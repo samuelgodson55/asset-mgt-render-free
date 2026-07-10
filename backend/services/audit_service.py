@@ -90,14 +90,14 @@ def export_audit_logs_csv(db: Session, user: dict, start_date: Optional[datetime
     get_audit_logs, optionally narrowed further by a start/end date range.
 
     Generation now happens inside `tasks.export_tasks.generate_audit_export`
-    on a background thread (see jobs.py and api/audit.py's module
-    docstring for why), which drains this generator into one in-memory
-    buffer rather than streaming it straight into an HTTP response the way
-    the old synchronous `GET /audit-logs/export` router handler used to
-    via StreamingResponse -- there's no HTTP response for a background job
-    to stream into. It stays a generator (rather than building one big
-    string up front) anyway, since that's still the cheaper way to
-    assemble it row by row regardless of what ultimately consumes it.
+    on the Celery `worker` container (see api/audit.py's module docstring
+    for why), which drains this generator into one in-memory buffer rather
+    than streaming it straight into an HTTP response the way the old
+    synchronous `GET /audit-logs/export` router handler used to via
+    StreamingResponse -- there's no HTTP response for a background job to
+    stream into. It stays a generator (rather than building one big string
+    up front) anyway, since that's still the cheaper way to assemble it row
+    by row regardless of what ultimately consumes it.
 
     NOTE: this deliberately does NOT apply limit/offset -- a "give me
     everything in this date range as a file" export is a fundamentally

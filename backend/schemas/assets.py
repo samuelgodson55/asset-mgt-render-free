@@ -63,3 +63,20 @@ class AdvancedCheckoutRequest(BaseModel):
 
 class QuantityUpdateRequest(BaseModel):
     new_total: int = Field(..., ge=0)
+
+
+class NameUpdateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+
+    # Same reasoning as _validate_due_date above: the frontend's rename
+    # input already stops an obviously-empty submit, but that's a UX
+    # nicety only -- this is the check that can't be bypassed by a direct
+    # API call. Strips surrounding whitespace so " " alone can't slip
+    # past `min_length=1` and become a blank-looking pool name.
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Asset name cannot be blank.")
+        return value

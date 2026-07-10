@@ -3,11 +3,15 @@
 // -----------------------------------------------------------------------------
 // Self-service "My Checked-Out Items" table used on staff.html and
 // customer.html -- each user only sees their own custody ledger here (no
-// admin actions), backed by GET /users/me/items.
+// admin actions), backed by GET /users/me/items. Rows due within
+// settings.DUE_SOON_REMINDER_DAYS show an amber "Due Soon" badge instead
+// of the usual "On Loan" one (see the `due_soon` flag computed server-side
+// by services/user_service.py's `_is_due_soon()`) -- a personal reminder
+// before the item actually goes overdue.
 // =============================================================================
 
 import { apiRequest } from '../api.js';
-import { escapeHtml, tableState, registerRenderer, filterAndPaginate, renderPaginationBar } from '../ui.js';
+import { escapeHtml, formatTimestamp, tableState, registerRenderer, filterAndPaginate, renderPaginationBar, rowDetailsTrigger } from '../ui.js';
 
 export async function loadMyItems() {
   const tbody = document.getElementById('myItemsTableBody');
@@ -36,14 +40,30 @@ export function renderMyItemsTable() {
 
   tbody.innerHTML = pageRows.map(item => `
     <tr class="transition hover:bg-card2/40">
-      <td class="px-5 py-3.5 font-medium text-slate-100">${escapeHtml(item.asset_name)}</td>
-      <td class="px-5 py-3.5 tag-mono text-slate-300">${item.quantity}</td>
-      <td class="px-5 py-3.5 tag-mono text-slate-300">${escapeHtml(item.checkout_date)}</td>
-      <td class="px-5 py-3.5 tag-mono text-slate-300">${escapeHtml(item.due_date)}</td>
       <td class="px-5 py-3.5">
-        <span class="inline-flex items-center gap-1 rounded-full bg-blue-500/10 px-2.5 py-1 text-[11px] font-semibold text-blue-400 ring-1 ring-blue-500/30">
-          <span class="h-1.5 w-1.5 rounded-full bg-blue-500"></span> On Loan
-        </span>
+        <div class="flex items-center gap-2">
+          <span class="font-medium text-slate-100">${escapeHtml(item.asset_name)}</span>
+          <!-- Mobile-only "Details" button (sm:hidden) -- surfaces the
+               Quantity, Checked Out, and Due Back columns this row hides
+               below sm:table-cell. See ui.js's rowDetailsTrigger(). -->
+          <button ${rowDetailsTrigger(escapeHtml(item.asset_name), [
+            ['Quantity', String(item.quantity)],
+            ['Checked Out', escapeHtml(formatTimestamp(item.checkout_date))],
+            ['Due Back', escapeHtml(item.due_date)],
+          ])} class="ml-auto shrink-0 rounded-md border border-border px-2 py-1 text-[11px] font-medium text-slate-400 transition hover:border-slate-500 hover:text-slate-200 sm:hidden">Details</button>
+        </div>
+      </td>
+      <td class="hidden px-5 py-3.5 tag-mono text-slate-300 sm:table-cell">${item.quantity}</td>
+      <td class="hidden px-5 py-3.5 tag-mono text-slate-300 sm:table-cell" title="${escapeHtml(item.checkout_date)}">${formatTimestamp(item.checkout_date)}</td>
+      <td class="hidden px-5 py-3.5 tag-mono text-slate-300 sm:table-cell">${escapeHtml(item.due_date)}</td>
+      <td class="px-5 py-3.5">
+        ${item.due_soon
+          ? `<span class="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-2.5 py-1 text-[11px] font-semibold text-amber-400 ring-1 ring-amber-500/30" title="A reminder before this goes overdue -- return it or request an extension soon.">
+              <span class="h-1.5 w-1.5 rounded-full bg-amber-500"></span> Due Soon
+            </span>`
+          : `<span class="inline-flex items-center gap-1 rounded-full bg-blue-500/10 px-2.5 py-1 text-[11px] font-semibold text-blue-400 ring-1 ring-blue-500/30">
+              <span class="h-1.5 w-1.5 rounded-full bg-blue-500"></span> On Loan
+            </span>`}
       </td>
       <td class="px-5 py-3.5">
         <button data-action="open-extension-request" data-checkout-id="${item.checkout_id}" data-asset-name="${escapeHtml(item.asset_name)}" data-due-date="${escapeHtml(item.due_date)}"

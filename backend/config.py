@@ -85,25 +85,28 @@ class Settings(BaseSettings):
     # lets them reach each other by service name.
     DATABASE_URL: str = "postgresql://admin:supersecret@db:5432/asset_db"
 
-    # --- Async export jobs (in-process, no broker) --------------------------
+    # --- Async export workers (Celery + Redis) -----------------------------
     # CSV/PDF ledger exports used to be generated synchronously, inline in
     # the request/response cycle -- fine for a small date range, but a
     # Super Admin exporting months of the (unbounded, append-only) audit
-    # ledger as a PDF could tie up the request for a long time building it.
+    # ledger as a PDF could tie up an API worker process for a long time
+    # building it. Generation now happens in a separate `celery` worker
+    # process/container (see backend/celery_app.py, backend/tasks/, and the
+    # `worker` service in docker-compose.yml); the API only ever enqueues a
+    # job and polls/returns its result.
     #
-    # This used to run on a separate Celery worker container backed by
-    # Redis. That shape doesn't fit Render's (or most platforms') FREE
-    # tier: free instances only cover Web Services, Postgres, and Key
-    # Value/Redis -- background workers and private services always
-    # require a paid plan. See backend/jobs.py for the replacement: a
-    # small in-process thread-pool + in-memory dict, living inside the
-    # SAME web service process as the API. This is a fine trade-off for a
-    # "lite" single-instance app (no horizontal scaling anyway on a free
-    # instance) -- the only real cost is that queued/finished jobs are
-    # lost if the process restarts or spins down, same as any other
-    # in-memory state. See jobs.py's module docstring for the full
-    # reasoning.
-    EXPORT_JOB_TTL_SECONDS: int = 3600
+    # REDIS_URL is used as BOTH the Celery broker (where jobs queue up) and
+    # the Celery result backend (where a finished job's file bytes are
+    # stashed, base64-encoded, until the frontend downloads them). "redis"
+    # is the docker-compose service name below, same pattern as
+    # DATABASE_URL's "db" hostname above.
+    REDIS_URL: str = "redis://redis:6379/0"
+    # How long a finished export's result (and its file bytes) stays in
+    # Redis before expiring, in seconds. Long enough for a normal
+    # "click export, wait a few seconds, download" flow with some slack
+    # for a slow connection; short enough that finished export files
+    # don't sit in Redis forever if nobody downloads them.
+    EXPORT_RESULT_TTL_SECONDS: int = 3600
 
     # --- JWT / Auth -----------------------------------------------------
     JWT_SECRET_KEY: str = "dev-secret-change-me-in-production"
@@ -111,15 +114,9 @@ class Settings(BaseSettings):
     JWT_EXPIRY_HOURS: int = 12
 
     # --- CORS -------------------------------------------------------------
-    # Comma-separated list of origins allowed to call this API. The
-    # frontend and API are now served from the SAME single web service
-    # (see main.py -- StaticFiles + the API routers live in one FastAPI
-    # app), so the browser only ever makes same-origin requests and never
-    # needs a CORS grant at all. This defaults to empty for exactly that
-    # reason. Only set this if you deploy the frontend separately from
-    # this API (e.g. a separate static host calling this backend
-    # cross-origin) -- add that frontend's real origin(s) here.
-    CORS_ORIGINS: str = ""
+    # Comma-separated list of origins allowed to call this API. Defaults
+    # cover local Docker Compose usage out of the box.
+    CORS_ORIGINS: str = "http://localhost:8080,http://127.0.0.1:8080,http://localhost,http://127.0.0.1"
 
     # --- Startup behavior (Operations & Observability requirement #1) -----
     # `main.py` used to call `init_db()` (create tables) and `seed_db()`
@@ -177,19 +174,24 @@ class Settings(BaseSettings):
     # Controls whether FastAPI's interactive docs (/docs -- Swagger UI),
     # /redoc, and the raw machine-readable schema (/openapi.json) exist at
     # all. Defaults to True so local `docker compose up` still gives you the
-    # handy interactive docs at http://localhost:8000/docs out of the box.
+    # handy interactive docs at http://localhost:8080/docs out of the box.
     #
     # In Render or any other environment reachable from the public internet,
-    # set this to "false". backend/main.py passes it into FastAPI's
-    # docs_url/redoc_url/openapi_url constructor args -- when disabled,
-    # FastAPI doesn't just hide the UI, it never generates or serves the
-    # schema at all, so there's no lower-effort way to reconstruct your
-    # entire API surface (every route, every request/response field) than
-    # just reading this repo's source, which is no worse than any other
-    # open-source app. (Previously there was a second, independent gate at
-    # the nginx reverse-proxy layer too -- now that the API and frontend
-    # are one process/service, see main.py's module docstring, this single
-    # check is the only layer.)
+    # set this to "false". This is read by BOTH layers that currently expose
+    # these routes, as defense in depth:
+    #   1. backend/main.py passes it into FastAPI's docs_url/redoc_url/
+    #      openapi_url constructor args -- when disabled, FastAPI doesn't
+    #      just hide the UI, it never generates or serves the schema at all,
+    #      so there's no lower-effort way to reconstruct your entire API
+    #      surface (every route, every request/response field) than just
+    #      reading this repo's source, which is no worse than any other
+    #      open-source app.
+    #   2. nginx/default.conf.template ALSO gates its own /docs, /redoc, and
+    #      /openapi.json proxy block on this same flag (via the identically-
+    #      named ENABLE_API_DOCS variable passed to the frontend container --
+    #      see docker-compose.yml/render.yaml), so a misconfigured or
+    #      out-of-date backend doesn't become the only thing standing
+    #      between these routes and the public internet.
     ENABLE_API_DOCS: bool = True
 
     # --- Hardcoded Super Admin (root account) ------------------------------
@@ -214,8 +216,8 @@ class Settings(BaseSettings):
     SUPER_ADMIN_NAME: str = "Super Admin"
     SUPER_ADMIN_PASSWORD: str = ""
 
-    # --- Email notifications (extension requests + overdue checkouts) -----
-    # This app sends exactly two kinds of email:
+    # --- Email notifications (extension requests + overdue + due-soon) ----
+    # This app sends exactly three kinds of email:
     #   1. Extension-request lifecycle emails (see
     #      services/extension_service.py) -- a Manager/Admin/Super Admin is
     #      emailed the moment a User requests more time on a checkout, and
@@ -226,6 +228,11 @@ class Settings(BaseSettings):
     #      overdue item's own holder (if they're a logged-in User with an
     #      email address) AND to every Manager/Admin/the Super Admin
     #      (everything system-wide -- Managers have no department-scoping).
+    #   3. A once-a-day "due soon" reminder digest (same file) -- the
+    #      proactive counterpart to #2: emailed BEFORE a checkout goes
+    #      overdue, to the same audience, for anything due within
+    #      DUE_SOON_REMINDER_DAYS (see below) that hasn't passed its due
+    #      date yet.
     #
     # NOTIFICATIONS_ENABLED is the single master switch: leave it "false"
     # (the default) for local development with no mail server configured --
@@ -257,36 +264,62 @@ class Settings(BaseSettings):
     # (see tasks/notification_tasks.py and services/extension_service.py).
     ADMIN_NOTIFICATION_EMAILS: str = ""
 
-    # How often the in-process scheduler checks for overdue checkouts and
-    # sends the digest email described above. See backend/scheduler.py for
-    # where this is wired up. 24 hours is a sane default for a "your item
-    # is overdue" reminder -- lower it for testing (e.g. to a few minutes)
-    # if you want to see it fire sooner.
-    #
-    # CAVEAT ON RENDER'S FREE PLAN: a free web service spins down after 15
-    # minutes with no inbound traffic (see README.md's "Deploying on
-    # Render's Free Plan" section), which pauses this in-process scheduler
-    # along with everything else. If reliable delivery matters more than
-    # zero cost, either upgrade this one service off the Free instance
-    # type, or point an external scheduler (e.g. a GitHub Actions cron
-    # workflow, or a free service like cron-job.org) at
-    # `POST /api/system/notifications/run` -- see api/system.py -- which
-    # both triggers the digest AND keeps the instance awake as a side
-    # effect.
+    # How often the background worker checks for overdue checkouts and
+    # sends the digest email described above. See celery_app.py's
+    # `beat_schedule` for where this is wired up. 24 hours is a sane
+    # default for a "your item is overdue" reminder -- lower it for
+    # testing (e.g. to a few minutes) if you want to see it fire sooner.
     OVERDUE_NOTIFICATION_INTERVAL_HOURS: int = 24
 
-    # --- External scheduler support (api/system.py) -------------------------
-    # Optional shared secret that lets an external scheduler (a GitHub
-    # Actions cron workflow, cron-job.org, UptimeRobot's "hit this URL"
-    # feature, etc.) call POST /api/system/notifications/run WITHOUT
-    # logging in as a real user first -- useful because those services
-    # can't practically hold a JWT session. Leave empty (the default) to
-    # disable this entirely; the endpoint then only accepts a normal Super
-    # Admin/Admin JWT, same as any other privileged route. If you set
-    # this, treat it like a password: generate a long random value and
-    # pass it as `X-Task-Token: <this value>` -- see api/system.py for
-    # exactly how it's checked.
-    SYSTEM_TASK_TOKEN: str = ""
+    # --- "Due Soon" reminder (a nudge BEFORE something goes overdue) ------
+    # DUE_SOON_REMINDER_DAYS is the single source of truth for what counts
+    # as "coming up soon": an active checkout with a due_date that's still
+    # in the future, but no further out than this many days, is "due
+    # soon". Both the dashboard-facing bits (the "Due Soon" banner on
+    # admin.html/manager.html, GET /checkouts/due-soon; the amber "Due
+    # Soon" badge on staff.html/customer.html's My Items -- see
+    # services/user_service.py's `_days_until_due()`) AND the email
+    # reminder below read this ONE setting, so raising or lowering the
+    # window changes every one of them consistently.
+    DUE_SOON_REMINDER_DAYS: int = 2
+
+    # How often the background worker checks for checkouts about to go
+    # overdue and sends the reminder email described above. Same
+    # timedelta-since-boot reasoning as OVERDUE_NOTIFICATION_INTERVAL_HOURS
+    # just above -- see celery_app.py's `beat_schedule` comment.
+    DUE_SOON_NOTIFICATION_INTERVAL_HOURS: int = 24
+
+    # --- Single-service (free-tier) deployment mode ------------------------
+    # Render's Free instance type only supports Web Services, Postgres, and
+    # Key Value (Redis) -- Private Services and Background Workers are NOT
+    # available on the Free plan at all (see render.yaml's top-of-file
+    # comment and README.md's "Deploying on Render's Free Plan" section for
+    # the full reasoning). To fit the whole app onto ONE free web service,
+    # this same FastAPI process can also serve the static frontend directly
+    # and mount every API route under an /api prefix, instead of relying on
+    # a separate nginx container to do both of those jobs.
+    #
+    # SERVE_FRONTEND=false (the default) preserves the original docker-
+    # compose.yml behavior, where nginx (built from nginx/Dockerfile) serves
+    # frontend/*.html/js/css itself and this backend container only ever
+    # answers API requests. render-start.sh sets SERVE_FRONTEND=true for the
+    # combined single-service Render image built from Dockerfile.render,
+    # which COPYs frontend/ into the image at FRONTEND_DIR.
+    SERVE_FRONTEND: bool = False
+    FRONTEND_DIR: str = "/app/frontend"
+
+    # --- Embedded Celery worker/beat (free-tier deployment mode) -----------
+    # Render's Free plan has no Background Worker service type at all (see
+    # SERVE_FRONTEND above), so there's nowhere to run `celery -A celery_app
+    # worker -B` as its own service the way docker-compose.yml's `worker`
+    # container does. render-start.sh instead launches that same Celery
+    # command as a background process INSIDE this web service's single
+    # container when RUN_EMBEDDED_WORKER=true, sharing this process's Redis
+    # (a free Render Key Value instance) and Postgres connections. This is a
+    # deliberate free-tier tradeoff, not a general recommendation -- see
+    # README.md for its caveats (the worker dies/restarts along with the web
+    # service on every free-instance spin-down and redeploy).
+    RUN_EMBEDDED_WORKER: bool = False
 
     # Tell Pydantic Settings v2 to also look for a `.env` file (useful when
     # running the backend directly with `uvicorn main:app` outside Docker,

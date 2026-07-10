@@ -8,7 +8,7 @@
 // =============================================================================
 
 import { apiRequest } from '../api.js';
-import { escapeHtml, debounce, renderServerPaginationBar } from '../ui.js';
+import { escapeHtml, debounce, renderServerPaginationBar, personAlertIcon, rowDetailsTrigger } from '../ui.js';
 
 // TRUE server-side search + pagination (same pattern as components/
 // audit.js's `auditState` / components/assets.js's `assetsState` /
@@ -47,15 +47,22 @@ function renderOutsidersTable(outsiders) {
         <div class="flex items-center gap-3">
           <div class="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-amber-500 to-orange-600 text-[11px] font-bold text-white">${initials}</div>
           <div>
-            <p class="font-medium text-slate-100">${escapeHtml(o.name)}</p>
+            <p class="flex items-center gap-1.5 font-medium text-slate-100">${escapeHtml(o.name)} ${personAlertIcon(o.alerts)}</p>
             <p class="tag-mono text-[11px] text-slate-500">${escapeHtml(o.contact_details)}</p>
           </div>
+          <!-- Mobile-only "Details" button (sm:hidden) -- surfaces the
+               Company and Custody columns this row hides below
+               sm:table-cell. See ui.js's rowDetailsTrigger(). -->
+          <button ${rowDetailsTrigger(escapeHtml(o.name), [
+            ['Company', escapeHtml(o.company || '—')],
+            ['Custody', `${o.outstanding_items} item${o.outstanding_items === 1 ? '' : 's'} checked out`],
+          ])} class="ml-auto shrink-0 rounded-md border border-border px-2 py-1 text-[11px] font-medium text-slate-400 transition hover:border-slate-500 hover:text-slate-200 sm:hidden">Details</button>
         </div>
       </td>
-      <td class="px-5 py-3.5 text-slate-300">${escapeHtml(o.company || '—')}</td>
-      <td class="px-5 py-3.5 tag-mono text-slate-300">${o.outstanding_items} item${o.outstanding_items === 1 ? '' : 's'} checked out</td>
+      <td class="hidden px-5 py-3.5 text-slate-300 sm:table-cell">${escapeHtml(o.company || '—')}</td>
+      <td class="hidden px-5 py-3.5 tag-mono text-slate-300 sm:table-cell">${o.outstanding_items} item${o.outstanding_items === 1 ? '' : 's'} checked out</td>
       <td class="px-5 py-3.5">
-        <div class="flex justify-end gap-2">
+        <div class="flex flex-wrap justify-end gap-2">
           <button data-action="open-custody" data-entity-id="${o.id}" data-entity-type="outsider" class="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">Custody Ledger</button>
         </div>
       </td>

@@ -1,0 +1,73 @@
+# =============================================================================
+# Dockerfile.render
+# -----------------------------------------------------------------------------
+# Builds ONE image containing the FastAPI backend, the static frontend, AND
+# (optionally, via RUN_EMBEDDED_WORKER) the Celery worker/beat process --
+# everything docker-compose.yml normally splits across THREE containers
+# (backend, worker, frontend/nginx), combined into a single deployable unit.
+#
+# WHY THIS FILE EXISTS
+# Render's Free instance type only supports Web Services, Postgres, and Key
+# Value (Redis) -- Private Services and Background Workers are NOT available
+# on the Free plan at all (see render.yaml's top-of-file comment). The
+# original multi-service design (a private backend + a private worker + a
+# public nginx frontend) needs THREE non-free services to run on Render,
+# which costs real money. This Dockerfile instead produces a single image
+# that can run entirely on ONE free web service:
+#   - FastAPI serves the API under /api/* (see backend/main.py)
+#   - FastAPI ALSO serves the static frontend directly, via
+#     SERVE_FRONTEND=true (see backend/main.py's StaticFiles mount) --
+#     replacing nginx's job for this deployment shape.
+#   - render-start.sh optionally launches the Celery worker+beat process
+#     alongside uvicorn, in the same container -- replacing the separate
+#     `worker` service's job.
+#
+# This is a Render/free-tier-specific alternative to backend/Dockerfile
+# (used by docker-compose.yml and any multi-service deployment) -- it does
+# NOT replace that file. See README.md's "Deploying on Render's Free Plan"
+# section for the full picture, including this approach's tradeoffs
+# (everything spins down and restarts together, no horizontal scaling).
+# =============================================================================
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+# Same requirements.txt the backend/worker images use -- celery/redis are
+# already listed there since docker-compose.yml's `worker` service depends
+# on them too, so no separate install step is needed for the embedded
+# worker case.
+COPY backend/requirements.txt /app/
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir --default-timeout=100 -r requirements.txt
+
+# Backend application code.
+COPY backend/ /app/
+
+# The static frontend, copied into the SAME image so FastAPI's StaticFiles
+# mount (backend/main.py, gated on SERVE_FRONTEND) can serve it directly --
+# see config.py's FRONTEND_DIR default ("/app/frontend"), which this COPY
+# destination matches.
+COPY frontend/ /app/frontend/
+
+COPY render-start.sh /app/render-start.sh
+RUN chmod +x /app/render-start.sh
+
+# SECURITY: run as a dedicated, unprivileged user -- same reasoning as
+# backend/Dockerfile's identical block.
+RUN useradd --create-home --shell /bin/bash appuser && chown -R appuser:appuser /app
+USER appuser
+
+# These are the free-tier single-service defaults for THIS image. They can
+# still be overridden via render.yaml's envVars (which they are, for
+# clarity) -- ENV here just means the image is self-describing/runnable
+# on its own without extra flags, e.g. for local testing:
+#   docker build -f Dockerfile.render -t snipeit-lite-render .
+#   docker run -p 8000:8000 -e DATABASE_URL=... -e REDIS_URL=... snipeit-lite-render
+ENV SERVE_FRONTEND=true
+ENV RUN_EMBEDDED_WORKER=true
+
+CMD ["/app/render-start.sh"]

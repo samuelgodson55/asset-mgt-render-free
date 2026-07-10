@@ -69,6 +69,50 @@ def utc_now() -> datetime.datetime:
 get_utc_now = utc_now
 
 
+def is_due_soon(due_date: "datetime.datetime | None") -> bool:
+    """
+    Shared "reminder before something goes overdue" test, used everywhere
+    a `due_date` gets serialized for a person to look at: the self-service
+    My Items table (services/user_service.py's get_my_assigned_items() /
+    get_user_assigned_items()) AND the Custody Ledger modal for both Users
+    and Ad-Hoc Outsiders (services/outsider_service.py's
+    get_outsider_assigned_items()). Kept here, right next to utc_now(),
+    rather than duplicated in each of those service modules, so the
+    "what counts as due soon" definition can never drift between them.
+
+    True when `due_date` is still in the future but no further out than
+    `settings.DUE_SOON_REMINDER_DAYS` -- the exact same rule
+    services/checkout_service.py's list_due_soon_checkouts() applies for
+    the system-wide "Due Soon" dashboard banner, just evaluated for one
+    checkout at a time instead of as a bulk SQL filter. An already-overdue
+    or open-ended (`due_date is None`) item is never "due soon".
+    """
+    if due_date is None:
+        return False
+    now = utc_now()
+    if due_date < now:
+        return False
+    from config import settings  # deferred: avoids a models<->config import cycle at module load time
+    return due_date <= now + datetime.timedelta(days=settings.DUE_SOON_REMINDER_DAYS)
+
+
+def is_overdue(due_date: "datetime.datetime | None") -> bool:
+    """
+    The `is_due_soon()` above, but for "has this already passed its due
+    date" -- the single-checkout equivalent of
+    services/checkout_service.py's list_overdue_checkouts() bulk filter.
+    Used wherever a `due_date` needs an at-a-glance overdue flag: per-user
+    alert summaries on the User/Ad-Hoc Directory (services/user_service.py
+    -> list_users(), services/outsider_service.py -> list_outsiders()) and
+    the Custody Ledger modal's per-item rows. An open-ended checkout
+    (`due_date is None`) is never overdue -- it was checked out on purpose
+    with no fixed return date.
+    """
+    if due_date is None:
+        return False
+    return due_date < utc_now()
+
+
 class AssetType(Base):
     __tablename__ = "asset_types"
 

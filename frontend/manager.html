@@ -42,6 +42,11 @@
       </div>
 
       <div class="flex items-center gap-4">
+        <button data-action="check-alerts" id="checkAlertsBtn" title="Check Overdue, Due Soon &amp; Extension Requests" class="flex items-center gap-1.5 rounded-md border border-border bg-card px-3 py-1.5 text-[13px] font-medium text-slate-300 transition hover:border-amber-500/40 hover:text-amber-400 disabled:cursor-not-allowed disabled:opacity-60">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.13-3.36L23 10M1 14l5.36 4.36A9 9 0 0020.49 15"/></svg>
+          <span class="hidden lg:inline">Check Alerts</span>
+        </button>
+
         <!-- Manager Mode pill: amber/orange instead of the Super Admin rose pill -->
         <span class="hidden items-center gap-1.5 rounded-full border border-amber-500/50 bg-amber-500/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-wide text-amber-400 glow-amber sm:flex">
           <span class="h-1.5 w-1.5 rounded-full bg-amber-500 animate-pulse"></span>
@@ -65,14 +70,14 @@
 
     <!-- Tabs -->
     <nav class="flex gap-1 -mb-px">
-      <button id="tabAssets" data-action="switch-tab" data-tab="assets" class="relative border-b-2 border-blue-500 px-4 py-3 text-[13px] font-semibold text-slate-50">
-        Asset Inventory
+      <button id="tabAssets" data-action="switch-tab" data-tab="assets" class="relative border-b-2 border-blue-500 px-3 py-3 text-[13px] font-semibold text-slate-50 sm:px-4">
+        <span class="sm:hidden">Assets</span><span class="hidden sm:inline">Asset Inventory</span>
       </button>
-      <button id="tabUsers" data-action="switch-tab" data-tab="users" class="relative border-b-2 border-transparent px-4 py-3 text-[13px] font-medium text-slate-500 transition hover:text-slate-300">
-        User Directory
+      <button id="tabUsers" data-action="switch-tab" data-tab="users" class="relative border-b-2 border-transparent px-3 py-3 text-[13px] font-medium text-slate-500 transition hover:text-slate-300 sm:px-4">
+        <span class="sm:hidden">Users</span><span class="hidden sm:inline">User Directory</span>
       </button>
-      <button id="tabAdhoc" data-action="switch-tab" data-tab="adhoc" class="relative border-b-2 border-transparent px-4 py-3 text-[13px] font-medium text-slate-500 transition hover:text-slate-300">
-        Ad-Hoc Directory
+      <button id="tabAdhoc" data-action="switch-tab" data-tab="adhoc" class="relative border-b-2 border-transparent px-3 py-3 text-[13px] font-medium text-slate-500 transition hover:text-slate-300 sm:px-4">
+        <span class="sm:hidden">Ad-Hoc</span><span class="hidden sm:inline">Ad-Hoc Directory</span>
       </button>
     </nav>
   </div>
@@ -80,29 +85,85 @@
 
 <main class="mx-auto max-w-[1440px] px-6 py-8 space-y-8">
 
+  <!-- ================= ALL CAUGHT UP BANNER =================
+       Shown only right after a manual "Check Now" (header button, see
+       checkAlertsNow() in js/dashboard.js) finds nothing across all three
+       alert widgets below -- routine background refreshes never touch
+       this, so it never shows up uninvited. -->
+  <div id="alertsAllClearBanner" class="hidden rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-4">
+    <div class="flex items-center justify-between gap-2">
+      <div class="flex items-center gap-2 text-[13px] font-semibold text-emerald-400">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><path d="M22 4L12 14.01l-3-3"/></svg>
+        <span>All caught up — nothing overdue, due soon, or awaiting extension review.</span>
+      </div>
+      <button data-action="dismiss-all-clear-banner" title="Dismiss" class="rounded-md p-1 text-emerald-400/70 transition hover:bg-emerald-500/10 hover:text-emerald-300">
+        <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+  </div>
+
   <!-- ================= OVERDUE CHECKOUTS ALERT BANNER =================
        Operations & Observability requirement #5: populated by
        js/components/overdue.js -> loadOverdueAlerts() from
        GET /checkouts/overdue (system-wide, same as Admin -- Managers no
        longer have department-scoping -- see services/checkout_service.py).
-       Hidden by default/whenever there are zero overdue items. -->
+       Hidden by default/whenever there are zero overdue items.
+       Dismissible via the X below (dismissOverdueAlert()) -- closing it
+       keeps it closed through ordinary dashboard refreshes, but the
+       header's "Check Alerts" button (checkAlertsNow()) always forces it
+       back open if there's still something to show, so it's never lost
+       for good. -->
   <div id="overdueAlertBanner" class="hidden rounded-xl border border-rose-500/30 bg-rose-500/5 p-4">
-    <div class="flex items-center gap-2 text-[13px] font-semibold text-rose-400">
-      <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01M10.29 3.86l-8.18 14.18A2 2 0 003.82 21h16.36a2 2 0 001.71-2.96L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
-      <span><span id="overdueAlertCount">0</span> checkout(s) are overdue</span>
+    <div class="flex items-center justify-between gap-2">
+      <div class="flex items-center gap-2 text-[13px] font-semibold text-rose-400">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01M10.29 3.86l-8.18 14.18A2 2 0 003.82 21h16.36a2 2 0 001.71-2.96L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
+        <span><span id="overdueAlertCount">0</span> checkout(s) are overdue</span>
+      </div>
+      <button data-action="dismiss-overdue-alert" title="Dismiss" class="rounded-md p-1 text-rose-400/70 transition hover:bg-rose-500/10 hover:text-rose-300">
+        <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
     </div>
     <ul id="overdueAlertList" class="mt-2 divide-y divide-rose-500/10 text-[12px]"></ul>
+  </div>
+
+  <!-- ================= DUE SOON ALERT BANNER =================
+       "A reminder before something goes overdue" -- the proactive
+       counterpart to the Overdue banner just above. Populated by
+       js/components/due-soon.js -> loadDueSoonAlerts() from GET
+       /checkouts/due-soon (system-wide, same as Admin -- Managers no
+       longer have department-scoping). Hidden by default/whenever
+       nothing is due within settings.DUE_SOON_REMINDER_DAYS. Amber
+       rather than red, since nothing here has actually gone wrong yet --
+       it's a nudge to act before it does. Dismissible/recallable the
+       same way as the Overdue banner above. -->
+  <div id="dueSoonAlertBanner" class="hidden rounded-xl border border-amber-500/30 bg-amber-500/5 p-4">
+    <div class="flex items-center justify-between gap-2">
+      <div class="flex items-center gap-2 text-[13px] font-semibold text-amber-400">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+        <span><span id="dueSoonAlertCount">0</span> checkout(s) due soon</span>
+      </div>
+      <button data-action="dismiss-due-soon-alert" title="Dismiss" class="rounded-md p-1 text-amber-400/70 transition hover:bg-amber-500/10 hover:text-amber-300">
+        <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <ul id="dueSoonAlertList" class="mt-2 divide-y divide-amber-500/10 text-[12px]"></ul>
   </div>
 
   <!-- ================= EXTENSION REQUESTS PANEL =================
        Populated by js/components/extensions.js -> loadExtensionRequests()
        from GET /checkouts/extension-requests?status=pending. Hidden by
        default/whenever there are zero pending requests -- toggled visible
-       only when result.total > 0, same pattern as the overdue banner above. -->
+       only when result.total > 0, same pattern as the overdue banner above.
+       Dismissible/recallable the same way as the other two banners. -->
   <div id="extensionRequestsPanel" class="hidden rounded-xl border border-amber-500/30 bg-amber-500/5 p-4">
-    <div class="flex items-center gap-2 text-[13px] font-semibold text-amber-400">
-      <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="9"/></svg>
-      <span><span id="extensionRequestsCount">0</span> extension request(s) awaiting your review</span>
+    <div class="flex items-center justify-between gap-2">
+      <div class="flex items-center gap-2 text-[13px] font-semibold text-amber-400">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="9"/></svg>
+        <span><span id="extensionRequestsCount">0</span> extension request(s) awaiting your review</span>
+      </div>
+      <button data-action="dismiss-extension-requests-alert" title="Dismiss" class="rounded-md p-1 text-amber-400/70 transition hover:bg-amber-500/10 hover:text-amber-300">
+        <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
     </div>
     <div id="extensionRequestsList" class="mt-2 space-y-2"></div>
   </div>
@@ -114,8 +175,8 @@
         <h1 class="text-xl font-bold tracking-tight text-slate-50">Asset Inventory</h1>
         <p class="text-[13px] text-slate-500"><span class="asset-pool-count">0</span> pools tracked · live from database</p>
       </div>
-      <div class="flex items-center gap-3">
-        <div class="relative w-72">
+      <div class="flex flex-wrap items-center gap-3">
+        <div class="relative w-full sm:w-72">
           <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
           <input type="text" id="assetSearchInput" placeholder="Search by asset name…"
             class="w-full rounded-lg border border-border bg-card2 py-2 pl-9 pr-3 text-[13px] text-slate-200 placeholder-slate-500 outline-none transition focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
@@ -144,7 +205,7 @@
         <thead>
           <tr class="border-b border-border bg-card2/60 text-[11px] uppercase tracking-wide text-slate-500">
             <th class="px-5 py-3 font-semibold">Asset Name</th>
-            <th class="px-5 py-3 font-semibold">Available / Total</th>
+            <th class="hidden px-5 py-3 font-semibold sm:table-cell">Available / Total</th>
             <th class="px-5 py-3 font-semibold">Status</th>
             <th class="px-5 py-3 font-semibold text-right">Actions</th>
           </tr>
@@ -170,8 +231,8 @@
         <h1 class="text-xl font-bold tracking-tight text-slate-50">Team Allocation Matrix</h1>
         <p class="text-[13px] text-slate-500"><span class="user-count">0</span> users</p>
       </div>
-      <div class="flex items-center gap-3">
-        <div class="relative w-72">
+      <div class="flex flex-wrap items-center gap-3">
+        <div class="relative w-full sm:w-72">
           <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
           <input type="text" id="userSearchInput" placeholder="Search by name or role…"
             class="w-full rounded-lg border border-border bg-card2 py-2 pl-9 pr-3 text-[13px] text-slate-200 placeholder-slate-500 outline-none transition focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
@@ -205,8 +266,8 @@
         <thead>
           <tr class="border-b border-border bg-card2/60 text-[11px] uppercase tracking-wide text-slate-500">
             <th class="px-5 py-3 font-semibold">User</th>
-            <th class="px-5 py-3 font-semibold">Department Role</th>
-            <th class="px-5 py-3 font-semibold">Custody</th>
+            <th class="hidden px-5 py-3 font-semibold sm:table-cell">Department Role</th>
+            <th class="hidden px-5 py-3 font-semibold sm:table-cell">Custody</th>
             <th class="px-5 py-3 font-semibold text-right">Actions</th>
           </tr>
         </thead>
@@ -305,8 +366,8 @@
         <h1 class="text-xl font-bold tracking-tight text-slate-50">Ad-Hoc Individuals (Unlinked)</h1>
         <p class="text-[13px] text-slate-500"><span class="outsider-count">0</span> unlinked profile(s) · created automatically when dispatching to an "Ad-Hoc Individual" in the Issue / Dispatch drawer</p>
       </div>
-      <div class="flex items-center gap-3">
-        <div class="relative w-72">
+      <div class="flex flex-wrap items-center gap-3">
+        <div class="relative w-full sm:w-72">
           <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
           <input type="text" id="outsiderSearchInput" placeholder="Search by name, contact, or company…"
             class="w-full rounded-lg border border-border bg-card2 py-2 pl-9 pr-3 text-[13px] text-slate-200 placeholder-slate-500 outline-none transition focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
@@ -339,8 +400,8 @@
         <thead>
           <tr class="border-b border-border bg-card2/60 text-[11px] uppercase tracking-wide text-slate-500">
             <th class="px-5 py-3 font-semibold">Individual</th>
-            <th class="px-5 py-3 font-semibold">Company</th>
-            <th class="px-5 py-3 font-semibold">Custody</th>
+            <th class="hidden px-5 py-3 font-semibold sm:table-cell">Company</th>
+            <th class="hidden px-5 py-3 font-semibold sm:table-cell">Custody</th>
             <th class="px-5 py-3 font-semibold text-right">Actions</th>
           </tr>
         </thead>
@@ -360,12 +421,12 @@
 
   <!-- ================= AUDIT TRAIL ================= -->
   <section class="overflow-hidden rounded-xl border border-border bg-card">
-    <div class="flex items-center justify-between border-b border-border px-5 py-4">
+    <div class="flex flex-col gap-3 border-b border-border px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
       <div>
         <h2 class="text-[14px] font-bold text-slate-100">Audit Trail</h2>
         <p class="text-[12px] text-slate-500">Every checkout dispatch, return, and system event across the whole organization.</p>
       </div>
-      <div class="flex items-center gap-4">
+      <div class="flex flex-wrap items-center gap-3">
         <div class="flex items-center gap-2 text-[12px] text-slate-400">
           <span>Rows per page</span>
           <select id="auditPerPageSelect" data-action="set-audit-perpage" class="rounded-lg border border-border bg-card2 px-2 py-1.5 text-slate-200 outline-none focus:border-blue-500/60">
@@ -394,9 +455,9 @@
       <thead>
         <tr class="border-b border-border bg-card2/60 text-[11px] uppercase tracking-wide text-slate-500">
           <th class="px-5 py-2.5 font-semibold">Timestamp</th>
-          <th class="px-5 py-2.5 font-semibold">Operator</th>
+          <th class="hidden px-5 py-2.5 font-semibold sm:table-cell">Operator</th>
           <th class="px-5 py-2.5 font-semibold">Action</th>
-          <th class="px-5 py-2.5 font-semibold">Detail</th>
+          <th class="hidden px-5 py-2.5 font-semibold sm:table-cell">Detail</th>
         </tr>
       </thead>
       <tbody id="auditTableBody" class="divide-y divide-border tag-mono text-slate-400">
@@ -686,6 +747,27 @@
         </form>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- ============= MOBILE ROW DETAILS POPUP =============
+     One shared, generic small modal for every data table on this page.
+     Each table hides its less-critical columns below the `sm` breakpoint
+     (see each components/*.js render function's `hidden sm:table-cell`
+     cells) so tables never force a long horizontal scroll on a phone --
+     desktop still shows every column unchanged. A per-row "Details"
+     button (also `sm:hidden`) opens THIS popup with whatever got hidden --
+     see js/ui.js's rowDetailsTrigger()/openRowDetailsFromElement(). -->
+<div id="rowDetailsModal" class="fixed inset-0 z-50 hidden items-center justify-center p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative w-full max-w-sm rounded-xl border border-border bg-[#141922] p-5 shadow-2xl">
+    <div class="mb-2 flex items-center justify-between">
+      <h3 id="rowDetailsTitle" class="text-[15px] font-bold text-slate-50">Details</h3>
+      <button data-action="close-modal" data-modal="rowDetailsModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <dl id="rowDetailsBody" class="text-[13px]"></dl>
   </div>
 </div>
 

@@ -8,7 +8,7 @@
 
 import { apiRequest } from '../api.js';
 import { getSession } from '../auth.js';
-import { escapeHtml, debounce, renderServerPaginationBar, openModal } from '../ui.js';
+import { escapeHtml, debounce, renderServerPaginationBar, openModal, personAlertIcon, formatTimestamp, rowDetailsTrigger } from '../ui.js';
 import { refreshDashboard } from '../dashboard.js';
 
 // TRUE server-side search + pagination (same pattern as components/
@@ -88,19 +88,27 @@ function renderUsersTable(users) {
         <div class="flex items-center gap-3">
           <div class="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 text-[11px] font-bold text-white">${initials}</div>
           <div>
-            <p class="font-medium text-slate-100">${escapeHtml(u.name)}</p>
+            <p class="flex items-center gap-1.5 font-medium text-slate-100">${escapeHtml(u.name)} ${personAlertIcon(u.alerts)}</p>
             <p class="tag-mono text-[11px] text-slate-500">${escapeHtml(u.email)}</p>
           </div>
+          <!-- Mobile-only "Details" button (sm:hidden) -- surfaces the
+               Privilege Tier / Department Role and Custody columns this
+               row hides below sm:table-cell. See ui.js's
+               rowDetailsTrigger(). -->
+          <button ${rowDetailsTrigger(escapeHtml(u.name), [
+            [isManagerView ? 'Department Role' : 'Privilege Tier', escapeHtml(isManagerView ? (u.department_role || 'Team Member') : u.role.replace('_', ' '))],
+            ['Custody', custodyLabel],
+          ])} class="ml-auto shrink-0 rounded-md border border-border px-2 py-1 text-[11px] font-medium text-slate-400 transition hover:border-slate-500 hover:text-slate-200 sm:hidden">Details</button>
         </div>
       </td>
-      <td class="px-5 py-3.5">
+      <td class="hidden px-5 py-3.5 sm:table-cell">
         <span class="inline-flex items-center gap-1 rounded-full bg-blue-500/10 px-2.5 py-1 text-[11px] font-semibold text-blue-400 ring-1 ring-blue-500/30">
           <span class="h-1.5 w-1.5 rounded-full bg-blue-500"></span> ${escapeHtml(isManagerView ? (u.department_role || 'Team Member') : u.role.replace('_', ' '))}
         </span>
       </td>
-      <td class="px-5 py-3.5 tag-mono text-slate-300">${custodyLabel}</td>
+      <td class="hidden px-5 py-3.5 tag-mono text-slate-300 sm:table-cell">${custodyLabel}</td>
       <td class="px-5 py-3.5">
-        <div class="flex justify-end gap-2">
+        <div class="flex flex-wrap justify-end gap-2">
           <button data-action="open-custody" data-entity-id="${u.id}" data-entity-type="user" class="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">Custody Ledger</button>
           ${isManagerView ? '' : `<button data-action="reset-password" data-user-id="${u.id}" data-user-name="${escapeHtml(u.name)}" class="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-amber-500/50 hover:text-amber-400">Reset Password</button>`}
           ${isManagerView ? '' : `<button data-action="delete-profile" data-user-id="${u.id}" data-user-name="${escapeHtml(u.name)}" class="rounded-md border border-rose-500/30 px-2.5 py-1.5 text-[12px] font-medium text-rose-400 transition hover:border-rose-500 hover:bg-rose-500/10">Delete Profile</button>`}
@@ -186,6 +194,7 @@ export async function submitResetPasswordForm(event) {
 
   const newPassword = document.getElementById('resetPasswordNew').value;
   const confirmPassword = document.getElementById('resetPasswordConfirm').value;
+  const adminPassword = document.getElementById('resetPasswordAdminConfirm').value;
 
   // Client-side check purely for immediate feedback -- the backend
   // independently re-validates password strength no matter what the
@@ -195,10 +204,19 @@ export async function submitResetPasswordForm(event) {
     return;
   }
 
+  // Same "immediate feedback, backend is the real gate" idea as the
+  // strength check above -- the actual re-auth is enforced server-side in
+  // reset_user_password(), this just avoids a round trip for the obvious
+  // empty-field case.
+  if (!adminPassword) {
+    setResetPasswordMessage('Enter your own password to confirm this reset.', true);
+    return;
+  }
+
   try {
     const result = await apiRequest(`/users/${pendingResetPasswordUserId}/reset-password`, {
       method: 'POST',
-      body: JSON.stringify({ new_password: newPassword }),
+      body: JSON.stringify({ new_password: newPassword, admin_password: adminPassword }),
     });
     setResetPasswordMessage(result.message || 'Password reset successfully.', false);
     document.getElementById('resetPasswordForm').reset();
@@ -244,16 +262,23 @@ function renderDeletedUsersTable(users) {
             <p class="font-medium text-slate-100">${escapeHtml(u.name)}</p>
             <p class="tag-mono text-[11px] text-slate-500">${escapeHtml(u.email)}</p>
           </div>
+          <!-- Mobile-only "Details" button (sm:hidden) -- surfaces the
+               Privilege Tier and Deleted On columns this row hides below
+               sm:table-cell. See ui.js's rowDetailsTrigger(). -->
+          <button ${rowDetailsTrigger(escapeHtml(u.name), [
+            ['Privilege Tier', escapeHtml(u.role.replace('_', ' '))],
+            ['Deleted On', u.deleted_at ? escapeHtml(formatTimestamp(u.deleted_at)) : '—'],
+          ])} class="ml-auto shrink-0 rounded-md border border-border px-2 py-1 text-[11px] font-medium text-slate-400 transition hover:border-slate-500 hover:text-slate-200 sm:hidden">Details</button>
         </div>
       </td>
-      <td class="px-5 py-3.5">
+      <td class="hidden px-5 py-3.5 sm:table-cell">
         <span class="inline-flex items-center gap-1 rounded-full bg-slate-500/10 px-2.5 py-1 text-[11px] font-semibold text-slate-400 ring-1 ring-slate-500/30">
           <span class="h-1.5 w-1.5 rounded-full bg-slate-500"></span> ${escapeHtml(u.role.replace('_', ' '))}
         </span>
       </td>
-      <td class="px-5 py-3.5 tag-mono text-slate-400">${escapeHtml(u.deleted_at || '—')}</td>
+      <td class="hidden px-5 py-3.5 tag-mono text-slate-400 sm:table-cell" title="${escapeHtml(u.deleted_at || '')}">${u.deleted_at ? formatTimestamp(u.deleted_at) : '—'}</td>
       <td class="px-5 py-3.5">
-        <div class="flex justify-end gap-2">
+        <div class="flex flex-wrap justify-end gap-2">
           <button data-action="restore-user" data-user-id="${u.id}" data-user-name="${escapeHtml(u.name)}" class="rounded-md border border-emerald-500/30 px-2.5 py-1.5 text-[12px] font-medium text-emerald-400 transition hover:border-emerald-500 hover:bg-emerald-500/10">Restore</button>
         </div>
       </td>

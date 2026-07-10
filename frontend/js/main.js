@@ -23,12 +23,14 @@
 // =============================================================================
 
 import { checkAccess, startIdleWatchdog, login, redirectByUserRole, logout, getSession } from './auth.js';
-import { closeModal, switchTab, toggleRoute, toggleCapacityEdit, changePage, setSearch, setPerPage } from './ui.js';
-import { refreshDashboard } from './dashboard.js';
+import { closeModal, switchTab, toggleRoute, toggleCapacityEdit, toggleNameEdit, changePage, setSearch, setPerPage, openRowDetailsFromElement } from './ui.js';
+import { refreshDashboard, checkAlertsNow } from './dashboard.js';
+import { dismissOverdueAlert } from './components/overdue.js';
+import { dismissDueSoonAlert } from './components/due-soon.js';
 
 import {
   openDispatchModal, submitDispatchForm, openPropsModal, recallException,
-  saveCapacity, submitExceptionForm, submitCreatePoolForm, submitCsvImportForm,
+  saveCapacity, saveName, submitExceptionForm, submitCreatePoolForm, submitCsvImportForm,
   deleteAssetPool, setAssetsSearch, setAssetsPerPage, changeAssetsPage,
 } from './components/assets.js';
 import {
@@ -47,7 +49,7 @@ import {
 } from './components/custody.js';
 import { openProfileModal, submitChangePasswordForm, ROLE_LABELS } from './components/profile.js';
 import { exportMyItems, exportCustodyItems, exportAllUsers, exportAllOutsiders } from './components/exports.js';
-import { openExtensionRequestModal, submitExtensionRequestForm, decideExtensionRequest, openDirectExtendModal, submitDirectExtendForm } from './components/extensions.js';
+import { openExtensionRequestModal, submitExtensionRequestForm, decideExtensionRequest, openDirectExtendModal, submitDirectExtendForm, dismissExtensionRequestsAlert } from './components/extensions.js';
 
 // -----------------------------------------------------------------------------
 // DELEGATED "CLICK" ACTIONS
@@ -72,8 +74,14 @@ const SERVER_PAGE_CHANGERS = {
 const CLICK_ACTIONS = {
   'switch-tab': (el) => switchTab(el.dataset.tab),
   'close-modal': (el) => closeModal(el.dataset.modal),
+  // Mobile-only "Details" button rendered by every table's component file
+  // (see ui.js's rowDetailsTrigger()/openRowDetailsFromElement()) -- shows
+  // whatever columns that table hides below the `sm` breakpoint.
+  'open-row-details': (el) => openRowDetailsFromElement(el),
   'toggle-capacity-edit': () => toggleCapacityEdit(),
   'save-capacity': () => saveCapacity(),
+  'toggle-name-edit': () => toggleNameEdit(),
+  'save-name': () => saveName(),
   'open-dispatch': (el) => openDispatchModal(parseInt(el.dataset.assetId, 10), el.dataset.assetName, parseInt(el.dataset.available, 10)),
   'open-props': (el) => openPropsModal(parseInt(el.dataset.assetId, 10)),
   'recall-exception': (el) => recallException(parseInt(el.dataset.assetId, 10), parseInt(el.dataset.exceptionId, 10)),
@@ -93,6 +101,14 @@ const CLICK_ACTIONS = {
     else changePage(key, delta);
   },
   'open-profile': () => openProfileModal(),
+  'check-alerts': () => checkAlertsNow(),
+  'dismiss-overdue-alert': () => dismissOverdueAlert(),
+  'dismiss-due-soon-alert': () => dismissDueSoonAlert(),
+  'dismiss-extension-requests-alert': () => dismissExtensionRequestsAlert(),
+  'dismiss-all-clear-banner': () => {
+    const banner = document.getElementById('alertsAllClearBanner');
+    if (banner) banner.classList.add('hidden');
+  },
 
   // Due-date extension requests -- see components/extensions.js.
   'open-extension-request': (el) => openExtensionRequestModal(parseInt(el.dataset.checkoutId, 10), el.dataset.assetName, el.dataset.dueDate),

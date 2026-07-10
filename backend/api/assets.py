@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from deps import get_current_user, require_super_admin, require_privileged_role
-from schemas.assets import AssetTypeCreate, ExceptionCreate, AdvancedCheckoutRequest, QuantityUpdateRequest
+from schemas.assets import AssetTypeCreate, ExceptionCreate, AdvancedCheckoutRequest, QuantityUpdateRequest, NameUpdateRequest
 import services.asset_service as asset_service
 
 router = APIRouter(prefix="/assets", tags=["assets"])
@@ -41,6 +41,11 @@ def get_asset_details(asset_id: int, db: Session = Depends(get_db), user: dict =
 @router.put("/{asset_id}/quantity")
 def update_asset_quantity(asset_id: int, payload: QuantityUpdateRequest, db: Session = Depends(get_db), user: dict = Depends(require_super_admin)):
     return asset_service.update_asset_quantity(db, asset_id, payload, user)
+
+
+@router.put("/{asset_id}/name")
+def update_asset_name(asset_id: int, payload: NameUpdateRequest, db: Session = Depends(get_db), user: dict = Depends(require_super_admin)):
+    return asset_service.update_asset_name(db, asset_id, payload, user)
 
 
 @router.delete("/{asset_id}")

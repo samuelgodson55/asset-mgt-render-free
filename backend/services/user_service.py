@@ -6,6 +6,7 @@ api/users.py.
 """
 
 from typing import Optional
+import datetime
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -13,7 +14,7 @@ from sqlalchemy import func
 import models
 from models import utc_now
 from config import settings
-from security import hash_password, SUPER_ADMIN_ID, SUPER_ADMIN_ROLE
+from security import hash_password, verify_password, SUPER_ADMIN_ID, SUPER_ADMIN_ROLE, SUPER_ADMIN_PASSWORD_HASH
 from schemas.users import UserCreateRequest
 import services.export_service as export_service
 from services.search_utils import apply_search_filter
@@ -186,9 +187,17 @@ def list_users(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offset: int 
 
     results = []
     for u in users:
-        outstanding = sum(
-            (c.quantity - c.quantity_returned) for c in u.checkouts if c.status == "active"
-        )
+        active_checkouts = [c for c in u.checkouts if c.status == "active"]
+        outstanding = sum((c.quantity - c.quantity_returned) for c in active_checkouts)
+
+        # Data Quality & Usability follow-up: the User Directory's small
+        # alert icon is computed PER PERSON, not per item -- someone with
+        # ten checked-out items and one overdue one gets exactly one
+        # "overdue" flag, not ten. See js/components/users.js's row
+        # template for how these three booleans become the icon(s), and
+        # the dashboard banners (js/components/overdue.js,
+        # components/due-soon.js, components/extensions.js) for the exact
+        # same "one line per person" idea applied there.
         results.append({
             "id": u.id,
             "name": u.name,
@@ -198,6 +207,13 @@ def list_users(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offset: int 
             "department": u.department,
             "department_role": u.department_role,
             "checkout_count": outstanding,
+            "alerts": {
+                "overdue": any(models.is_overdue(c.due_date) for c in active_checkouts),
+                "due_soon": any(models.is_due_soon(c.due_date) for c in active_checkouts),
+                "pending_extension": any(
+                    er.status == "pending" for c in active_checkouts for er in c.extension_requests
+                ),
+            },
         })
     return {"items": results, "total": total, "limit": limit, "offset": offset}
 
@@ -219,8 +235,31 @@ def get_my_assigned_items(db: Session, user: dict) -> dict:
     items = [{
         "checkout_id": c.id, "asset_name": c.asset.name if c.asset else "Unknown Asset",
         "quantity": c.quantity, "quantity_returned": c.quantity_returned, "outstanding": c.quantity - c.quantity_returned,
-        "checkout_date": c.checkout_date.strftime("%Y-%m-%d %H:%M:%S") if c.checkout_date else None,
+        # TIMEZONE FIX: `checkout_date` used to be pre-formatted here with
+        # `.strftime("%Y-%m-%d %H:%M:%S")` -- that prints the raw UTC wall-
+        # clock numbers with no timezone marker at all, and the frontend
+        # (js/components/myitems.js's "My Checked-Out Items" table) just
+        # displayed that string verbatim. Anyone outside UTC saw a
+        # checkout hour that was wrong by their UTC offset (e.g. an hour
+        # behind for Lagos/WAT, UTC+1) with no indication it was even a
+        # UTC value in the first place.
+        #
+        # `.isoformat()` instead keeps the UTC offset on the wire (e.g.
+        # "2026-07-10T14:23:01.123456+00:00"), exactly like AuditLog rows
+        # already do (services/audit_service.py's get_audit_logs() returns
+        # the ORM objects directly, which FastAPI's default JSON encoder
+        # serializes to this same ISO-with-offset shape) -- and the
+        # frontend's `formatTimestamp()` (js/ui.js), which the Audit Trail
+        # table already relies on, does the actual UTC -> browser-local
+        # conversion via `new Date(...).toLocaleString()`. Applying that
+        # same helper to `checkout_date` in myitems.js is what actually
+        # fixes the displayed hour -- this ISO change is what makes that
+        # possible.
+        "checkout_date": c.checkout_date.isoformat() if c.checkout_date else None,
         "due_date": c.due_date.strftime("%Y-%m-%d") if c.due_date else "No Fixed Due Date",
+        "due_soon": models.is_due_soon(c.due_date),
+        "overdue": models.is_overdue(c.due_date),
+        "pending_extension": any(er.status == "pending" for er in c.extension_requests),
     } for c in active_checkouts]
 
     return {
@@ -244,8 +283,14 @@ def get_user_assigned_items(db: Session, user_id: int, user: dict) -> dict:
     items = [{
         "checkout_id": c.id, "asset_name": c.asset.name if c.asset else "Unknown Asset",
         "quantity": c.quantity, "quantity_returned": c.quantity_returned, "outstanding": c.quantity - c.quantity_returned,
-        "checkout_date": c.checkout_date.strftime("%Y-%m-%d %H:%M:%S") if c.checkout_date else None,
+        # TIMEZONE FIX -- see get_my_assigned_items() above for the full
+        # explanation of why this is `.isoformat()` and not a
+        # pre-formatted `.strftime(...)` string.
+        "checkout_date": c.checkout_date.isoformat() if c.checkout_date else None,
         "due_date": c.due_date.strftime("%Y-%m-%d") if c.due_date else "No Fixed Due Date",
+        "due_soon": models.is_due_soon(c.due_date),
+        "overdue": models.is_overdue(c.due_date),
+        "pending_extension": any(er.status == "pending" for er in c.extension_requests),
     } for c in active_checkouts]
 
     return {
@@ -272,12 +317,33 @@ def get_user_assigned_items(db: Session, user_id: int, user: dict) -> dict:
 _ITEM_EXPORT_HEADERS = ["Asset", "Quantity", "Quantity Returned", "Outstanding", "Checked Out", "Due Date"]
 
 
+def _format_export_datetime(iso_string: Optional[str]) -> str:
+    """
+    Turns one of the `.isoformat()` timestamps now used throughout this
+    module's dicts (checkout_date, deleted_at -- see get_my_assigned_items()'s
+    "TIMEZONE FIX" comment above for why they're ISO in the first place)
+    back into a friendly string for a CSV/PDF export cell.
+
+    Unlike the live UI (js/ui.js's formatTimestamp(), which converts to the
+    browser's local timezone), a static export file has no viewer-specific
+    timezone to convert to at generation time -- so this keeps it in UTC
+    and says so explicitly, rather than risk it being misread as local
+    time the way the old un-labeled pre-formatted string could be.
+    """
+    if not iso_string:
+        return ""
+    try:
+        return datetime.datetime.fromisoformat(iso_string).strftime("%Y-%m-%d %H:%M:%S UTC")
+    except ValueError:
+        return iso_string  # unparseable -- surface it as-is rather than silently dropping it
+
+
 def _item_export_rows(items: list) -> list:
     """Turns the `assigned_items` list shape (see get_my_assigned_items /
     get_user_assigned_items above) into plain rows for
     export_service.build_csv_bytes()/build_pdf_bytes()."""
     return [
-        [i["asset_name"], i["quantity"], i["quantity_returned"], i["outstanding"], i["checkout_date"] or "", i["due_date"]]
+        [i["asset_name"], i["quantity"], i["quantity_returned"], i["outstanding"], _format_export_datetime(i["checkout_date"]), i["due_date"]]
         for i in items
     ]
 
@@ -335,7 +401,7 @@ def export_all_users_items(db: Session, user: dict, fmt: str = "csv"):
                 u.name, u.email, u.department or "—", u.role,
                 c.asset.name if c.asset else "Unknown Asset",
                 c.quantity, c.quantity - c.quantity_returned,
-                c.checkout_date.strftime("%Y-%m-%d %H:%M:%S") if c.checkout_date else "",
+                c.checkout_date.strftime("%Y-%m-%d %H:%M:%S UTC") if c.checkout_date else "",
                 c.due_date.strftime("%Y-%m-%d") if c.due_date else "No Fixed Due Date",
             ])
 
@@ -409,7 +475,7 @@ def delete_user(db: Session, user_id: int, user: dict) -> dict:
 # ---------------------------------------------------------------------------
 # ADMIN-ISSUED PASSWORD RESET ("forgot password" recovery path)
 # ---------------------------------------------------------------------------
-def reset_user_password(db: Session, user_id: int, new_password: str, admin_user: dict) -> dict:
+def reset_user_password(db: Session, user_id: int, new_password: str, admin_password: str, admin_user: dict) -> dict:
     """
     Lets a Super Admin or Admin (see require_super_admin in deps.py, which
     -- despite the name -- also allows the "admin" role, same as everywhere
@@ -420,13 +486,37 @@ def reset_user_password(db: Session, user_id: int, new_password: str, admin_user
     update_password()): that one requires re-confirming the account's
     CURRENT password, which is exactly what a locked-out user doesn't have.
     An admin performing a reset never needs to know -- or be asked for --
-    the old password.
+    the TARGET's old password.
+
+    SECURITY: even though the target's old password is never needed, the
+    ACTING admin must re-confirm their OWN current password (`admin_password`)
+    before this proceeds -- same "step-up" idea as update_password()'s
+    self-service current-password check, just guarding a different account.
+    Without this, anyone who got hold of a still-valid admin/super-admin JWT
+    (an unattended logged-in browser tab, a leaked token, etc.) could reset
+    any other account's password -- including handing themselves a path to
+    another privileged account -- without ever having to prove they still
+    are who the token says they are.
 
     Mirrors update_password()'s recovery behavior: a successful reset also
     clears any accumulated brute-force lockout state (failed_login_attempts
     / locked_until), since a fresh admin-issued password is just as
     legitimate a recovery event as the user finally remembering their own.
     """
+    # Re-authentication step: verify the ACTING admin's own current
+    # password. The Super Admin's hash is the precomputed constant from
+    # security.py (it has no `users` table row); any other admin/manager
+    # is looked up by their own JWT subject id. A missing/unresolvable
+    # admin account or an incorrect password both fail closed.
+    if str(admin_user["sub"]) == str(SUPER_ADMIN_ID):
+        admin_hash = SUPER_ADMIN_PASSWORD_HASH
+    else:
+        admin_row = db.query(models.User).filter(models.User.id == int(admin_user["sub"])).first()
+        admin_hash = admin_row.password_hash if admin_row else None
+
+    if not admin_hash or not admin_password or not verify_password(admin_password, admin_hash):
+        raise HTTPException(status_code=400, detail="Your password is incorrect.")
+
     # The hardcoded Super Admin's password lives only in the
     # SUPER_ADMIN_PASSWORD environment variable (see security.py) -- it has
     # no `users` table row to update, so it can never be reset from within
@@ -495,7 +585,10 @@ def list_deleted_users(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offs
     results = [{
         "id": u.id, "name": u.name, "email": u.email, "username": u.username,
         "role": u.role, "department": u.department, "department_role": u.department_role,
-        "deleted_at": u.deleted_at.strftime("%Y-%m-%d %H:%M:%S") if u.deleted_at else None,
+        # TIMEZONE FIX -- see get_my_assigned_items() above for the full
+        # explanation of why this is `.isoformat()` and not a
+        # pre-formatted `.strftime(...)` string.
+        "deleted_at": u.deleted_at.isoformat() if u.deleted_at else None,
     } for u in users]
     return {"items": results, "total": total, "limit": limit, "offset": offset}
 

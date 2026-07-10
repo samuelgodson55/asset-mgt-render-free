@@ -3,6 +3,8 @@ api/checkouts.py
 -----------------
 POST /checkouts/{id}/return -- quantified return processing.
 GET  /checkouts/overdue     -- dashboard alert feed of overdue checkouts.
+GET  /checkouts/due-soon    -- dashboard alert feed of checkouts due soon
+                                (a reminder BEFORE something goes overdue).
 
 POST /checkouts/{id}/extension-requests               -- request more time
 GET  /checkouts/extension-requests                     -- list requests (privileged)
@@ -47,6 +49,19 @@ def get_overdue_checkouts(
 ):
     """Dashboard alert feed: active checkouts whose due date has passed."""
     return checkout_service.list_overdue_checkouts(db, user, limit, offset)
+
+
+# Same route-ordering reasoning as "/overdue" just above -- "/due-soon" is
+# also a literal path with no {checkout_id} segment.
+@router.get("/due-soon")
+def get_due_soon_checkouts(
+    limit: int = Query(checkout_service.DEFAULT_LIMIT, ge=1, le=checkout_service.MAX_LIMIT, description="Max rows to return"),
+    offset: int = Query(0, ge=0, description="Rows to skip (for paging through a large due-soon list)"),
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_privileged_role),
+):
+    """Dashboard alert feed: active checkouts due within settings.DUE_SOON_REMINDER_DAYS, but not yet overdue -- a reminder BEFORE something goes overdue."""
+    return checkout_service.list_due_soon_checkouts(db, user, limit, offset)
 
 
 @router.post("/{checkout_id}/extension-requests")

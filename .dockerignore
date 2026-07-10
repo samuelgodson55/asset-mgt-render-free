@@ -1,15 +1,13 @@
 # =============================================================================
 # .dockerignore
 # -----------------------------------------------------------------------------
-# The root Dockerfile's build context is the PROJECT ROOT (see
-# docker-compose.yml and render.yaml -- both build from `.`) so it can COPY
-# both backend/ and frontend/ into one combined image (see the Dockerfile's
-# own module comment for why it's one image/service now instead of three).
-# Without this file, `docker build`/`docker compose build` would transmit
-# EVERYTHING in the repo root to the Docker daemon as build context --
-# including a real ".env" full of secrets, if one exists on disk, even
-# though no COPY instruction ever references it. Excluding it here means
-# it's never even sent over, not just "not copied into the final image".
+# nginx/Dockerfile's build context is the PROJECT ROOT (see docker-compose.yml
+# -- `context: .`) so it can COPY both frontend/ and nginx/. Without this
+# file, `docker build`/`docker compose build` would transmit EVERYTHING in
+# the repo root to the Docker daemon as build context -- including a real
+# ".env" full of secrets, if one exists on disk, even though no COPY
+# instruction ever references it. Excluding it here means it's never even
+# sent over, not just "not copied into the final image".
 # =============================================================================
 
 # --- Secrets -- never send these to the Docker daemon as build context ------
