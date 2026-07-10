@@ -42,14 +42,26 @@ export async function openCustodyModal(entityId, entityType = 'user') {
     document.getElementById('custodyCount').textContent = data.assigned_items.length;
 
     const list = document.getElementById('custodyItemList');
-    list.innerHTML = data.assigned_items.map(item => `
+    list.innerHTML = data.assigned_items.map(item => {
+      // At most one of these two color-codes the due-date line -- an item
+      // that's already overdue is always shown as overdue, never also
+      // "due soon" (is_overdue()/is_due_soon() on the backend are already
+      // mutually exclusive, this just mirrors that here).
+      const dueDateClass = item.overdue ? 'text-rose-400' : item.due_soon ? 'text-amber-400' : 'text-slate-500';
+      const dueDateSuffix = item.overdue ? ' · Overdue' : item.due_soon ? ' · Due Soon' : '';
+      const extensionBadge = item.pending_extension
+        ? `<span class="ml-2 inline-flex items-center gap-1 rounded-full border border-violet-500/30 bg-violet-500/10 px-2 py-0.5 text-[10px] font-semibold text-violet-300">Extension Requested</span>`
+        : '';
+      return `
     <div class="flex items-center gap-3 rounded-lg border border-border bg-card2/50 px-3 py-2.5">
       <input type="checkbox" data-checkout-id="${item.checkout_id}" data-outstanding="${item.outstanding}" data-action="update-custody-selection"
         class="custody-item-checkbox h-4 w-4 rounded border-border bg-card2 text-blue-600 focus:ring-0 focus:ring-offset-0" />
       <div class="flex flex-1 items-center justify-between">
         <div>
-          <p class="text-[13px] font-medium text-slate-200">${escapeHtml(item.asset_name)}</p>
-          <p class="tag-mono text-[11px] text-slate-500">Outstanding ${item.outstanding} / ${item.quantity} · due ${escapeHtml(item.due_date)}</p>
+          <p class="text-[13px] font-medium text-slate-200">${escapeHtml(item.asset_name)}${extensionBadge}</p>
+          <p class="tag-mono text-[11px] ${dueDateClass}">
+            Outstanding ${item.outstanding} / ${item.quantity} · due ${escapeHtml(item.due_date)}${dueDateSuffix}
+          </p>
         </div>
         <div class="flex items-center gap-2">
           <input type="number" min="1" max="${item.outstanding}" value="${item.outstanding}" id="returnQty-${item.checkout_id}"
@@ -59,7 +71,8 @@ export async function openCustodyModal(entityId, entityType = 'user') {
           <button data-action="process-return" data-checkout-id="${item.checkout_id}" class="rounded-md bg-emerald-600/90 px-2.5 py-1.5 text-[11px] font-semibold text-white transition hover:bg-emerald-500">Process Return</button>
         </div>
       </div>
-    </div>`).join('') || `<p class="text-[12px] text-slate-500">No items currently checked out.</p>`;
+    </div>`;
+    }).join('') || `<p class="text-[12px] text-slate-500">No items currently checked out.</p>`;
 
     updateCustodySelection();
     openModal('custodyModal');

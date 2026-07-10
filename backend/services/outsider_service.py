@@ -55,10 +55,21 @@ def list_outsiders(db: Session, limit: int = DEFAULT_LIMIT, offset: int = 0, sea
 
     results = []
     for o in outsiders:
-        outstanding = sum(c.quantity - c.quantity_returned for c in o.checkouts if c.status == "active")
+        active_checkouts = [c for c in o.checkouts if c.status == "active"]
+        outstanding = sum(c.quantity - c.quantity_returned for c in active_checkouts)
         results.append({
             "id": o.id, "name": o.name, "contact_details": o.contact_details,
             "company": o.company, "outstanding_items": outstanding,
+            # Same per-person (not per-item) alert flags as
+            # user_service.list_users() -- see that function's comment for
+            # the full rationale.
+            "alerts": {
+                "overdue": any(models.is_overdue(c.due_date) for c in active_checkouts),
+                "due_soon": any(models.is_due_soon(c.due_date) for c in active_checkouts),
+                "pending_extension": any(
+                    er.status == "pending" for c in active_checkouts for er in c.extension_requests
+                ),
+            },
         })
     return {"items": results, "total": total, "limit": limit, "offset": offset}
 
@@ -75,8 +86,14 @@ def get_outsider_assigned_items(db: Session, outsider_id: int) -> dict:
     items = [{
         "checkout_id": c.id, "asset_name": c.asset.name if c.asset else "Unknown Asset",
         "quantity": c.quantity, "quantity_returned": c.quantity_returned, "outstanding": c.quantity - c.quantity_returned,
-        "checkout_date": c.checkout_date.strftime("%Y-%m-%d %H:%M:%S") if c.checkout_date else None,
+        # TIMEZONE FIX -- see services/user_service.py's
+        # get_my_assigned_items() for the full explanation of why this is
+        # `.isoformat()` and not a pre-formatted `.strftime(...)` string.
+        "checkout_date": c.checkout_date.isoformat() if c.checkout_date else None,
         "due_date": c.due_date.strftime("%Y-%m-%d") if c.due_date else "No Fixed Due Date",
+        "due_soon": models.is_due_soon(c.due_date),
+        "overdue": models.is_overdue(c.due_date),
+        "pending_extension": any(er.status == "pending" for er in c.extension_requests),
     } for c in active_checkouts]
 
     return {
@@ -98,11 +115,26 @@ def get_outsider_assigned_items(db: Session, outsider_id: int) -> dict:
 _ITEM_EXPORT_HEADERS = ["Asset", "Quantity", "Quantity Returned", "Outstanding", "Checked Out", "Due Date"]
 
 
+def _format_export_datetime(iso_string: Optional[str]) -> str:
+    """
+    Mirrors services/user_service.py's `_format_export_datetime()` -- turns
+    a `.isoformat()` checkout_date back into a friendly, explicitly-UTC
+    string for a CSV/PDF export cell (a static file has no browser to
+    localize it into the viewer's own timezone the way the live UI does).
+    """
+    if not iso_string:
+        return ""
+    try:
+        return datetime.datetime.fromisoformat(iso_string).strftime("%Y-%m-%d %H:%M:%S UTC")
+    except ValueError:
+        return iso_string  # unparseable -- surface it as-is rather than silently dropping it
+
+
 def _item_export_rows(items: list) -> list:
     """Turns the `assigned_items` list shape (see get_outsider_assigned_items
     above) into plain rows for export_service.build_csv_bytes()/build_pdf_bytes()."""
     return [
-        [i["asset_name"], i["quantity"], i["quantity_returned"], i["outstanding"], i["checkout_date"] or "", i["due_date"]]
+        [i["asset_name"], i["quantity"], i["quantity_returned"], i["outstanding"], _format_export_datetime(i["checkout_date"]), i["due_date"]]
         for i in items
     ]
 
@@ -143,7 +175,7 @@ def export_all_outsiders_items(db: Session, user: dict, fmt: str = "csv"):
                 o.name, o.contact_details, o.company or "—",
                 c.asset.name if c.asset else "Unknown Asset",
                 c.quantity, c.quantity - c.quantity_returned,
-                c.checkout_date.strftime("%Y-%m-%d %H:%M:%S") if c.checkout_date else "",
+                c.checkout_date.strftime("%Y-%m-%d %H:%M:%S UTC") if c.checkout_date else "",
                 c.due_date.strftime("%Y-%m-%d") if c.due_date else "No Fixed Due Date",
             ])
 

@@ -17,7 +17,7 @@ from sqlalchemy import func
 import models
 from services.search_utils import apply_search_filter
 from models import utc_now
-from schemas.assets import AssetTypeCreate, ExceptionCreate, AdvancedCheckoutRequest, QuantityUpdateRequest
+from schemas.assets import AssetTypeCreate, ExceptionCreate, AdvancedCheckoutRequest, QuantityUpdateRequest, NameUpdateRequest
 from services.stock import recalculate_asset_stock
 
 # Same reasoning as user_service.DEFAULT_LIMIT/MAX_LIMIT -- bounds how many
@@ -124,7 +124,11 @@ def get_asset_details(db: Session, asset_id: int) -> dict:
         checkout_list.append({
             "checkout_id": c.id, "assignee_name": assignee_name, "assignee_type": assignee_type,
             "quantity": c.quantity, "quantity_returned": c.quantity_returned, "outstanding": outstanding,
-            "checkout_date": c.checkout_date.strftime("%Y-%m-%d %H:%M:%S") if c.checkout_date else None,
+            # TIMEZONE FIX -- see services/user_service.py's
+            # get_my_assigned_items() for the full explanation of why this
+            # is `.isoformat()` and not a pre-formatted `.strftime(...)`
+            # string.
+            "checkout_date": c.checkout_date.isoformat() if c.checkout_date else None,
             "due_date": c.due_date.strftime("%Y-%m-%d") if c.due_date else "No Fixed Due Date",
         })
 
@@ -175,6 +179,38 @@ def update_asset_quantity(db: Session, asset_id: int, payload: QuantityUpdateReq
     ))
     db.commit()
     return {"message": "Successfully updated total capacity."}
+
+
+def update_asset_name(db: Session, asset_id: int, payload: NameUpdateRequest, user: dict) -> dict:
+    # Renaming a stock pool is a Super Admin-only action -- same privilege
+    # tier as adjusting its capacity above.
+    asset = db.query(models.AssetType).filter(
+        models.AssetType.id == asset_id, models.AssetType.is_deleted == False
+    ).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset type not found")
+
+    # AssetType.name carries a DB-level unique constraint, but we still
+    # pre-check here (same pattern create_asset_type uses on creation) so
+    # a collision surfaces as a friendly 400 instead of a raw
+    # IntegrityError/500 from the database.
+    duplicate = db.query(models.AssetType).filter(
+        models.AssetType.name == payload.name,
+        models.AssetType.id != asset_id,
+        models.AssetType.is_deleted == False,
+    ).first()
+    if duplicate:
+        raise HTTPException(status_code=400, detail="Asset type name already exists")
+
+    old_name = asset.name
+    asset.name = payload.name
+
+    db.add(models.AuditLog(
+        operator=user["email"], action="POOL_RENAMED", target_type="AssetType", target_id=asset_id,
+        details=f"Renamed asset pool from '{old_name}' to '{payload.name}'.",
+    ))
+    db.commit()
+    return {"message": "Successfully updated asset name."}
 
 
 def delete_asset_type(db: Session, asset_id: int, user: dict) -> dict:

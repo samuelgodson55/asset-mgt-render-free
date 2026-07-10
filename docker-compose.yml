@@ -4,7 +4,7 @@
 #     docker compose up --build
 #
 # SECRETS (requirement #1): every value that used to be hardcoded here
-# (POSTGRES_PASSWORD, JWT_SECRET_KEY, etc.) is read from a git-ignored
+# (POSTGRES_PASSWORD, JWT_SECRET_KEY, etc.) is now read from a git-ignored
 # ".env" file in this same folder via the ${VARIABLE_NAME} syntax. Docker
 # Compose automatically loads ".env" with NO extra configuration needed --
 # it just has to sit next to this file. See .env.example for the template
@@ -12,21 +12,22 @@
 # time:
 #     cp .env.example .env
 #
-# Two services:
-#   db   - PostgreSQL database that stores everything
-#   app  - ONE FastAPI process (built from the root Dockerfile) that
-#          serves BOTH the JSON API (under /api/*) AND the static
-#          frontend (index.html/admin.html/js/*, etc.) -- see
-#          backend/main.py's module docstring for why this used to be
-#          three containers (backend + Celery worker + nginx) and now
-#          isn't: that split doesn't fit Render's (or most platforms')
-#          FREE tier, and this docker-compose.yml intentionally mirrors
-#          the same simpler shape used in render.yaml so "works locally"
-#          and "works on Render" mean the same thing.
+# Three services:
+#   db       - PostgreSQL database that stores everything
+#   backend  - FastAPI app (main.py) talking to the db (not published to the
+#              host anymore -- see the "frontend" service below)
+#   frontend - the static site (index.html/admin.html/js/*) PLUS an nginx
+#              reverse proxy in front of it, built from nginx/Dockerfile.
+#              nginx serves the frontend directly and transparently forwards
+#              every /api/* request to the backend container over Docker's
+#              internal network -- see nginx/default.conf.template for the
+#              full explanation. This is also the ONLY multi-tier-portable
+#              piece: the exact same image runs on Render/cloud too, just
+#              with different BACKEND_HOST/BACKEND_PORT env vars.
 #
 # Once running, everything is served from ONE origin:
-#   App + API:  http://localhost:8000
-#   API docs:   http://localhost:8000/docs   (if ENABLE_API_DOCS=true)
+#   App + API:        http://localhost:8080          (nginx)
+#   API docs:          http://localhost:8080/docs     (proxied by nginx)
 # -----------------------------------------------------------------------------
 services:
   db:
@@ -46,29 +47,46 @@ services:
       # down` and container restarts -- only `docker compose down -v` wipes it.
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      # Requirement #7: the app won't even try to start until this reports
-      # healthy (see `app`'s `depends_on: condition: service_healthy`
-      # below), which prevents the classic "app crash-loops because
-      # Postgres wasn't ready yet" race condition.
+      # Requirement #7: the backend won't even try to start until this
+      # reports healthy (see backend's `depends_on: condition:
+      # service_healthy` below), which prevents the classic "backend
+      # crash-loops because Postgres wasn't ready yet" race condition.
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-admin} -d ${POSTGRES_DB:-asset_db}"]
       interval: 5s
       timeout: 5s
       retries: 5
 
-  app:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: snipeit_lite_app
+  # ---------------------------------------------------------------------
+  # redis (Celery broker + result backend for async exports)
+  # ---------------------------------------------------------------------
+  # Two jobs: (1) the queue the `backend` container drops export jobs
+  # into, and (2) where the `worker` container stashes a finished job's
+  # file bytes until the frontend downloads them (see
+  # backend/celery_app.py's module docstring for the full picture, and
+  # config.py's EXPORT_RESULT_TTL_SECONDS for how long results live here
+  # before expiring). Not published to the host -- like `db`, it's only
+  # ever reached over Compose's internal network, by service name.
+  redis:
+    image: redis:7-alpine
+    container_name: snipeit_lite_redis
     restart: unless-stopped
-    # Local-dev override: live-reload on file changes, unlike the
-    # Dockerfile's own production CMD (see that file's comment). Mounts
-    # backend/ and frontend/ as bind mounts below so edits on your host
-    # show up immediately without rebuilding the image.
-    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     volumes:
-      - ./backend:/app/backend
-      - ./frontend:/app/frontend
+      # Named volume so queued-but-not-yet-processed jobs and any
+      # not-yet-downloaded export results survive a `docker compose
+      # restart`. Redis's default persistence (RDB snapshots) is enabled
+      # out of the box in this image, which is all this workload needs --
+      # a lost job here just means re-clicking "export", not lost data.
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: ./backend
+    container_name: snipeit_lite_backend
+    restart: unless-stopped
     environment:
       # "development" or "production" -- gates the startup JWT-secret check
       # in backend/config.py (requirement #5). Defaults to "development" so
@@ -79,15 +97,21 @@ services:
       # "db" works because Docker Compose puts every service on the same
       # network and lets them reach each other by service name.
       DATABASE_URL: ${DATABASE_URL:-postgresql://admin:supersecret@db:5432/asset_db}
+      # Broker + result backend for the async export job system (see
+      # backend/celery_app.py) -- "redis" is the service name below,
+      # resolved by Compose's internal DNS the same way "db" is for
+      # Postgres.
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in your .env file -- see .env.example}
       JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
       JWT_EXPIRY_HOURS: ${JWT_EXPIRY_HOURS:-12}
-      # The frontend and API are served from this SAME container/origin
-      # now (see backend/main.py), so this almost never matters for normal
-      # browser use -- it only matters if you call this API directly from
-      # a genuinely different origin. Empty by default; see config.py's
-      # CORS_ORIGINS docstring.
-      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      # Now mostly defense-in-depth: since the browser always calls the
+      # SAME origin that served the page (nginx proxies /api/* under the
+      # hood -- see nginx/default.conf.template), this almost never matters
+      # for same-origin requests anymore. It still matters if you ever hit
+      # this backend directly (bypassing nginx) or from a genuinely
+      # different origin, so it stays here rather than being removed.
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080,http://localhost,http://127.0.0.1}
       # Operations & Observability requirement #1: gate the startup
       # init_db()/seed_db() calls instead of always running them. Leave
       # both "true" for local docker-compose demo use; set both "false" in
@@ -102,7 +126,10 @@ services:
       LOGIN_RATE_LIMIT_WINDOW_SECONDS: ${LOGIN_RATE_LIMIT_WINDOW_SECONDS:-60}
       # SECURITY: exposes/hides /docs, /redoc, /openapi.json -- see
       # config.py's ENABLE_API_DOCS docstring. Defaults to "true" for local
-      # dev convenience; set "false" in a real production .env.
+      # dev convenience; set "false" in a real production .env. Must be
+      # kept in sync with the frontend service's own ENABLE_API_DOCS below
+      # (same .env key drives both, so this happens automatically as long
+      # as you don't override just one of the two services individually).
       ENABLE_API_DOCS: ${ENABLE_API_DOCS:-true}
       # Hardcoded Super Admin (root account) -- see .env.example and
       # backend/config.py's SUPER_ADMIN_* docstring. Defaults keep local
@@ -114,10 +141,7 @@ services:
       # Email notifications (extension requests + overdue-checkout digest)
       # -- see backend/config.py's NOTIFICATIONS_ENABLED docstring. Leave
       # disabled for local dev with no mail server; the app works fine
-      # without it, it just logs what it would have sent instead. The
-      # digest itself now runs from an in-process scheduler thread (see
-      # backend/scheduler.py) rather than a separate Celery worker
-      # container -- nothing extra to run locally for it to work.
+      # without it, it just logs what it would have sent instead.
       NOTIFICATIONS_ENABLED: ${NOTIFICATIONS_ENABLED:-false}
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
@@ -127,16 +151,138 @@ services:
       SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-}
       ADMIN_NOTIFICATION_EMAILS: ${ADMIN_NOTIFICATION_EMAILS:-}
       OVERDUE_NOTIFICATION_INTERVAL_HOURS: ${OVERDUE_NOTIFICATION_INTERVAL_HOURS:-24}
-      # Optional shared secret for triggering the overdue digest from an
-      # external scheduler instead of/in addition to the in-process one --
-      # see config.py's SYSTEM_TASK_TOKEN docstring and api/system.py.
-      # Empty (disabled) by default.
-      SYSTEM_TASK_TOKEN: ${SYSTEM_TASK_TOKEN:-}
-    ports:
-      - "8000:8000"
+      # "A reminder before something goes overdue" -- see
+      # backend/config.py's DUE_SOON_REMINDER_DAYS docstring.
+      DUE_SOON_REMINDER_DAYS: ${DUE_SOON_REMINDER_DAYS:-2}
+      DUE_SOON_NOTIFICATION_INTERVAL_HOURS: ${DUE_SOON_NOTIFICATION_INTERVAL_HOURS:-24}
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+    # NOTE: no host `ports:` mapping here anymore -- see nginx reverse-proxy
+    # comment block below for why. The backend is still fully reachable by
+    # the frontend container over Compose's internal network at
+    # "backend:8000"; it's just no longer directly exposed to the host/
+    # public internet. If you need to hit it directly for debugging (e.g.
+    # curling it, or Postman), temporarily add back:
+    #     ports:
+    #       - "8000:8000"
+
+  # ---------------------------------------------------------------------
+  # worker (Celery consumer -- generates audit ledger CSV/PDF exports)
+  # ---------------------------------------------------------------------
+  # Same image/build context as `backend` (identical requirements.txt, so
+  # it has reportlab/celery/redis/SQLAlchemy available and can import
+  # services/audit_service.py directly) -- the only thing that differs is
+  # the `command:` below, which runs a Celery worker process instead of
+  # uvicorn. This is what actually executes `tasks.generate_audit_export`
+  # jobs the `backend` container enqueues via POST /audit-logs/export
+  # (backend/tasks/export_tasks.py) AND the scheduled
+  # `tasks.send_overdue_notifications` digest (backend/tasks/
+  # notification_tasks.py); see backend/celery_app.py for both.
+  #
+  # `-B` embeds Celery BEAT (the periodic-task scheduler) directly inside
+  # this same worker process, rather than running it as its own container
+  # -- see celery_app.py's `beat_schedule` comment for the full reasoning
+  # and its "don't scale this to >1 replica without splitting Beat back
+  # out" caveat.
+  #
+  # Talks to the SAME Postgres database as `backend` (it needs to query
+  # the audit_logs table itself) and the SAME Redis instance (as the
+  # queue it consumes from and where it stashes finished results) -- so it
+  # gets an almost-identical environment block. Not published to the host
+  # at all: nothing outside this Compose network ever talks to a worker
+  # directly, only via the job queue.
+  worker:
+    build: ./backend
+    container_name: snipeit_lite_worker
+    restart: unless-stopped
+    command: ["celery", "-A", "celery_app", "worker", "-B", "--loglevel=info", "--concurrency=2"]
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://admin:supersecret@db:5432/asset_db}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      # The worker never issues/verifies JWTs itself (export jobs are
+      # enqueued with an already-validated user's role/email baked in --
+      # see api/audit.py), but Settings() still requires a JWT_SECRET_KEY
+      # value to construct without error since it shares config.py with
+      # the backend, so it needs the same one set here.
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in your .env file -- see .env.example}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      # The worker never runs its own DB migrations/seeding -- `backend`
+      # already owns that on its startup hook -- so these stay disabled
+      # here regardless of the .env values used for `backend`.
+      AUTO_INIT_DB: "false"
+      AUTO_SEED_DEMO_DATA: "false"
+      # Same notification settings as `backend` above -- the overdue-digest
+      # task (which runs HERE, in the worker/beat process, not in backend)
+      # needs them too. Kept identical/copy-pasted rather than factored out
+      # since docker-compose.yml has no "shared env block" feature without
+      # YAML anchors, which this project avoids for beginner-readability.
+      NOTIFICATIONS_ENABLED: ${NOTIFICATIONS_ENABLED:-false}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-}
+      ADMIN_NOTIFICATION_EMAILS: ${ADMIN_NOTIFICATION_EMAILS:-}
+      OVERDUE_NOTIFICATION_INTERVAL_HOURS: ${OVERDUE_NOTIFICATION_INTERVAL_HOURS:-24}
+      DUE_SOON_REMINDER_DAYS: ${DUE_SOON_REMINDER_DAYS:-2}
+      DUE_SOON_NOTIFICATION_INTERVAL_HOURS: ${DUE_SOON_NOTIFICATION_INTERVAL_HOURS:-24}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------
+  # frontend / nginx reverse proxy (requirement: multi-tier deployment)
+  # ---------------------------------------------------------------------
+  # This is no longer a bare `nginx:alpine` + bind-mounted static files --
+  # it's now built from nginx/Dockerfile, which produces ONE self-contained
+  # image bundling both the static site AND an environment-templated nginx
+  # config (see nginx/default.conf.template). That image is what gets
+  # deployed unmodified to Render and your cloud environment too; only the
+  # environment variables below change between tiers.
+  #
+  # SECURITY: this is now the ONLY container with a host-published port.
+  # The browser talks exclusively to nginx; nginx is the sole thing that
+  # forwards /api/* requests on to the backend over the private Compose
+  # network (see BACKEND_HOST/BACKEND_PORT below). The backend is no longer
+  # reachable directly from outside Docker at all -- shrinking the app's
+  # public attack surface to one hardened, well-understood entry point.
+  frontend:
+    build:
+      context: .
+      dockerfile: nginx/Dockerfile
+    container_name: snipeit_lite_frontend
+    restart: unless-stopped
+    environment:
+      # Which port nginx listens on INSIDE the container. Left at 80 here
+      # since we're the ones choosing the host-side port via the `ports:`
+      # mapping below; a platform like Render would instead inject its own
+      # $PORT and this line wouldn't exist in that environment at all.
+      PORT: ${FRONTEND_PORT:-80}
+      # "backend" is this Compose file's service name above -- Docker's
+      # embedded DNS resolves it automatically to that container's current
+      # IP on every request (see default.conf.template's `resolver`
+      # directive for why "every request" matters, not just "at startup").
+      BACKEND_HOST: ${BACKEND_HOST:-backend}
+      BACKEND_PORT: ${BACKEND_PORT:-8000}
+      RESOLVER_IP: ${RESOLVER_IP:-127.0.0.11}
+      # SECURITY: must match the backend service's own ENABLE_API_DOCS
+      # above -- see that line's comment and config.py's ENABLE_API_DOCS
+      # docstring. Reading from the SAME .env key here means the two
+      # services can't silently drift out of sync with each other.
+      ENABLE_API_DOCS: ${ENABLE_API_DOCS:-true}
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
 
 volumes:
   pgdata:
+  redisdata:

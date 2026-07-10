@@ -1,0 +1,64 @@
+# =============================================================================
+# .github/workflows/deploy-render.yml
+# -----------------------------------------------------------------------------
+# Migrate-then-deploy for the Render Free-plan target this project ships with
+# (render.yaml + Dockerfile.render). See README.md's "Safely Updating An
+# Existing Production Deployment (CI/CD)" -> "Render" section for WHY this
+# workflow exists: Render's `preDeployCommand` and Shell/SSH access are both
+# paid-instance-type-only, so there is no built-in way to run `alembic
+# upgrade head` before a Free-plan deploy goes live. This workflow is the
+# fix -- it runs the migration from CI, against the database's PUBLIC
+# connection string, and only THEN tells Render to deploy.
+#
+# ONLY RELEVANT IF YOU DEPLOY VIA render.yaml. If you deploy via
+# docker-compose.yml on your own server instead, delete this file and use
+# deploy-docker-compose.yml (most projects only need ONE of the two
+# deploy-*.yml workflows in this folder, matching whichever platform you
+# actually deployed to).
+#
+# PREREQUISITE: set this service's auto-deploy to "Off" in the Render
+# Dashboard first (Settings -> Build & Deploy -> Auto-Deploy). Otherwise
+# Render will ALSO auto-deploy on every push, racing this workflow's
+# migration step -- see the README section above for why that's unsafe.
+#
+# REQUIRED REPOSITORY SECRETS (Settings -> Secrets and variables -> Actions):
+#   RENDER_DATABASE_URL      -- snipeit-lite-db's EXTERNAL connection string
+#                                 (Render Dashboard -> snipeit-lite-db -> Info
+#                                 -> "External Database URL")
+#   RENDER_DEPLOY_HOOK_URL    -- snipeit-lite-web's deploy hook URL (Render
+#                                  Dashboard -> snipeit-lite-web -> Settings
+#                                  -> "Deploy Hook")
+#
+# If you've since upgraded snipeit-lite-web to a paid instance type, the
+# simpler fix is to delete this workflow entirely and add
+# `preDeployCommand: cd backend && alembic upgrade head` directly to
+# render.yaml instead -- see the README section above.
+# =============================================================================
+name: Deploy (Render)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  migrate-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install backend dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Run database migrations against the live production database
+        working-directory: backend
+        env:
+          DATABASE_URL: ${{ secrets.RENDER_DATABASE_URL }}
+        run: alembic upgrade head
+
+      - name: Trigger the Render deploy (only runs if the migration above succeeded)
+        run: curl -fsS -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}"

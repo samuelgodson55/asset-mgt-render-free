@@ -128,7 +128,7 @@ def reset_user_password(user_id: int, req: UserPasswordResetRequest, db: Session
     for another user's account directly, with no need to know their old
     one. See services/user_service.py -> reset_user_password() docstring.
     """
-    return user_service.reset_user_password(db, user_id, req.new_password, user)
+    return user_service.reset_user_password(db, user_id, req.new_password, req.admin_password, user)
 
 
 @router.post("/{user_id}/restore")

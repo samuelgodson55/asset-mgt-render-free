@@ -53,6 +53,64 @@ export function escapeHtml(str) {
   return String(str).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+// -----------------------------------------------------------------------------
+// MOBILE "ROW DETAILS" POPUP
+// -----------------------------------------------------------------------------
+// Every data table in this app hides its less-critical columns below the
+// `sm` (640px) breakpoint -- see each components/*.js render function's
+// `hidden sm:table-cell` cells -- so a table never forces the page into a
+// long horizontal scroll on a phone. Desktop (`sm:` and up) still renders
+// every column exactly as before.
+//
+// Whatever gets hidden isn't lost, though: a small "Details" button (also
+// only shown below `sm`, via `sm:hidden`) opens THIS one shared popup with
+// the hidden fields as a simple label/value list. Every table on every
+// page reuses the SAME modal markup (`id="rowDetailsModal"`, added once
+// near the bottom of each dashboard HTML file) -- a render function just
+// calls `rowDetailsTrigger(title, fields)` to build its mobile button's
+// `data-*` attributes. See components/assets.js's renderAssetsTable() for
+// the first example.
+//
+// `fields` is an array of `[label, value]` pairs, e.g.:
+//   [['Available / Total', '4 / 10 units'], ['Pool ID', 'POOL-7']]
+// `value` may contain HTML (e.g. a status-badge `<span>`) -- same
+// discipline as everywhere else in this codebase: the CALLER is
+// responsible for escapeHtml()-ing any raw/untrusted text before putting
+// it in the array, since openRowDetailsFromElement() below renders it via
+// innerHTML, not textContent.
+export function rowDetailsTrigger(title, fields) {
+  // JSON-encode the fields, then HTML-escape the whole blob so it's safe
+  // to sit inside a double-quoted HTML attribute -- the browser reverses
+  // that escaping automatically when JS later reads `el.dataset.fields`,
+  // so openRowDetailsFromElement() just JSON.parses it straight back out.
+  return `data-action="open-row-details" data-title="${escapeHtml(title)}" data-fields='${escapeHtml(JSON.stringify(fields))}'`;
+}
+
+// Called by main.js's delegated click handler for any element carrying
+// `data-action="open-row-details"` (built by rowDetailsTrigger() above).
+export function openRowDetailsFromElement(el) {
+  const titleEl = document.getElementById('rowDetailsTitle');
+  const bodyEl = document.getElementById('rowDetailsBody');
+  if (!titleEl || !bodyEl) return; // shouldn't happen -- every dashboard HTML file includes the shared #rowDetailsModal
+
+  titleEl.textContent = el.dataset.title || 'Details';
+
+  let fields = [];
+  try {
+    fields = JSON.parse(el.dataset.fields || '[]');
+  } catch {
+    fields = [];
+  }
+
+  bodyEl.innerHTML = fields.map(([label, value]) => `
+    <div class="flex items-start justify-between gap-4 border-b border-border/60 py-2.5 last:border-0">
+      <dt class="text-slate-500">${escapeHtml(label)}</dt>
+      <dd class="text-right font-medium text-slate-200">${value}</dd>
+    </div>`).join('') || `<p class="py-2 text-center text-slate-500">No additional details.</p>`;
+
+  openModal('rowDetailsModal');
+}
+
 // Turns a backend ISO-8601 timestamp (e.g.
 // "2026-07-08T07:58:40.216313+00:00") into a short, human-friendly string
 // for on-screen tables (e.g. "Jul 8, 2026, 7:58 AM") -- the raw ISO string
@@ -111,6 +169,13 @@ export function toggleRoute() {
 export function toggleCapacityEdit() {
   document.getElementById('capacityBtn').classList.toggle('hidden');
   const edit = document.getElementById('capacityEdit');
+  edit.classList.toggle('hidden');
+  edit.classList.toggle('flex');
+}
+
+export function toggleNameEdit() {
+  document.getElementById('nameDisplay').classList.toggle('hidden');
+  const edit = document.getElementById('nameEdit');
   edit.classList.toggle('hidden');
   edit.classList.toggle('flex');
 }
@@ -273,6 +338,100 @@ export function renderServerPaginationBar(key, state) {
   }
   if (prevBtn) prevBtn.disabled = state.page <= 1;
   if (nextBtn) nextBtn.disabled = state.page >= totalPages;
+}
+
+// =============================================================================
+// DISMISSIBLE ALERT BANNERS (Overdue / Due Soon / Extension Requests)
+// -----------------------------------------------------------------------------
+// Each of those three banners has the exact same "click X, it goes away,
+// but a routine background refresh shouldn't immediately pop it back open"
+// requirement. A plain in-memory flag handles that within a single page
+// load, but it resets the instant the tab is reloaded or the person
+// navigates away and back -- from a user's point of view that looks
+// exactly like "clicking X did nothing", since the banner they *just*
+// dismissed is right back the next time they land on the page.
+//
+// This keeps the dismissal in localStorage instead, keyed to a signature
+// of exactly what was on screen when it was dismissed (e.g. which
+// checkout ids, how many days until due). That means:
+//   - Reloading the page / switching tabs and back respects the dismissal.
+//   - The moment the underlying situation actually changes -- a new item
+//     becomes due soon, one drops off, a days-until-due count ticks over --
+//     the signature no longer matches, so the banner comes back on its own
+//     even without an explicit "Check Alerts" click, since that's now
+//     genuinely new information the person hasn't seen and dismissed yet.
+const DISMISS_STORAGE_PREFIX = 'snipeit:alertDismissed:';
+
+export function isAlertDismissed(key, signature) {
+  if (!signature) return false;
+  try {
+    return window.localStorage.getItem(DISMISS_STORAGE_PREFIX + key) === signature;
+  } catch (e) {
+    // Storage can throw in some private-browsing modes -- fail open (i.e.
+    // just show the banner) rather than let a storage quirk crash the page.
+    return false;
+  }
+}
+
+export function setAlertDismissed(key, signature) {
+  if (!signature) return;
+  try {
+    window.localStorage.setItem(DISMISS_STORAGE_PREFIX + key, signature);
+  } catch (e) {
+    // Ignore -- worst case the dismissal only lasts for this page load.
+  }
+}
+
+export function clearAlertDismissed(key) {
+  try {
+    window.localStorage.removeItem(DISMISS_STORAGE_PREFIX + key);
+  } catch (e) {
+    // Ignore, same as above.
+  }
+}
+
+// A person-level (not item-level) alert icon for the User Directory /
+// Ad-Hoc Directory tables. Takes the `alerts: {overdue, due_soon,
+// pending_extension}` object backend/services/user_service.py's
+// list_users() (and outsider_service.py's list_outsiders()) computes per
+// person -- ONE icon regardless of how many individual items are overdue/
+// due soon/pending, exactly the "don't flag someone once per item" ask
+// this was built for. Colored by the single most urgent thing true for
+// them (overdue > due soon > pending extension); the tooltip names
+// everything that applies, and the Custody Ledger (opened via the
+// existing "Custody Ledger" button on that row) is always where the
+// actual itemized detail lives -- this icon is only ever a pointer to it.
+export function personAlertIcon(alerts) {
+  if (!alerts || (!alerts.overdue && !alerts.due_soon && !alerts.pending_extension)) return '';
+  const reasons = [];
+  if (alerts.overdue) reasons.push('has overdue item(s)');
+  if (alerts.due_soon) reasons.push('has item(s) due soon');
+  if (alerts.pending_extension) reasons.push('has a pending extension request');
+  const color = alerts.overdue ? 'text-rose-400' : alerts.due_soon ? 'text-amber-400' : 'text-violet-400';
+  const title = `${reasons.join(' · ')} — see Custody Ledger for details`;
+  return `<span title="${escapeHtml(title)}" class="inline-flex h-4 w-4 shrink-0 ${color}">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v4m0 4h.01M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"/></svg>
+  </span>`;
+}
+
+// Groups a list of per-checkout alert items (each already carrying
+// assignee_name/entity_id/entity_type -- see services/checkout_service.py's
+// list_overdue_checkouts()/list_due_soon_checkouts() and
+// services/extension_service.py's list_extension_requests()) into one
+// entry per PERSON. This is what lets the Overdue/Due Soon banners and the
+// Extension Requests panel show "T. Okafor has 2 items due soon" instead
+// of two separate item rows -- someone with a pile of checked-out
+// equipment never gets flagged once per item, just once per alert type.
+export function groupByPerson(items) {
+  const groups = new Map();
+  for (const item of items) {
+    const key = item.entity_type && item.entity_id != null ? `${item.entity_type}:${item.entity_id}` : `name:${item.assignee_name}`;
+    if (!groups.has(key)) {
+      groups.set(key, { entityId: item.entity_id, entityType: item.entity_type, assigneeName: item.assignee_name, items: [] });
+    }
+    groups.get(key).items.push(item);
+  }
+  return Array.from(groups.values());
 }
 
 export function statusBadge(available) {

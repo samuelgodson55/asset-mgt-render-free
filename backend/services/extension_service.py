@@ -43,7 +43,6 @@ import logging
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-import jobs
 import models
 from models import utc_now
 from schemas.checkouts import ExtensionRequestCreate, ExtensionDecisionRequest, DirectExtensionRequest
@@ -85,24 +84,24 @@ def _coerce_aware(dt: datetime.datetime | None) -> datetime.datetime | None:
 
 def _notify(to, subject: str, body: str) -> None:
     """
-    Runs one email send on the background thread pool (see jobs.run_async
-    / tasks.send_email_task) instead of calling
+    Enqueues one email via tasks.send_email_task instead of calling
     notification_service.send_email() inline -- see that task's docstring
     for why (short version: it keeps a slow/misconfigured SMTP server from
     holding this request/response open, which is what used to make the
     Request Extension modal and the Extension Requests panel both feel
     like they hung before clearing).
 
-    Kept fail-soft here (log + move on) for the same reason
+    `.delay()` itself can raise if Redis/the broker is unreachable -- kept
+    fail-soft here (log + move on) for the exact same reason
     notification_service.send_email() never raises: a checkout's due date
     already changed and was already committed by the time this is called,
-    so a background-submission hiccup should never turn into a 500 on an
-    otherwise-successful extension request/decision.
+    so a broker hiccup should never turn into a 500 on an otherwise-
+    successful extension request/decision.
     """
     try:
-        jobs.run_async(send_email_task, to=to, subject=subject, body=body)
+        send_email_task.delay(to=to, subject=subject, body=body)
     except Exception:
-        logger.warning("Failed to submit notification email %r", subject, exc_info=True)
+        logger.warning("Failed to enqueue notification email %r", subject, exc_info=True)
 
 
 def _notification_recipients(db) -> list[str]:
@@ -233,19 +232,33 @@ def list_extension_requests(db: Session, user: dict, status: str | None = None, 
     items = []
     for r in rows:
         checkout = r.checkout
+        if checkout and checkout.user:
+            assignee_name, entity_id, entity_type = checkout.user.name, checkout.user.id, "user"
+        elif checkout and checkout.outsider:
+            assignee_name, entity_id, entity_type = checkout.outsider.name, checkout.outsider.id, "outsider"
+        else:
+            assignee_name, entity_id, entity_type = "Unknown", None, None
+
         items.append({
             "id": r.id,
             "checkout_id": r.checkout_id,
             "asset_name": checkout.asset.name if checkout and checkout.asset else "Unknown Asset",
+            "assignee_name": assignee_name,
+            "entity_id": entity_id,
+            "entity_type": entity_type,
             "requested_by_label": r.requested_by_label,
             "previous_due_date": r.previous_due_date.strftime("%Y-%m-%d") if r.previous_due_date else None,
             "requested_new_due_date": r.requested_new_due_date.strftime("%Y-%m-%d"),
             "reason": r.reason,
             "status": r.status,
             "decided_by": r.decided_by,
-            "decided_at": r.decided_at.strftime("%Y-%m-%d %H:%M:%S") if r.decided_at else None,
+            # TIMEZONE FIX -- see services/user_service.py's
+            # get_my_assigned_items() for the full explanation of why
+            # these are `.isoformat()` and not pre-formatted
+            # `.strftime(...)` strings.
+            "decided_at": r.decided_at.isoformat() if r.decided_at else None,
             "decision_note": r.decision_note,
-            "created_at": r.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "created_at": r.created_at.isoformat(),
         })
 
     return {"items": items, "total": total, "limit": limit, "offset": offset}

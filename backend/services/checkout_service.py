@@ -2,16 +2,20 @@
 services/checkout_service.py
 ------------------------------
 Processing a return against an existing AssetCheckout row, and listing
-overdue checkouts for dashboard alerts. Used by api/checkouts.py.
+overdue / soon-to-be-due checkouts for dashboard alerts. Used by
+api/checkouts.py.
 """
 
+import datetime
 import logging
+import math
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 import models
 from models import utc_now
+from config import settings
 from schemas.checkouts import ReturnRequest
 from services.stock import recalculate_asset_stock
 
@@ -131,10 +135,13 @@ def list_overdue_checkouts(db: Session, user: dict, limit: int = DEFAULT_LIMIT, 
     for c in overdue:
         if c.user:
             assignee_name, assignee_type = c.user.name, c.user.role.capitalize()
+            entity_id, entity_type = c.user.id, "user"
         elif c.outsider:
             assignee_name, assignee_type = f"{c.outsider.name} ({c.outsider.company or 'No Company'})", "External Outsider"
+            entity_id, entity_type = c.outsider.id, "outsider"
         else:
             assignee_name, assignee_type = "Unknown", "Unknown"
+            entity_id, entity_type = None, None
 
         days_overdue = (now - c.due_date).days
         items.append({
@@ -143,10 +150,87 @@ def list_overdue_checkouts(db: Session, user: dict, limit: int = DEFAULT_LIMIT, 
             "asset_name": c.asset.name if c.asset else "Unknown Asset",
             "assignee_name": assignee_name,
             "assignee_type": assignee_type,
+            "entity_id": entity_id,
+            "entity_type": entity_type,
             "quantity": c.quantity,
             "outstanding": c.quantity - c.quantity_returned,
             "due_date": c.due_date.strftime("%Y-%m-%d"),
             "days_overdue": max(days_overdue, 0),
+        })
+
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+
+def list_due_soon_checkouts(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offset: int = 0) -> dict:
+    """
+    Powers GET /checkouts/due-soon -- the proactive counterpart to
+    list_overdue_checkouts() above: a "Due Soon" dashboard banner on
+    admin.html/manager.html that flags active checkouts approaching their
+    due date BEFORE they actually go overdue, so a Super Admin/Manager can
+    chase down a return (or grant an extension) ahead of time instead of
+    only ever finding out after the fact.
+
+    "Due soon" here means: status == "active" (not yet returned) AND
+    due_date is not null AND due_date is still in the future AND due_date
+    falls within `settings.DUE_SOON_REMINDER_DAYS` days from now. An
+    already-overdue checkout is deliberately EXCLUDED (that's what the
+    "Overdue" banner is for) -- the two lists are mutually exclusive by
+    construction, on either side of `now`, so nothing ever double-counts
+    across both banners. A checkout with no due_date at all is, same as
+    for "overdue", never considered due soon either -- it was checked out
+    open-ended on purpose.
+
+    SCOPING: both Super Admins and Managers see every due-soon checkout
+    system-wide -- Managers no longer have department-scoping anywhere in
+    this app (same as list_overdue_checkouts() above).
+
+    Sorted with the SOONEST-due item first, since that's the most urgent
+    one to act on.
+    """
+    limit = max(1, min(limit, MAX_LIMIT))
+    offset = max(0, offset)
+    now = utc_now()
+    horizon = now + datetime.timedelta(days=settings.DUE_SOON_REMINDER_DAYS)
+
+    query = db.query(models.AssetCheckout).filter(
+        models.AssetCheckout.status == "active",
+        models.AssetCheckout.due_date.isnot(None),
+        models.AssetCheckout.due_date >= now,
+        models.AssetCheckout.due_date <= horizon,
+    )
+
+    total = query.count()
+    due_soon = query.order_by(models.AssetCheckout.due_date.asc()).offset(offset).limit(limit).all()
+
+    items = []
+    for c in due_soon:
+        if c.user:
+            assignee_name, assignee_type = c.user.name, c.user.role.capitalize()
+            entity_id, entity_type = c.user.id, "user"
+        elif c.outsider:
+            assignee_name, assignee_type = f"{c.outsider.name} ({c.outsider.company or 'No Company'})", "External Outsider"
+            entity_id, entity_type = c.outsider.id, "outsider"
+        else:
+            assignee_name, assignee_type = "Unknown", "Unknown"
+            entity_id, entity_type = None, None
+
+        # Ceiling division on the remaining time, not floor: something due
+        # in 6 hours should read "due in 1 day", not "due in 0 days"
+        # (which would misleadingly read as if it were already overdue).
+        remaining = c.due_date - now
+        days_until_due = max(1, math.ceil(remaining.total_seconds() / 86400))
+        items.append({
+            "checkout_id": c.id,
+            "asset_id": c.asset_id,
+            "asset_name": c.asset.name if c.asset else "Unknown Asset",
+            "assignee_name": assignee_name,
+            "assignee_type": assignee_type,
+            "entity_id": entity_id,
+            "entity_type": entity_type,
+            "quantity": c.quantity,
+            "outstanding": c.quantity - c.quantity_returned,
+            "due_date": c.due_date.strftime("%Y-%m-%d"),
+            "days_until_due": days_until_due,
         })
 
     return {"items": items, "total": total, "limit": limit, "offset": offset}

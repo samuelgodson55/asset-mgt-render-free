@@ -7,7 +7,7 @@
 // =============================================================================
 
 import { apiRequest } from '../api.js';
-import { escapeHtml, openModal, closeModal, toggleRoute, toggleCapacityEdit, statusBadge, debounce, renderServerPaginationBar } from '../ui.js';
+import { escapeHtml, openModal, closeModal, toggleRoute, toggleCapacityEdit, toggleNameEdit, statusBadge, debounce, renderServerPaginationBar, rowDetailsTrigger } from '../ui.js';
 import { refreshDashboard } from '../dashboard.js';
 
 let currentDispatchAssetId = null; // remembers which asset the open dispatch drawer is for
@@ -56,13 +56,25 @@ function renderAssetsTable(items) {
   tbody.innerHTML = items.map(a => `
     <tr class="transition hover:bg-card2/40">
       <td class="px-5 py-3.5">
-        <p class="font-medium text-slate-100">${escapeHtml(a.name)}</p>
-        <p class="tag-mono text-[11px] text-slate-500">POOL-${a.id}</p>
+        <div class="flex items-center gap-2">
+          <div>
+            <p class="font-medium text-slate-100">${escapeHtml(a.name)}</p>
+            <p class="tag-mono text-[11px] text-slate-500">POOL-${a.id}</p>
+          </div>
+          <!-- Mobile-only "Details" button (sm:hidden) -- surfaces the
+               Available/Total column this row hides below sm:table-cell,
+               so nothing is actually lost on a phone, just one tap away.
+               See ui.js's rowDetailsTrigger()/openRowDetailsFromElement(). -->
+          <button ${rowDetailsTrigger(escapeHtml(a.name), [
+            ['Available / Total', `${a.available_quantity} / ${a.total_quantity} units`],
+            ['Status', statusBadge(a.available_quantity)],
+          ])} class="ml-auto shrink-0 rounded-md border border-border px-2 py-1 text-[11px] font-medium text-slate-400 transition hover:border-slate-500 hover:text-slate-200 sm:hidden">Details</button>
+        </div>
       </td>
-      <td class="px-5 py-3.5 tag-mono text-slate-300">${a.available_quantity} / ${a.total_quantity} units</td>
+      <td class="hidden px-5 py-3.5 tag-mono text-slate-300 sm:table-cell">${a.available_quantity} / ${a.total_quantity} units</td>
       <td class="px-5 py-3.5">${statusBadge(a.available_quantity)}</td>
       <td class="px-5 py-3.5">
-        <div class="flex justify-end gap-2">
+        <div class="flex flex-wrap justify-end gap-2">
           ${isManagerView
             ? `<button data-action="open-props" data-asset-id="${a.id}" class="rounded-md px-2.5 py-1.5 text-[12px] font-medium text-slate-400 underline-offset-2 transition hover:text-blue-400 hover:underline">View Pool details</button>`
             : `<button data-action="open-props" data-asset-id="${a.id}" class="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-slate-500 hover:text-white">Properties Hub</button>`}
@@ -243,6 +255,20 @@ export async function openPropsModal(assetId) {
     const capacityInput = document.getElementById('capacityInput');
     if (capacityInput) capacityInput.value = details.total_quantity;
 
+    // Rename field -- only present on admin.html (Super Admin's Properties
+    // Hub), same as capacityInput above. Reset back to display mode (not
+    // mid-edit) every time the modal is (re)opened, so a stale edit state
+    // from a previous visit never lingers.
+    const nameInput = document.getElementById('nameInput');
+    if (nameInput) nameInput.value = details.name;
+    const nameDisplay = document.getElementById('nameDisplay');
+    const nameEdit = document.getElementById('nameEdit');
+    if (nameDisplay && nameEdit) {
+      nameDisplay.classList.remove('hidden');
+      nameEdit.classList.add('hidden');
+      nameEdit.classList.remove('flex');
+    }
+
     const list = document.getElementById('propsDeploymentList');
     list.innerHTML = details.active_assignments.map(a => `
     <div class="flex items-center justify-between rounded-lg border border-border bg-card2/50 px-3 py-2.5">
@@ -297,6 +323,24 @@ export async function saveCapacity() {
       method: 'PUT', body: JSON.stringify({ new_total: newTotal }),
     });
     toggleCapacityEdit();
+    openPropsModal(currentPropsAssetId);
+    refreshDashboard();
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+export async function saveName() {
+  const newName = document.getElementById('nameInput').value.trim();
+  if (!newName) {
+    alert('Asset name cannot be empty.');
+    return;
+  }
+  try {
+    await apiRequest(`/assets/${currentPropsAssetId}/name`, {
+      method: 'PUT', body: JSON.stringify({ name: newName }),
+    });
+    toggleNameEdit();
     openPropsModal(currentPropsAssetId);
     refreshDashboard();
   } catch (err) {

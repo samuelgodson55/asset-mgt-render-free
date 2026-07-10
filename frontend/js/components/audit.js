@@ -30,7 +30,7 @@
 
 import { apiRequest, API_URL } from '../api.js';
 import { getSession } from '../auth.js';
-import { escapeHtml, formatTimestamp, renderServerPaginationBar } from '../ui.js';
+import { escapeHtml, formatTimestamp, renderServerPaginationBar, rowDetailsTrigger } from '../ui.js';
 
 const auditState = { page: 1, perPage: 10, total: 0 };
 
@@ -45,9 +45,22 @@ export async function loadAuditLogs() {
     tbody.innerHTML = result.items.map(l => `
     <tr>
       <td class="px-5 py-2.5 whitespace-nowrap" title="${escapeHtml(l.timestamp)}">${escapeHtml(formatTimestamp(l.timestamp))}</td>
-      <td class="px-5 py-2.5">${escapeHtml(l.operator)}</td>
-      <td class="px-5 py-2.5"><span class="rounded bg-blue-500/10 px-1.5 py-0.5 text-blue-400 ring-1 ring-blue-500/30">${escapeHtml(l.action)}</span></td>
-      <td class="px-5 py-2.5 text-slate-500">${escapeHtml(l.details)}</td>
+      <td class="hidden px-5 py-2.5 sm:table-cell">${escapeHtml(l.operator)}</td>
+      <td class="px-5 py-2.5">
+        <div class="flex items-center gap-2">
+          <span class="rounded bg-blue-500/10 px-1.5 py-0.5 text-blue-400 ring-1 ring-blue-500/30">${escapeHtml(l.action)}</span>
+          <!-- Mobile-only "Details" button (sm:hidden) -- surfaces the
+               Operator and Detail columns this row hides below
+               sm:table-cell. See ui.js's rowDetailsTrigger(). -->
+          <button ${rowDetailsTrigger('Log Entry', [
+            ['Timestamp', escapeHtml(l.timestamp)],
+            ['Operator', escapeHtml(l.operator)],
+            ['Action', escapeHtml(l.action)],
+            ['Detail', escapeHtml(l.details)],
+          ])} class="ml-auto shrink-0 rounded-md border border-border px-2 py-1 text-[11px] font-medium text-slate-400 transition hover:border-slate-500 hover:text-slate-200 sm:hidden">Details</button>
+        </div>
+      </td>
+      <td class="hidden px-5 py-2.5 text-slate-500 sm:table-cell">${escapeHtml(l.details)}</td>
     </tr>`).join('') || `<tr><td colspan="4" class="px-5 py-6 text-center text-slate-500">No log entries yet.</td></tr>`;
 
     renderServerPaginationBar('audit', auditState);

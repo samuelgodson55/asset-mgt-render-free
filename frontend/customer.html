@@ -73,8 +73,8 @@
         <span class="my-item-count">0</span> item(s) currently on loan to you
       </p>
     </div>
-    <div class="flex items-center gap-3">
-      <div class="relative w-64">
+    <div class="flex flex-wrap items-center gap-3">
+      <div class="relative w-full sm:w-64">
         <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
         <input type="text" id="myItemsSearchInput" placeholder="Search by asset name…"
           class="w-full rounded-lg border border-border bg-card2 py-2 pl-9 pr-3 text-[13px] text-slate-200 placeholder-slate-500 outline-none transition focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
@@ -112,9 +112,9 @@
       <thead>
         <tr class="border-b border-border bg-card2/60 text-[11px] uppercase tracking-wide text-slate-500">
           <th class="px-5 py-3 font-semibold">Asset</th>
-          <th class="px-5 py-3 font-semibold">Quantity</th>
-          <th class="px-5 py-3 font-semibold">Checked Out</th>
-          <th class="px-5 py-3 font-semibold">Due Back</th>
+          <th class="hidden px-5 py-3 font-semibold sm:table-cell">Quantity</th>
+          <th class="hidden px-5 py-3 font-semibold sm:table-cell">Checked Out</th>
+          <th class="hidden px-5 py-3 font-semibold sm:table-cell">Due Back</th>
           <th class="px-5 py-3 font-semibold">Status</th>
           <th class="px-5 py-3 font-semibold">Actions</th>
         </tr>
@@ -245,6 +245,27 @@
         <button type="submit" class="flex-1 rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500">Submit Request</button>
       </div>
     </form>
+  </div>
+</div>
+
+<!-- ============= MOBILE ROW DETAILS POPUP =============
+     One shared, generic small modal for every data table on this page.
+     Each table hides its less-critical columns below the `sm` breakpoint
+     (see each components/*.js render function's `hidden sm:table-cell`
+     cells) so tables never force a long horizontal scroll on a phone --
+     desktop still shows every column unchanged. A per-row "Details"
+     button (also `sm:hidden`) opens THIS popup with whatever got hidden --
+     see js/ui.js's rowDetailsTrigger()/openRowDetailsFromElement(). -->
+<div id="rowDetailsModal" class="fixed inset-0 z-50 hidden items-center justify-center p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative w-full max-w-sm rounded-xl border border-border bg-[#141922] p-5 shadow-2xl">
+    <div class="mb-2 flex items-center justify-between">
+      <h3 id="rowDetailsTitle" class="text-[15px] font-bold text-slate-50">Details</h3>
+      <button data-action="close-modal" data-modal="rowDetailsModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <dl id="rowDetailsBody" class="text-[13px]"></dl>
   </div>
 </div>
 

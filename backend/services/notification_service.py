@@ -21,10 +21,10 @@ request, is a real business action that already happened and was already
 committed to the database by the time this module gets called -- an SMTP
 server being down/misconfigured should never turn into a 500 error on an
 otherwise-successful API request, and should never crash the nightly
-overdue-digest scheduler either (see scheduler.py -- a crash there would
-silently stop *every* overdue reminder, not just fail to send one email).
-Every function here catches its own exceptions, logs a clear warning, and
-returns a simple True/False success flag instead.
+Celery Beat notification task either (which would silently stop *every*
+overdue reminder, not just fail to send one email). Every function here
+catches its own exceptions, logs a clear warning, and returns a simple
+True/False success flag instead.
 
 WHY NOTIFICATIONS_ENABLED EXISTS AS ITS OWN FLAG (separate from "is
 SMTP_HOST set")

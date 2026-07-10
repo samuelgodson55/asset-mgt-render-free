@@ -29,7 +29,7 @@ real production deployment.
 4. [Project Structure](#project-structure)
 5. [How A Request Flows Through The App](#how-a-request-flows-through-the-app)
 6. [Quick Start (Docker)](#quick-start-docker)
-7. [Deploying on Render's Free Plan](#deploying-on-renders-free-plan)
+7. [Deploying Across Environments (nginx Reverse Proxy)](#deploying-across-environments-nginx-reverse-proxy)
 8. [Running Without Docker (Local Dev)](#running-without-docker-local-dev)
 9. [Environment Variables Reference](#environment-variables-reference)
 10. [Roles & Permissions Model](#roles--permissions-model)
@@ -38,9 +38,9 @@ real production deployment.
 13. [File & Function Reference](#file--function-reference)
 14. [Making Changes Safely (A Guide For Beginners)](#making-changes-safely-a-guide-for-beginners)
 15. [Testing Your Changes](#testing-your-changes)
-16. [Continuous Integration](#continuous-integration)
-17. [Security Model](#security-model)
-18. [Running In Production](#running-in-production)
+16. [Security Model](#security-model)
+17. [Running In Production](#running-in-production)
+18. [Safely Updating An Existing Production Deployment (CI/CD)](#safely-updating-an-existing-production-deployment-cicd)
 19. [Suggested Future Features](#suggested-future-features)
 20. [Troubleshooting](#troubleshooting)
 
@@ -135,11 +135,17 @@ who uses it.
   for how this differs from the self-service request flow.
 - **Overdue alerts** — a banner on the Admin/Manager dashboard lists every
   active checkout whose due date has passed, most-overdue-first.
+- **Due Soon alerts** — "a reminder before something goes overdue" — a
+  second, amber banner right above it lists every active checkout due
+  within `DUE_SOON_REMINDER_DAYS` that hasn't gone overdue yet,
+  soonest-first. See [Due-Date Extensions &
+  Notifications](#due-date-extensions--notifications) below for the full
+  picture (it also shows up on Staff/Customer's own My Items and in the
+  Custody Ledger).
 
 ### Due-Date Extensions & Notifications
 
-Everyone gets a piece of this, scoped by role. Three related pieces, all
-backed by `backend/services/extension_service.py`:
+Everyone gets a piece of this, scoped by role. Four related pieces:
 
 - **Request an extension (Staff / Customer, self-service)** — a "Request
   Extension" button sits next to every row in "My Items"
@@ -161,37 +167,65 @@ backed by `backend/services/extension_service.py`:
   **Extend** button described in [Custody & Returns](#custody--returns-super-admin--manager)
   above. Same unrestricted permission as approving a request, just
   without the request existing first.
+- **A reminder before something goes overdue (everyone)** — the same
+  `DUE_SOON_REMINDER_DAYS` window (2 days by default — see [Environment
+  Variables Reference](#environment-variables-reference)) drives three
+  matching, proactive nudges, all surfaced BEFORE a checkout's due date
+  actually passes:
+  - **Admin / Manager** — an amber **"Due Soon"** dashboard banner (right
+    above the red "Overdue" one) lists every active checkout system-wide
+    that's due within the window, soonest first — see
+    `backend/services/checkout_service.py`'s `list_due_soon_checkouts()`
+    and `GET /checkouts/due-soon`.
+  - **Staff / Customer** — a row in "My Items" that's due within the
+    window shows an amber **"Due Soon"** badge instead of the usual blue
+    "On Loan" one, right on their own self-service dashboard.
+  - **Admin / Manager, inside the Custody Ledger** — the same due-soon
+    rows are also highlighted amber (with a "· Due Soon" note next to the
+    due date) when reviewing anyone's custody, whether a User or an
+    Ad-Hoc Outsider.
+
+  All three read the exact same `due_soon`/`days_until_due` computation
+  (`models.is_due_soon()`, shared by every service module above) so the
+  "what counts as due soon" definition can never drift between them.
 
 **Email notifications** (`backend/services/notification_service.py` +
 `backend/tasks/notification_tasks.py`) — plain SMTP, no vendor SDK, off by
 default (`NOTIFICATIONS_ENABLED=false` — see [Environment Variables
-Reference](#environment-variables-reference)). Two kinds go out once
+Reference](#environment-variables-reference)). Three kinds go out once
 enabled and configured:
 1. **Extension-request lifecycle** — every Manager/Admin (system-wide) is
    emailed the moment a new request comes in; the checkout's holder is
    emailed back once their request is approved or denied, or once a
    Manager/Admin/Super Admin grants an extension directly (no request
    needed for that email to go out).
-2. **Daily overdue digest** — an in-process scheduler thread
-   (`send_overdue_notifications`, see [`backend/scheduler.py`](backend/scheduler.py),
-   every `OVERDUE_NOTIFICATION_INTERVAL_HOURS` — 24 by default) emails each
-   overdue checkout's own holder a reminder, plus one combined system-wide
-   summary digest to every Manager and Admin/Super Admin (Managers have no
-   department-scoping, so they get the exact same full list Admins do).
+2. **Daily overdue digest** — a scheduled Celery Beat job
+   (`send_overdue_notifications`, every `OVERDUE_NOTIFICATION_INTERVAL_HOURS`
+   — 24 by default) emails each overdue checkout's own holder a reminder,
+   plus one combined system-wide summary digest to every Manager and
+   Admin/Super Admin (Managers have no department-scoping, so they get
+   the exact same full list Admins do).
+3. **Daily due-soon reminder digest** — the proactive counterpart to #2:
+   a second scheduled Celery Beat job (`send_due_soon_reminders`, every
+   `DUE_SOON_NOTIFICATION_INTERVAL_HOURS` — 24 by default) sends the
+   *same shape* of individual-holder-reminder + Manager/Admin-digest
+   email, just for checkouts due within `DUE_SOON_REMINDER_DAYS` instead
+   of ones that have already passed their due date — "a reminder before
+   something goes overdue," by email as well as on the dashboard.
 
-Every one of these emails runs on a **background thread**
-(`tasks.send_email_task`, submitted via [`backend/jobs.py`](backend/jobs.py))
-rather than sent inline in the request/response cycle — a slow or
-unreachable SMTP server can add several seconds of latency
-(`smtplib.SMTP(..., timeout=10)`), and doing that inline used to make the
-"Request Extension" modal and the "Extension Requests" panel both feel
-like they hung before clearing. The API now commits the database change
-and returns immediately; the actual email goes out a moment later,
-out-of-band — the same in-process background-thread pattern already used
-for audit-ledger exports (see [Tech Stack](#tech-stack)). If
-`NOTIFICATIONS_ENABLED=false` (the default), every notification is simply
-logged at `DEBUG` level instead of sent — nothing here requires a mail
-server to develop or demo the app locally.
+Every one of these emails is **enqueued on the background `worker`
+container** (`tasks.send_email_task`, `backend/celery_app.py`) rather than
+sent inline in the request/response cycle — a slow or unreachable SMTP
+server can add several seconds of latency (`smtplib.SMTP(...,
+timeout=10)`), and doing that inline used to make the "Request Extension"
+modal and the "Extension Requests" panel both feel like they hung before
+clearing. The API now commits the database change and returns
+immediately; the actual email goes out a moment later, out-of-band —
+exactly the same producer/consumer split already used for audit-ledger
+exports (see [Tech Stack](#tech-stack)). If `NOTIFICATIONS_ENABLED=false`
+(the default), every notification is simply logged at `DEBUG` level
+instead of sent — nothing here requires a mail server to develop or demo
+the app locally.
 
 ### Directories (Super Admin / Manager)
 
@@ -268,11 +302,11 @@ Click your name in the navbar on any dashboard to:
   human-readable **details** string. A return entry specifically also
   names **who the equipment was returned from** — a linked User (name +
   email) or an unlinked ad-hoc Outsider (name, and company if known).
-- Exportable as CSV or PDF. Export generation runs on a background thread
-  (see [Tech Stack](#tech-stack)) rather than inline in the request —
-  clicking "Export" submits a job and polls it to completion before
-  downloading, so a wide date range never risks tying up the API or
-  timing out the browser. Both a Manager and a Super Admin see/export
+- Exportable as CSV or PDF. Export generation runs on a background
+  Celery worker (see [Tech Stack](#tech-stack)) rather than inline in the
+  request — clicking "Export" enqueues a job and polls it to completion
+  before downloading, so a wide date range never risks tying up the API
+  or timing out the browser. Both a Manager and a Super Admin see/export
   the entire ledger — Managers have no department-scoping anywhere in
   this app.
 
@@ -303,12 +337,9 @@ Click your name in the navbar on any dashboard to:
 - **Backend:** Python 3.11, FastAPI, SQLAlchemy 2.0, PostgreSQL 16,
   Alembic (migrations), PyJWT (session tokens), `pwdlib`/Argon2id
   (password hashing), Pydantic Settings v2 (typed config), `reportlab`
-  (PDF generation for exports). Audit-ledger exports and the
-  overdue-checkout email digest run as **in-process background
-  threads** (see [`backend/jobs.py`](backend/jobs.py) and
-  [`backend/scheduler.py`](backend/scheduler.py)) rather than a separate
-  Celery + Redis worker — see [Deploying on Render's Free
-  Plan](#deploying-on-renders-free-plan) for why.
+  (PDF generation for exports), Celery + Redis (background workers for
+  audit-ledger exports, extension-request/overdue/due-soon-checkout email
+  notifications, and two scheduled Celery Beat digest jobs — see below).
 - **Email:** plain SMTP (`smtplib`, no vendor SDK) via
   `backend/services/notification_service.py` — works unmodified against a
   self-hosted mail server or any hosted provider's SMTP endpoint
@@ -321,18 +352,17 @@ Click your name in the navbar on any dashboard to:
   time to a single static `frontend/css/tailwind.css` (see
   [`build-tailwind/README.md`](build-tailwind/README.md)) instead of being
   pulled from a CDN and recompiled in every visitor's browser at runtime.
-  Served directly by the SAME FastAPI process as the API, via Starlette's
-  `StaticFiles` (see [`backend/main.py`](backend/main.py)) — no separate
-  nginx container.
-- **Infra:** ONE Docker image (built from the root
-  [`Dockerfile`](Dockerfile)), containing both the API and the static
-  frontend, run as ONE process. Locally, `docker-compose.yml` runs just
-  two services: `db` (Postgres) and `app` (that one combined image). See
-  [Deploying on Render's Free Plan](#deploying-on-renders-free-plan) for
-  why this is a single service rather than the split
-  backend/worker/frontend/Redis shape you might expect from a "real"
-  production app — short version: that split doesn't fit any platform's
-  free tier, and this app is explicitly sized to run on one for free.
+  Served by an nginx reverse proxy built from
+  [`nginx/Dockerfile`](nginx/Dockerfile) (see
+  [Deploying Across Environments](#deploying-across-environments-nginx-reverse-proxy)).
+- **Infra:** Docker Compose, 5 services: `db` (Postgres), `redis`
+  (Celery broker/result backend, not exposed to the host), `backend`
+  (FastAPI/uvicorn, not exposed to the host), `worker` (Celery — builds
+  audit-ledger CSV/PDF exports, sends every email notification, and runs
+  the embedded Celery Beat scheduler for the daily overdue AND due-soon
+  digests, all out-of-band; not exposed to the host), `frontend` (nginx —
+  serves the static site AND reverse-proxies `/api/*` to `backend`, the
+  only publicly-exposed service).
 
 Because `frontend/css/tailwind.css` is a plain committed file (not
 generated inside the Docker build), **editing an `.html` or `.js` file
@@ -346,62 +376,76 @@ one CSS file — see that folder's README for the one-line command.
 
 ```
 snipe-it-lite/
-├── Dockerfile                  # Single image: backend + frontend, one process
-├── .dockerignore                # Keeps .env (and other junk) out of the build context
-├── docker-compose.yml           # 2 services: db, app (local dev)
-├── render.yaml                   # Render Blueprint -- ONE free web service +
-│                                    # ONE free Postgres, see "Deploying on
-│                                    # Render's Free Plan" section above
-├── .env.example                 # Copy this to .env and fill in real secrets
-├── .gitignore                    # Keeps .env (and other junk) out of git
-│
 ├── .github/
 │   └── workflows/
-│       └── ci.yml                 # Lint (ruff), pytest smoke tests against a
-│                                     # real Postgres, Docker build, and
-│                                     # render.yaml/docker-compose.yml validation
-│                                     # -- runs on every push/PR
+│       ├── ci.yml                     # Lint/syntax sanity checks on every
+│       │                                # push + PR (no full test suite yet --
+│       │                                # see "Suggested Future Features")
+│       ├── deploy-docker-compose.yml   # Push-to-deploy over SSH for a
+│       │                                # self-hosted VPS -- see "Safely
+│       │                                # Updating An Existing Production
+│       │                                # Deployment" section above
+│       └── deploy-render.yml            # Migrate-then-deploy for the Render
+│                                          # Free-plan target (works around
+│                                          # Free's lack of preDeployCommand)
+│
+├── docker-compose.yml        # 5 services: db, redis, backend, worker, frontend
+├── render.yaml                # Render Blueprint (free-plan shape: db + redis +
+│                                # one combined web service) -- see "Deploying
+│                                # Across Environments" section above
+├── Dockerfile.render          # Builds the single combined image (backend +
+│                                # static frontend + optional embedded Celery
+│                                # worker) that render.yaml's web service uses --
+│                                # a Render-Free-plan-specific ALTERNATIVE to
+│                                # backend/Dockerfile, not a replacement for it
+├── render-start.sh             # CMD for Dockerfile.render -- optionally launches
+│                                # the embedded Celery worker/beat, then execs uvicorn
+├── .env.example               # Copy this to .env and fill in real secrets
+├── .gitignore                  # Keeps .env (and other junk) out of git
+├── .dockerignore               # Keeps .env (and other junk) out of the build context too
+│
+├── nginx/
+│   ├── Dockerfile                  # Builds the frontend/reverse-proxy image
+│   ├── default.conf.template        # nginx config template -- see "Deploying
+│   │                                  # Across Environments" section above
+│   └── docker-entrypoint.d/
+│       └── 15-detect-resolver-ip.sh  # Auto-detects RESOLVER_IP from
+│                                       # /etc/resolv.conf if it isn't set
+│                                       # (must stay non-executable -- see
+│                                       # its own header comment for why)
 │
 ├── backend/
-│   ├── main.py                    # FastAPI app: middleware, startup, routers,
-│   │                                 # AND the static-frontend mount (StaticFiles)
+│   ├── main.py                    # FastAPI app: middleware, startup, routers
 │   ├── config.py                   # Pydantic Settings -- all env vars, one place
 │   ├── database.py                  # SQLAlchemy engine/session + init_db()/seed_db()
 │   ├── models.py                     # SQLAlchemy ORM table definitions
 │   ├── security.py                    # Password hashing, password policy, JWT
 │   ├── deps.py                         # get_current_user / role-gate dependencies
 │   ├── logging_config.py                # Structured (JSON) logging setup
-│   ├── jobs.py                            # In-process background thread pool --
-│   │                                         # replaces Celery+Redis for async
-│   │                                         # audit exports + fire-and-forget email
-│   ├── scheduler.py                        # In-process daily overdue-digest timer
-│   │                                          # thread -- replaces Celery Beat
-│   ├── requirements.txt                    # Python dependencies (production image)
-│   ├── requirements-dev.txt                 # + pytest/httpx/ruff, CI-only
-│   ├── pyproject.toml                        # ruff lint config
+│   ├── celery_app.py                      # Celery app: Redis broker/result backend
+│   │                                        # for async exports -- shared by `backend`
+│   │                                        # (producer) and `worker` (consumer)
+│   ├── requirements.txt                  # Python dependencies
+│   ├── Dockerfile                         # Backend container build (also used,
+│   │                                        # unmodified, by the `worker` service --
+│   │                                        # see docker-compose.yml)
 │   │
-│   ├── tests/                     # pytest smoke tests -- run by .github/workflows/ci.yml
-│   │   └── test_smoke.py
-│   │
-│   ├── tasks/                     # Plain functions, run via jobs.py's thread pool
+│   ├── tasks/                     # Celery tasks -- run on the `worker` container
 │   │   ├── export_tasks.py          # generate_audit_export(): builds the CSV/PDF
 │   │   │                              # off the request/response cycle
 │   │   └── notification_tasks.py     # send_email_task() (generic async email --
 │   │                                    # used by extension_service.py too) +
-│   │                                    # send_overdue_notifications() (the daily
-│   │                                    # digest -- see scheduler.py)
+│   │                                    # send_overdue_notifications() +
+│   │                                    # send_due_soon_reminders() (Celery
+│   │                                    # Beat digests -- see celery_app.py)
 │   │
 │   ├── middleware/                # ASGI middleware, one concern per file
 │   │   ├── request_context.py       # Request Correlation ID (X-Request-ID)
 │   │   ├── rate_limit.py             # Per-IP login rate limiting
-│   │   └── security_headers.py       # Standard defensive response headers + CSP
+│   │   └── security_headers.py       # Standard defensive response headers
 │   │
-│   ├── api/                       # Thin FastAPI routers (HTTP layer only),
-│   │   │                            # all mounted under /api in main.py
+│   ├── api/                       # Thin FastAPI routers (HTTP layer only)
 │   │   ├── auth.py, assets.py, users.py, outsiders.py, checkouts.py, audit.py
-│   │   └── system.py                 # GET /system/health (uptime pinger target)
-│   │                                    # + POST /system/notifications/run
-│   │                                    # (manual/external-scheduler trigger)
 │   │
 │   ├── schemas/                   # Pydantic request/response models
 │   │   ├── auth.py, assets.py, users.py, checkouts.py
@@ -411,7 +455,7 @@ snipe-it-lite/
 │   │   ├── asset_service.py           # Asset pool CRUD, checkout, CSV import
 │   │   ├── user_service.py             # User directory, self/bulk exports
 │   │   ├── outsider_service.py          # Ad-hoc directory, exports
-│   │   ├── checkout_service.py           # Returns, overdue-checkout feed
+│   │   ├── checkout_service.py           # Returns, overdue + due-soon feeds
 │   │   ├── extension_service.py           # Due-date extension requests +
 │   │   │                                    # decisions + direct grants
 │   │   ├── notification_service.py         # The one place that calls smtplib --
@@ -436,8 +480,7 @@ snipe-it-lite/
 │   ├── input.css                   # @tailwind base/components/utilities
 │   └── package.json                 # `npm run build` / `npm run watch`
 │
-└── frontend/                     # Served directly by backend/main.py -- no
-    │                                # separate container/service
+└── frontend/
     ├── index.html            # Login page
     ├── admin.html            # Super Admin dashboard
     ├── manager.html          # Manager dashboard
@@ -456,6 +499,7 @@ snipe-it-lite/
             ├── assets.js           # Inventory table, dispatch, exceptions, CSV import
             ├── audit.js             # Audit ledger table + CSV/PDF export
             ├── custody.js            # Custody Ledger modal + returns + direct Extend
+            ├── due-soon.js            # "Due Soon" alert banner (reminder before overdue)
             ├── exports.js             # Properties-assigned CSV/PDF downloads
             ├── extensions.js           # Request/Approve/Deny + direct-extend modals
             ├── myitems.js               # Staff/Customer "what do I have?" view
@@ -475,11 +519,10 @@ understand this, every file's purpose becomes obvious.
 Browser (frontend/js)
    │  fetch('/api/...') — see js/api.js (relative path, no hardcoded host)
    ▼
-main.py's /api routers    <-- SAME FastAPI process that also serves the
-                              static frontend files (see main.py's
-                              `app.include_router(..., prefix="/api")`
-                              calls and its StaticFiles mount) -- no
-                              separate reverse-proxy hop anymore.
+nginx (frontend container)   <-- reverse proxy: strips the "/api" prefix and
+                                  forwards to the backend container. See
+                                  nginx/default.conf.template and the
+                                  "Deploying Across Environments" section.
    │
    ▼
 api/*.py            <-- HTTP layer only: parses the request body, checks
@@ -552,18 +595,18 @@ python3 -c "import secrets; print(secrets.token_hex(32))"
 #    - Pick a real POSTGRES_PASSWORD and update DATABASE_URL in .env to match
 #      (the placeholder password appears in BOTH places -- keep them in sync).
 
-# 2. Build and start everything (Postgres + the one combined app container)
+# 2. Build and start everything (Postgres, Redis, backend, worker, frontend)
 docker compose up --build
 
-# 3. Open the app -- everything (frontend + API) is served from ONE origin,
-#    ONE container, straight from FastAPI (see backend/main.py):
-#    App (login page):  http://localhost:8000
-#    API docs:           http://localhost:8000/docs
+# 3. Open the app -- everything is served from ONE origin now, via the
+#    nginx reverse proxy (see the next section for how/why):
+#    App (login page):  http://localhost:8080
+#    API docs:           http://localhost:8080/docs
 ```
 
-Leave the terminal running to see live logs from both containers. Press
-`Ctrl+C` to stop everything, or run `docker compose up -d --build` to
-start it in the background instead.
+Leave the terminal running to see live logs from all three containers.
+Press `Ctrl+C` to stop everything, or run `docker compose up -d --build`
+to start it in the background instead.
 
 **To stop and remove the containers (keeping your database data):**
 ```bash
@@ -601,127 +644,169 @@ username `superadmin` / password `change-this-super-admin-password`; set
 your own `SUPER_ADMIN_USERNAME`/`SUPER_ADMIN_PASSWORD` before deploying
 anywhere real.
 
-## Deploying on Render's Free Plan
+## Deploying Across Environments (nginx Reverse Proxy)
 
-This app is deliberately sized to deploy **entirely within Render's free
-plan — $0/month, no credit card required for the free resources
-themselves.** That took some real re-shaping (see the note below if
-you're curious why), and it comes with a few honest trade-offs — both
-covered here.
+This app is designed to run, **unmodified**, across three tiers: your local
+Docker Compose setup, a Render staging environment, and a real cloud
+environment (AWS/GCP/Azure/etc.). The piece that makes that possible is the
+`frontend` service — it's no longer a bare static-file server, it's an
+**nginx reverse proxy** built from [`nginx/Dockerfile`](nginx/Dockerfile).
 
-### Why this looks different from a "typical" production deployment
+**The core idea:** the browser never talks to the FastAPI backend directly
+and never needs to know its hostname. `frontend/js/api.js` calls a single
+constant, relative path — `/api` — for every request. nginx, sitting in
+front of both the static site and the backend, quietly forwards
+(“proxies”) anything under `/api/*` to wherever the real backend actually
+lives in that environment, **unchanged** — `backend/main.py` mounts every
+API router under an `/api` prefix itself (e.g. `/api/auth`, `/api/assets`),
+so there's no path-rewriting for nginx to do anymore. See
+[`nginx/default.conf.template`](nginx/default.conf.template) for the
+fully-commented config that does this.
 
-A more conventional version of this app would split into a private
-FastAPI backend, a separate Celery worker + Redis for background jobs,
-and a public nginx frontend/reverse-proxy in front of it all — five
-resources total. Render's (and most platforms') **free** tier doesn't
-support that shape at all:
+```
+Browser  --GET /api/assets-->  nginx (frontend container)  --GET /api/assets-->  FastAPI (backend container)
+Browser  <--------------------------- same response --------------------------------------
+```
 
-- Free instance types are limited to **Web Services, Postgres, and Key
-  Value (Redis-compatible) instances** — private services and background
-  workers always require a **paid** plan. (See
-  [render.com/docs/free](https://render.com/docs/free).)
-- Free web services **can't receive private network traffic** from other
-  services either, so even a free nginx-in-front-of-a-free-backend split
-  wouldn't work.
+Because that config is a **template** (`envsubst`'d by nginx's own
+entrypoint script every time the container starts), the exact same Docker
+image works in all three tiers — only these environment variables change:
 
-So this app now runs as **ONE Docker image** (built from the root
-[`Dockerfile`](Dockerfile)) that serves both the JSON API (`/api/*`) and
-the static frontend from a single FastAPI process — see
-[`backend/main.py`](backend/main.py)'s module docstring for the full
-explanation. The audit-export and overdue-notification background jobs
-that used to run on a separate Celery worker now run as **in-process
-background threads** inside that same process instead — see
-[`backend/jobs.py`](backend/jobs.py) and
-[`backend/scheduler.py`](backend/scheduler.py).
+| Variable | What it controls | Local Docker Compose | Render / Cloud |
+|---|---|---|---|
+| `PORT` | Port nginx listens on inside its container | `80` | Whatever port that platform injects |
+| `BACKEND_HOST` | Hostname nginx proxies `/api/*` to | `backend` (the Compose service name) | Your backend service's real hostname on that platform |
+| `BACKEND_PORT` | Port on that host | `8000` | Whatever port your backend actually listens on there |
+| `RESOLVER_IP` | Internal DNS server nginx uses to re-resolve `BACKEND_HOST` on every request (so a backend redeploy never leaves nginx pointed at a stale IP) | `127.0.0.11` (Docker's built-in DNS) | Auto-detected at boot from `/etc/resolv.conf` if left unset — see [`nginx/docker-entrypoint.d/15-detect-resolver-ip.sh`](nginx/docker-entrypoint.d/15-detect-resolver-ip.sh) |
 
-### Deploy it
+`PORT`, `BACKEND_HOST`, and `BACKEND_PORT` all have sensible defaults baked
+into `nginx/Dockerfile`. `RESOLVER_IP` deliberately does **not** — instead of
+hardcoding a guess that could go stale on some future platform, it's
+auto-detected at container boot (see the table above and
+[`nginx/docker-entrypoint.d/15-detect-resolver-ip.sh`](nginx/docker-entrypoint.d/15-detect-resolver-ip.sh)
+for why). All four are already wired up as `environment:` overrides on the
+`frontend` service in `docker-compose.yml`, sourced from `.env` (see
+`.env.example`) — Compose explicitly pins `RESOLVER_IP=127.0.0.11` there, so
+nothing changes for local dev.
 
-The easiest path is the [`render.yaml`](render.yaml) **Blueprint** at the
-repo root, which provisions both resources (the free Postgres database
-and the free web service) in one shot and wires them together
-automatically:
+### Local Docker Compose
+Nothing to configure — `docker compose up --build` already sets
+`BACKEND_HOST=backend`/`BACKEND_PORT=8000`, matching the `backend` service
+in the same compose file.
 
-- [ ] Push `render.yaml` (already at the repo root) to your Git provider.
+### Render
+
+**This project is configured to run entirely on Render's free plan** — no
+credit card, no paid services. See [`render.yaml`](render.yaml)'s
+top-of-file comment for the full reasoning; the short version is: Render's
+Free instance type only exists for Web Services, Postgres, and Key Value
+(Redis) — Private Services and Background Workers aren't available on the
+Free plan at any price, which ruled out the original private-backend +
+private-worker + public-frontend split. Instead, [`Dockerfile.render`](Dockerfile.render)
+builds ONE image containing the FastAPI backend, the static frontend
+(served directly by FastAPI — see `backend/main.py`'s `SERVE_FRONTEND`
+flag), and an **embedded** Celery worker/beat process (see
+[`render-start.sh`](render-start.sh) and `RUN_EMBEDDED_WORKER`), so the
+whole app fits on a single free Web Service.
+
+- [ ] Push this repo (including `render.yaml` and `Dockerfile.render` at
+      the repo root) to your Git provider.
 - [ ] In the Render Dashboard: **New** → **Blueprint** → connect this repo.
-      Render reads `render.yaml`, shows you the two resources it's about
-      to create (`snipeit-lite-db`, `snipeit-lite`), and provisions them
-      on **Deploy Blueprint**.
-- [ ] That's it — `render.yaml` uses Blueprint's `fromDatabase` reference
-      to fill in `DATABASE_URL` from the Postgres instance automatically.
-      There's no "copy the connection string from the dashboard" step to
-      do by hand.
-- [ ] `JWT_SECRET_KEY` and `SUPER_ADMIN_PASSWORD` are both auto-generated
-      by Render (`generateValue: true`) — you never need to invent or
-      store either one yourself. Find the generated
-      `SUPER_ADMIN_PASSWORD` in the dashboard's **Environment** tab if you
-      need to log in as the hardcoded Super Admin (see
-      [Roles & Permissions Model](#roles--permissions-model)).
-- [ ] `ENABLE_API_DOCS` is already set to `false` in `render.yaml` —
-      `/docs`, `/redoc`, and `/openapi.json` are disabled by default on
-      this Blueprint, not just left at their locally-convenient default.
-      See the [Security Model](#security-model) section if you ever want
-      to turn them back on temporarily.
-- [ ] Verify: load the service's public Render URL, log in, and confirm
-      everything works (open your browser's Network tab — you should see
-      `200`s from `/api/auth/login` etc.).
+      Render reads `render.yaml` and shows you the three resources it's
+      about to create — `snipeit-lite-db` (free Postgres),
+      `snipeit-lite-redis` (free Key Value), and `snipeit-lite-web` (free
+      Web Service) — then provisions them on **Deploy Blueprint**.
+- [ ] That's it — no manual hostname copy-pasting. `JWT_SECRET_KEY` and
+      `SUPER_ADMIN_PASSWORD` are auto-generated (`generateValue: true`);
+      find the generated Super Admin password in the Render dashboard's
+      Environment tab if you need to log in as that account.
+- [ ] Verify: load `snipeit-lite-web`'s public Render URL (expect a ~1
+      minute cold start the first time, or after any 15-minute idle period
+      — see the free-plan limitations below), log in, and confirm `/api/*`
+      calls succeed in your browser's Network tab.
 
-Prefer to click through the dashboard manually instead of using the
-Blueprint? Create one **Web Service**, Free plan, `runtime: docker`,
-`dockerfilePath: ./Dockerfile`, and one **PostgreSQL** database, Free
-plan — then copy the `envVars` list from `render.yaml` into that Web
-Service's Environment tab by hand.
+**Know the free-plan tradeoffs before you rely on this for anything real**
+(all documented in more detail in `render.yaml`'s comments):
+- The web service **spins down after 15 minutes idle** and takes about a
+  minute to spin back up on the next request.
+- **750 free instance-hours/month**, shared across every free web service
+  in your Render *workspace* — fine for just this one service running
+  continuously, but a second always-on free web service in the same
+  workspace could push you over the limit.
+- Only **one** free Postgres and **one** free Key Value instance are
+  allowed per workspace.
+- The free Postgres database **expires 30 days after creation** (14-day
+  grace period to upgrade before Render deletes it) — there's no way
+  around this on the Free plan.
+- The free Key Value (Redis) instance is **in-memory only** — a restart
+  (including every spin-down/spin-up cycle) wipes any queued-but-not-yet-
+  processed export job. Worst case: a queued export is lost and someone
+  re-clicks "export".
+- The embedded Celery worker/beat process lives and dies with the web
+  service's spin-down/redeploy cycle, so scheduled notification digests
+  (see `celery_app.py`'s `beat_schedule`) may fire somewhat irregularly
+  around a spin-down. Fine for personal/demo use; not a guarantee for
+  anything time-sensitive.
+- The embedded-worker approach does **not** scale past one instance — if
+  you ever move off the Free plan and turn on horizontal scaling, every
+  instance would start its own worker/beat and fire every scheduled task
+  once per instance (duplicate emails). See the next section.
 
-### Known free-tier trade-offs (read this before you rely on it)
+<details>
+<summary>Need a paid, multi-service, horizontally-scalable deployment instead? Click to expand.</summary>
 
-- **The service spins down after 15 minutes of no inbound traffic**, and
-  takes roughly 30–60 seconds to spin back up on the next request. Fine
-  for a demo, personal project, or internal tool with light traffic; not
-  what you want for an always-on production tool — upgrade this one
-  service off the Free instance type if that matters to you (everything
-  else about this Blueprint stays exactly the same).
-- **The free Postgres instance expires after 30 days** and isn't
-  automatically backed up or renewed — Render emails you before it
-  expires. Upgrade it to a paid plan before then if you need this data to
-  persist long-term.
-- **The daily overdue-checkout email digest only fires while the service
-  is awake** (see [`backend/scheduler.py`](backend/scheduler.py)'s
-  docstring) — the spin-down above pauses it along with everything else.
-  Two ways to make it reliable despite that, in increasing order of
-  effort:
-  1. Point a free external uptime pinger (e.g.
-     [UptimeRobot](https://uptimerobot.com),
-     [cron-job.org](https://cron-job.org)) at
-     `GET https://<your-app>.onrender.com/api/system/health` every few
-     minutes — keeps the service (and the scheduler thread inside it)
-     from ever spinning down.
-  2. Point an external scheduler directly at
-     `POST https://<your-app>.onrender.com/api/system/notifications/run`
-     (with an `X-Task-Token` header matching your `SYSTEM_TASK_TOKEN`) —
-     a free GitHub Actions **scheduled workflow** (`on: schedule:`) works
-     well for this and costs nothing on a public repo. See
-     [`backend/api/system.py`](backend/api/system.py) and
-     `SYSTEM_TASK_TOKEN` in [Environment Variables
-     Reference](#environment-variables-reference).
-- **Only ever runs as ONE instance.** Free instances can't horizontally
-  scale, which is actually why the in-process job system in
-  [`backend/jobs.py`](backend/jobs.py) is safe to use here at all — see
-  that file's docstring for what would need to change if you later
-  upgrade to a paid plan *and* turn on multiple instances.
+Once you're off the Free plan, you can split this back into the original
+three-service shape (a private backend, a private Celery worker, and a
+public nginx frontend) for proper horizontal scaling and no shared-process
+tradeoffs:
 
-### Other platforms (Cloud/AWS/GCP/Azure/self-hosted)
+- [ ] Create a **Web Service** (`plan: starter` or higher) built from
+      `nginx/Dockerfile` (build context = repo root) for the frontend/
+      proxy — the only piece that needs a public URL.
+- [ ] Create a **Private Service** (`plan: starter` or higher) built from
+      `backend/Dockerfile` for the FastAPI backend, with
+      `SERVE_FRONTEND=false` (the default) and `ENVIRONMENT=production`.
+      Bind to `0.0.0.0` on Render's injected `$PORT`.
+- [ ] Create a **Background Worker** (`plan: starter` or higher), same
+      image/build context as the backend, with `dockerCommand: celery -A
+      celery_app worker -B --loglevel=info --concurrency=2` and
+      `RUN_EMBEDDED_WORKER=false` (it's its own dedicated process now, not
+      embedded — see `render-start.sh`'s caveats for why this matters once
+      you scale the web service to more than one instance).
+- [ ] Create a paid **Key Value** and **Postgres** instance (Free instances
+      don't support persistence/backups/expiration-free storage — see
+      `render.yaml`'s comments).
+- [ ] Wire `DATABASE_URL`/`REDIS_URL`/`BACKEND_HOST`/`BACKEND_PORT` together
+      via `fromDatabase`/`fromService` the same way the free-tier
+      `render.yaml` does (or via the dashboard's **Connect → Internal**
+      tab if you're not using a Blueprint) — see the "Deploying Across
+      Environments" table above for what each variable controls.
+- [ ] Confirm every service is in the **same Render region** — private
+      networking only works within one region.
 
-Nothing about this app is Render-specific — it's just one Docker image
-(the root `Dockerfile`) plus a Postgres database. Any platform that can
-run a Docker container and give it a `DATABASE_URL` works the same way:
-build the root `Dockerfile`, set the environment variables from
-`.env.example`, point `DATABASE_URL` at your Postgres instance, and make
-sure the container's `$PORT` env var (or your platform's equivalent) is
-honored — the Dockerfile's `CMD` already reads `$PORT` at startup. If
-your platform *does* give you real background workers/cron jobs for
-free/cheap, you could reintroduce a separate worker for the notification
-digest instead of relying on `backend/scheduler.py` — that file's
-docstring covers the trade-off.
+</details>
+
+
+### Cloud (AWS/GCP/Azure/etc.)
+Same pattern: deploy the `nginx/Dockerfile` image as your public-facing
+service, deploy `backend/Dockerfile` as an internal-only service (e.g.
+behind a private load balancer or in the same VPC/private subnet with no
+public IP), and set `BACKEND_HOST`/`BACKEND_PORT` to match that
+environment's actual internal DNS naming (e.g. an ECS Service Connect name,
+a Kubernetes Service DNS name like `backend.default.svc.cluster.local`, or
+an internal ALB/NLB hostname). Leave `RESOLVER_IP` unset unless you've
+confirmed a specific value your platform needs — it's auto-detected from
+`/etc/resolv.conf` at boot otherwise (see
+[`nginx/docker-entrypoint.d/15-detect-resolver-ip.sh`](nginx/docker-entrypoint.d/15-detect-resolver-ip.sh)).
+
+### Why the backend is no longer exposed directly
+`docker-compose.yml`'s `backend` service no longer publishes port `8000` to
+the host. nginx is now the **only** public entry point; it's the sole thing
+that reaches the backend, over each environment's private/internal
+network. This shrinks the app's public attack surface to one hardened,
+well-understood front door, and is exactly the shape you want in Render/
+cloud too — never give your database-talking API container a public IP if
+a reverse proxy can front it instead.
 
 ## Running Without Docker (Local Dev)
 
@@ -731,7 +816,7 @@ need a PostgreSQL server running somewhere reachable (Docker is still the
 easiest way to get *just* Postgres — see the snippet below).
 
 ```bash
-# 1. Start ONLY a Postgres container (skip the "app" container)
+# 1. Start ONLY a Postgres container (skip backend/frontend containers)
 docker compose up db
 
 # 2. In a separate terminal, set up a Python virtual environment
@@ -746,18 +831,33 @@ pip install -r requirements.txt
 export DATABASE_URL="postgresql://admin:change-this-to-a-long-random-password@localhost:5432/asset_db"
 export JWT_SECRET_KEY="any-random-string-for-local-dev"
 
-# 4. Run the backend with live-reload -- this ALSO serves the frontend
-#    (see backend/main.py's StaticFiles mount), so there's nothing extra
-#    to run for the frontend. Just open the URL below.
+# 4. Run the backend with live-reload
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
-# now open http://localhost:8000
 ```
 
-That's it — no separate frontend server, no reverse proxy to configure.
-`frontend/js/api.js`'s `API_URL` is a relative path (`/api`), which
-resolves correctly here because the SAME `uvicorn` process is serving
-both the API and the static frontend files (see [Tech
-Stack](#tech-stack) above).
+For the frontend, since there's no build step, you can serve the
+`frontend/` folder with literally any static file server:
+
+```bash
+cd frontend
+python3 -m http.server 8080
+# now open http://localhost:8080
+```
+
+**One catch:** `frontend/js/api.js`'s `API_URL` is deliberately a *relative*
+path (`/api`) — see [Deploying Across Environments](#deploying-across-environments-nginx-reverse-proxy)
+above for why. That only resolves correctly when the frontend is served
+*behind the nginx reverse proxy* (which is what `docker compose up`
+gives you and does the `/api/*` → backend forwarding). A bare
+`python3 -m http.server` has no such proxy, so `/api/*` calls will 404
+against its own static file server. For this fully-Docker-free mode,
+either:
+- run `docker compose up frontend db` alongside the steps above so nginx
+  still fronts things (simplest — just skip starting `backend` via
+  Compose and run it with `uvicorn` instead, as shown), or
+- temporarily hardcode `API_URL` back to `http://localhost:8000` in
+  `frontend/js/api.js` while working this way, and revert it before
+  committing.
 
 ## Environment Variables Reference
 
@@ -767,21 +867,22 @@ see `.gitignore`) and are read by `backend/config.py` into a single typed
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `ENVIRONMENT` | `development` | `production` enables the startup JWT-secret strength check and adds an HSTS response header. |
-| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | see `.env.example` | Postgres credentials, shared by the `db` and `app` services. |
+| `ENVIRONMENT` | `development` | `production` enables the startup JWT-secret strength check. |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | see `.env.example` | Postgres credentials, shared by the `db` and `backend` services. |
 | `DATABASE_URL` | built from the above | Full SQLAlchemy connection string. |
-| `EXPORT_JOB_TTL_SECONDS` | `3600` | How long a finished export job's file bytes stay cached in memory (see [`backend/jobs.py`](backend/jobs.py)) before expiring. |
+| `REDIS_URL` | `redis://redis:6379/0` | Celery broker **and** result backend, shared by `backend` (producer) and `worker` (consumer) — used for async audit-ledger exports and every email notification (see [Due-Date Extensions & Notifications](#due-date-extensions--notifications)). |
+| `EXPORT_RESULT_TTL_SECONDS` | `3600` | How long a finished export job's file bytes stay cached in Redis before expiring. |
 | `JWT_SECRET_KEY` | *(required, no insecure default allowed)* | Signs/verifies session tokens. **Must** be a long random string in production. |
 | `JWT_ALGORITHM` | `HS256` | JWT signing algorithm. |
 | `JWT_EXPIRY_HOURS` | `12` | How long a login session stays valid. |
-| `CORS_ORIGINS` | *(empty)* | Comma-separated list of origins allowed to call the API cross-origin. Almost never needed — the frontend and API are served from the same origin now (see [Tech Stack](#tech-stack)). |
+| `CORS_ORIGINS` | localhost variants | Comma-separated list of origins allowed to call the API. |
 | `AUTO_INIT_DB` | `true` | If true, runs `create_all()` on startup (creates missing tables). Set `false` in production and use Alembic instead. |
 | `AUTO_SEED_DEMO_DATA` | `true` | If true, seeds demo accounts/data on an empty DB at startup. Set `false` in production. |
 | `LOG_LEVEL` | `INFO` | `DEBUG` \| `INFO` \| `WARNING` \| `ERROR` \| `CRITICAL`. |
 | `LOG_FORMAT` | `json` | `json` (production/log aggregators) or `text` (readable local dev). |
-| `LOGIN_RATE_LIMIT_MAX` | `5` | Max `/api/auth/login` attempts per IP per window before HTTP 429. |
+| `LOGIN_RATE_LIMIT_MAX` | `5` | Max `/auth/login` attempts per IP per window before HTTP 429. |
 | `LOGIN_RATE_LIMIT_WINDOW_SECONDS` | `60` | The window (in seconds) the above limit applies over. |
-| `ENABLE_API_DOCS` | `true` | Whether `/docs`, `/redoc`, `/openapi.json` exist at all. **Set `false` in Render/cloud** — see the Security Model section below. |
+| `ENABLE_API_DOCS` | `true` | Whether `/docs`, `/redoc`, `/openapi.json` exist at all. **Set `false` in Render/cloud** — see the Security Model section below. Also read by the frontend/nginx service (see the table below) as a second, independent layer. |
 | `SUPER_ADMIN_USERNAME` | `superadmin` | Login identifier for the hardcoded Super Admin (root) account — see [Roles & Permissions Model](#roles--permissions-model). |
 | `SUPER_ADMIN_NAME` | `Super Admin` | Display name for that account (shown in the navbar/profile, same as any other user's `name`). |
 | `SUPER_ADMIN_PASSWORD` | *(placeholder, must be changed in production)* | Password for the hardcoded Super Admin. Leaving it empty fully disables that login path. **Must** be a real, unique value in production — the backend refuses to start otherwise (same idea as `JWT_SECRET_KEY`). |
@@ -791,11 +892,23 @@ see `.gitignore`) and are read by `backend/config.py` into a single typed
 | `SMTP_USERNAME` / `SMTP_PASSWORD` | *(empty)* | SMTP auth credentials, if your provider requires them. |
 | `SMTP_USE_TLS` | `true` | STARTTLS vs. a plain/unencrypted connection (only appropriate for a local/private relay). |
 | `SMTP_FROM_EMAIL` | *(empty)* | The `From:` address. Required if `NOTIFICATIONS_ENABLED=true` — most providers reject sends where this doesn't match a verified domain/sender. |
-| `ADMIN_NOTIFICATION_EMAILS` | *(empty)* | Comma-separated extra recipients who get every overdue digest and every new-extension-request alert, in addition to Admins/Managers/the Super Admin. |
-| `OVERDUE_NOTIFICATION_INTERVAL_HOURS` | `24` | How often the in-process scheduler (see [`backend/scheduler.py`](backend/scheduler.py)) checks for overdue checkouts and sends the digest. Lower it (e.g. to a few minutes) while testing locally if you want to see it fire sooner. On Render's free plan this pauses whenever the instance spins down — see [Deploying on Render's Free Plan](#deploying-on-renders-free-plan). |
-| `SYSTEM_TASK_TOKEN` | *(empty, disabled)* | Optional shared secret that lets an external scheduler trigger `POST /api/system/notifications/run` without a real login session — see [`backend/api/system.py`](backend/api/system.py) and [Deploying on Render's Free Plan](#deploying-on-renders-free-plan). |
+| `ADMIN_NOTIFICATION_EMAILS` | *(empty)* | Comma-separated extra recipients who get every overdue digest, every due-soon reminder digest, and every new-extension-request alert, in addition to Admins/Managers/the Super Admin. |
+| `OVERDUE_NOTIFICATION_INTERVAL_HOURS` | `24` | How often the Celery Beat job checks for overdue checkouts and sends the digest. Lower it (e.g. to a few minutes) while testing locally if you want to see it fire sooner. |
+| `DUE_SOON_REMINDER_DAYS` | `2` | "A reminder before something goes overdue" — how many days ahead of its `due_date` an active checkout counts as "due soon". Drives the "Due Soon" dashboard banner, the "Due Soon" badge on My Items, AND the due-soon reminder email below, all from this one setting. |
+| `DUE_SOON_NOTIFICATION_INTERVAL_HOURS` | `24` | How often the Celery Beat job checks for checkouts about to go overdue and sends the due-soon reminder digest. Same "lower it for local testing" idea as `OVERDUE_NOTIFICATION_INTERVAL_HOURS` above. |
 | `ACCOUNT_LOCKOUT_MAX_ATTEMPTS` | `5` | Wrong-password attempts against **the same account** before it's locked, regardless of which IP they came from. |
 | `ACCOUNT_LOCKOUT_DURATION_MINUTES` | `15` | How long that per-account lock lasts once triggered. |
+
+The four below are read by the **`frontend`** service (the nginx reverse
+proxy), not the backend — see [Deploying Across Environments](#deploying-across-environments-nginx-reverse-proxy).
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `FRONTEND_PORT` | `80` | Port nginx listens on inside its own container. |
+| `BACKEND_HOST` | `backend` | Hostname nginx proxies `/api/*` requests to. |
+| `BACKEND_PORT` | `8000` | Port on that host. |
+| `RESOLVER_IP` | `127.0.0.11` | Internal DNS server nginx uses to re-resolve `BACKEND_HOST` on every request. |
+| `ENABLE_API_DOCS` | `true` | nginx's own copy of the backend's identically-named flag (see the table above) — blocks `/docs`/`/redoc`/`/openapi.json` at the proxy itself, before the request ever reaches the backend, if either copy is `false`. **Set `false` in Render/cloud.** |
 
 ## Roles & Permissions Model
 
@@ -992,6 +1105,7 @@ once the backend is running. This table is the high-level map:
 | `GET /outsiders/export` | Super Admin / Admin / Manager | Bulk download of every active checkout across every ad-hoc individual (CSV/PDF). |
 | `POST /checkouts/{id}/return` | Super Admin / Admin / Manager | Process a (partial or full) return. |
 | `GET /checkouts/overdue` | Super Admin / Admin / Manager | Dashboard alert feed of overdue checkouts, system-wide for both roles (no department-scoping). |
+| `GET /checkouts/due-soon` | Super Admin / Admin / Manager | Dashboard alert feed of checkouts due within `DUE_SOON_REMINDER_DAYS` but not yet overdue — "a reminder before something goes overdue," system-wide for both roles. |
 | `POST /checkouts/{id}/extension-requests` | logged in | Request more time on your own active checkout (or, if Manager/Admin/Super Admin, on behalf of an Ad-Hoc Individual). Creates a **pending** request — does not change the due date by itself. |
 | `GET /checkouts/extension-requests` | Super Admin / Admin / Manager | List extension requests — `?status=pending\|approved\|denied&limit=&offset=` (Managers see every request, same as Admin/Super Admin). |
 | `POST /checkouts/extension-requests/{id}/decision` | Super Admin / Admin / Manager | Approve or deny a pending request — `{approve, override_due_date?, note?}`. Approving is what actually updates the checkout's due date. |
@@ -1000,7 +1114,7 @@ once the backend is running. This table is the high-level map:
 | `POST /audit-logs/export` | Super Admin / Admin / Manager | Enqueue a background export job — `?format=csv` (default) or `?format=pdf`, plus optional `?start_date=&end_date=`. Returns `{task_id, status}` immediately; does not return the file. |
 | `GET /audit-logs/export/{task_id}/status` | Super Admin / Admin / Manager | Poll a job's progress — `{state, ready, error?}`. |
 | `GET /audit-logs/export/{task_id}/download` | Super Admin / Admin / Manager | Download the finished file once `status` reports `SUCCESS` (409 if not ready yet, 404 if the task_id is unknown/expired). |
-| `GET /health` | anyone | Trivial liveness check for Docker/orchestrators. |
+| `GET /healthz` | anyone | Trivial liveness check for Docker/orchestrators. |
 
 **Every export endpoint** accepts `?format=csv` or `?format=pdf` and
 responds with a real file download (`Content-Disposition: attachment`) —
@@ -1021,7 +1135,7 @@ the actual logic lives. Use this section as a map when you need to find
   their `AUTO_*` settings flags are enabled.
 - `custom_openapi()` — customizes the generated OpenAPI schema (used by
   `/docs`).
-- `health_check()` — `GET /health`.
+- `health_check()` — `GET /healthz`.
 - Also where the middleware stack (`RateLimitMiddleware`,
   `RequestContextMiddleware`, `CORSMiddleware`, `SecurityHeadersMiddleware`)
   and all API routers are registered — if you add a new `api/*.py` file,
@@ -1054,6 +1168,15 @@ the actual logic lives. Use this section as a map when you need to find
 #### `backend/models.py`
 - `utc_now()` — the one place "the current time" is generated app-wide,
   always timezone-aware UTC (never plain `datetime.now()`).
+- `is_due_soon(due_date)` — "a reminder before something goes overdue":
+  the one shared definition of "coming up soon" (still in the future, but
+  no further out than `settings.DUE_SOON_REMINDER_DAYS`), reused by
+  `services/user_service.py` and `services/outsider_service.py` so a
+  User's My Items badge, a User's Custody Ledger highlight, and an Ad-Hoc
+  Outsider's Custody Ledger highlight can never disagree about what
+  counts as "due soon" (the system-wide "Due Soon" dashboard banner
+  applies the identical rule as its own bulk SQL filter — see
+  `services/checkout_service.py`'s `list_due_soon_checkouts()`).
 - `class AssetType` — an inventory pool (name, total_quantity,
   custom_fields).
 - `class AssetException` — a single serial number pulled out of
@@ -1135,7 +1258,7 @@ the actual logic lives. Use this section as a map when you need to find
 - **`api/outsiders.py`** — `get_outsiders`, `export_all_outsiders`,
   `get_outsider_assigned_items`, `export_outsider_assigned_items`.
 - **`api/checkouts.py`** — `return_checkout`, `get_overdue_checkouts`,
-  `request_extension`, `get_extension_requests`,
+  `get_due_soon_checkouts`, `request_extension`, `get_extension_requests`,
   `decide_extension_request`, `extend_checkout`.
 - **`api/audit.py`** — `get_audit_logs`, `export_audit_logs`.
 
@@ -1159,7 +1282,10 @@ the actual logic lives. Use this section as a map when you need to find
   password only lives in `SUPER_ADMIN_PASSWORD`).
 - **`services/checkout_service.py`** — `return_checkout` processes a
   partial/full return (and records who the equipment came from in the
-  audit entry); `list_overdue_checkouts` backs the overdue alert feed.
+  audit entry); `list_overdue_checkouts` backs the overdue alert feed;
+  `list_due_soon_checkouts` (the proactive counterpart — "a reminder
+  before something goes overdue") backs the "Due Soon" alert feed,
+  mutually exclusive with the overdue one on either side of `now`.
 - **`services/extension_service.py`** — `create_extension_request`
   (self-service, or Manager/Admin logging one on behalf of an Outsider);
   `list_extension_requests` (system-wide for both Managers and Admins — no
@@ -1183,19 +1309,25 @@ the actual logic lives. Use this section as a map when you need to find
   ever being assigned to a database-backed account; `create_user`,
   `list_users` (now accepts a `search` param, narrowing across name/
   email/role/department/department_role), `get_my_assigned_items`,
-  `get_user_assigned_items`, `delete_user` (which also rejects the Super
-  Admin's sentinel id); the export trio `export_my_assigned_items`,
-  `export_user_assigned_items`, `export_all_users_items`;
-  `reset_user_password` (Super Admin/Admin sets a locked-out user's new
-  password directly — no current password needed — and clears lockout
-  state, same as a self-service change); `list_deleted_users` (mirrors
-  `list_users` but scoped to `is_deleted == True`, for the Restore panel);
-  `restore_user` (reverses `delete_user`, re-enabling login — no email/
-  username collision handling needed since `create_user`/
-  `_derive_username` already check across soft-deleted rows too).
+  `get_user_assigned_items` (both now stamp each item with a `due_soon`
+  flag via `models.is_due_soon()` — "a reminder before something goes
+  overdue," surfaced on My Items and the Custody Ledger), `delete_user`
+  (which also rejects the Super Admin's sentinel id); the export trio
+  `export_my_assigned_items`, `export_user_assigned_items`,
+  `export_all_users_items`; `reset_user_password` (Super Admin/Admin sets
+  a locked-out user's new password directly — no current password needed
+  — and clears lockout state, same as a self-service change);
+  `list_deleted_users` (mirrors `list_users` but scoped to
+  `is_deleted == True`, for the Restore panel); `restore_user` (reverses
+  `delete_user`, re-enabling login — no email/username collision handling
+  needed since `create_user`/`_derive_username` already check across
+  soft-deleted rows too).
 - **`services/outsider_service.py`** — `list_outsiders` (now accepts a
   `search` param, narrowing across name/contact_details/company),
-  `get_outsider_assigned_items`; the export pair
+  `get_outsider_assigned_items` (also stamps each item with a `due_soon`
+  flag, same `models.is_due_soon()` helper as user_service.py's item
+  builders — an Ad-Hoc Outsider's Custody Ledger gets the identical
+  "due soon" highlight a User's does); the export pair
   `export_outsider_assigned_items`, `export_all_outsiders_items`.
 - **`services/audit_service.py`** — `get_audit_logs` (TRUE server-side
   paginated listing); `_filtered_audit_logs_query` (shared filter logic);
@@ -1212,43 +1344,47 @@ the actual logic lives. Use this section as a map when you need to find
   single shared formula for `Available = Total − Outbound − Isolated`,
   called after every mutation that could change it.
 
-### Backend — In-Process Background Jobs (`backend/jobs.py`, `backend/scheduler.py`, `backend/tasks/`)
+### Backend — Async Workers (Celery) (`backend/celery_app.py`, `backend/tasks/`)
 
-Everything below runs as a background **thread**, inside the SAME process
-serving HTTP requests — no separate worker container, no broker. See
-`jobs.py`'s module docstring for the full reasoning (short version: a
-separate Celery+Redis worker doesn't fit Render's, or most platforms',
-free tier — see [Deploying on Render's Free Plan](#deploying-on-renders-free-plan)).
+Two different processes share one Celery app — see `celery_app.py`'s
+module docstring for the full producer/consumer split: the `backend`
+container only ever enqueues jobs (`.delay(...)`) and returns
+immediately; the `worker` container is the only thing that actually runs
+them, completely out-of-band from any HTTP request.
 
-- **`jobs.py`** — `submit(fn, ...)` runs a function on a shared
-  `ThreadPoolExecutor` and returns a `job_id` immediately; `get_status`/
-  `get_result` poll it, mirroring just enough of Celery's `AsyncResult`
-  API that `api/audit.py` barely had to change. `run_async(fn, ...)` is
-  the fire-and-forget variant (no `job_id`, used for emails). All state
-  lives in a plain in-memory dict — see the module docstring for what
-  that does and doesn't cost you.
-- **`scheduler.py`** — a single daemon thread, started from
-  `main.py`'s startup event, that calls `send_overdue_notifications()`
-  every `OVERDUE_NOTIFICATION_INTERVAL_HOURS`. Replaces Celery Beat.
+- **`celery_app.py`** — the shared `celery_app` instance (Redis as both
+  broker and result backend), its serialization/result-TTL config, and
+  `beat_schedule` — wires `tasks.send_overdue_notifications` to run every
+  `OVERDUE_NOTIFICATION_INTERVAL_HOURS` AND `tasks.send_due_soon_reminders`
+  to run every `DUE_SOON_NOTIFICATION_INTERVAL_HOURS`, as two independent
+  schedule entries. `-B` embeds Celery Beat directly inside the `worker`
+  container's own process (see `docker-compose.yml`'s `worker` service)
+  rather than running it as a separate container — correct for one worker
+  replica, **not** something to scale to multiple replicas without
+  splitting Beat back out (see the in-code comment).
 - **`tasks/export_tasks.py`** — `generate_audit_export(...)`, builds one
-  audit-ledger CSV/PDF export file and returns it as a small dict
-  (base64-encoded file bytes) that `jobs.py` holds in memory until
-  `GET /api/audit-logs/export/{task_id}/download` reads it back out.
+  audit-ledger CSV/PDF export file and returns it as a small JSON-safe
+  dict (base64-encoded file bytes) that Celery stashes in Redis until
+  `GET /audit-logs/export/{task_id}/download` reads it back out.
 - **`tasks/notification_tasks.py`** — `send_email_task(to, subject,
   body)`, a thin, generic wrapper around
-  `notification_service.send_email()` that runs on the background thread
-  pool instead of inline in an API request — this is what
-  `services/extension_service.py`'s `_notify()` submits via
-  `jobs.run_async()`, and the reason the "Request Extension"/"Extension
-  Requests" UI no longer hangs waiting on a slow SMTP server (see
-  [Due-Date Extensions &
+  `notification_service.send_email()` that runs on the `worker` instead
+  of inline in an API request — this is what
+  `services/extension_service.py`'s `_notify()` enqueues, and the reason
+  the "Request Extension"/"Extension Requests" UI no longer hangs waiting
+  on a slow SMTP server (see [Due-Date Extensions &
   Notifications](#due-date-extensions--notifications)).
-  `send_overdue_notifications()` is what `scheduler.py` calls on a timer
-  (and what `POST /api/system/notifications/run` — see `api/system.py` —
-  triggers manually): reminds each overdue checkout's own holder, plus
-  one combined system-wide digest for every Manager and Admin/Super
-  Admin + `ADMIN_NOTIFICATION_EMAILS` (Managers have no
-  department-scoping, so they get the exact same full list Admins do).
+  `send_overdue_notifications()` is the scheduled Celery Beat job:
+  reminds each overdue checkout's own holder, plus one combined
+  system-wide digest for every Manager and Admin/Super Admin +
+  `ADMIN_NOTIFICATION_EMAILS` (Managers have no department-scoping, so
+  they get the exact same full list Admins do).
+  `send_due_soon_reminders()` — "a reminder before something goes
+  overdue" — is its proactive counterpart: the identical shape of
+  individual-holder-reminder + Manager/Admin digest, just for checkouts
+  due within `DUE_SOON_REMINDER_DAYS` instead of ones already overdue
+  (`_due_soon_query()`/`_format_line()` are shared helpers used by both
+  jobs).
 
 ### Backend — Schemas (`backend/schemas/`)
 
@@ -1319,10 +1455,17 @@ Pure Pydantic request/response models, no logic:
   `js/ui.js`'s `renderServerPaginationBar()` with `assets.js`/`users.js`/
   `outsiders.js` below), `exportAuditLogs(format)` (CSV or PDF).
 - **`custody.js`** — `getCurrentCustodyEntity()` (lets other modules know
-  which user/outsider's ledger is open), `openCustodyModal`,
-  `processReturn`, selection/bulk-return helpers. Each item row's "Extend"
-  button is wired to `extensions.js` (below) via `main.js`'s
+  which user/outsider's ledger is open), `openCustodyModal` (highlights
+  any row where the backend's `due_soon` flag is set — amber text + a
+  "· Due Soon" note next to the due date), `processReturn`,
+  selection/bulk-return helpers. Each item row's "Extend" button is wired
+  to `extensions.js` (below) via `main.js`'s
   `data-action="open-direct-extend"`.
+- **`due-soon.js`** — `loadDueSoonAlerts`. "A reminder before something
+  goes overdue" — the proactive counterpart to `overdue.js` below: same
+  shape, same data flow (`GET /checkouts/due-soon` instead of
+  `/checkouts/overdue`), just an amber banner instead of a red one since
+  nothing has actually gone wrong yet.
 - **`exports.js`** — `exportMyItems`, `exportCustodyItems`,
   `exportAllUsers`, `exportAllOutsiders` — all built on one shared
   `downloadExport()` helper that reads the real filename off the
@@ -1336,8 +1479,12 @@ Pure Pydantic request/response models, no logic:
   (Admin/Manager only, no request/approval step). See [Due-Date
   Extensions & Notifications](#due-date-extensions--notifications).
 - **`myitems.js`** — `loadMyItems`/`renderMyItemsTable`, the
-  Staff/Customer self-service view. Each row's "Request Extension" button
-  opens `extensions.js`'s self-service modal.
+  Staff/Customer self-service view. A row due within
+  `settings.DUE_SOON_REMINDER_DAYS` shows an amber "Due Soon" badge
+  instead of the usual blue "On Loan" one (reads the backend's `due_soon`
+  flag — see `services/user_service.py`'s `get_my_assigned_items()`).
+  Each row's "Request Extension" button opens `extensions.js`'s
+  self-service modal.
 - **`outsiders.js`** — `loadOutsiders` (TRUE server-side search +
   pagination — `outsidersState` + `setOutsidersSearch`/
   `setOutsidersPerPage`/`changeOutsidersPage`).
@@ -1470,17 +1617,17 @@ navbar/modal/tab structure. To add a new tab:
 
 ## Testing Your Changes
 
-A small pytest smoke suite lives in `backend/tests/` and runs
-automatically in CI (`.github/workflows/ci.yml`) against a real Postgres
-service container — see [Continuous Integration](#continuous-integration)
-below. It's intentionally not a full test suite for every business rule;
-here's how to verify a change works more thoroughly in the meantime.
+There's no bundled automated test suite in this project yet (see
+[Suggested Future Features](#suggested-future-features) for adding one) —
+here's how to verify a change works in the meantime.
 
 ### Fastest option: Swagger UI (`/docs`)
 
 With the full stack running via `docker compose up`, open
-`http://localhost:8000/docs` — the SAME origin serving the app now, no
-separate proxy or port (see [Tech Stack](#tech-stack)). Every
+`http://localhost:8080/docs` (proxied through nginx — see
+[Deploying Across Environments](#deploying-across-environments-nginx-reverse-proxy)).
+If you're running the backend standalone with `uvicorn` (no nginx in
+front), it's at `http://localhost:8000/docs` instead. Every
 endpoint is listed with a "Try it out" button, a place to paste your JWT
 (click the padlock icon, or the green "Authorize" button at the top), and
 a live response. This is the quickest way to confirm a backend change
@@ -1507,13 +1654,13 @@ from fastapi.testclient import TestClient
 from main import app
 client = TestClient(app)
 
-# Log in as the demo Admin account (see "Demo Login Credentials" above)
-r = client.post("/api/auth/login", json={"identifier": "r.adeyemi@corp.io", "password": "Admin123!"})
+# Log in as the demo Super Admin
+r = client.post("/auth/login", json={"identifier": "r.adeyemi@corp.io", "password": "SuperAdmin123!"})
 token = r.json()["token"]
 headers = {"Authorization": f"Bearer {token}"}
 
 # Try whatever you just built, e.g.:
-r = client.get("/api/assets", headers=headers)
+r = client.get("/assets", headers=headers)
 print(r.status_code, r.json())
 EOF
 
@@ -1522,9 +1669,7 @@ rm -f /tmp/test.db   # clean up when you're done
 
 This is exactly the pattern used to verify the exports, audit trail, and
 account-lockout features described in this README while they were built —
-copy/adapt the snippet above for whatever endpoint you're changing. See
-[`backend/tests/test_smoke.py`](backend/tests/test_smoke.py) for a real,
-runnable version of this same pattern.
+copy/adapt the snippet above for whatever endpoint you're changing.
 
 ### Frontend
 
@@ -1533,30 +1678,6 @@ saving a `.js`/`.html` file. Open your browser's DevTools Console while
 testing — `js/api.js` throws a real `Error` (with the backend's message)
 on any failed request, which will show up there if something goes wrong
 silently in the UI.
-
-## Continuous Integration
-
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push
-and pull request against `main`, with four jobs:
-
-- **lint** — `ruff check .` against the backend.
-- **test** — spins up a real, throwaway Postgres service container, runs
-  `alembic upgrade head` against it, then runs the pytest smoke suite in
-  [`backend/tests/`](backend/tests/) with the full app wired up against
-  that database.
-- **docker** — builds the production image from the root `Dockerfile`
-  (the same one Render builds from `render.yaml`), to catch a broken
-  `Dockerfile`/`COPY` path/missing dependency before a real deploy ever
-  attempts it.
-- **validate-deploy-configs** — lints `render.yaml` and
-  `docker-compose.yml` as YAML, and runs `docker compose config` to
-  confirm every `${VARIABLE}` reference in `docker-compose.yml` actually
-  resolves against `.env.example`.
-
-None of these jobs deploy anything — this workflow's only job is to catch
-problems before they ever reach a real deploy. Wire up Render's own
-GitHub integration (auto-deploy on push) or a separate deploy step if you
-want pushes to `main` to also trigger a live deployment.
 
 ## Security Model
 
@@ -1590,9 +1711,9 @@ when adding a new feature.
 - ✅ Email notifications never block a request or task on a slow/
   unreachable mail server — every send is fail-soft (logs a warning,
   returns `False`, never raises — `services/notification_service.py`) AND
-  runs on a background thread rather than inline in the request/response
-  cycle (`tasks.send_email_task`, submitted via `jobs.run_async()` — see
-  [Due-Date Extensions & Notifications](#due-date-extensions--notifications)).
+  runs on the background `worker` container rather than inline in the
+  request/response cycle (`tasks.send_email_task` — see [Due-Date
+  Extensions & Notifications](#due-date-extensions--notifications)).
 - ✅ Row-level locking (`with_for_update()`) on the checkout path prevents
   a race condition from overselling a pool under concurrent requests.
 - ✅ Pagination limits (`limit`/`offset` + hard `MAX_LIMIT` caps) on every
@@ -1611,22 +1732,23 @@ when adding a new feature.
   `X-Frame-Options`, `Referrer-Policy`, `Permissions-Policy`).
 - ✅ A real **`Content-Security-Policy`**, tuned against the frontend's
   actual CDN/script/font usage rather than a generic copy-pasted policy —
-  see `backend/middleware/security_headers.py`'s `Content-Security-Policy`
-  header and its accompanying comment for the reasoning behind each
-  directive.
+  see `nginx/default.conf.template`'s `Content-Security-Policy` header and
+  its accompanying comment for the reasoning behind each directive.
 - ✅ Exactly one **Super Admin**, hardcoded via environment variables
   rather than a database row — it can never be created, edited, or deleted
   through the app, and never appears in the User Directory or any other
   listing. See [Roles & Permissions Model](#roles--permissions-model).
-- ✅ App container runs as an unprivileged user, not root.
+- ✅ Backend container runs as an unprivileged user, not root.
 - ✅ Structured, correlated logging for every login attempt and password
   change (never the password itself).
 - ✅ Interactive API docs (`/docs`, `/redoc`, `/openapi.json`) can be fully
-  disabled via `ENABLE_API_DOCS=false` — FastAPI never generates/serves
-  the schema at all when disabled, not just a hidden UI. Defaults to
-  `true` for local-dev convenience; **set `false`** in Render/cloud
-  (`render.yaml` already does this). See `config.py`'s `ENABLE_API_DOCS`
-  docstring and the Environment Variables Reference above.
+  disabled via `ENABLE_API_DOCS=false` — gated independently at **both**
+  the backend (FastAPI never generates/serves the schema at all, not just
+  a hidden UI) and nginx (blocks the request before it ever reaches the
+  backend). Defaults to `true` for local-dev convenience; **set `false`**
+  in Render/cloud (`render.yaml` already does this). See `config.py`'s
+  `ENABLE_API_DOCS` docstring and the Environment Variables Reference
+  above.
 
 **Known trade-off, left as-is:** the frontend stores the JWT in
 `localStorage` (see `frontend/js/auth.js`'s comment) rather than an
@@ -1652,40 +1774,36 @@ A checklist before you deploy this anywhere real:
 - [ ] `AUTO_INIT_DB=false` and `AUTO_SEED_DEMO_DATA=false` — run
       `alembic upgrade head` as its own explicit deploy step instead, and
       never create the public demo accounts against a real database.
-- [ ] Set `CORS_ORIGINS` to your real frontend domain(s) only — or leave
-      it empty if the frontend and API stay on this same combined service
-      (the default; see [Tech Stack](#tech-stack)).
+- [ ] Set `CORS_ORIGINS` to your real frontend domain(s) only.
 - [ ] Decide on email: leave `NOTIFICATIONS_ENABLED=false` if you don't
-      want extension-request/overdue-checkout emails yet, or set it to
-      `true` and fill in real `SMTP_HOST`/`SMTP_FROM_EMAIL`/etc. — see
-      [Due-Date Extensions & Notifications](#due-date-extensions--notifications).
-      If you're on Render's free plan, also read [Deploying on Render's
-      Free Plan](#deploying-on-renders-free-plan)'s note on the daily
-      digest pausing whenever the service spins down.
-- [ ] Set `ENABLE_API_DOCS=false` (`render.yaml` already does this).
-      Confirm it worked by requesting `/docs` and `/openapi.json` on your
-      deployed URL — both should return a plain `404`, not a docs page or
-      schema.
-- [ ] Put TLS termination in front of this service — a managed platform's
-      own edge/load balancer (Render does this automatically), or a cloud
-      load balancer / cert-manager setup if you're self-hosting. Once
-      `ENVIRONMENT=production` is set, `middleware/security_headers.py`
-      automatically adds a `Strict-Transport-Security` header — safe to
-      leave on even before TLS is in front of it, since browsers simply
-      ignore that header over plain HTTP.
-- [ ] Drop `--reload` from the `uvicorn` command if you've customized the
-      Dockerfile's `CMD` (the root `Dockerfile` already doesn't use it —
-      only `docker-compose.yml`'s local-dev override does). A free-tier
-      instance has limited RAM/CPU and no horizontal scaling anyway, so a
-      single `uvicorn` worker process is the right fit; only add
-      `--workers N` if you've upgraded to a paid plan with more resources
-      AND still run this as one instance (see `jobs.py`'s docstring for
-      why multiple *instances* need a different job-queue design first).
-- [ ] Consider swapping the in-memory login rate limiter (and
-      `jobs.py`'s in-memory job store) for a shared, Redis-backed
-      alternative if you ever run more than one instance of this service
-      — see `middleware/rate_limit.py`'s and `jobs.py`'s docstrings for
-      exactly what breaks (silently, per-instance) if you don't.
+      want extension-request/overdue/due-soon-checkout emails yet, or set
+      it to `true` and fill in real `SMTP_HOST`/`SMTP_FROM_EMAIL`/etc. —
+      see [Due-Date Extensions & Notifications](#due-date-extensions--notifications).
+      Either way, confirm the `worker` service is actually running
+      (`docker compose ps` / your platform's dashboard) — it's what sends
+      every email AND generates every audit-ledger export; a stopped
+      `worker` means "Export" buttons hang forever and extension-request
+      emails silently never leave the enqueue step.
+- [ ] Set `ENABLE_API_DOCS=false` for **both** the backend and frontend
+      services (same `.env` key drives both locally; `render.yaml` already
+      sets `false` for both services in Render). Confirm it worked by
+      requesting `/docs` on your deployed URL and `/openapi.json` directly
+      against the backend if it's ever reachable from anywhere but
+      nginx — both should return a plain `404`, not a docs page or schema.
+- [ ] This app already reverse-proxies internally via nginx (see
+      [Deploying Across Environments](#deploying-across-environments-nginx-reverse-proxy)),
+      but that nginx layer does **not** terminate HTTPS itself. Put TLS
+      termination in front of it — a managed platform's own edge/load
+      balancer (Render does this automatically), or a cloud load balancer
+      / cert-manager setup if you're self-hosting nginx. This app doesn't
+      set `Strict-Transport-Security` itself — see
+      `middleware/security_headers.py`'s docstring for why that belongs at
+      the TLS-terminating layer, not here.
+- [ ] Drop `--reload` from the backend's `uvicorn` command and run with
+      multiple `--workers` instead (see `backend/Dockerfile`'s comment).
+- [ ] Consider swapping the in-memory login rate limiter for a
+      Redis-backed one if you run more than one backend replica (see
+      `middleware/rate_limit.py`'s docstring).
 - [ ] Review and tighten `ACCOUNT_LOCKOUT_MAX_ATTEMPTS` /
       `ACCOUNT_LOCKOUT_DURATION_MINUTES` and
       `LOGIN_RATE_LIMIT_MAX`/`LOGIN_RATE_LIMIT_WINDOW_SECONDS` for your
@@ -1693,41 +1811,182 @@ A checklist before you deploy this anywhere real:
 - [ ] Set up a real backup schedule for the Postgres volume — this
       project doesn't include one, since backup strategy is very
       deployment-specific (managed Postgres providers usually handle this
-      for you automatically; note Render's *free* Postgres specifically
-      expires after 30 days with no automatic renewal — see [Deploying on
-      Render's Free Plan](#deploying-on-renders-free-plan)).
+      for you automatically).
+
+## Safely Updating An Existing Production Deployment (CI/CD)
+
+**This repo ships three GitHub Actions workflows** in
+`.github/workflows/`: [`ci.yml`](.github/workflows/ci.yml) (lint/syntax
+sanity checks on every push and PR — there's no full test suite yet, see
+[Suggested Future Features](#suggested-future-features)),
+[`deploy-docker-compose.yml`](.github/workflows/deploy-docker-compose.yml)
+(push-to-deploy for a self-hosted VPS), and
+[`deploy-render.yml`](.github/workflows/deploy-render.yml) (migrate-then-deploy
+for the Render Free-plan target this project ships with). **You almost
+certainly only want one of the two `deploy-*.yml` files active** — delete
+whichever doesn't match the platform you actually deployed to, so pushes
+don't try to deploy the same code to two places. Both are already wired to
+follow the same rule, which is what makes any of this genuinely *safe* to
+automate rather than just fast:
+
+> **Migrate first, deploy second, and only ever ADD to the schema —
+> never rename or drop a column in the same release that also removes the
+> code using it.** New code talking to an old (not-yet-migrated) database
+> is usually fine if you only ever add nullable columns/tables. Old code
+> talking to a new (already-migrated) database breaks the moment a
+> migration renames/drops something the still-running old code expects.
+> Deploying migrations *after* code, or dropping/renaming columns in the
+> same release the code stops using them, both create a window where
+> requests fail — see [Database & Migrations](#database--migrations-alembic)
+> for how this project's Alembic setup fits in.
+
+### Self-hosted Docker Compose (VPS / bare cloud VM)
+
+[`deploy-docker-compose.yml`](.github/workflows/deploy-docker-compose.yml)
+runs on every push to `main` (or on demand via **Actions → Deploy (Docker
+Compose / VPS) → Run workflow**) and, over SSH, does exactly this — in
+order, with `set -e` so a failed step stops the whole deploy instead of
+limping forward:
+
+```bash
+git pull                                       # 1. get the new code
+docker compose build backend worker frontend   # 2. build new images
+                                                #    (doesn't touch running containers yet)
+docker compose exec -T backend alembic upgrade head  # 3. migrate FIRST, while the
+                                                       #    OLD containers are still
+                                                       #    serving traffic -- safe as
+                                                       #    long as the migration is
+                                                       #    additive (see the rule above)
+docker compose up -d --no-deps backend worker frontend  # 4. swap in the new
+                                                          #    images one service at
+                                                          #    a time; --no-deps stops
+                                                          #    Compose from also
+                                                          #    restarting db/redis
+```
+
+It then verifies the deploy (the backend answers `/healthz` from inside
+the Compose network, and nginx is serving the login page) before the
+workflow reports success.
+
+**Required repository secrets** (Settings → Secrets and variables →
+Actions): `PROD_HOST`, `PROD_SSH_USER`, `PROD_SSH_KEY` (the private half of
+a key pair whose public half is already in that user's
+`~/.ssh/authorized_keys` on the server), and `PROD_PROJECT_DIR` (the
+absolute path to this repo's checkout on the server).
+
+- **Rollback:** `git checkout <previous-commit>` on the server, then
+  re-run steps 2 and 4 by hand (skip step 3 — you never roll a migration
+  *back* just to roll code back; only run `alembic downgrade -1` if the
+  migration itself is the thing you need to undo, and only if you're
+  certain no code depending on the new column/table has shipped anywhere
+  else).
+- **Zero-downtime-ish, not true zero-downtime:** `docker compose up -d`
+  stops and starts each named container in place, so there's a brief gap
+  (seconds) per service. For true zero-downtime you'd need two backend
+  containers behind nginx and a rolling `--scale`, which is a bigger
+  change than this project's single-replica Compose file supports out of
+  the box — see [Suggested Future Features](#suggested-future-features).
+- **This workflow has no manual-approval gate** — every push to `main`
+  deploys immediately once CI-equivalent checks pass. Add an `environment:
+  production` block with required reviewers (GitHub's built-in deployment
+  protection rules) to the job in `deploy-docker-compose.yml` if you want
+  a human to approve every deploy first.
+
+### Render
+
+The free-plan shape this project ships with (see [Render](#render) above)
+makes Render's own automated pre-deploy migrations **genuinely
+unavailable**, for two concrete reasons:
+
+- Render's `preDeployCommand` (its supported mechanism for "run migrations
+  before the new version goes live") is **only available on paid instance
+  types** — it does not exist as an option on the Free plan at all.
+- The Shell tab and SSH access into a running instance are **also
+  paid-plan-only** — so there's no way to `exec` into the Free web service
+  and run `alembic upgrade head` by hand against it either, the way
+  `docker compose exec backend ...` works locally.
+
+[`deploy-render.yml`](.github/workflows/deploy-render.yml) works around
+both limits by running the migration from CI, against the database's
+*external* connection string, and only calling Render's Deploy Hook
+afterward — so the migration always finishes before the new code goes
+live, without needing `preDeployCommand` or Shell access at all:
+
+- [ ] **In the Render Dashboard, set `snipeit-lite-web`'s auto-deploy to
+      "Off"** (Settings → Build & Deploy → Auto-Deploy) — otherwise Render
+      still auto-deploys on every push on its own, racing this workflow's
+      migration step, which defeats the whole point.
+- [ ] Get `snipeit-lite-db`'s **External Database URL** (Render Dashboard
+      → `snipeit-lite-db` → Info — Free Postgres instances still expose
+      one; only Key Value/Redis is private-network-only on Free, per
+      `render.yaml`'s comments) and save it as the `RENDER_DATABASE_URL`
+      repository secret.
+- [ ] Get `snipeit-lite-web`'s **Deploy Hook URL** (Render Dashboard →
+      `snipeit-lite-web` → Settings → Deploy Hook) and save it as the
+      `RENDER_DEPLOY_HOOK_URL` repository secret.
+- [ ] Push to `main` (or run **Actions → Deploy (Render) → Run workflow**
+      on demand). The workflow runs `alembic upgrade head` against the
+      external URL first; the deploy-hook `curl` only fires if that step
+      succeeds.
+- [ ] Confirm the new deploy is live and a login still succeeds (expect
+      the usual free-plan cold start — see [Render](#render) above).
+
+If you've since upgraded `snipeit-lite-web` to a paid instance type, the
+simpler long-term fix is to delete `deploy-render.yml` entirely and add
+`preDeployCommand: cd backend && alembic upgrade head` directly to
+`render.yaml` instead — Render then handles the ordering for you natively,
+with no external CI step required.
+
+### Generic cloud (AWS/GCP/Azure/Kubernetes/etc.)
+
+Same "migrate first, deploy second" rule applies; the mechanics depend on
+your platform's own release-step feature (ECS's task definition + a
+one-off migration task before the service update, a Kubernetes `Job` +
+`initContainer` pattern ahead of a rolling `Deployment` update, etc.) —
+outside this project's scope to ship a ready-made workflow for, but the
+same sequencing constraint from the top of this section governs all of
+them; `deploy-docker-compose.yml` is a reasonable template to adapt.
+
+---
 
 ## Suggested Future Features
 
 Small, well-scoped follow-ups if you want to keep extending this project:
 
-- **A deeper automated test suite** beyond the smoke tests in
-  `backend/tests/` (see [Testing Your Changes](#testing-your-changes) and
-  [Continuous Integration](#continuous-integration)) — real coverage of
-  each role's permission boundaries, the checkout/return/extension state
-  machine, and the CSV/PDF export formats.
-- **Redis-backed rate limiting and job storage** (e.g. `slowapi`/
-  `fastapi-limiter` for login attempts, a real queue for `jobs.py`) if
-  this service is ever scaled to multiple instances, so all instances
-  share one counter/job store instead of each enforcing its own
-  independently — see `middleware/rate_limit.py`'s and `jobs.py`'s
-  docstrings for why this only matters once you're past a single
-  instance.
+- **A manual-approval / staging gate on the CI/CD pipeline** —
+  `.github/workflows/deploy-docker-compose.yml` and `deploy-render.yml`
+  (see [Safely Updating An Existing Production
+  Deployment](#safely-updating-an-existing-production-deployment-cicd))
+  deploy straight to production on every push to `main`, with no staging
+  environment and no human approval step in between. Adding a GitHub
+  `environment: production` block with required reviewers (or a separate
+  staging deploy target that has to pass smoke tests first) would close
+  that gap. Gating deploys on `ci.yml` passing first (`on: workflow_run`
+  instead of a parallel `on: push`) is a smaller, complementary version of
+  the same idea.
+- **An automated test suite** (`pytest` + `TestClient` + a throwaway
+  SQLite or test-Postgres database) — see
+  [Testing Your Changes](#testing-your-changes) for the manual pattern
+  this would formalize.
+- **Redis-backed rate limiting** (e.g. `slowapi` or `fastapi-limiter`) if
+  the backend is ever scaled to multiple workers/replicas, so all
+  instances share one counter instead of each enforcing its own limit
+  independently.
 - **A `deleted_by` column** recording which admin performed a given
   soft-delete (good first Alembic migration exercise) — `restore_user()`
   itself (undoing a soft-delete) already shipped; see [Directories](#directories-super-admin--manager).
 - **Case-insensitive login** (`func.lower()` comparison + a matching
   unique index) so `T.Okafor@corp.io` and `t.okafor@corp.io` are treated
   as the same account.
+- **`Strict-Transport-Security` (HSTS)**, set at your TLS-terminating
+  reverse proxy once deployed with HTTPS. (A real `Content-Security-Policy`
+  is no longer on this list — see `nginx/default.conf.template`, which now
+  sets one tuned against the frontend's actual CDN/script usage.)
 - **Per-user notification preferences** — email is currently all-or-nothing
   via `NOTIFICATIONS_ENABLED` (see [Due-Date Extensions &
   Notifications](#due-date-extensions--notifications)); a `users` table
-  column for "email me my own overdue reminders: yes/no" would be a small,
-  well-scoped follow-up.
-- **A reminder before something goes overdue**, not just after — the
-  overdue digest (`tasks.send_overdue_notifications`) only fires once a
-  due date has already passed; a "due in N days" heads-up would need a
-  second scheduled query alongside it.
+  column for "email me my own overdue/due-soon reminders: yes/no" would
+  be a small, well-scoped follow-up.
 - **`httpOnly` cookie sessions + CSRF tokens**, replacing the current
   `localStorage`-based JWT storage (see the trade-off noted in
   [Security Model](#security-model)).
@@ -1735,24 +1994,30 @@ Small, well-scoped follow-ups if you want to keep extending this project:
   foundation (`middleware/request_context.py`, `logging_config.py`) is a
   natural stepping stone toward full distributed tracing if this app ever
   calls out to other services.
+- **Scheduled/async large exports** — today's exports are built
+  synchronously in one request; if directories grow very large, a
+  background-job + "email me the file when it's ready" pattern would
+  scale better than holding the request open.
 
 ## Troubleshooting
 
-- **The app takes 30–60 seconds to respond after being idle for a
-  while (Render free plan only)** — expected. Render's free web
-  services spin down after 15 minutes with no inbound traffic and take a
-  moment to spin back up on the next request. See [Deploying on Render's
-  Free Plan](#deploying-on-renders-free-plan) for two ways to keep it warm
-  if that matters for your use case.
-- **The overdue-checkout digest email never seems to fire** — first
-  check `NOTIFICATIONS_ENABLED=true` and your `SMTP_*` settings are
-  actually correct (see [Due-Date Extensions &
-  Notifications](#due-date-extensions--notifications)). If those are
-  right, and you're on Render's free plan, the in-process scheduler
-  thread (`backend/scheduler.py`) pauses whenever the service spins down
-  from inactivity — see [Deploying on Render's Free
-  Plan](#deploying-on-renders-free-plan) for the fix (an uptime pinger,
-  or an external scheduler hitting `POST /api/system/notifications/run`).
+- **Login (or literally any `/api/*` call) fails with `405 Method Not
+  Allowed`, and the response body is just `{"detail": "Method Not
+  Allowed"}`** — this means nginx is forwarding requests to the backend
+  with the wrong path (commonly, every request collapsing down to just
+  `/`, which only has a `GET` handler). This is a well-known nginx
+  gotcha: `proxy_pass`'s usual "trailing slash strips the matched
+  `location` prefix" behavior **only works when the upstream address is a
+  static string** — it silently stops working the moment that address is
+  a *variable* (which `nginx/default.conf.template`'s `/api/` block uses,
+  so nginx re-resolves `BACKEND_HOST` on every request instead of caching
+  a possibly-stale IP). The fix already in this repo uses an explicit
+  `rewrite ^/api/(.*)$ /$1 break;` before `proxy_pass` instead of relying
+  on that trick — if you ever edit that `location /api/` block, keep the
+  `rewrite` line, or `/api/*` requests will start silently arriving at the
+  backend as just `/` again. Rebuild the frontend image after any nginx
+  config change: `docker compose build --no-cache frontend && docker
+  compose up -d --force-recreate frontend`.
 - **"Refusing to start: ENVIRONMENT=production but JWT_SECRET_KEY is
   still a placeholder..."** — expected and intentional (see `config.py`).
   Generate a real secret: `python3 -c "import secrets;
@@ -1790,18 +2055,20 @@ Small, well-scoped follow-ups if you want to keep extending this project:
   almost always means there's genuinely nothing active to export yet
   (e.g. no active checkouts) rather than a permissions/scope issue.
 - **"Request Extension" (or Approve/Deny, or "Extend") feels slow to
-  close/clear** — every extension-related action submits an email to a
-  background thread instead of sending it inline (see [Due-Date
+  close/clear** — every extension-related action enqueues an email via
+  the `worker` container instead of sending it inline (see [Due-Date
   Extensions & Notifications](#due-date-extensions--notifications)), so
   the API itself should return almost instantly regardless of SMTP
-  speed. If it's still slow, check the app's own logs for a
-  `background_task_failed` entry (see `jobs.py -> run_async()`) — a
-  submission that fails is caught and logged (never raised — see
-  `services/extension_service.py -> _notify()`), but a genuine hang here
-  would point to something else worth investigating separately.
+  speed. If it's still slow, check that the `worker` container is
+  actually running (`docker compose ps`) and that Redis is reachable —
+  a broker `.delay()` call that can't reach Redis is caught and logged
+  (never raised — see `services/extension_service.py -> _notify()`), but
+  a *backend* process that can't reach Redis at all for unrelated reasons
+  is worth investigating separately.
 - **Extension emails never arrive, even with `NOTIFICATIONS_ENABLED=true`**
-  — check the app's logs for the actual `smtplib` error (search for
-  `tasks.send_email_task` / `notification_service`). Confirm `SMTP_HOST`
+  — check the `worker` container's logs, not the `backend` container's —
+  emails are sent from there (`tasks.send_email_task`), not from the API
+  process that received the original request. Also confirm `SMTP_HOST`
   and `SMTP_FROM_EMAIL` are both set — `notification_service.send_email()`
   logs a `WARNING` (not `DEBUG`) and refuses to send if either is missing
   while `NOTIFICATIONS_ENABLED=true`.
