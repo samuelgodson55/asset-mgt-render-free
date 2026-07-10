@@ -1557,7 +1557,6 @@ None of these jobs deploy anything — this workflow's only job is to catch
 problems before they ever reach a real deploy. Wire up Render's own
 GitHub integration (auto-deploy on push) or a separate deploy step if you
 want pushes to `main` to also trigger a live deployment.
-jhjj
 
 ## Security Model
 
