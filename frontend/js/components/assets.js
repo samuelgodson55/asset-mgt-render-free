@@ -53,38 +53,55 @@ function renderAssetsTable(items) {
 
   document.querySelectorAll('.asset-pool-count').forEach(el => el.textContent = assetsState.total);
 
-  tbody.innerHTML = items.map(a => `
-    <tr class="transition hover:bg-card2/40">
+  tbody.innerHTML = items.map(a => {
+    // Built once, reused in two places: inline at the end of the row for
+    // desktop (`sm:table-cell`, unchanged from before) AND as a full-width
+    // "Actions" block inside the mobile row-details popup (see below) --
+    // that column is now hidden on phones instead of overflowing off the
+    // right edge of the screen, so these same buttons have to be reachable
+    // some other way once a row is tapped.
+    const actionButtons = `
+      ${isManagerView
+        ? `<button data-action="open-props" data-asset-id="${a.id}" class="rounded-md px-2.5 py-1.5 text-[12px] font-medium text-slate-400 underline-offset-2 transition hover:text-blue-400 hover:underline">View Pool details</button>`
+        : `<button data-action="open-props" data-asset-id="${a.id}" class="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-slate-500 hover:text-white">Properties Hub</button>`}
+      <button data-action="open-dispatch" data-asset-id="${a.id}" data-asset-name="${escapeHtml(a.name)}" data-available="${a.available_quantity}" class="rounded-md bg-blue-600/90 px-2.5 py-1.5 text-[12px] font-medium text-white transition hover:bg-blue-500">Issue / Dispatch</button>
+      ${isSuperAdminView
+        ? `<button data-action="delete-asset-pool" data-asset-id="${a.id}" data-asset-name="${escapeHtml(a.name)}" class="rounded-md border border-rose-500/30 px-2.5 py-1.5 text-[12px] font-medium text-rose-400 transition hover:border-rose-500 hover:bg-rose-500/10">Delete</button>`
+        : ''}`;
+
+    // The ENTIRE row is tappable on mobile (rowDetailsTrigger() attaches
+    // `data-action="open-row-details"` straight to the <tr>) instead of a
+    // separate small "Details" button eating space next to the name --
+    // tapping anywhere on a row's name/status cells pops the shared
+    // details modal with the Available/Total count plus these same action
+    // buttons. On desktop, every column still renders inline exactly as
+    // before, so real buttons under the pointer are always what actually
+    // gets clicked (closest('[data-action]') in main.js's delegated
+    // handler resolves to the innermost match), and the row-level handler
+    // is simply never reached there.
+    return `
+    <tr ${rowDetailsTrigger(escapeHtml(a.name), [
+      ['Available / Total', `${a.available_quantity} / ${a.total_quantity} units`],
+      ['', `<div class="flex flex-wrap gap-2">${actionButtons}</div>`],
+    ])} class="cursor-pointer transition hover:bg-card2/40 active:bg-card2/60 sm:cursor-default">
       <td class="px-5 py-3.5">
         <div class="flex items-center gap-2">
           <div>
             <p class="font-medium text-slate-100">${escapeHtml(a.name)}</p>
             <p class="tag-mono text-[11px] text-slate-500">POOL-${a.id}</p>
           </div>
-          <!-- Mobile-only "Details" button (sm:hidden) -- surfaces the
-               Available/Total column this row hides below sm:table-cell,
-               so nothing is actually lost on a phone, just one tap away.
-               See ui.js's rowDetailsTrigger()/openRowDetailsFromElement(). -->
-          <button ${rowDetailsTrigger(escapeHtml(a.name), [
-            ['Available / Total', `${a.available_quantity} / ${a.total_quantity} units`],
-            ['Status', statusBadge(a.available_quantity)],
-          ])} class="ml-auto shrink-0 rounded-md border border-border px-2 py-1 text-[11px] font-medium text-slate-400 transition hover:border-slate-500 hover:text-slate-200 sm:hidden">Details</button>
+          <!-- Mobile-only affordance showing the row itself is tappable
+               (replaces the old separate "Details" button). -->
+          <svg class="ml-auto h-4 w-4 shrink-0 text-slate-600 sm:hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
         </div>
       </td>
       <td class="hidden px-5 py-3.5 tag-mono text-slate-300 sm:table-cell">${a.available_quantity} / ${a.total_quantity} units</td>
       <td class="px-5 py-3.5">${statusBadge(a.available_quantity)}</td>
-      <td class="px-5 py-3.5">
-        <div class="flex flex-wrap justify-end gap-2">
-          ${isManagerView
-            ? `<button data-action="open-props" data-asset-id="${a.id}" class="rounded-md px-2.5 py-1.5 text-[12px] font-medium text-slate-400 underline-offset-2 transition hover:text-blue-400 hover:underline">View Pool details</button>`
-            : `<button data-action="open-props" data-asset-id="${a.id}" class="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-slate-500 hover:text-white">Properties Hub</button>`}
-          <button data-action="open-dispatch" data-asset-id="${a.id}" data-asset-name="${escapeHtml(a.name)}" data-available="${a.available_quantity}" class="rounded-md bg-blue-600/90 px-2.5 py-1.5 text-[12px] font-medium text-white transition hover:bg-blue-500">Issue / Dispatch</button>
-          ${isSuperAdminView
-            ? `<button data-action="delete-asset-pool" data-asset-id="${a.id}" data-asset-name="${escapeHtml(a.name)}" class="rounded-md border border-rose-500/30 px-2.5 py-1.5 text-[12px] font-medium text-rose-400 transition hover:border-rose-500 hover:bg-rose-500/10">Delete</button>`
-            : ''}
-        </div>
+      <td class="hidden px-5 py-3.5 sm:table-cell">
+        <div class="flex flex-wrap justify-end gap-2">${actionButtons}</div>
       </td>
-    </tr>`).join('') || `<tr><td colspan="4" class="px-5 py-6 text-center text-slate-500">No asset pools found.</td></tr>`;
+    </tr>`;
+  }).join('') || `<tr><td colspan="4" class="px-5 py-6 text-center text-slate-500">No asset pools found.</td></tr>`;
 
   renderServerPaginationBar('assets', assetsState);
 }
