@@ -1,17 +1,5 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-.venv/
-venv/
-ENV/
 .env
-
-# Databases
-*.sqlite3
-*.db
-
-# IDEs and OS
-.vscode/
-.idea/
+__pycache__/
+*.pyc
+node_modules/
 .DS_Store

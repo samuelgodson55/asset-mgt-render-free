@@ -1,0 +1,11 @@
+# requirements-dev.txt
+# -----------------------------------------------------------------------------
+# Dev/CI-only dependencies -- NOT installed in the production Docker image
+# (see the root Dockerfile, which only installs backend/requirements.txt).
+# Installed separately by .github/workflows/ci.yml so the deployed image
+# stays as small as possible.
+# -----------------------------------------------------------------------------
+-r requirements.txt
+pytest==8.3.2
+httpx==0.27.2
+ruff==0.6.9
