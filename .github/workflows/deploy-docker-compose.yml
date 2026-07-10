@@ -1,0 +1,94 @@
+# =============================================================================
+# .github/workflows/deploy-docker-compose.yml
+# -----------------------------------------------------------------------------
+# Push-to-deploy for a self-hosted Docker Compose target (a VPS or bare cloud
+# VM you SSH into) -- see README.md's "Safely Updating An Existing Production
+# Deployment (CI/CD)" section for the full explanation of why the steps below
+# are ordered the way they are (migrate FIRST, while the old containers are
+# still serving traffic, then swap in the new images).
+#
+# ONLY RELEVANT IF YOU DEPLOY VIA docker-compose.yml ON YOUR OWN SERVER. If
+# you deploy on Render instead, delete this file and use
+# deploy-render.yml alongside it (or instead of it -- most projects only need
+# ONE of the two deploy-*.yml workflows in this folder, matching whichever
+# platform you actually deployed to).
+#
+# REQUIRED REPOSITORY SECRETS (Settings -> Secrets and variables -> Actions):
+#   PROD_HOST      -- the server's hostname or IP
+#   PROD_SSH_USER   -- the SSH user to connect as
+#   PROD_SSH_KEY     -- the private key for that user (public half must
+#                        already be in that user's ~/.ssh/authorized_keys)
+#   PROD_PROJECT_DIR  -- absolute path to this repo's checkout on the server
+#                          (e.g. /home/deploy/snipe-it-lite)
+#
+# This workflow is a starting point, not a finished pipeline: it has no
+# staging environment and no manual approval gate before touching production.
+# Add an `environment: production` block with required reviewers (GitHub's
+# built-in deployment protection rules) if you want a human to approve every
+# deploy before it runs.
+# =============================================================================
+name: Deploy (Docker Compose / VPS)
+
+on:
+  push:
+    branches: [main]
+  # Lets you re-run a deploy on demand from the Actions tab without pushing
+  # an empty commit -- e.g. to retry after a transient SSH failure.
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_SSH_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          # `set -e` (hardening promised in README.md's CI/CD section):
+          # without it, a failed `alembic upgrade head` would still let the
+          # final `docker compose up -d` line run afterward, deploying new
+          # code against a database that was never actually migrated.
+          script: |
+            set -e
+            cd "${{ secrets.PROD_PROJECT_DIR }}"
+
+            echo "==> Pulling latest code"
+            git fetch origin main
+            git checkout main
+            git pull origin main
+
+            echo "==> Building new images (does not touch running containers yet)"
+            docker compose build backend worker frontend
+
+            echo "==> Running database migrations FIRST, while the OLD"
+            echo "    containers are still serving traffic"
+            docker compose exec -T backend alembic upgrade head
+
+            echo "==> Swapping in the new images"
+            docker compose up -d --no-deps backend worker frontend
+
+            echo "==> Pruning old dangling images to keep disk usage sane"
+            docker image prune -f
+
+      - name: Verify the deploy
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_SSH_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          script: |
+            set -e
+            cd "${{ secrets.PROD_PROJECT_DIR }}"
+            docker compose ps
+            # The backend container isn't published to the host (see
+            # docker-compose.yml's comment on the `backend` service -- only
+            # `frontend`/nginx is), so check its health from inside the
+            # Compose network rather than curling a host port. Fails (and
+            # should page you) if the backend didn't come back up cleanly
+            # after the swap.
+            docker compose exec -T backend python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz', timeout=5)"
+            # And confirm the public entrypoint (nginx) is actually serving
+            # the login page end-to-end.
+            curl -fsS http://localhost:8080/ > /dev/null

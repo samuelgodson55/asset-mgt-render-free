@@ -1,0 +1,77 @@
+# =============================================================================
+# .github/workflows/ci.yml
+# -----------------------------------------------------------------------------
+# Runs on every push and pull request. This project doesn't have an automated
+# test suite yet (see README.md's "Suggested Future Features" -- adding a
+# pytest + TestClient suite is the natural next step), so this workflow is
+# deliberately lightweight: it catches syntax errors and config mistakes
+# before they ever reach the deploy workflows in this same folder, without
+# requiring a database or any running services.
+#
+# Both deploy-docker-compose.yml and deploy-render.yml can be switched from
+# "on: push" to "on: workflow_run" (triggered by this workflow's success) if
+# you want deploys to be gated on CI passing -- see each file's own comments.
+# =============================================================================
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend-syntax-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install backend dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Byte-compile every backend module (catches syntax errors)
+        run: python -m py_compile $(find backend -name "*.py" -not -path "*/alembic/versions/*")
+
+      - name: Import the FastAPI app (catches import-time errors)
+        working-directory: backend
+        env:
+          # Dummy values -- just enough for config.py's Settings/startup
+          # checks to pass import time; no database connection is actually
+          # made by this step.
+          ENVIRONMENT: development
+          DATABASE_URL: postgresql://user:pass@localhost:5432/placeholder
+          JWT_SECRET_KEY: ci-placeholder-secret-not-used-anywhere-real
+          SUPER_ADMIN_USERNAME: superadmin
+          SUPER_ADMIN_NAME: CI Placeholder
+          SUPER_ADMIN_PASSWORD: ci-placeholder-password-not-real-123
+        run: python -c "import main"
+
+  compose-and-blueprint-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate docker-compose.yml syntax
+        run: docker compose -f docker-compose.yml config > /dev/null
+
+      - name: Validate render.yaml is well-formed YAML
+        run: python3 -c "import yaml, sys; yaml.safe_load(open('render.yaml')); print('render.yaml OK')"
+
+  frontend-syntax-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Check every frontend JS file parses (no build step, just a syntax check)
+        run: |
+          for f in $(find frontend/js -name "*.js"); do
+            node --check "$f" || exit 1
+          done
