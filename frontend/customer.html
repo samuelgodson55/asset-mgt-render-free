@@ -1,8 +1,12 @@
 <!DOCTYPE html>
-<html lang="en" class="dark">
+<html lang="en">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<!-- Applies the saved (or OS-preferred) dark/light theme to <html> BEFORE
+     first paint -- see js/theme-init.js for why this has to be external
+     and synchronous instead of a module script. -->
+<script src="js/theme-init.js"></script>
 <title>Snipe-IT Lite — My Assets</title>
 
 <!-- =====================================================================
@@ -28,7 +32,7 @@
 <body class="min-h-screen overflow-x-hidden font-sans text-slate-200 antialiased" data-view="customer">
 
 <!-- ================= GLOBAL NAVBAR ================= -->
-<header class="sticky top-0 z-30 border-b border-border bg-[#12161d]/95 backdrop-blur">
+<header class="sticky top-0 z-30 border-b border-border bg-card/95 backdrop-blur">
   <div class="mx-auto max-w-[1100px] px-4 sm:px-6">
     <div class="flex h-16 items-center justify-between gap-2">
       <div class="flex items-center gap-3">
@@ -41,7 +45,7 @@
         </div>
       </div>
 
-      <div class="flex items-center gap-2 sm:gap-4">
+      <div class="flex items-center gap-1.5 sm:gap-4">
         <span class="hidden items-center gap-1.5 rounded-full border border-violet-500/50 bg-violet-500/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-wide text-violet-400 glow-violet sm:flex">
           <span class="h-1.5 w-1.5 rounded-full bg-violet-500"></span>
           Customer Portal
@@ -55,6 +59,11 @@
           </div>
         </button>
 
+        <button type="button" data-action="toggle-theme" title="Switch to light / dark theme" aria-label="Toggle color theme" class="theme-toggle flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border bg-card text-slate-300 transition hover:border-blue-500/40 hover:text-blue-400 sm:h-9 sm:w-9">
+          <span class="icon-moon"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg></span>
+          <span class="icon-sun"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg></span>
+        </button>
+
         <button id="logout-btn" title="Log out" class="flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-[13px] font-medium text-slate-300 transition hover:border-rose-500/40 hover:text-rose-400 sm:px-3">
           <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>
           <span class="hidden sm:inline">Log out</span>
@@ -64,7 +73,7 @@
   </div>
 </header>
 
-<main class="mx-auto max-w-[1100px] px-6 py-8 space-y-6">
+<main class="mx-auto max-w-[1100px] px-4 py-6 space-y-5 sm:px-6 sm:py-8 sm:space-y-6">
   <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
     <div>
       <h1 class="text-xl font-bold tracking-tight text-slate-50">My Checked-Out Items</h1>
@@ -82,8 +91,8 @@
       <div class="flex items-center gap-2 text-[13px] text-slate-400">
         <span>Rows per page</span>
         <select id="myItemsPerPageSelect" class="rounded-lg border border-border bg-card2 px-2.5 py-2 text-slate-200 outline-none focus:border-blue-500/60">
-          <option value="5">5</option>
-            <option value="10" selected>10</option>
+          <option value="5" selected>5</option>
+            <option value="10">10</option>
           <option value="25">25</option>
           <option value="50">50</option>
         </select>
@@ -149,9 +158,9 @@
      identical markup on every dashboard page (admin/manager/staff/
      customer.html) since it's driven entirely by the logged-in user's own
      data from GET /auth/me, with nothing role-specific about it. -->
-<div id="profileModal" class="fixed inset-0 z-50 hidden items-center justify-center p-4">
+<div id="profileModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
   <div class="absolute inset-0 bg-black/70 backdrop"></div>
-  <div class="relative max-h-[90vh] w-full max-w-md overflow-y-auto rounded-xl border border-border bg-[#141922] shadow-2xl">
+  <div class="relative max-h-[90vh] w-full max-w-md overflow-y-auto sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl shadow-2xl">
     <div class="flex items-start justify-between border-b border-border px-6 py-5">
       <div>
         <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Account</p>
@@ -215,9 +224,9 @@
      js/components/extensions.js. A Manager/Admin/Super Admin then
      approves/denies it from the "Extension Requests" panel on their own
      dashboard (admin.html / manager.html). -->
-<div id="extensionRequestModal" class="fixed inset-0 z-50 hidden items-center justify-center p-4">
+<div id="extensionRequestModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
   <div class="absolute inset-0 bg-black/70 backdrop"></div>
-  <div class="relative w-full max-w-sm overflow-y-auto rounded-xl border border-border bg-[#141922] shadow-2xl">
+  <div class="relative w-full max-w-sm overflow-y-auto sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl shadow-2xl">
     <div class="flex items-start justify-between border-b border-border px-6 py-5">
       <div>
         <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Custody</p>
@@ -257,9 +266,9 @@
      desktop still shows every column unchanged. A per-row "Details"
      button (also `sm:hidden`) opens THIS popup with whatever got hidden --
      see js/ui.js's rowDetailsTrigger()/openRowDetailsFromElement(). -->
-<div id="rowDetailsModal" class="fixed inset-0 z-50 hidden items-center justify-center p-4">
+<div id="rowDetailsModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
   <div class="absolute inset-0 bg-black/70 backdrop"></div>
-  <div class="relative w-full max-w-sm rounded-xl border border-border bg-[#141922] p-5 shadow-2xl">
+  <div class="relative w-full max-w-sm sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl p-5 shadow-2xl">
     <div class="mb-2 flex items-center justify-between">
       <h3 id="rowDetailsTitle" class="text-[15px] font-bold text-slate-50">Details</h3>
       <button data-action="close-modal" data-modal="rowDetailsModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">

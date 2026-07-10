@@ -3,31 +3,157 @@
  * -----------------------------------------------------------------------------
  * The small set of hand-written CSS rules Tailwind's utility classes don't
  * cover on their own (custom scrollbars, the monospace "tag" font, the
- * per-role colored glow pills, etc). Previously this was copy-pasted as an
- * inline <style> block into every HTML file, with each page only keeping
- * the subset of rules it actually used (e.g. index.html only needed
- * body-background + .tag-mono; admin.html additionally needed the
- * scrollbar rules, .glow-red, .backdrop, and the date-picker filter).
+ * per-role colored glow pills, the dark/light color tokens, mobile bottom
+ * -sheet modal behavior, and the swipeable tab-nav affordances).
  *
  * Consolidated into one external file so every page can share a single
- * source of truth (all 4 .glow-* colors live here now, and each page just
- * uses whichever one its own markup references), and so the CSP's
- * style-src no longer needs 'unsafe-inline' to allow it -- being an
- * ordinary linked stylesheet, it's already covered by style-src 'self'.
+ * source of truth, and so the CSP's style-src doesn't need 'unsafe-inline'
+ * to allow it.
  */
 
-/* Matches the Tailwind "canvas" theme color (see build-tailwind/tailwind.config.js)
-   so the page background is correct even before/without any Tailwind
-   utility class painting it -- avoids a flash of the browser's default
-   white background on first paint. */
-body { background-color: #0f1319; }
+/* =============================================================================
+   COLOR TOKENS
+   -----------------------------------------------------------------------------
+   Every color tailwind.config.js re-points at a CSS variable (canvas/card/
+   card2/border, the full slate scale, and the "bright accent on dark bg"
+   300/400 shades of blue/emerald/amber/rose/violet) is DEFINED here, once,
+   as an R G B triplet (no commas -- that's what lets Tailwind's `<alpha-
+   value>` opacity modifiers like `bg-card/80` keep working).
+
+   `:root` is the dark theme -- values are IDENTICAL to the fixed hex
+   constants this file used to hard-code, so dark mode is unchanged.
+   `:root.light` overlays the light theme by re-defining the same variables;
+   `html.light` is toggled by js/theme.js (persisted to localStorage) and
+   js/theme-init.js applies it synchronously pre-paint to avoid a flash of
+   the wrong theme.
+   ============================================================================= */
+:root {
+  color-scheme: dark;
+
+  --canvas: 15 19 25;   /* #0f1319 */
+  --card:   23 28 37;   /* #171c25 */
+  --card2:  29 35 46;   /* #1d232e */
+  --border: 42 49 64;   /* #2a3140 */
+
+  --slate-50:  248 250 252;
+  --slate-100: 241 245 249;
+  --slate-200: 226 232 240;
+  --slate-300: 203 213 225;
+  --slate-400: 148 163 184;
+  --slate-500: 100 116 139;
+  --slate-600: 71 85 105;
+  --slate-700: 51 65 85;
+  --slate-800: 30 41 59;
+  --slate-900: 15 23 42;
+  --slate-950: 2 6 23;
+
+  --blue-300: 147 197 253;
+  --blue-400: 96 165 250;
+  --emerald-300: 110 231 183;
+  --emerald-400: 52 211 153;
+  --amber-200: 253 230 138;
+  --amber-300: 252 211 77;
+  --amber-400: 251 191 36;
+  --rose-300: 253 164 175;
+  --rose-400: 251 113 133;
+  --violet-300: 196 181 253;
+  --violet-400: 167 139 250;
+
+  /* The modal box/backdrop panel color used inline as `bg-[#141922]`
+     throughout the HTML (arbitrary-value Tailwind classes can't be routed
+     through the config's color tokens the way named classes can) -- kept
+     here too so JS never has to guess a hex string for it. */
+  --panel: 20 25 34; /* #141922 */
+
+  --scrollbar-track: 23 28 37;
+  --scrollbar-thumb: 42 49 64;
+  --scrollbar-thumb-hover: 56 64 79;
+}
+
+:root.light {
+  color-scheme: light;
+
+  --canvas: 246 247 249;  /* soft off-white, not stark #fff, easier on the eyes */
+  --card:   255 255 255;
+  --card2:  241 245 249;
+  --border: 226 232 240;
+
+  /* Full inversion of the slate scale, mirrored around the 500 midpoint --
+     whatever shade carried "the brightest / most prominent text" in dark
+     mode (slate-50) becomes the darkest, most prominent text color in
+     light mode, and so on down the scale. This is what lets every existing
+     text-slate-* / border-slate-* / bg-slate-* class in the HTML just work
+     under both themes without being touched. */
+  --slate-50:  2 6 23;
+  --slate-100: 15 23 42;
+  --slate-200: 30 41 59;
+  --slate-300: 51 65 85;
+  --slate-400: 71 85 105;
+  --slate-500: 100 116 139;
+  --slate-600: 148 163 184;
+  --slate-700: 203 213 225;
+  --slate-800: 226 232 240;
+  --slate-900: 241 245 249;
+  --slate-950: 248 250 252;
+
+  /* Darker/richer versions of each accent hue so text/icons keep AA
+     contrast against a white card instead of washing out like a dark
+     -mode pastel would. */
+  --blue-300: 29 64 175;
+  --blue-400: 37 99 235;
+  --emerald-300: 4 120 87;
+  --emerald-400: 5 150 105;
+  --amber-200: 146 64 14;
+  --amber-300: 180 83 9;
+  --amber-400: 217 119 6;
+  --rose-300: 190 18 60;
+  --rose-400: 225 29 72;
+  --violet-300: 109 40 217;
+  --violet-400: 124 58 237;
+
+  --panel: 255 255 255;
+
+  --scrollbar-track: 241 245 249;
+  --scrollbar-thumb: 203 213 225;
+  --scrollbar-thumb-hover: 148 163 184;
+}
+
+/* Matches the "canvas" theme color so the page background is correct even
+   before/without any Tailwind utility class painting it -- avoids a flash
+   of the browser's default white background on first paint. */
+body { background-color: rgb(var(--canvas)); transition: background-color .15s ease; }
+
+/* Every element that changes color between themes gets a short, shared
+   transition so flipping the toggle reads as an intentional cross-fade
+   instead of an abrupt flash -- but ONLY color-ish properties, and ONLY
+   while `html.theme-transitioning` is present (added for ~200ms by
+   js/theme.js around the actual class swap), so normal hovers/interactions
+   elsewhere on the page aren't all given a lingering transition too.
+
+   NOTE: `color` is deliberately NOT included here. Text using the highest
+   -contrast token (text-slate-50) swings from near-white to near-black
+   between themes -- animating that swing makes it pass through a washed
+   -out mid-gray for a chunk of the transition, which on a light background
+   reads as the text (the page's logo, its h1) briefly disappearing rather
+   than an intentional cross-fade. Every OTHER property here still
+   transitions, so the swap doesn't read as an abrupt flash. */
+html.theme-transitioning,
+html.theme-transitioning * {
+  transition: background-color .18s ease, border-color .18s ease, box-shadow .18s ease !important;
+}
+
+/* Arbitrary-value `bg-[#141922]` classes used by every modal panel in the
+   HTML can't be routed through tailwind.config.js's color tokens, so this
+   attribute selector re-points that exact utility class at the themed
+   --panel variable instead. */
+.bg-\[\#141922\] { background-color: rgb(var(--panel)) !important; }
 
 /* Custom scrollbar styling (WebKit/Blink only -- Firefox falls back to its
    own default scrollbar, which is an acceptable, non-broken degradation). */
 ::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-track { background: #171c25; }
-::-webkit-scrollbar-thumb { background: #2a3140; border-radius: 8px; }
-::-webkit-scrollbar-thumb:hover { background: #38404f; }
+::-webkit-scrollbar-track { background: rgb(var(--scrollbar-track)); }
+::-webkit-scrollbar-thumb { background: rgb(var(--scrollbar-thumb)); border-radius: 8px; }
+::-webkit-scrollbar-thumb:hover { background: rgb(var(--scrollbar-thumb-hover)); }
 
 /* Monospace styling for IDs, timestamps, and other "tag"-like data --
    Tailwind's own font-mono utility doesn't use JetBrains Mono, so this is
@@ -46,5 +172,87 @@ body { background-color: #0f1319; }
 
 /* Recolors the browser's built-in date-picker calendar icon to match the
    dark theme (it's black-on-transparent by default, invisible on dark
-   backgrounds without this). */
+   backgrounds without this). Light mode's icon is already dark-on
+   -transparent, so it needs no filter at all. */
 input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(0.7); cursor: pointer; }
+:root.light input[type="date"]::-webkit-calendar-picker-indicator { filter: none; }
+
+/* =============================================================================
+   THEME TOGGLE BUTTON
+   -----------------------------------------------------------------------------
+   A single physical control that visually swaps its icon based on which
+   theme is active (see js/theme.js) instead of needing two separate
+   buttons wired up in markup.
+   ============================================================================= */
+.theme-toggle { position: relative; overflow: hidden; }
+.theme-toggle .icon-sun,
+.theme-toggle .icon-moon {
+  position: absolute; inset: 0; margin: auto;
+  display: flex; align-items: center; justify-content: center;
+  transition: opacity .15s ease, transform .25s ease;
+}
+.theme-toggle .icon-sun  { opacity: 0; transform: rotate(-90deg) scale(.5); }
+.theme-toggle .icon-moon { opacity: 1; transform: rotate(0) scale(1); }
+:root.light .theme-toggle .icon-sun  { opacity: 1; transform: rotate(0) scale(1); }
+:root.light .theme-toggle .icon-moon { opacity: 0; transform: rotate(90deg) scale(.5); }
+
+/* =============================================================================
+   MOBILE BOTTOM-SHEET MODALS
+   -----------------------------------------------------------------------------
+   Below the `sm` breakpoint, every centered dialog (`.sheet-panel`, added
+   alongside each modal's existing Tailwind classes -- see the HTML) docks
+   to the bottom of the screen instead of floating as a small centered card
+   with awkward margins on all sides, and grows a small drag-handle bar so
+   it reads as an intentional native-feeling sheet instead of a resized
+   desktop dialog. `sm:` and up is untouched -- desktop keeps the original
+   centered-dialog treatment.
+   ============================================================================= */
+@media (max-width: 639px) {
+  .sheet-panel { position: relative; padding-top: 22px; }
+  .sheet-panel::before {
+    content: '';
+    position: absolute;
+    top: 8px; left: 50%;
+    width: 36px; height: 4px;
+    transform: translateX(-50%);
+    border-radius: 9999px;
+    background: rgb(var(--border));
+  }
+  /* Respect the notch/home-indicator safe area on iOS so a sheet's own
+     buttons never end up sitting underneath it. Floored at 20px (not 0px)
+     so devices WITHOUT a safe-area inset don't lose their bottom padding
+     entirely -- previously this collapsed the sheet's own `p-5` bottom
+     padding to 0, leaving action buttons (e.g. Properties Hub / Issue-
+     Dispatch / Delete in the row-details popup) sitting flush against the
+     bottom edge of the sheet with no breathing room. */
+  .sheet-panel { padding-bottom: max(env(safe-area-inset-bottom), 20px); }
+}
+
+/* Sheets (and the existing right-docked drawers) slide in rather than just
+   appearing -- a small, purely cosmetic touch that reads as considerably
+   more polished on a phone. Respects reduced-motion preferences. */
+@media (prefers-reduced-motion: no-preference) {
+  @media (max-width: 639px) {
+    .sheet-panel { animation: sheet-slide-up .22s cubic-bezier(.32,.72,0,1); }
+  }
+  .drawer-panel { animation: drawer-slide-in .22s cubic-bezier(.32,.72,0,1); }
+}
+@keyframes sheet-slide-up { from { transform: translateY(24px); opacity: .4; } to { transform: translateY(0); opacity: 1; } }
+@keyframes drawer-slide-in { from { transform: translateX(24px); opacity: .4; } to { transform: translateX(0); opacity: 1; } }
+
+/* =============================================================================
+   SWIPEABLE TAB NAV (Asset Inventory / User Directory / Ad-Hoc Directory)
+   -----------------------------------------------------------------------------
+   js/ui.js's initSwipeNav() does the actual gesture handling; this is just
+   the (mobile-only, sm:hidden via the HTML) little dot-strip under the tab
+   content telling a phone visitor those sections are swipeable left/right,
+   plus the brief translate+fade used while a swipe-triggered tab change is
+   in flight.
+   ============================================================================= */
+.swipe-dot { width: 6px; height: 6px; border-radius: 9999px; background: rgb(var(--border)); transition: background-color .15s ease, width .15s ease; }
+.swipe-dot.is-active { width: 16px; background: rgb(var(--blue-400)); }
+
+@media (prefers-reduced-motion: no-preference) {
+  .swipe-content-enter { animation: swipe-fade-in .16s ease; }
+}
+@keyframes swipe-fade-in { from { opacity: 0; transform: translateX(6px); } to { opacity: 1; transform: translateX(0); } }

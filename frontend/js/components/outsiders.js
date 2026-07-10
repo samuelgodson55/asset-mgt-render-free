@@ -16,7 +16,7 @@ import { escapeHtml, debounce, renderServerPaginationBar, personAlertIcon, rowDe
 // (debounced), page turn, or "rows per page" change re-fetches just that
 // slice from `GET /outsiders?search=&limit=&offset=` instead of
 // re-filtering an already-downloaded array.
-const outsidersState = { page: 1, perPage: 10, search: '', total: 0 };
+const outsidersState = { page: 1, perPage: 5, search: '', total: 0 };
 
 export async function loadOutsiders() {
   const tbody = document.getElementById('outsiderTableBody');
@@ -83,7 +83,7 @@ export const setOutsidersSearch = debounce((value) => {
 
 // Called from the "Rows per page" <select>'s 'change' listener (main.js).
 export function setOutsidersPerPage(value) {
-  outsidersState.perPage = parseInt(value, 10) || 10;
+  outsidersState.perPage = parseInt(value, 10) || 5;
   outsidersState.page = 1;
   loadOutsiders();
 }
