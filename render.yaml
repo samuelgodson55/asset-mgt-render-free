@@ -184,6 +184,13 @@ services:
         value: 5
       - key: LOGIN_RATE_LIMIT_WINDOW_SECONDS
         value: 60
+      # Per-account brute-force lockout -- see config.py and
+      # services/auth_service.py's login(). A second, finer-grained layer
+      # on top of the IP-based limiter above.
+      - key: ACCOUNT_LOCKOUT_MAX_ATTEMPTS
+        value: 5
+      - key: ACCOUNT_LOCKOUT_DURATION_MINUTES
+        value: 15
       # SECURITY: this is a real cloud deployment reachable from the public
       # internet, so /docs, /redoc, and /openapi.json are disabled here --
       # see config.py's ENABLE_API_DOCS docstring for the full reasoning.

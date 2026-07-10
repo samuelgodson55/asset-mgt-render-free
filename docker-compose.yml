@@ -124,6 +124,12 @@ services:
       # Operations & Observability requirement #3: login rate limiting.
       LOGIN_RATE_LIMIT_MAX: ${LOGIN_RATE_LIMIT_MAX:-5}
       LOGIN_RATE_LIMIT_WINDOW_SECONDS: ${LOGIN_RATE_LIMIT_WINDOW_SECONDS:-60}
+      # Per-account brute-force lockout (see config.py and
+      # services/auth_service.py's login()) -- a second, finer-grained
+      # layer on top of the IP-based limiter above. Only read by `backend`
+      # (login only happens there), so `worker` doesn't need these two.
+      ACCOUNT_LOCKOUT_MAX_ATTEMPTS: ${ACCOUNT_LOCKOUT_MAX_ATTEMPTS:-5}
+      ACCOUNT_LOCKOUT_DURATION_MINUTES: ${ACCOUNT_LOCKOUT_DURATION_MINUTES:-15}
       # SECURITY: exposes/hides /docs, /redoc, /openapi.json -- see
       # config.py's ENABLE_API_DOCS docstring. Defaults to "true" for local
       # dev convenience; set "false" in a real production .env. Must be
