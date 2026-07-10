@@ -32,7 +32,7 @@ import { apiRequest, API_URL } from '../api.js';
 import { getSession } from '../auth.js';
 import { escapeHtml, formatTimestamp, renderServerPaginationBar, rowDetailsTrigger } from '../ui.js';
 
-const auditState = { page: 1, perPage: 10, total: 0 };
+const auditState = { page: 1, perPage: 5, total: 0 };
 
 export async function loadAuditLogs() {
   const tbody = document.getElementById('auditTableBody');
@@ -80,7 +80,7 @@ export function changeAuditPage(delta) {
 
 // Called by main.js's delegated change handler when "Rows per page" changes.
 export function setAuditPerPage(value) {
-  auditState.perPage = parseInt(value, 10) || 10;
+  auditState.perPage = parseInt(value, 10) || 5;
   auditState.page = 1; // changing page size always resets back to page 1
   loadAuditLogs();
 }

@@ -28,7 +28,7 @@ export function getCurrentPropsAssetId() {
 // in the search box (debounced), page turn, or "rows per page" change
 // re-fetches just that slice from `GET /assets?search=&limit=&offset=`
 // instead of re-filtering an already-downloaded array.
-const assetsState = { page: 1, perPage: 10, search: '', total: 0 };
+const assetsState = { page: 1, perPage: 5, search: '', total: 0 };
 
 export async function loadAssets() {
   const tbody = document.getElementById('assetTableBody');
@@ -115,7 +115,7 @@ export const setAssetsSearch = debounce((value) => {
 
 // Called from the "Rows per page" <select>'s 'change' listener (main.js).
 export function setAssetsPerPage(value) {
-  assetsState.perPage = parseInt(value, 10) || 10;
+  assetsState.perPage = parseInt(value, 10) || 5;
   assetsState.page = 1;
   loadAssets();
 }

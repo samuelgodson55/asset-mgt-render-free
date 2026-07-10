@@ -16,7 +16,7 @@ import { refreshDashboard } from '../dashboard.js';
 // keystroke in the search box (debounced), page turn, or "rows per page"
 // change re-fetches just that slice from `GET /users?search=&limit=&
 // offset=` instead of re-filtering an already-downloaded array.
-const usersState = { page: 1, perPage: 10, search: '', total: 0 };
+const usersState = { page: 1, perPage: 5, search: '', total: 0 };
 
 // ---- User Directory / Team Allocation Matrix table ----
 export async function loadUsers() {
@@ -131,7 +131,7 @@ export const setUsersSearch = debounce((value) => {
 
 // Called from the "Rows per page" <select>'s 'change' listener (main.js).
 export function setUsersPerPage(value) {
-  usersState.perPage = parseInt(value, 10) || 10;
+  usersState.perPage = parseInt(value, 10) || 5;
   usersState.page = 1;
   loadUsers();
 }
@@ -230,7 +230,7 @@ export async function submitResetPasswordForm(event) {
 // ---- Restore Deleted Users (Super Admin/Admin only) ----
 // Same true server-side search + pagination pattern as usersState above,
 // against its own separate GET /users/deleted list.
-const deletedUsersState = { page: 1, perPage: 10, search: '', total: 0 };
+const deletedUsersState = { page: 1, perPage: 5, search: '', total: 0 };
 
 export async function loadDeletedUsers() {
   const tbody = document.getElementById('deletedUserTableBody');
@@ -297,7 +297,7 @@ export const setDeletedUsersSearch = debounce((value) => {
 });
 
 export function setDeletedUsersPerPage(value) {
-  deletedUsersState.perPage = parseInt(value, 10) || 10;
+  deletedUsersState.perPage = parseInt(value, 10) || 5;
   deletedUsersState.page = 1;
   loadDeletedUsers();
 }

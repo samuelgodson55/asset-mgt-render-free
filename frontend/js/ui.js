@@ -166,16 +166,121 @@ export function switchTab(tab) {
   allSections.forEach(s => s.classList.add('hidden'));
   allTabs.forEach(t => { t.classList.add(...inactiveCls); t.classList.remove(...activeCls); });
 
+  let activeSection;
   if (tab === 'assets') {
+    activeSection = assets;
     assets.classList.remove('hidden');
     tabAssets.classList.add(...activeCls); tabAssets.classList.remove(...inactiveCls);
   } else if (tab === 'adhoc' && adhoc) {
+    activeSection = adhoc;
     adhoc.classList.remove('hidden');
     tabAdhoc.classList.add(...activeCls); tabAdhoc.classList.remove(...inactiveCls);
   } else {
+    activeSection = users;
     users.classList.remove('hidden');
     tabUsers.classList.add(...activeCls); tabUsers.classList.remove(...inactiveCls);
   }
+
+  updateSwipeDots(tab);
+
+  // Small fade+slide-in on the freshly-revealed section, mostly noticeable
+  // when this was triggered by a swipe gesture (initSwipeNav() below) --
+  // re-trigger by removing/re-adding the class in case it's still present
+  // from a previous switch (a class added twice in a row without ever
+  // being removed wouldn't re-play the CSS animation).
+  if (activeSection) {
+    activeSection.classList.remove('swipe-content-enter');
+    // eslint-disable-next-line no-unused-expressions
+    void activeSection.offsetWidth; // force reflow so the class removal above "takes" before re-adding it
+    activeSection.classList.add('swipe-content-enter');
+  }
+}
+
+// -----------------------------------------------------------------------------
+// SWIPE-BETWEEN-TABS (mobile)
+// -----------------------------------------------------------------------------
+// admin.html / manager.html are the only pages with the 3-tab Asset
+// Inventory / User Directory / Ad-Hoc Directory nav (see switchTab()
+// above); on every other page the `#tabAssets` lookup below fails fast and
+// both functions are no-ops.
+//
+// The order swiping moves through always matches left-to-right reading
+// order of the tabs actually present on THIS page/role (Ad-Hoc doesn't
+// exist for every role), rather than a hardcoded list, so it can't ever
+// try to switch to a tab that isn't there.
+function getSwipeTabOrder() {
+  return ['assets', 'users', 'adhoc'].filter(t => document.getElementById(`tab${t[0].toUpperCase()}${t.slice(1)}`));
+}
+
+function getActiveSwipeTab(order) {
+  const sectionIds = { assets: 'assetInventorySection', users: 'userDirectorySection', adhoc: 'adhocDirectorySection' };
+  return order.find(t => {
+    const el = document.getElementById(sectionIds[t]);
+    return el && !el.classList.contains('hidden');
+  }) || order[0];
+}
+
+// A thin strip of small dots (one per tab) shown only below the `sm`
+// breakpoint -- see the `<div id="swipeDots">` markup added right under
+// the tab content in admin.html/manager.html -- so a phone visitor has a
+// visual hint that this area is swipeable, and can see at a glance which
+// of the 2-3 sections they're currently on. Desktop already has the full
+// text tab labels for that, so this stays hidden there.
+function updateSwipeDots(activeTab) {
+  const strip = document.getElementById('swipeDots');
+  if (!strip) return;
+  const order = getSwipeTabOrder();
+  strip.innerHTML = order.map(t =>
+    `<span class="swipe-dot${t === activeTab ? ' is-active' : ''}"></span>`
+  ).join('');
+}
+
+// Attaches a single touchstart/touchend pair to the whole scrollable tab
+// -content area. Deliberately conservative about when it actually counts
+// as a "swipe" (rather than a vertical scroll or a tap): the horizontal
+// distance has to clear a real threshold AND clearly dominate over
+// whatever vertical movement also happened, and it's ignored entirely
+// while any modal is open (so swiping to dismiss/scroll inside a modal --
+// e.g. the Properties Hub sheet -- never accidentally also changes the
+// tab underneath it).
+export function initSwipeNav() {
+  const order = getSwipeTabOrder();
+  if (order.length < 2) return; // nothing to swipe between on this page/role
+
+  const swipeArea = document.getElementById('swipeArea');
+  if (!swipeArea) return;
+
+  updateSwipeDots(getActiveSwipeTab(order));
+
+  const H_THRESHOLD = 60; // minimum horizontal travel, in px, to count as a swipe
+  let startX = 0, startY = 0, tracking = false;
+
+  swipeArea.addEventListener('touchstart', (event) => {
+    if (event.touches.length !== 1) { tracking = false; return; }
+    // Any open modal "wins" -- don't also change tabs underneath it.
+    if (document.querySelector('.fixed.flex[id$="Modal"]')) { tracking = false; return; }
+    startX = event.touches[0].clientX;
+    startY = event.touches[0].clientY;
+    tracking = true;
+  }, { passive: true });
+
+  swipeArea.addEventListener('touchend', (event) => {
+    if (!tracking) return;
+    tracking = false;
+    const dx = event.changedTouches[0].clientX - startX;
+    const dy = event.changedTouches[0].clientY - startY;
+    if (Math.abs(dx) < H_THRESHOLD || Math.abs(dx) < Math.abs(dy) * 1.3) return; // too vertical/short -- treat as a scroll, not a swipe
+
+    const currentOrder = getSwipeTabOrder(); // re-read in case the role's tabs changed since mount (they don't, but cheap insurance)
+    const activeTab = getActiveSwipeTab(currentOrder);
+    const currentIndex = currentOrder.indexOf(activeTab);
+    // Swiping LEFT (dx negative) advances to the NEXT tab, mirroring how a
+    // person swipes left to go "forward" through a carousel/photo album;
+    // swiping RIGHT goes back.
+    const nextIndex = dx < 0 ? currentIndex + 1 : currentIndex - 1;
+    if (nextIndex < 0 || nextIndex >= currentOrder.length) return; // already at an edge -- nothing to do
+    switchTab(currentOrder[nextIndex]);
+  }, { passive: true });
 }
 
 export function toggleRoute() {
@@ -234,7 +339,7 @@ export function toggleNameEdit() {
 // those three files (and audit.js) share.
 // =============================================================================
 export const tableState = {
-  myItems: { raw: [], search: '', page: 1, perPage: 10 },
+  myItems: { raw: [], search: '', page: 1, perPage: 5 },
 };
 
 // Maps a table key to the function that should re-render it. Each
@@ -301,7 +406,7 @@ export function setSearch(key, value) {
 // Called from the "Rows per page" <select>'s 'change' listener (main.js).
 export function setPerPage(key, value) {
   if (!tableState[key]) return;
-  tableState[key].perPage = parseInt(value, 10) || 10;
+  tableState[key].perPage = parseInt(value, 10) || 5;
   tableState[key].page = 1;
   if (RENDERERS[key]) RENDERERS[key]();
 }

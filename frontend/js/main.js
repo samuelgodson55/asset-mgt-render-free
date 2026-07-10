@@ -23,7 +23,8 @@
 // =============================================================================
 
 import { checkAccess, startIdleWatchdog, login, redirectByUserRole, logout, getSession } from './auth.js';
-import { closeModal, switchTab, toggleRoute, toggleCapacityEdit, toggleNameEdit, changePage, setSearch, setPerPage, openRowDetailsFromElement } from './ui.js';
+import { closeModal, switchTab, toggleRoute, toggleCapacityEdit, toggleNameEdit, changePage, setSearch, setPerPage, openRowDetailsFromElement, initSwipeNav } from './ui.js';
+import { toggleTheme, initThemeToggle } from './theme.js';
 import { refreshDashboard, checkAlertsNow } from './dashboard.js';
 import { dismissOverdueAlert } from './components/overdue.js';
 import { dismissDueSoonAlert } from './components/due-soon.js';
@@ -74,6 +75,7 @@ const SERVER_PAGE_CHANGERS = {
 const CLICK_ACTIONS = {
   'switch-tab': (el) => switchTab(el.dataset.tab),
   'close-modal': (el) => closeModal(el.dataset.modal),
+  'toggle-theme': () => toggleTheme(),
   // Mobile-only "Details" button rendered by every table's component file
   // (see ui.js's rowDetailsTrigger()/openRowDetailsFromElement()) -- shows
   // whatever columns that table hides below the `sm` breakpoint.
@@ -290,6 +292,11 @@ document.addEventListener('DOMContentLoaded', () => {
   checkAccess();
   startIdleWatchdog();
   wireDelegatedEvents();
+  initThemeToggle();
+  // Only does anything on admin.html/manager.html, where the Asset
+  // Inventory / User Directory / Ad-Hoc Directory tabs exist -- a no-op
+  // (returns immediately) on every other page.
+  initSwipeNav();
 
   // --- Login form (index.html) ---
   const loginForm = document.getElementById('login-form');
