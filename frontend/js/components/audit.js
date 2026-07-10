@@ -42,22 +42,23 @@ export async function loadAuditLogs() {
     const result = await apiRequest(`/audit-logs?limit=${auditState.perPage}&offset=${offset}`);
     auditState.total = result.total;
 
+    // Whole row is tappable on mobile -- see components/assets.js's
+    // renderAssetsTable() for the full explanation of this pattern.
     tbody.innerHTML = result.items.map(l => `
-    <tr>
+    <tr ${rowDetailsTrigger('Log Entry', [
+      ['Timestamp', escapeHtml(l.timestamp)],
+      ['Operator', escapeHtml(l.operator)],
+      ['Action', escapeHtml(l.action)],
+      ['Detail', escapeHtml(l.details)],
+    ])} class="cursor-pointer transition hover:bg-card2/40 active:bg-card2/60 sm:cursor-default">
       <td class="px-5 py-2.5 whitespace-nowrap" title="${escapeHtml(l.timestamp)}">${escapeHtml(formatTimestamp(l.timestamp))}</td>
       <td class="hidden px-5 py-2.5 sm:table-cell">${escapeHtml(l.operator)}</td>
       <td class="px-5 py-2.5">
         <div class="flex items-center gap-2">
           <span class="rounded bg-blue-500/10 px-1.5 py-0.5 text-blue-400 ring-1 ring-blue-500/30">${escapeHtml(l.action)}</span>
-          <!-- Mobile-only "Details" button (sm:hidden) -- surfaces the
-               Operator and Detail columns this row hides below
-               sm:table-cell. See ui.js's rowDetailsTrigger(). -->
-          <button ${rowDetailsTrigger('Log Entry', [
-            ['Timestamp', escapeHtml(l.timestamp)],
-            ['Operator', escapeHtml(l.operator)],
-            ['Action', escapeHtml(l.action)],
-            ['Detail', escapeHtml(l.details)],
-          ])} class="ml-auto shrink-0 rounded-md border border-border px-2 py-1 text-[11px] font-medium text-slate-400 transition hover:border-slate-500 hover:text-slate-200 sm:hidden">Details</button>
+          <!-- Mobile-only affordance showing the row itself is tappable
+               (replaces the old separate "Details" button). -->
+          <svg class="ml-auto h-4 w-4 shrink-0 text-slate-600 sm:hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
         </div>
       </td>
       <td class="hidden px-5 py-2.5 text-slate-500 sm:table-cell">${escapeHtml(l.details)}</td>

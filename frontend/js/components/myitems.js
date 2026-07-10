@@ -38,19 +38,27 @@ export function renderMyItemsTable() {
   const { pageRows, total, startIndex } = filterAndPaginate('myItems', ['asset_name']);
   document.querySelectorAll('.my-item-count').forEach(el => el.textContent = total);
 
-  tbody.innerHTML = pageRows.map(item => `
-    <tr class="transition hover:bg-card2/40">
+  tbody.innerHTML = pageRows.map(item => {
+    const actionButtons = `<button data-action="open-extension-request" data-checkout-id="${item.checkout_id}" data-asset-name="${escapeHtml(item.asset_name)}" data-due-date="${escapeHtml(item.due_date)}"
+      class="rounded-md border border-border px-2.5 py-1.5 text-[11px] font-semibold text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
+      Request Extension
+    </button>`;
+
+    // Whole row is tappable on mobile -- see components/assets.js's
+    // renderAssetsTable() for the full explanation of this pattern.
+    return `
+    <tr ${rowDetailsTrigger(escapeHtml(item.asset_name), [
+      ['Quantity', String(item.quantity)],
+      ['Checked Out', escapeHtml(formatTimestamp(item.checkout_date))],
+      ['Due Back', escapeHtml(item.due_date)],
+      ['', `<div class="flex flex-wrap gap-2">${actionButtons}</div>`],
+    ])} class="cursor-pointer transition hover:bg-card2/40 active:bg-card2/60 sm:cursor-default">
       <td class="px-5 py-3.5">
         <div class="flex items-center gap-2">
           <span class="font-medium text-slate-100">${escapeHtml(item.asset_name)}</span>
-          <!-- Mobile-only "Details" button (sm:hidden) -- surfaces the
-               Quantity, Checked Out, and Due Back columns this row hides
-               below sm:table-cell. See ui.js's rowDetailsTrigger(). -->
-          <button ${rowDetailsTrigger(escapeHtml(item.asset_name), [
-            ['Quantity', String(item.quantity)],
-            ['Checked Out', escapeHtml(formatTimestamp(item.checkout_date))],
-            ['Due Back', escapeHtml(item.due_date)],
-          ])} class="ml-auto shrink-0 rounded-md border border-border px-2 py-1 text-[11px] font-medium text-slate-400 transition hover:border-slate-500 hover:text-slate-200 sm:hidden">Details</button>
+          <!-- Mobile-only affordance showing the row itself is tappable
+               (replaces the old separate "Details" button). -->
+          <svg class="ml-auto h-4 w-4 shrink-0 text-slate-600 sm:hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
         </div>
       </td>
       <td class="hidden px-5 py-3.5 tag-mono text-slate-300 sm:table-cell">${item.quantity}</td>
@@ -65,13 +73,9 @@ export function renderMyItemsTable() {
               <span class="h-1.5 w-1.5 rounded-full bg-blue-500"></span> On Loan
             </span>`}
       </td>
-      <td class="px-5 py-3.5">
-        <button data-action="open-extension-request" data-checkout-id="${item.checkout_id}" data-asset-name="${escapeHtml(item.asset_name)}" data-due-date="${escapeHtml(item.due_date)}"
-          class="rounded-md border border-border px-2.5 py-1.5 text-[11px] font-semibold text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
-          Request Extension
-        </button>
-      </td>
-    </tr>`).join('') || `<tr><td colspan="6" class="px-5 py-6 text-center text-slate-500">You have no items currently checked out.</td></tr>`;
+      <td class="hidden px-5 py-3.5 sm:table-cell">${actionButtons}</td>
+    </tr>`;
+  }).join('') || `<tr><td colspan="6" class="px-5 py-6 text-center text-slate-500">You have no items currently checked out.</td></tr>`;
 
   renderPaginationBar('myItems', total, startIndex, pageRows.length);
 }

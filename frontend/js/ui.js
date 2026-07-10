@@ -102,11 +102,22 @@ export function openRowDetailsFromElement(el) {
     fields = [];
   }
 
-  bodyEl.innerHTML = fields.map(([label, value]) => `
-    <div class="flex items-start justify-between gap-4 border-b border-border/60 py-2.5 last:border-0">
+  // A field with an empty-string label is treated as a full-width block
+  // instead of a label/value row -- used for the "Actions" row each table
+  // now appends (see components/assets.js, users.js, outsiders.js,
+  // myitems.js) so the same Issue/Dispatch, Properties Hub, Delete, etc.
+  // buttons that desktop shows inline in the table row are still reachable
+  // on mobile once that row's actions column is hidden below `sm`. Those
+  // buttons carry their own real `data-action` attributes, so main.js's
+  // delegated body-level click handler wires them up automatically no
+  // matter where in the DOM they end up.
+  bodyEl.innerHTML = fields.map(([label, value]) => label
+    ? `<div class="flex items-start justify-between gap-4 border-b border-border/60 py-2.5 last:border-0">
       <dt class="text-slate-500">${escapeHtml(label)}</dt>
       <dd class="text-right font-medium text-slate-200">${value}</dd>
-    </div>`).join('') || `<p class="py-2 text-center text-slate-500">No additional details.</p>`;
+    </div>`
+    : `<div class="pt-3">${value}</div>`
+  ).join('') || `<p class="py-2 text-center text-slate-500">No additional details.</p>`;
 
   openModal('rowDetailsModal');
 }
@@ -124,10 +135,18 @@ export function formatTimestamp(isoString) {
   if (!isoString) return '';
   const d = new Date(isoString);
   if (Number.isNaN(d.getTime())) return isoString;
-  return d.toLocaleString(undefined, {
-    year: 'numeric', month: 'short', day: 'numeric',
-    hour: 'numeric', minute: '2-digit',
-  });
+  // Fixed "YYYY-MM-DD HH:MM:SS" (24-hour, local time) instead of a
+  // locale-dependent string -- consistent, sortable-looking, and doesn't
+  // vary in width from one row to the next (which is what made table
+  // columns using it jump around before).
+  const pad = (n) => String(n).padStart(2, '0');
+  const yyyy = d.getFullYear();
+  const mm = pad(d.getMonth() + 1);
+  const dd = pad(d.getDate());
+  const hh = pad(d.getHours());
+  const min = pad(d.getMinutes());
+  const ss = pad(d.getSeconds());
+  return `${yyyy}-${mm}-${dd} ${hh}:${min}:${ss}`;
 }
 
 export function switchTab(tab) {

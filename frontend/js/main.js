@@ -144,7 +144,16 @@ function wireDelegatedEvents() {
     const el = event.target.closest('[data-action]');
     if (!el) return;
     const action = CLICK_ACTIONS[el.dataset.action];
-    if (action) action(el);
+    if (!action) return;
+
+    // Action buttons embedded in the mobile "row details" popup's Actions
+    // block (see ui.js's openRowDetailsFromElement()) each open ANOTHER
+    // modal on top of it (Dispatch drawer, Properties Hub, Reset Password,
+    // etc.) -- close the details popup first so the two never stack.
+    if (el.dataset.action !== 'open-row-details' && el.closest('#rowDetailsBody')) {
+      closeModal('rowDetailsModal');
+    }
+    action(el);
   });
 
   document.body.addEventListener('change', (event) => {

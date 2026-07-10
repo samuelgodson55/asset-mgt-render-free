@@ -82,8 +82,19 @@ function renderUsersTable(users) {
     // `checkout_count` comes straight from the backend (GET /users), which
     // sums up the outstanding quantity across that user's active checkouts.
     const custodyLabel = `${u.checkout_count ?? 0} item${(u.checkout_count ?? 0) === 1 ? '' : 's'} checked out`;
+    const actionButtons = `
+      <button data-action="open-custody" data-entity-id="${u.id}" data-entity-type="user" class="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">Custody Ledger</button>
+      ${isManagerView ? '' : `<button data-action="reset-password" data-user-id="${u.id}" data-user-name="${escapeHtml(u.name)}" class="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-amber-500/50 hover:text-amber-400">Reset Password</button>`}
+      ${isManagerView ? '' : `<button data-action="delete-profile" data-user-id="${u.id}" data-user-name="${escapeHtml(u.name)}" class="rounded-md border border-rose-500/30 px-2.5 py-1.5 text-[12px] font-medium text-rose-400 transition hover:border-rose-500 hover:bg-rose-500/10">Delete Profile</button>`}`;
+
+    // Whole row is tappable on mobile -- see components/assets.js's
+    // renderAssetsTable() for the full explanation of this pattern.
     return `
-    <tr class="transition hover:bg-card2/40">
+    <tr ${rowDetailsTrigger(escapeHtml(u.name), [
+      [isManagerView ? 'Department Role' : 'Privilege Tier', escapeHtml(isManagerView ? (u.department_role || 'Team Member') : u.role.replace('_', ' '))],
+      ['Custody', custodyLabel],
+      ['', `<div class="flex flex-wrap gap-2">${actionButtons}</div>`],
+    ])} class="cursor-pointer transition hover:bg-card2/40 active:bg-card2/60 sm:cursor-default">
       <td class="px-5 py-3.5">
         <div class="flex items-center gap-3">
           <div class="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 text-[11px] font-bold text-white">${initials}</div>
@@ -91,14 +102,9 @@ function renderUsersTable(users) {
             <p class="flex items-center gap-1.5 font-medium text-slate-100">${escapeHtml(u.name)} ${personAlertIcon(u.alerts)}</p>
             <p class="tag-mono text-[11px] text-slate-500">${escapeHtml(u.email)}</p>
           </div>
-          <!-- Mobile-only "Details" button (sm:hidden) -- surfaces the
-               Privilege Tier / Department Role and Custody columns this
-               row hides below sm:table-cell. See ui.js's
-               rowDetailsTrigger(). -->
-          <button ${rowDetailsTrigger(escapeHtml(u.name), [
-            [isManagerView ? 'Department Role' : 'Privilege Tier', escapeHtml(isManagerView ? (u.department_role || 'Team Member') : u.role.replace('_', ' '))],
-            ['Custody', custodyLabel],
-          ])} class="ml-auto shrink-0 rounded-md border border-border px-2 py-1 text-[11px] font-medium text-slate-400 transition hover:border-slate-500 hover:text-slate-200 sm:hidden">Details</button>
+          <!-- Mobile-only affordance showing the row itself is tappable
+               (replaces the old separate "Details" button). -->
+          <svg class="ml-auto h-4 w-4 shrink-0 text-slate-600 sm:hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
         </div>
       </td>
       <td class="hidden px-5 py-3.5 sm:table-cell">
@@ -107,12 +113,8 @@ function renderUsersTable(users) {
         </span>
       </td>
       <td class="hidden px-5 py-3.5 tag-mono text-slate-300 sm:table-cell">${custodyLabel}</td>
-      <td class="px-5 py-3.5">
-        <div class="flex flex-wrap justify-end gap-2">
-          <button data-action="open-custody" data-entity-id="${u.id}" data-entity-type="user" class="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">Custody Ledger</button>
-          ${isManagerView ? '' : `<button data-action="reset-password" data-user-id="${u.id}" data-user-name="${escapeHtml(u.name)}" class="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-amber-500/50 hover:text-amber-400">Reset Password</button>`}
-          ${isManagerView ? '' : `<button data-action="delete-profile" data-user-id="${u.id}" data-user-name="${escapeHtml(u.name)}" class="rounded-md border border-rose-500/30 px-2.5 py-1.5 text-[12px] font-medium text-rose-400 transition hover:border-rose-500 hover:bg-rose-500/10">Delete Profile</button>`}
-        </div>
+      <td class="hidden px-5 py-3.5 sm:table-cell">
+        <div class="flex flex-wrap justify-end gap-2">${actionButtons}</div>
       </td>
     </tr>`;
   }).join('') || `<tr><td colspan="4" class="px-5 py-6 text-center text-slate-500">No accounts found.</td></tr>`;
@@ -253,8 +255,14 @@ function renderDeletedUsersTable(users) {
 
   tbody.innerHTML = users.map(u => {
     const initials = u.name.split(' ').map(p => p[0]).join('').slice(0, 2).toUpperCase();
+    const actionButtons = `<button data-action="restore-user" data-user-id="${u.id}" data-user-name="${escapeHtml(u.name)}" class="rounded-md border border-emerald-500/30 px-2.5 py-1.5 text-[12px] font-medium text-emerald-400 transition hover:border-emerald-500 hover:bg-emerald-500/10">Restore</button>`;
+
     return `
-    <tr class="transition hover:bg-card2/40">
+    <tr ${rowDetailsTrigger(escapeHtml(u.name), [
+      ['Privilege Tier', escapeHtml(u.role.replace('_', ' '))],
+      ['Deleted On', u.deleted_at ? escapeHtml(formatTimestamp(u.deleted_at)) : '—'],
+      ['', `<div class="flex flex-wrap gap-2">${actionButtons}</div>`],
+    ])} class="cursor-pointer transition hover:bg-card2/40 active:bg-card2/60 sm:cursor-default">
       <td class="px-5 py-3.5">
         <div class="flex items-center gap-3">
           <div class="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-slate-500 to-slate-600 text-[11px] font-bold text-white">${initials}</div>
@@ -262,13 +270,9 @@ function renderDeletedUsersTable(users) {
             <p class="font-medium text-slate-100">${escapeHtml(u.name)}</p>
             <p class="tag-mono text-[11px] text-slate-500">${escapeHtml(u.email)}</p>
           </div>
-          <!-- Mobile-only "Details" button (sm:hidden) -- surfaces the
-               Privilege Tier and Deleted On columns this row hides below
-               sm:table-cell. See ui.js's rowDetailsTrigger(). -->
-          <button ${rowDetailsTrigger(escapeHtml(u.name), [
-            ['Privilege Tier', escapeHtml(u.role.replace('_', ' '))],
-            ['Deleted On', u.deleted_at ? escapeHtml(formatTimestamp(u.deleted_at)) : '—'],
-          ])} class="ml-auto shrink-0 rounded-md border border-border px-2 py-1 text-[11px] font-medium text-slate-400 transition hover:border-slate-500 hover:text-slate-200 sm:hidden">Details</button>
+          <!-- Mobile-only affordance showing the row itself is tappable
+               (replaces the old separate "Details" button). -->
+          <svg class="ml-auto h-4 w-4 shrink-0 text-slate-600 sm:hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
         </div>
       </td>
       <td class="hidden px-5 py-3.5 sm:table-cell">
@@ -277,10 +281,8 @@ function renderDeletedUsersTable(users) {
         </span>
       </td>
       <td class="hidden px-5 py-3.5 tag-mono text-slate-400 sm:table-cell" title="${escapeHtml(u.deleted_at || '')}">${u.deleted_at ? formatTimestamp(u.deleted_at) : '—'}</td>
-      <td class="px-5 py-3.5">
-        <div class="flex flex-wrap justify-end gap-2">
-          <button data-action="restore-user" data-user-id="${u.id}" data-user-name="${escapeHtml(u.name)}" class="rounded-md border border-emerald-500/30 px-2.5 py-1.5 text-[12px] font-medium text-emerald-400 transition hover:border-emerald-500 hover:bg-emerald-500/10">Restore</button>
-        </div>
+      <td class="hidden px-5 py-3.5 sm:table-cell">
+        <div class="flex flex-wrap justify-end gap-2">${actionButtons}</div>
       </td>
     </tr>`;
   }).join('') || `<tr><td colspan="4" class="px-5 py-6 text-center text-slate-500">No deleted accounts.</td></tr>`;

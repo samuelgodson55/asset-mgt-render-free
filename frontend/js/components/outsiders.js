@@ -41,8 +41,16 @@ function renderOutsidersTable(outsiders) {
 
   tbody.innerHTML = outsiders.map(o => {
     const initials = o.name.split(' ').map(p => p[0]).join('').slice(0, 2).toUpperCase();
+    const actionButtons = `<button data-action="open-custody" data-entity-id="${o.id}" data-entity-type="outsider" class="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">Custody Ledger</button>`;
+
+    // Whole row is tappable on mobile -- see components/assets.js's
+    // renderAssetsTable() for the full explanation of this pattern.
     return `
-    <tr class="transition hover:bg-card2/40">
+    <tr ${rowDetailsTrigger(escapeHtml(o.name), [
+      ['Company', escapeHtml(o.company || '—')],
+      ['Custody', `${o.outstanding_items} item${o.outstanding_items === 1 ? '' : 's'} checked out`],
+      ['', `<div class="flex flex-wrap gap-2">${actionButtons}</div>`],
+    ])} class="cursor-pointer transition hover:bg-card2/40 active:bg-card2/60 sm:cursor-default">
       <td class="px-5 py-3.5">
         <div class="flex items-center gap-3">
           <div class="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-amber-500 to-orange-600 text-[11px] font-bold text-white">${initials}</div>
@@ -50,21 +58,15 @@ function renderOutsidersTable(outsiders) {
             <p class="flex items-center gap-1.5 font-medium text-slate-100">${escapeHtml(o.name)} ${personAlertIcon(o.alerts)}</p>
             <p class="tag-mono text-[11px] text-slate-500">${escapeHtml(o.contact_details)}</p>
           </div>
-          <!-- Mobile-only "Details" button (sm:hidden) -- surfaces the
-               Company and Custody columns this row hides below
-               sm:table-cell. See ui.js's rowDetailsTrigger(). -->
-          <button ${rowDetailsTrigger(escapeHtml(o.name), [
-            ['Company', escapeHtml(o.company || '—')],
-            ['Custody', `${o.outstanding_items} item${o.outstanding_items === 1 ? '' : 's'} checked out`],
-          ])} class="ml-auto shrink-0 rounded-md border border-border px-2 py-1 text-[11px] font-medium text-slate-400 transition hover:border-slate-500 hover:text-slate-200 sm:hidden">Details</button>
+          <!-- Mobile-only affordance showing the row itself is tappable
+               (replaces the old separate "Details" button). -->
+          <svg class="ml-auto h-4 w-4 shrink-0 text-slate-600 sm:hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
         </div>
       </td>
       <td class="hidden px-5 py-3.5 text-slate-300 sm:table-cell">${escapeHtml(o.company || '—')}</td>
       <td class="hidden px-5 py-3.5 tag-mono text-slate-300 sm:table-cell">${o.outstanding_items} item${o.outstanding_items === 1 ? '' : 's'} checked out</td>
-      <td class="px-5 py-3.5">
-        <div class="flex flex-wrap justify-end gap-2">
-          <button data-action="open-custody" data-entity-id="${o.id}" data-entity-type="outsider" class="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">Custody Ledger</button>
-        </div>
+      <td class="hidden px-5 py-3.5 sm:table-cell">
+        <div class="flex flex-wrap justify-end gap-2">${actionButtons}</div>
       </td>
     </tr>`;
   }).join('') || `<tr><td colspan="4" class="px-5 py-6 text-center text-slate-500">No ad-hoc individuals on file yet.</td></tr>`;
