@@ -23,7 +23,7 @@
 // =============================================================================
 
 import { checkAccess, startIdleWatchdog, login, redirectByUserRole, logout, getSession } from './auth.js';
-import { closeModal, switchTab, toggleRoute, toggleCapacityEdit, toggleNameEdit, toggleDepartmentEdit, changePage, setSearch, setPerPage, openRowDetailsFromElement, initSwipeNav } from './ui.js';
+import { closeModal, switchTab, toggleRoute, toggleCapacityEdit, toggleNameEdit, toggleDepartmentEdit, changePage, setSearch, setPerPage, openRowDetailsFromElement, initSwipeNav, initModalBackdropDismiss } from './ui.js';
 import { toggleTheme, initThemeToggle } from './theme.js';
 import { refreshDashboard, checkAlertsNow } from './dashboard.js';
 import { dismissOverdueAlert } from './components/overdue.js';
@@ -319,6 +319,9 @@ document.addEventListener('DOMContentLoaded', () => {
   // Inventory / User Directory / Ad-Hoc Directory tabs exist -- a no-op
   // (returns immediately) on every other page.
   initSwipeNav();
+  // App-wide (every page with a modal) -- lets a click on the dimmed
+  // backdrop behind any modal close it, same as its Cancel/X button.
+  initModalBackdropDismiss();
 
   // --- Login form (index.html) ---
   const loginForm = document.getElementById('login-form');

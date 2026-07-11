@@ -261,7 +261,7 @@ def get_status() -> dict:
     latest = entries[0] if entries else None
     return {
         "auto_backup_enabled": settings.ENABLE_AUTO_BACKUP,
-        "backup_hour_utc": settings.BACKUP_HOUR_UTC,
+        "backup_hours_utc": settings.backup_hours_utc_list,
         "gdrive_enabled": settings.BACKUP_GDRIVE_ENABLED,
         "retention_count": settings.BACKUP_RETENTION_COUNT,
         "backup_count": len(entries),
@@ -478,23 +478,34 @@ _scheduler_started = False
 _scheduler_lock = threading.Lock()
 
 
-def _seconds_until_next_run(hour_utc: int) -> float:
+def _seconds_until_next_run(hours_utc: list[int]) -> float:
+    """
+    Finds the soonest upcoming run time across ALL configured hours (today
+    or tomorrow, whichever comes first) rather than just one -- e.g. for
+    hours_utc=[3, 15, 21] at 16:00 UTC, the next run is 21:00 UTC today, not
+    tomorrow's 3:00.
+    """
     now = datetime.datetime.now(datetime.timezone.utc)
-    target = now.replace(hour=hour_utc, minute=0, second=0, microsecond=0)
-    if target <= now:
-        target += datetime.timedelta(days=1)
-    return (target - now).total_seconds()
+    candidates = []
+    for hour in hours_utc:
+        target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+        if target <= now:
+            target += datetime.timedelta(days=1)
+        candidates.append(target)
+    return (min(candidates) - now).total_seconds()
 
 
 def _scheduler_loop() -> None:
-    logger.info("backup_service: scheduler thread started -- daily backup at %02d:00 UTC.", settings.BACKUP_HOUR_UTC)
+    hours = settings.backup_hours_utc_list
+    hours_label = ", ".join(f"{h:02d}:00" for h in hours)
+    logger.info("backup_service: scheduler thread started -- backup at %s UTC daily.", hours_label)
     while True:
-        sleep_seconds = _seconds_until_next_run(settings.BACKUP_HOUR_UTC)
+        sleep_seconds = _seconds_until_next_run(settings.backup_hours_utc_list)
         time.sleep(sleep_seconds)
         try:
             create_backup(triggered_by="scheduled")
         except Exception:
-            logger.exception("backup_service: scheduled daily backup failed.")
+            logger.exception("backup_service: scheduled backup failed.")
         # Small buffer so a slightly-early wakeup (clock drift) can't fire twice.
         time.sleep(5)
 

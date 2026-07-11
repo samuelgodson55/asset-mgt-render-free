@@ -899,8 +899,8 @@ see `.gitignore`) and are read by `backend/config.py` into a single typed
 | `DUE_SOON_NOTIFICATION_INTERVAL_HOURS` | `24` | How often the Celery Beat job checks for checkouts about to go overdue and sends the due-soon reminder digest. Same "lower it for local testing" idea as `OVERDUE_NOTIFICATION_INTERVAL_HOURS` above. |
 | `ACCOUNT_LOCKOUT_MAX_ATTEMPTS` | `5` | Wrong-password attempts against **the same account** before it's locked, regardless of which IP they came from. |
 | `ACCOUNT_LOCKOUT_DURATION_MINUTES` | `15` | How long that per-account lock lasts once triggered. |
-| `ENABLE_AUTO_BACKUP` | `true` | Runs one daily `pg_dump` backup inside this same process (a plain daemon thread — no Celery/Redis dependency). See [Backups](#backups). |
-| `BACKUP_HOUR_UTC` | `3` | Hour of day (UTC, 0–23) the daily backup runs at. |
+| `ENABLE_AUTO_BACKUP` | `true` | Runs a `pg_dump` backup inside this same process (a plain daemon thread — no Celery/Redis dependency) at each hour in `BACKUP_HOURS_UTC`. See [Backups](#backups). |
+| `BACKUP_HOURS_UTC` | `3` | Comma-separated hours of day (UTC, each 0–23) the backup runs at — `3` for once a day, `3,15,21` for three times a day. |
 | `BACKUP_DIR` | `/app/backups` | Where local backup files + their `index.json` metadata live inside the container. |
 | `BACKUP_RETENTION_COUNT` | `7` | How many local backup files to keep before deleting the oldest. Google Drive copies (if enabled) are unaffected. |
 | `BACKUP_GDRIVE_ENABLED` | `false` | Uploads every backup to Google Drive right after it's written locally — the only thing that makes a backup survive a Render redeploy/spin-down. |
@@ -1084,8 +1084,9 @@ Everything lives in `backend/services/backup_service.py` (the logic),
 `backend/api/backup.py` (the `/api/backup/*` routes, Super Admin/Admin
 only), and the **System Backups** panel at the bottom of `admin.html`.
 
-**What happens automatically:** once a day, at `BACKUP_HOUR_UTC` (default
-`3`, i.e. 03:00 UTC), this app runs `pg_dump` against its own database,
+**What happens automatically:** once a day at each hour listed in
+`BACKUP_HOURS_UTC` (default `3`, i.e. 03:00 UTC — set e.g. `3,15,21` for
+three times a day), this app runs `pg_dump` against its own database,
 gzip-compresses the result, saves it to `BACKUP_DIR` (default
 `/app/backups`), and — if `BACKUP_GDRIVE_ENABLED=true` — uploads that same
 file to a Google Drive folder you control. This runs as a plain daemon
