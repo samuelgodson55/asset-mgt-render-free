@@ -67,7 +67,7 @@ export async function loadBackupStatus() {
       <div class="grid grid-cols-2 gap-4 sm:grid-cols-4">
         <div>
           <p class="text-[11px] uppercase tracking-wide text-slate-500">Daily schedule</p>
-          <p class="text-[13px] font-semibold text-slate-200">${status.auto_backup_enabled ? `${String(status.backup_hour_utc).padStart(2, '0')}:00 UTC` : 'Disabled'}</p>
+          <p class="text-[13px] font-semibold text-slate-200">${status.auto_backup_enabled ? status.backup_hours_utc.map(h => `${String(h).padStart(2, '0')}:00`).join(', ') + ' UTC' : 'Disabled'}</p>
         </div>
         <div>
           <p class="text-[11px] uppercase tracking-wide text-slate-500">Google Drive sync</p>

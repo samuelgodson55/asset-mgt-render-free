@@ -34,6 +34,7 @@ HOW VARIABLES FLOW (beginner-friendly walkthrough)
    directly. One source of truth, one place to add new config values.
 """
 
+from typing import Optional
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -342,8 +343,18 @@ class Settings(BaseSettings):
     # it does not depend on Celery/Redis being configured at all, so it
     # works identically whether or not the embedded worker is enabled.
     ENABLE_AUTO_BACKUP: bool = True
-    # Hour of day (UTC, 0-23) the daily scheduled backup runs at.
-    BACKUP_HOUR_UTC: int = 3
+    # Comma-separated hours of day (UTC, each 0-23) the scheduled backup
+    # runs at -- e.g. "3" for once a day, or "3,15,21" for three times a
+    # day. Parsed/validated by `backup_hours_utc_list` below; invalid
+    # values (out of 0-23, non-numeric) raise a clear error at startup
+    # rather than silently being ignored.
+    BACKUP_HOURS_UTC: str = "3"
+    # DEPRECATED, kept only for existing deployments that already set this
+    # single-value var -- if set, it OVERRIDES BACKUP_HOURS_UTC entirely
+    # (so upgrading this app doesn't silently change an existing schedule).
+    # New setups should use BACKUP_HOURS_UTC instead. Leave unset (None) to
+    # use BACKUP_HOURS_UTC.
+    BACKUP_HOUR_UTC: Optional[int] = None
     # Where local backup files (and their index.json metadata file) live
     # inside the container.
     BACKUP_DIR: str = "/app/backups"
@@ -399,7 +410,14 @@ class Settings(BaseSettings):
     # Tell Pydantic Settings v2 to also look for a `.env` file (useful when
     # running the backend directly with `uvicorn main:app` outside Docker,
     # where environment variables aren't injected by docker-compose.yml).
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    # env_ignore_empty: docker-compose.yml passes through vars like
+    # `BACKUP_HOUR_UTC: ${BACKUP_HOUR_UTC:-}` so an unset .env value arrives
+    # here as a literal empty string, not as "truly absent" -- without this,
+    # that empty string would fail to parse as int/bool for fields like
+    # BACKUP_HOUR_UTC below and crash the app on boot. Every other field in
+    # this file already treats an empty string the same as its default
+    # value, so this has no effect anywhere else.
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore", env_ignore_empty=True)
 
     @property
     def cors_origin_list(self) -> list[str]:
@@ -410,6 +428,33 @@ class Settings(BaseSettings):
     def admin_notification_email_list(self) -> list[str]:
         """Split the comma-separated ADMIN_NOTIFICATION_EMAILS string into a clean list."""
         return [email.strip() for email in self.ADMIN_NOTIFICATION_EMAILS.split(",") if email.strip()]
+
+    @property
+    def backup_hours_utc_list(self) -> list[int]:
+        """
+        Parses BACKUP_HOURS_UTC ("3" or "3,15,21") into a sorted, deduped
+        list of ints, same comma-separated-string pattern as
+        cors_origin_list/admin_notification_email_list above. If the
+        deprecated single-value BACKUP_HOUR_UTC is set, it wins outright
+        (see that field's own docstring for why) and BACKUP_HOURS_UTC is
+        ignored entirely.
+        """
+        if self.BACKUP_HOUR_UTC is not None:
+            return [self.BACKUP_HOUR_UTC]
+
+        hours: set[int] = set()
+        for part in self.BACKUP_HOURS_UTC.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                hour = int(part)
+            except ValueError:
+                raise ValueError(f"BACKUP_HOURS_UTC contains a non-numeric hour: '{part}'.")
+            if not 0 <= hour <= 23:
+                raise ValueError(f"BACKUP_HOURS_UTC contains an out-of-range hour: {hour} (must be 0-23).")
+            hours.add(hour)
+        return sorted(hours) or [3]
 
     @property
     def is_production(self) -> bool:
@@ -476,6 +521,19 @@ class Settings(BaseSettings):
                 f"least {_MIN_PROD_SUPER_ADMIN_PASSWORD_LENGTH} characters long."
             )
 
+        return self
+
+    # -----------------------------------------------------------------
+    # STARTUP CHECK: BACKUP_HOURS_UTC is well-formed
+    # -----------------------------------------------------------------
+    # backup_hours_utc_list (above) is a lazy @property -- without this,
+    # a typo like BACKUP_HOURS_UTC="3,25" would only surface when the
+    # scheduler thread first reads it, which could be hours after boot
+    # (whenever the next scheduled run was supposed to be). Same
+    # fail-fast-at-import-time approach as _enforce_prod_jwt_secret above.
+    @model_validator(mode="after")
+    def _validate_backup_hours(self) -> "Settings":
+        self.backup_hours_utc_list
         return self
 
 

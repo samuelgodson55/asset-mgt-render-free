@@ -90,6 +90,9 @@
       <button id="tabAdhoc" data-action="switch-tab" data-tab="adhoc" class="relative border-b-2 border-transparent px-3 py-3 text-[13px] font-medium text-slate-500 transition hover:text-slate-300 sm:px-4">
         <span class="sm:hidden">Ad-Hoc</span><span class="hidden sm:inline">Ad-Hoc Directory</span>
       </button>
+      <button id="tabLogs" data-action="switch-tab" data-tab="logs" class="relative border-b-2 border-transparent px-3 py-3 text-[13px] font-medium text-slate-500 transition hover:text-slate-300 sm:px-4">
+        <span class="sm:hidden">Logs</span><span class="hidden sm:inline">Audit &amp; Backups</span>
+      </button>
     </nav>
   </div>
 </header>
@@ -180,12 +183,12 @@
   <!-- Swipe hint dots (mobile only) -- see js/ui.js's updateSwipeDots(). -->
   <div id="swipeDots" class="mb-4 flex items-center justify-center gap-1.5 sm:hidden"></div>
 
-  <!-- #swipeArea wraps all three tab sections below so js/ui.js's
+  <!-- #swipeArea wraps all four tab sections below so js/ui.js's
        initSwipeNav() can attach a single touchstart/touchend pair here and
        let a phone visitor move between Asset Inventory / User Directory /
-       Ad-Hoc Directory by swiping left or right, in addition to tapping
-       the tabs in the navbar above. Desktop is unaffected -- touch events
-       simply never fire from a mouse. -->
+       Ad-Hoc Directory / Audit & Backups by swiping left or right, in
+       addition to tapping the tabs in the navbar above. Desktop is
+       unaffected -- touch events simply never fire from a mouse. -->
   <div id="swipeArea">
   <!-- ================= ASSET INVENTORY INTERFACE ================= -->
   <section id="assetInventorySection">
@@ -538,7 +541,15 @@
       </div>
     </div>
   </section>
-  </div><!-- /#swipeArea -->
+
+  <!-- ================= AUDIT & BACKUPS (4th tab) =================
+       Previously both of these sat unconditionally below the 3 tabs above
+       (visible no matter which tab was active), which crowded the page on
+       mobile in particular. Grouped into their own tab instead -- manager.html
+       doesn't get this same tab since its own Audit Trail section has no
+       System Backups panel next to it (backups are Super Admin/Admin-only,
+       see that section's own comment below). -->
+  <section id="auditBackupsSection" class="hidden space-y-6 sm:space-y-8">
 
   <!-- ================= AUDIT TRAIL ================= -->
   <section class="overflow-hidden rounded-xl border border-border bg-card">
@@ -649,6 +660,9 @@
       </tbody>
     </table>
   </section>
+
+  </section><!-- /#auditBackupsSection -->
+  </div><!-- /#swipeArea -->
 </main>
 
 <!-- ================= RESTORE BACKUP MODAL ================= -->

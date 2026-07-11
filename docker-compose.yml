@@ -171,7 +171,10 @@ services:
       DUE_SOON_NOTIFICATION_INTERVAL_HOURS: ${DUE_SOON_NOTIFICATION_INTERVAL_HOURS:-24}
       # Database backups -- see backend/config.py's BACKUP_* docstring.
       ENABLE_AUTO_BACKUP: ${ENABLE_AUTO_BACKUP:-true}
-      BACKUP_HOUR_UTC: ${BACKUP_HOUR_UTC:-3}
+      BACKUP_HOURS_UTC: ${BACKUP_HOURS_UTC:-3}
+      # Deprecated single-value override -- see config.py's docstring. Left
+      # unset by default so BACKUP_HOURS_UTC above is what actually applies.
+      BACKUP_HOUR_UTC: ${BACKUP_HOUR_UTC:-}
       BACKUP_DIR: ${BACKUP_DIR:-/app/backups}
       BACKUP_RETENTION_COUNT: ${BACKUP_RETENTION_COUNT:-7}
       BACKUP_GDRIVE_ENABLED: ${BACKUP_GDRIVE_ENABLED:-false}

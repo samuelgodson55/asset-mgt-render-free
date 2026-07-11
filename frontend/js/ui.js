@@ -48,6 +48,33 @@ export function closeModal(id) {
   el.classList.remove('flex');
 }
 
+// -----------------------------------------------------------------------------
+// CLICK-OUTSIDE-TO-CLOSE (every modal)
+// -----------------------------------------------------------------------------
+// Every modal in this app is built the same way (see openModal()'s own
+// comment above): a `fixed inset-0 ... [id$="Modal"]` wrapper containing a
+// `.backdrop` div (the dim/blurred layer) as one sibling and the actual
+// visible panel as another. Clicking the backdrop itself -- i.e. anywhere
+// in the dimmed area OUTSIDE the panel -- should dismiss the modal, same
+// as tapping its Cancel/X button.
+//
+// This works for every current and future modal with zero per-modal
+// wiring: it's one delegated listener here, gated on the click TARGET
+// itself being the `.backdrop` element (not something that merely
+// bubbled through it, which can't happen anyway since the panel is a
+// sibling of `.backdrop`, not a descendant of it -- but the explicit
+// check keeps this robust even if that markup pattern ever changes).
+// Every close button in this app already just closes with no
+// confirmation step first (see admin.html's `data-action="close-modal"`
+// buttons), so dismissing this same way from the backdrop is safe too.
+export function initModalBackdropDismiss() {
+  document.addEventListener('click', (event) => {
+    if (!event.target.classList.contains('backdrop')) return;
+    const modal = event.target.closest('[id$="Modal"]');
+    if (modal) closeModal(modal.id);
+  });
+}
+
 export function escapeHtml(str) {
   if (str === null || str === undefined) return '';
   return String(str).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -153,15 +180,17 @@ export function switchTab(tab) {
   const assets = document.getElementById('assetInventorySection');
   const users = document.getElementById('userDirectorySection');
   const adhoc = document.getElementById('adhocDirectorySection');
+  const logs = document.getElementById('auditBackupsSection');
   const tabAssets = document.getElementById('tabAssets');
   const tabUsers = document.getElementById('tabUsers');
   const tabAdhoc = document.getElementById('tabAdhoc');
+  const tabLogs = document.getElementById('tabLogs');
   if (!assets || !users) return;
 
   const activeCls = ['border-blue-500', 'text-slate-50', 'font-semibold'];
   const inactiveCls = ['border-transparent', 'text-slate-500', 'font-medium'];
-  const allTabs = [tabAssets, tabUsers, tabAdhoc].filter(Boolean);
-  const allSections = [assets, users, adhoc].filter(Boolean);
+  const allTabs = [tabAssets, tabUsers, tabAdhoc, tabLogs].filter(Boolean);
+  const allSections = [assets, users, adhoc, logs].filter(Boolean);
 
   allSections.forEach(s => s.classList.add('hidden'));
   allTabs.forEach(t => { t.classList.add(...inactiveCls); t.classList.remove(...activeCls); });
@@ -175,6 +204,10 @@ export function switchTab(tab) {
     activeSection = adhoc;
     adhoc.classList.remove('hidden');
     tabAdhoc.classList.add(...activeCls); tabAdhoc.classList.remove(...inactiveCls);
+  } else if (tab === 'logs' && logs) {
+    activeSection = logs;
+    logs.classList.remove('hidden');
+    tabLogs.classList.add(...activeCls); tabLogs.classList.remove(...inactiveCls);
   } else {
     activeSection = users;
     users.classList.remove('hidden');
@@ -199,21 +232,25 @@ export function switchTab(tab) {
 // -----------------------------------------------------------------------------
 // SWIPE-BETWEEN-TABS (mobile)
 // -----------------------------------------------------------------------------
-// admin.html / manager.html are the only pages with the 3-tab Asset
-// Inventory / User Directory / Ad-Hoc Directory nav (see switchTab()
-// above); on every other page the `#tabAssets` lookup below fails fast and
-// both functions are no-ops.
+// admin.html / manager.html are the only pages with this tabbed nav (see
+// switchTab() above) -- admin.html has 4 tabs (Asset Inventory / User
+// Directory / Ad-Hoc Directory / Audit & Backups), manager.html only 3
+// (no Audit & Backups tab there -- see admin.html's own comment on
+// #auditBackupsSection for why backups are Super Admin/Admin-only).
+// getSwipeTabOrder()'s `document.getElementById` filter below means both
+// pages "just work" here without any per-page branching; on every other
+// page the `#tabAssets` lookup fails fast and both functions are no-ops.
 //
 // The order swiping moves through always matches left-to-right reading
 // order of the tabs actually present on THIS page/role (Ad-Hoc doesn't
 // exist for every role), rather than a hardcoded list, so it can't ever
 // try to switch to a tab that isn't there.
 function getSwipeTabOrder() {
-  return ['assets', 'users', 'adhoc'].filter(t => document.getElementById(`tab${t[0].toUpperCase()}${t.slice(1)}`));
+  return ['assets', 'users', 'adhoc', 'logs'].filter(t => document.getElementById(`tab${t[0].toUpperCase()}${t.slice(1)}`));
 }
 
 function getActiveSwipeTab(order) {
-  const sectionIds = { assets: 'assetInventorySection', users: 'userDirectorySection', adhoc: 'adhocDirectorySection' };
+  const sectionIds = { assets: 'assetInventorySection', users: 'userDirectorySection', adhoc: 'adhocDirectorySection', logs: 'auditBackupsSection' };
   return order.find(t => {
     const el = document.getElementById(sectionIds[t]);
     return el && !el.classList.contains('hidden');
