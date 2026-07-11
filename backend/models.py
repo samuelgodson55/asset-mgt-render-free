@@ -122,6 +122,22 @@ class AssetType(Base):
     available_quantity = Column(Integer, default=0, nullable=False)
     custom_fields = Column(JSON, default=dict, nullable=True)
 
+    # --- Originating department (OPTIONAL) ---------------------------------
+    # Which internal department this pool's equipment originates from/
+    # belongs to (e.g. "Engineering", "Design"). Purely descriptive/
+    # organizational -- unlike User.department (below), it does NOT scope
+    # who can see or dispatch the pool; every role that can see the Asset
+    # Inventory today still sees every pool regardless of this value.
+    # Settable when a pool is first registered (POST /assets) or via CSV
+    # batch import (POST /assets/import, "department" column), and left
+    # NULL when not provided since not every org tracks this. Surfaced next
+    # to the pool's POOL-{id} tag in the Asset Inventory table, inside the
+    # Properties Hub modal, as a "Department" column on every checked-out-
+    # items export, and as the filter categories on the Asset Inventory's
+    # own export (see services/asset_service.py's
+    # export_assets_inventory() / list_asset_departments()).
+    department = Column(String, nullable=True)
+
     # --- Soft delete ------------------------------------------------------
     # We NEVER hard-delete an asset pool row (same rationale as User below):
     # a hard delete would either violate the foreign keys from

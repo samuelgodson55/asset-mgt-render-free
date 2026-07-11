@@ -122,9 +122,13 @@ def seed_db():
         db.commit()
 
         # --- Demo asset pools ----------------------------------------------------
-        laptop_pool = models.AssetType(name='MacBook Pro 14" M3 Pool', total_quantity=15, available_quantity=14)
-        monitor_pool = models.AssetType(name="Dell UltraSharp U2723QE Monitor", total_quantity=40, available_quantity=39)
-        mouse_pool = models.AssetType(name="Logitech MX Master 3S", total_quantity=60, available_quantity=59)
+        # Every pool now gets a department (previously only used in ad-hoc
+        # testing) so "Asset Inventory Export by department" and the
+        # Properties Hub's department field have real demo data to show
+        # instead of an empty "No department set" state on first boot.
+        laptop_pool = models.AssetType(name='MacBook Pro 14" M3 Pool', total_quantity=15, available_quantity=14, department="Engineering")
+        monitor_pool = models.AssetType(name="Dell UltraSharp U2723QE Monitor", total_quantity=40, available_quantity=39, department="Engineering")
+        mouse_pool = models.AssetType(name="Logitech MX Master 3S", total_quantity=60, available_quantity=59, department="Operations")
         db.add_all([laptop_pool, monitor_pool, mouse_pool])
         db.commit()
 

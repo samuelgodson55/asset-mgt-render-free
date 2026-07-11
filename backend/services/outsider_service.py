@@ -85,6 +85,7 @@ def get_outsider_assigned_items(db: Session, outsider_id: int) -> dict:
     ).all()
     items = [{
         "checkout_id": c.id, "asset_name": c.asset.name if c.asset else "Unknown Asset",
+        "asset_department": c.asset.department if c.asset else None,
         "quantity": c.quantity, "quantity_returned": c.quantity_returned, "outstanding": c.quantity - c.quantity_returned,
         # TIMEZONE FIX -- see services/user_service.py's
         # get_my_assigned_items() for the full explanation of why this is
@@ -112,7 +113,7 @@ def get_outsider_assigned_items(db: Session, outsider_id: int) -> dict:
 # aren't tied to a department at all), so "ad-hoc individuals under a
 # Manager's purview" means the same thing here as it does everywhere else
 # in this codebase: every ad-hoc profile in the system.
-_ITEM_EXPORT_HEADERS = ["Asset", "Quantity", "Quantity Returned", "Outstanding", "Checked Out", "Due Date"]
+_ITEM_EXPORT_HEADERS = ["Asset", "Department", "Quantity", "Quantity Returned", "Outstanding", "Checked Out", "Due Date"]
 
 
 def _format_export_datetime(iso_string: Optional[str]) -> str:
@@ -134,7 +135,7 @@ def _item_export_rows(items: list) -> list:
     """Turns the `assigned_items` list shape (see get_outsider_assigned_items
     above) into plain rows for export_service.build_csv_bytes()/build_pdf_bytes()."""
     return [
-        [i["asset_name"], i["quantity"], i["quantity_returned"], i["outstanding"], _format_export_datetime(i["checkout_date"]), i["due_date"]]
+        [i["asset_name"], i.get("asset_department") or "—", i["quantity"], i["quantity_returned"], i["outstanding"], _format_export_datetime(i["checkout_date"]), i["due_date"]]
         for i in items
     ]
 
@@ -165,7 +166,7 @@ def export_all_outsiders_items(db: Session, user: dict, fmt: str = "csv"):
     """
     outsiders = db.query(models.Outsider).order_by(models.Outsider.id).all()
 
-    headers = ["Individual", "Contact", "Company", "Asset", "Quantity", "Outstanding", "Checked Out", "Due Date"]
+    headers = ["Individual", "Contact", "Company", "Asset", "Department", "Quantity", "Outstanding", "Checked Out", "Due Date"]
     rows = []
     for o in outsiders:
         for c in o.checkouts:
@@ -174,6 +175,7 @@ def export_all_outsiders_items(db: Session, user: dict, fmt: str = "csv"):
             rows.append([
                 o.name, o.contact_details, o.company or "—",
                 c.asset.name if c.asset else "Unknown Asset",
+                c.asset.department if c.asset and c.asset.department else "—",
                 c.quantity, c.quantity - c.quantity_returned,
                 c.checkout_date.strftime("%Y-%m-%d %H:%M:%S UTC") if c.checkout_date else "",
                 c.due_date.strftime("%Y-%m-%d") if c.due_date else "No Fixed Due Date",

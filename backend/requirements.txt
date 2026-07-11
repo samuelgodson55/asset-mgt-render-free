@@ -10,3 +10,5 @@ alembic==1.13.2
 reportlab==4.2.5
 celery==5.4.0
 redis==5.0.8
+google-api-python-client==2.143.0
+google-auth==2.34.0

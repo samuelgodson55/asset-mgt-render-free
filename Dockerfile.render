@@ -36,6 +36,13 @@ WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
+# postgresql-client provides pg_dump/psql -- required by
+# services/backup_service.py (database backup/restore). Same reasoning as
+# backend/Dockerfile's identical block.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends postgresql-client && \
+    rm -rf /var/lib/apt/lists/*
+
 # Same requirements.txt the backend/worker images use -- celery/redis are
 # already listed there since docker-compose.yml's `worker` service depends
 # on them too, so no separate install step is needed for the embedded

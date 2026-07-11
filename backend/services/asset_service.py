@@ -17,8 +17,9 @@ from sqlalchemy import func
 import models
 from services.search_utils import apply_search_filter
 from models import utc_now
-from schemas.assets import AssetTypeCreate, ExceptionCreate, AdvancedCheckoutRequest, QuantityUpdateRequest, NameUpdateRequest
+from schemas.assets import AssetTypeCreate, ExceptionCreate, AdvancedCheckoutRequest, QuantityUpdateRequest, NameUpdateRequest, DepartmentUpdateRequest
 from services.stock import recalculate_asset_stock
+import services.export_service as export_service
 
 # Same reasoning as user_service.DEFAULT_LIMIT/MAX_LIMIT -- bounds how many
 # asset pools a single request can return (Data Quality & Usability
@@ -47,14 +48,16 @@ def create_asset_type(db: Session, asset: AssetTypeCreate, user: dict) -> dict:
         total_quantity=asset.total_quantity,
         available_quantity=asset.total_quantity,  # no checkouts/isolations yet, so Available == Total
         custom_fields=asset.custom_fields,
+        department=asset.department,
     )
     db.add(new_asset_type)
     db.commit()
     db.refresh(new_asset_type)
 
+    dept_log_text = f" (Department: {asset.department})" if asset.department else ""
     db.add(models.AuditLog(
         operator=user["email"], action="POOL_CREATED", target_type="AssetType", target_id=new_asset_type.id,
-        details=f"Created asset category '{asset.name}' with initial quantity of {asset.total_quantity}",
+        details=f"Created asset category '{asset.name}' with initial quantity of {asset.total_quantity}{dept_log_text}",
     ))
     db.commit()
     return {"message": "Asset type created successfully", "id": new_asset_type.id}
@@ -138,7 +141,8 @@ def get_asset_details(db: Session, asset_id: int) -> dict:
     db.commit()
 
     return {
-        "asset_id": asset.id, "name": asset.name, "total_quantity": stock["total"],
+        "asset_id": asset.id, "name": asset.name, "department": asset.department,
+        "total_quantity": stock["total"],
         "available_quantity": stock["available"], "outbound_quantity": stock["outbound"],
         "isolated_quantity": stock["isolated"],
         "under_repair_count": len(repairs),
@@ -211,6 +215,39 @@ def update_asset_name(db: Session, asset_id: int, payload: NameUpdateRequest, us
     ))
     db.commit()
     return {"message": "Successfully updated asset name."}
+
+
+def update_asset_department(db: Session, asset_id: int, payload: DepartmentUpdateRequest, user: dict) -> dict:
+    # Same privilege tier as renaming/adjusting capacity above -- lets a
+    # Super Admin backfill a department onto pools that were created
+    # without one (or correct/clear one that's already set).
+    asset = db.query(models.AssetType).filter(
+        models.AssetType.id == asset_id, models.AssetType.is_deleted == False
+    ).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset type not found")
+
+    old_department = asset.department
+    new_department = payload.department
+    if old_department == new_department:
+        return {"message": "Department unchanged."}
+
+    asset.department = new_department
+
+    if new_department:
+        change_desc = (
+            f"changed from '{old_department}' to '{new_department}'"
+            if old_department else f"set to '{new_department}'"
+        )
+    else:
+        change_desc = f"cleared (was '{old_department}')"
+
+    db.add(models.AuditLog(
+        operator=user["email"], action="POOL_DEPARTMENT_UPDATED", target_type="AssetType", target_id=asset_id,
+        details=f"Department for asset pool '{asset.name}' {change_desc}.",
+    ))
+    db.commit()
+    return {"message": "Successfully updated department."}
 
 
 def delete_asset_type(db: Session, asset_id: int, user: dict) -> dict:
@@ -546,6 +583,16 @@ def import_assets_from_csv(db: Session, file: UploadFile, user: dict) -> dict:
             name = (row.get("name") or "").strip()
             raw_qty = (row.get("total_quantity") or "").strip()
 
+            # OPTIONAL "department" column -- which internal department this
+            # row's equipment originates from (e.g. "Engineering"). Entirely
+            # optional: a missing column, or a blank cell, never rejects the
+            # row -- it just leaves/keeps `department` unset for that pool
+            # (same "optional, not required" rule as the Create Stock Pool
+            # form's department field -- see schemas/assets.py's
+            # AssetTypeCreate.department).
+            raw_department = (row.get("department") or "").strip()
+            department = raw_department or None
+
             if not name:
                 errors.append({"row": line_number, "name": row.get("name"), "reason": "Missing asset name."})
                 continue
@@ -566,9 +613,17 @@ def import_assets_from_csv(db: Session, file: UploadFile, user: dict) -> dict:
             existing = db.query(models.AssetType).filter(models.AssetType.name == name).first()
             if existing:
                 existing.total_quantity += qty
+                # A department provided on a re-import of an existing pool
+                # updates/fills in that pool's department; a blank cell
+                # never clears a department that was already set, so a
+                # department-less follow-up import (e.g. a routine
+                # quantity-only restock file) can never accidentally wipe
+                # out a value someone set earlier.
+                if department:
+                    existing.department = department
                 recalculate_asset_stock(db, existing)
             else:
-                db.add(models.AssetType(name=name, total_quantity=qty, available_quantity=qty))
+                db.add(models.AssetType(name=name, total_quantity=qty, available_quantity=qty, department=department))
             imported_count += 1
 
         summary = f"Spreadsheet processed. Registered {imported_count} update(s), {len(errors)} row(s) rejected."
@@ -590,3 +645,78 @@ def import_assets_from_csv(db: Session, file: UploadFile, user: dict) -> dict:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# ASSET INVENTORY EXPORT (CSV / PDF) -- with per-department download options
+# ---------------------------------------------------------------------------
+# Unlike the "properties assigned" exports in user_service.py/
+# outsider_service.py (which export CHECKOUTS -- who currently holds what),
+# this exports the INVENTORY ITSELF -- one row per pool, exactly what the
+# Asset Inventory table shows. `list_asset_departments()` powers the
+# Export button's dropdown of "download by department" options (plus a
+# "Download All" choice); `export_assets_inventory()` does the actual
+# CSV/PDF generation, optionally narrowed to a single department.
+_INVENTORY_EXPORT_HEADERS = ["Pool ID", "Asset Name", "Department", "Available", "Total", "Status"]
+
+
+def list_asset_departments(db: Session) -> dict:
+    """
+    Every distinct, non-blank department currently set on an active
+    (non-soft-deleted) pool, alphabetically sorted -- used to populate the
+    Asset Inventory export button's per-department download list. Pools
+    with no department set are NOT represented as their own category here;
+    they're still included in "Download All" (see export_assets_inventory
+    below), just not offered as a specific department filter to pick.
+    """
+    rows = db.query(models.AssetType.department).filter(
+        models.AssetType.is_deleted == False,
+        models.AssetType.department.isnot(None),
+        models.AssetType.department != "",
+    ).distinct().all()
+    departments = sorted({r[0] for r in rows if r[0]}, key=str.lower)
+    return {"departments": departments}
+
+
+def _inventory_status_label(available_quantity: int) -> str:
+    """Mirrors js/ui.js's statusBadge() thresholds exactly, so a pool that
+    reads 'Critical Low Stock' on screen exports with that same label."""
+    return "Critical Low Stock" if available_quantity <= 3 else "In Stock"
+
+
+def export_assets_inventory(db: Session, user: dict, department: Optional[str], fmt: str):
+    """
+    Exports the Asset Inventory table itself (one row per pool), optionally
+    narrowed to a single department. `department=None` (or blank/"all")
+    means "Download All" -- every active pool regardless of department.
+    Soft-deleted pools are excluded, same as the live Asset Inventory table.
+    """
+    query = db.query(models.AssetType).filter(models.AssetType.is_deleted == False)
+
+    dept_filter = (department or "").strip()
+    if dept_filter and dept_filter.lower() != "all":
+        # Case-insensitive exact match against the department string --
+        # the dropdown that drives this is itself populated from the exact
+        # distinct values on file (see list_asset_departments above), so
+        # this only ever needs to match one of those, not do substring
+        # search.
+        query = query.filter(func.lower(models.AssetType.department) == dept_filter.lower())
+
+    pools = query.order_by(models.AssetType.id).all()
+
+    rows = [
+        [p.id, p.name, p.department or "—", p.available_quantity, p.total_quantity, _inventory_status_label(p.available_quantity)]
+        for p in pools
+    ]
+
+    today = utc_now().strftime("%Y-%m-%d")
+    scope_label = dept_filter if (dept_filter and dept_filter.lower() != "all") else "All Departments"
+    filename_stub = f"asset_inventory_{dept_filter.replace(' ', '_')}" if (dept_filter and dept_filter.lower() != "all") else "asset_inventory_all"
+    title = f"Asset Inventory — {scope_label}"
+    subtitle = f"Exported by {user['email']} · {len(rows)} pool(s) · {today}"
+
+    if fmt == "pdf":
+        pdf_bytes = export_service.build_pdf_bytes(title, subtitle, _INVENTORY_EXPORT_HEADERS, rows)
+        return pdf_bytes, "application/pdf", f"{filename_stub}_{today}.pdf"
+    csv_bytes = export_service.build_csv_bytes(_INVENTORY_EXPORT_HEADERS, rows)
+    return csv_bytes, "text/csv", f"{filename_stub}_{today}.csv"

@@ -213,6 +213,13 @@
             <option value="50">50</option>
           </select>
         </div>
+        <!-- Opens #assetExportModal (department picker + CSV/PDF) -- see
+             js/components/assets.js's openAssetExportModal(). -->
+        <button data-action="open-asset-export" title="Export the Asset Inventory table"
+          class="flex items-center gap-1.5 rounded-md border border-border bg-card2 px-3 py-2 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+          Export
+        </button>
       </div>
     </div>
 
@@ -265,6 +272,12 @@
             <input type="number" id="newPoolQty" required min="0" placeholder="e.g. 20"
               class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
           </div>
+          <div>
+            <label class="mb-1 block text-[12px] font-medium text-slate-400">Department <span class="text-slate-600">(optional)</span></label>
+            <input type="text" id="newPoolDepartment" placeholder="e.g. Engineering"
+              class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
+            <p class="mt-1 text-[11px] text-slate-500">Which internal department this equipment originates from.</p>
+          </div>
           <button type="submit" class="mt-1 w-full rounded-lg bg-blue-600 py-2 text-[13px] font-semibold text-white transition hover:bg-blue-500 active:bg-blue-700">
             Create Stock Pool
           </button>
@@ -274,7 +287,7 @@
       <!-- Spreadsheet Batch Import -->
       <div class="rounded-xl border border-border bg-card p-5">
         <h2 class="mb-1 text-[14px] font-semibold text-slate-100">Spreadsheet Batch Import</h2>
-        <p class="mb-4 text-[12px] text-slate-500">Bulk-load asset pools from a formatted CSV export (columns: name, total_quantity).</p>
+        <p class="mb-4 text-[12px] text-slate-500">Bulk-load asset pools from a formatted CSV export (columns: name, total_quantity, department [optional]).</p>
         <form id="csvImportForm">
           <!-- id="csvDropZone" is what js/main.js's wireCsvDragAndDrop()
                attaches dragover/dragleave/drop listeners to -- see that
@@ -565,7 +578,7 @@
         <tr class="border-b border-border bg-card2/60 text-[11px] uppercase tracking-wide text-slate-500">
           <th class="px-5 py-2.5 font-semibold">Timestamp</th>
           <th class="hidden px-5 py-2.5 font-semibold sm:table-cell">Operator</th>
-          <th class="px-5 py-2.5 font-semibold">Action</th>
+          <th class="hidden px-5 py-2.5 font-semibold sm:table-cell">Action</th>
           <th class="hidden px-5 py-2.5 font-semibold sm:table-cell">Detail</th>
         </tr>
       </thead>
@@ -585,7 +598,105 @@
       </div>
     </div>
   </section>
+
+  <!-- ================= SYSTEM BACKUPS ================= -->
+  <!-- Super Admin/Admin only on the backend (deps.require_super_admin) --
+       see js/components/backups.js and backend/api/backup.py. Daily
+       scheduled backup + optional Google Drive sync run automatically;
+       this panel is for manual "Backup Now", downloading a copy, and
+       restoring the database from a backup (either one already on local
+       disk, or one you upload -- e.g. after downloading it back from
+       Google Drive once local disk has been wiped by a Render
+       redeploy/spin-down). -->
+  <section class="overflow-hidden rounded-xl border border-border bg-card">
+    <div class="flex flex-col gap-3 border-b border-border px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+      <div>
+        <h2 class="text-[14px] font-bold text-slate-100">System Backups</h2>
+        <p class="text-[12px] text-slate-500">Daily automated backup, downloadable copies, and one-click restore</p>
+      </div>
+      <div class="flex flex-wrap items-center gap-2">
+        <button data-action="refresh-backups" title="Refresh" class="flex items-center gap-1.5 rounded-md border border-border bg-card2 px-3 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.13-3.36L23 10M1 14l5.36 4.36A9 9 0 0020.49 15"/></svg>
+          Refresh
+        </button>
+        <button data-action="restore-upload-backup" title="Restore from an uploaded backup file" class="flex items-center gap-1.5 rounded-md border border-border bg-card2 px-3 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-amber-500/50 hover:text-amber-400">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg>
+          Restore from File…
+        </button>
+        <button data-action="create-backup-now" id="backupNowBtn" title="Run a backup right now" class="flex items-center gap-1.5 rounded-md border border-blue-500/40 bg-blue-500/10 px-3 py-1.5 text-[12px] font-medium text-blue-400 transition hover:bg-blue-500/20">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
+          Backup Now
+        </button>
+      </div>
+    </div>
+
+    <div id="backupStatusCard" class="border-b border-border px-5 py-4">
+      <p class="text-[13px] text-slate-500">Loading backup status…</p>
+    </div>
+
+    <table class="w-full text-left text-[13px]">
+      <thead>
+        <tr class="border-b border-border bg-card2/60 text-[11px] uppercase tracking-wide text-slate-500">
+          <th class="px-5 py-3 font-semibold">File</th>
+          <th class="hidden px-5 py-3 font-semibold sm:table-cell">Created</th>
+          <th class="hidden px-5 py-3 font-semibold sm:table-cell">Size / Trigger</th>
+          <th class="hidden px-5 py-3 font-semibold sm:table-cell">Cloud Sync</th>
+          <th class="hidden px-5 py-3 font-semibold text-right sm:table-cell">Actions</th>
+        </tr>
+      </thead>
+      <tbody id="backupTableBody" class="divide-y divide-border">
+        <tr><td colspan="5" class="px-5 py-6 text-center text-slate-500">Loading backups…</td></tr>
+      </tbody>
+    </table>
+  </section>
 </main>
+
+<!-- ================= RESTORE BACKUP MODAL ================= -->
+<!-- Deliberately requires typing "RESTORE" (not just a confirm() dialog) --
+     this action replaces the ENTIRE database and cannot be undone except
+     by restoring yet another backup. See js/components/backups.js's
+     confirmRestore(). -->
+<div id="restoreBackupModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative w-full max-w-md overflow-y-auto sheet-panel rounded-t-2xl border border-amber-500/30 bg-[#141922] sm:rounded-xl shadow-2xl">
+    <div class="flex items-start justify-between border-b border-border px-6 py-5">
+      <div>
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-amber-500">Destructive Action</p>
+        <h3 class="text-[16px] font-bold text-slate-50">Restore Database</h3>
+      </div>
+      <button data-action="close-modal" data-modal="restoreBackupModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <div class="space-y-4 px-6 py-5">
+      <p class="text-[12px] text-slate-400">
+        This will replace the ENTIRE current database with the contents of
+        <span id="restoreModalTarget" class="font-semibold text-slate-200">this backup</span>.
+        Every asset, user, checkout, and audit record created since that backup was taken will be lost.
+        A safety backup of the current state is taken automatically right before this runs.
+      </p>
+
+      <div id="restoreUploadRow" class="hidden">
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Backup file (.sql.gz or .sql)</label>
+        <input type="file" id="restoreUploadInput" accept=".gz,.sql"
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60" />
+        <p class="mt-1 text-[11px] text-slate-500">e.g. a backup you downloaded from Google Drive after this app's local disk was wiped by a redeploy/spin-down.</p>
+      </div>
+
+      <div class="border-t border-border pt-4">
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Type <span class="tag-mono font-bold text-amber-400">RESTORE</span> to confirm</label>
+        <input type="text" id="restoreConfirmInput" placeholder="RESTORE"
+          class="tag-mono w-full rounded-lg border border-amber-500/30 bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-amber-500/60" />
+      </div>
+
+      <div class="flex items-center justify-end gap-3 pt-2">
+        <button type="button" data-action="close-modal" data-modal="restoreBackupModal" class="rounded-md px-3 py-2 text-[13px] font-medium text-slate-400 transition hover:text-slate-200">Cancel</button>
+        <button type="button" id="restoreConfirmBtn" data-action="confirm-restore-backup" class="rounded-md border border-amber-500/40 bg-amber-500/10 px-4 py-2 text-[13px] font-semibold text-amber-400 transition hover:bg-amber-500/20">Restore Database</button>
+      </div>
+    </div>
+  </div>
+</div>
 
 <!-- ================= DISPATCH CHECKOUT DRAWER (MODAL) ================= -->
 <div id="dispatchModal" class="fixed inset-0 z-40 hidden items-center justify-end">
@@ -810,6 +921,28 @@
             <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
           </button>
         </div>
+        <!-- Originating department (optional -- see models.py's AssetType
+             docstring). Editable here (unlike manager.html's read-only
+             version of this modal): always shown, with a placeholder text
+             when unset, so a Super Admin can backfill a department onto
+             pools that don't have one yet, same rename-in-place pattern as
+             nameDisplay/nameEdit above. -->
+        <div id="deptDisplay" class="mt-0.5 flex items-center gap-1.5 text-[12px] text-slate-500">
+          <span>Department: <span id="propsDepartment" class="font-medium text-slate-300">—</span></span>
+          <button data-action="toggle-department-edit" class="shrink-0 rounded-md p-1 text-slate-500 transition hover:bg-card2 hover:text-blue-400" title="Edit department">
+            <svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+          </button>
+        </div>
+        <!-- Same stack-below-`sm` layout as nameEdit above, for the same
+             reason (a fixed-width input plus two buttons doesn't fit one
+             row on a phone-width modal). -->
+        <div id="deptEdit" class="hidden mt-2 flex-col items-stretch gap-2 sm:mt-1.5 sm:flex-row sm:items-center">
+          <input type="text" id="deptInput" placeholder="e.g. Engineering" class="w-full rounded-md border border-border bg-card2 px-2 py-1.5 text-[13px] text-slate-200 outline-none focus:border-blue-500/60 sm:w-56" />
+          <div class="flex gap-2">
+            <button data-action="save-department" class="rounded-md bg-emerald-600 px-2.5 py-1.5 text-[11px] font-semibold text-white transition hover:bg-emerald-500">Save</button>
+            <button data-action="toggle-department-edit" class="rounded-md border border-border px-2.5 py-1.5 text-[11px] font-medium text-slate-300 transition hover:border-slate-500">Cancel</button>
+          </div>
+        </div>
         <!-- Stacks (input full-width, Save/Cancel side-by-side beneath it)
              below `sm` instead of trying to cram a fixed-width input plus
              two buttons into one row on a phone-width modal, which used to
@@ -977,6 +1110,51 @@
             Update Password
           </button>
         </form>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= ASSET INVENTORY EXPORT (MODAL) =================
+     Opened by the Asset Inventory tab's "Export" button (data-action=
+     "open-asset-export" -- see js/components/assets.js's
+     openAssetExportModal(), which populates #assetExportDepartment with
+     "Download All" plus one option per distinct department on file
+     before showing this). Downloads the INVENTORY TABLE itself (one row
+     per pool) -- not a properties-assigned/custody export -- via
+     GET /assets/export, see js/components/exports.js's
+     exportAssetsInventory(). -->
+<div id="assetExportModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative w-full max-w-sm overflow-y-auto sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl shadow-2xl">
+    <div class="flex items-start justify-between border-b border-border px-6 py-5">
+      <div>
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Asset Inventory</p>
+        <h3 class="text-[16px] font-bold text-slate-50">Export Inventory</h3>
+      </div>
+      <button data-action="close-modal" data-modal="assetExportModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="space-y-4 px-6 py-5">
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Category</label>
+        <select id="assetExportDepartment" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60">
+          <option value="all">Download All</option>
+        </select>
+        <p class="mt-1 text-[11px] text-slate-500">Pick a department to export just its pools, or download everything.</p>
+      </div>
+      <div class="flex gap-3 pt-1">
+        <button data-action="export-assets-inventory" data-format="csv"
+          class="flex-1 flex items-center justify-center gap-1.5 rounded-lg border border-border py-2.5 text-[13px] font-semibold text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+          .CSV
+        </button>
+        <button data-action="export-assets-inventory" data-format="pdf"
+          class="flex-1 flex items-center justify-center gap-1.5 rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+          .PDF
+        </button>
       </div>
     </div>
   </div>

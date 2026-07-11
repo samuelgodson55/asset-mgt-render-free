@@ -23,7 +23,7 @@
 // =============================================================================
 
 import { checkAccess, startIdleWatchdog, login, redirectByUserRole, logout, getSession } from './auth.js';
-import { closeModal, switchTab, toggleRoute, toggleCapacityEdit, toggleNameEdit, changePage, setSearch, setPerPage, openRowDetailsFromElement, initSwipeNav } from './ui.js';
+import { closeModal, switchTab, toggleRoute, toggleCapacityEdit, toggleNameEdit, toggleDepartmentEdit, changePage, setSearch, setPerPage, openRowDetailsFromElement, initSwipeNav } from './ui.js';
 import { toggleTheme, initThemeToggle } from './theme.js';
 import { refreshDashboard, checkAlertsNow } from './dashboard.js';
 import { dismissOverdueAlert } from './components/overdue.js';
@@ -31,8 +31,8 @@ import { dismissDueSoonAlert } from './components/due-soon.js';
 
 import {
   openDispatchModal, submitDispatchForm, openPropsModal, recallException,
-  saveCapacity, saveName, submitExceptionForm, submitCreatePoolForm, submitCsvImportForm,
-  deleteAssetPool, setAssetsSearch, setAssetsPerPage, changeAssetsPage,
+  saveCapacity, saveName, saveDepartment, submitExceptionForm, submitCreatePoolForm, submitCsvImportForm,
+  deleteAssetPool, setAssetsSearch, setAssetsPerPage, changeAssetsPage, openAssetExportModal,
 } from './components/assets.js';
 import {
   deleteProfile, submitCreateUserForm, setUsersSearch, setUsersPerPage, changeUsersPage,
@@ -49,7 +49,16 @@ import {
   processAllReturns, bulkProcessReturns,
 } from './components/custody.js';
 import { openProfileModal, submitChangePasswordForm, ROLE_LABELS } from './components/profile.js';
-import { exportMyItems, exportCustodyItems, exportAllUsers, exportAllOutsiders } from './components/exports.js';
+import { exportMyItems, exportCustodyItems, exportAllUsers, exportAllOutsiders, exportAssetsInventory } from './components/exports.js';
+import {
+  refreshBackupsPanel,
+  createBackupNow,
+  downloadBackup,
+  deleteBackup,
+  openRestoreLocalModal,
+  openRestoreUploadModal,
+  confirmRestore,
+} from './components/backups.js';
 import { openExtensionRequestModal, submitExtensionRequestForm, decideExtensionRequest, openDirectExtendModal, submitDirectExtendForm, dismissExtensionRequestsAlert } from './components/extensions.js';
 
 // -----------------------------------------------------------------------------
@@ -84,6 +93,8 @@ const CLICK_ACTIONS = {
   'save-capacity': () => saveCapacity(),
   'toggle-name-edit': () => toggleNameEdit(),
   'save-name': () => saveName(),
+  'toggle-department-edit': () => toggleDepartmentEdit(),
+  'save-department': () => saveDepartment(),
   'open-dispatch': (el) => openDispatchModal(parseInt(el.dataset.assetId, 10), el.dataset.assetName, parseInt(el.dataset.available, 10)),
   'open-props': (el) => openPropsModal(parseInt(el.dataset.assetId, 10)),
   'recall-exception': (el) => recallException(parseInt(el.dataset.assetId, 10), parseInt(el.dataset.exceptionId, 10)),
@@ -95,6 +106,7 @@ const CLICK_ACTIONS = {
   'reset-password': (el) => openResetPasswordModal(parseInt(el.dataset.userId, 10), el.dataset.userName),
   'restore-user': (el) => restoreUser(parseInt(el.dataset.userId, 10), el.dataset.userName),
   'delete-asset-pool': (el) => deleteAssetPool(parseInt(el.dataset.assetId, 10), el.dataset.assetName),
+  'open-asset-export': () => openAssetExportModal(),
   'change-page': (el) => {
     const key = el.dataset.key;
     const delta = parseInt(el.dataset.delta, 10);
@@ -123,12 +135,22 @@ const CLICK_ACTIONS = {
   'export-custody': (el) => exportCustodyItems(el.dataset.format),
   'export-all-users': (el) => exportAllUsers(el.dataset.format),
   'export-all-outsiders': (el) => exportAllOutsiders(el.dataset.format),
+  'export-assets-inventory': (el) => exportAssetsInventory(el.dataset.format),
 
   // The audit ledger pages itself server-side (true limit/offset re-fetch
   // on every click) rather than through the shared client-side
   // tableState/changePage() machinery used by My Items -- see
   // components/audit.js's module docstring for why.
   'change-audit-page': (el) => changeAuditPage(parseInt(el.dataset.delta, 10)),
+
+  // System Backups panel -- see components/backups.js.
+  'refresh-backups': () => refreshBackupsPanel(),
+  'create-backup-now': (el) => createBackupNow(el),
+  'download-backup': (el) => downloadBackup(el),
+  'delete-backup': (el) => deleteBackup(el),
+  'restore-local-backup': (el) => openRestoreLocalModal(el),
+  'restore-upload-backup': () => openRestoreUploadModal(),
+  'confirm-restore-backup': () => confirmRestore(),
 };
 
 // -----------------------------------------------------------------------------
@@ -392,6 +414,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (document.getElementById('myItemsTableBody')) {
       loadMyItems();
+    }
+    if (document.getElementById('backupTableBody')) {
+      refreshBackupsPanel();
     }
   }
 });

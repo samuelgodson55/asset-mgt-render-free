@@ -34,15 +34,16 @@ real production deployment.
 9. [Environment Variables Reference](#environment-variables-reference)
 10. [Roles & Permissions Model](#roles--permissions-model)
 11. [Database & Migrations (Alembic)](#database--migrations-alembic)
-12. [Full API Reference](#full-api-reference)
-13. [File & Function Reference](#file--function-reference)
-14. [Making Changes Safely (A Guide For Beginners)](#making-changes-safely-a-guide-for-beginners)
-15. [Testing Your Changes](#testing-your-changes)
-16. [Security Model](#security-model)
-17. [Running In Production](#running-in-production)
-18. [Safely Updating An Existing Production Deployment (CI/CD)](#safely-updating-an-existing-production-deployment-cicd)
-19. [Suggested Future Features](#suggested-future-features)
-20. [Troubleshooting](#troubleshooting)
+12. [Backups](#backups)
+13. [Full API Reference](#full-api-reference)
+14. [File & Function Reference](#file--function-reference)
+15. [Making Changes Safely (A Guide For Beginners)](#making-changes-safely-a-guide-for-beginners)
+16. [Testing Your Changes](#testing-your-changes)
+17. [Security Model](#security-model)
+18. [Running In Production](#running-in-production)
+19. [Safely Updating An Existing Production Deployment (CI/CD)](#safely-updating-an-existing-production-deployment-cicd)
+20. [Suggested Future Features](#suggested-future-features)
+21. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -898,6 +899,16 @@ see `.gitignore`) and are read by `backend/config.py` into a single typed
 | `DUE_SOON_NOTIFICATION_INTERVAL_HOURS` | `24` | How often the Celery Beat job checks for checkouts about to go overdue and sends the due-soon reminder digest. Same "lower it for local testing" idea as `OVERDUE_NOTIFICATION_INTERVAL_HOURS` above. |
 | `ACCOUNT_LOCKOUT_MAX_ATTEMPTS` | `5` | Wrong-password attempts against **the same account** before it's locked, regardless of which IP they came from. |
 | `ACCOUNT_LOCKOUT_DURATION_MINUTES` | `15` | How long that per-account lock lasts once triggered. |
+| `ENABLE_AUTO_BACKUP` | `true` | Runs one daily `pg_dump` backup inside this same process (a plain daemon thread — no Celery/Redis dependency). See [Backups](#backups). |
+| `BACKUP_HOUR_UTC` | `3` | Hour of day (UTC, 0–23) the daily backup runs at. |
+| `BACKUP_DIR` | `/app/backups` | Where local backup files + their `index.json` metadata live inside the container. |
+| `BACKUP_RETENTION_COUNT` | `7` | How many local backup files to keep before deleting the oldest. Google Drive copies (if enabled) are unaffected. |
+| `BACKUP_GDRIVE_ENABLED` | `false` | Uploads every backup to Google Drive right after it's written locally — the only thing that makes a backup survive a Render redeploy/spin-down. |
+| `BACKUP_GDRIVE_OAUTH_CLIENT_ID` | *(empty)* | Mode 1 (personal Google account) — printed by `backend/scripts/gdrive_oauth_setup.py`. Takes priority over Mode 2 if both are set. See [Backups](#backups). |
+| `BACKUP_GDRIVE_OAUTH_CLIENT_SECRET` | *(empty)* | Mode 1, paired with the above. |
+| `BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN` | *(empty)* | Mode 1, paired with the above. |
+| `BACKUP_GDRIVE_CREDENTIALS_JSON` | *(empty)* | Mode 2 (Google Workspace) — the raw contents of a service account's JSON key. Only works if `BACKUP_GDRIVE_FOLDER_ID` is a Shared Drive folder. See [Backups](#backups) for the 5-minute setup. |
+| `BACKUP_GDRIVE_FOLDER_ID` | *(empty)* | The destination Drive folder's ID (from its URL). Mode 1: any folder in your own Drive. Mode 2: must be inside a Shared Drive, shared with the service account as an Editor. |
 
 The four below are read by the **`frontend`** service (the nginx reverse
 proxy), not the backend — see [Deploying Across Environments](#deploying-across-environments-nginx-reverse-proxy).
@@ -1067,6 +1078,141 @@ it** (either by hand or via `alembic revision --autogenerate`) — don't
 rely on `create_all()` alone, since it will never alter an *existing*
 table that's missing a new column.
 
+## Backups
+
+Everything lives in `backend/services/backup_service.py` (the logic),
+`backend/api/backup.py` (the `/api/backup/*` routes, Super Admin/Admin
+only), and the **System Backups** panel at the bottom of `admin.html`.
+
+**What happens automatically:** once a day, at `BACKUP_HOUR_UTC` (default
+`3`, i.e. 03:00 UTC), this app runs `pg_dump` against its own database,
+gzip-compresses the result, saves it to `BACKUP_DIR` (default
+`/app/backups`), and — if `BACKUP_GDRIVE_ENABLED=true` — uploads that same
+file to a Google Drive folder you control. This runs as a plain daemon
+thread inside the same `uvicorn` process (see
+`backup_service.start_backup_scheduler()`, called from `main.py`'s startup
+event) — **not** Celery — so it works whether or not `RUN_EMBEDDED_WORKER`
+is enabled, with no Redis dependency.
+
+**Why Google Drive, not just local disk:** on Render's Free plan, this
+service's own disk is **ephemeral** — wiped on every restart, every
+spin-down/wake-up cycle, and every redeploy. A local backup file is a
+convenient "undo the last few minutes" safety net (and is what the
+Restore button's dropdown reads from), but it is NOT durable on its own.
+Google Drive sync is what actually protects you against a wiped disk.
+
+**Setting up Google Drive sync (~5 minutes, one-time):** there are two auth
+modes — pick the one matching your Google account. If both get configured,
+Mode 1 (OAuth) takes priority.
+
+**Mode 1 — personal/consumer Google account (a regular Gmail), recommended
+for most people running this project:**
+
+A Google Cloud "service account" (Mode 2 below) has **zero Drive storage
+quota of its own** — even a folder you personally share with it as
+"Editor" doesn't help, since any file it creates there is still *owned by*
+the service account and billed against its (nonexistent) quota. That's the
+`storageQuotaExceeded` / "Service Accounts do not have storage quota..."
+error you'll hit if you try Mode 2 without a Workspace Shared Drive. Mode 1
+sidesteps this entirely by uploading as *you* instead, so backups count
+against your own normal 15GB quota, same as dragging a file into Drive by
+hand.
+
+1. In [Google Cloud Console](https://console.cloud.google.com/), create a
+   project (or reuse one), then enable the **Google Drive API** (**APIs &
+   Services → Library**).
+2. **APIs & Services → OAuth consent screen** → choose **External** → fill
+   in an app name/support email → Save. This is fine to leave in "Testing"
+   mode forever for personal use — no Google review/verification needed.
+   Under "Test users", add your own Google account's email.
+3. **APIs & Services → Credentials → Create Credentials → OAuth client
+   ID** → Application type **Desktop app** → Create → **Download JSON**.
+4. On your own machine (not inside Docker): `pip install google-auth-oauthlib`,
+   then run:
+   ```bash
+   python backend/scripts/gdrive_oauth_setup.py /path/to/the_downloaded.json
+   ```
+   A browser opens — log in with the Google account whose Drive storage
+   you want backups to live in, and click Allow. The script prints three
+   values.
+5. In Google Drive, create (or pick) a regular folder for backups (no
+   sharing step needed this time) and copy its ID out of the URL:
+   `https://drive.google.com/drive/folders/<THIS_PART>`.
+6. Set these in `.env` (or Render's Environment tab):
+   ```bash
+   BACKUP_GDRIVE_ENABLED=true
+   BACKUP_GDRIVE_OAUTH_CLIENT_ID=<printed by the script>
+   BACKUP_GDRIVE_OAUTH_CLIENT_SECRET=<printed by the script>
+   BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN=<printed by the script>
+   BACKUP_GDRIVE_FOLDER_ID=<the folder ID from step 5>
+   ```
+   On Render, the three `BACKUP_GDRIVE_OAUTH_*` values are marked
+   `sync: false` in `render.yaml` — paste them directly into the
+   Environment tab; they're never committed to git.
+
+**Mode 2 — Google Workspace account with a Shared Drive:**
+
+1. In [Google Cloud Console](https://console.cloud.google.com/), create a
+   project (or reuse one), then **APIs & Services → Credentials → Create
+   Credentials → Service Account**. Enable the **Google Drive API** first
+   if it isn't already (**APIs & Services → Library**).
+2. Open the new service account → **Keys → Add Key → Create new key →
+   JSON**. This downloads a `.json` file — treat it like a password.
+3. Create a folder **inside a Shared Drive** (not a regular "My Drive"
+   folder — this only works inside a Shared Drive, since that's the one
+   place Google bills storage to the drive itself rather than the file's
+   creator), right-click → **Share**, and share it with the service
+   account's own email address (looks like
+   `something@your-project.iam.gserviceaccount.com`, found inside the JSON
+   key) as an **Editor**.
+4. Copy that folder's ID out of its URL:
+   `https://drive.google.com/drive/folders/<THIS_PART>`.
+5. Set three environment variables (`.env` locally, or Render's
+   Environment tab):
+   ```bash
+   BACKUP_GDRIVE_ENABLED=true
+   BACKUP_GDRIVE_CREDENTIALS_JSON='<paste the entire JSON key file contents as one line>'
+   BACKUP_GDRIVE_FOLDER_ID=<the folder ID from step 4>
+   ```
+   On Render, `BACKUP_GDRIVE_CREDENTIALS_JSON` is marked `sync: false` in
+   `render.yaml` — paste the JSON key's contents directly into the
+   Environment tab; it's never committed to git.
+
+**Manual backup:** click **Backup Now** in the System Backups panel — runs
+`pg_dump` synchronously and returns pass/fail immediately (this app's data
+is small/fast enough that a background job isn't needed for this).
+
+**Downloading a backup:** click **Download** next to any local backup to
+save its `.sql.gz` file yourself, independent of Google Drive.
+
+**Restoring — two paths, both destructive (replace the whole database):**
+- **Restore** next to a backup already listed in the panel (still on this
+  container's local disk).
+- **Restore from File…** — upload a `.sql.gz` (or plain `.sql`) file
+  directly. This is the recovery path once local disk has been wiped
+  (e.g. a Render redeploy happened since the last backup): download the
+  last good file from your Google Drive backups folder, then upload it
+  here.
+
+Both paths require typing `RESTORE` into a confirmation box before
+anything runs, and both automatically take one more "pre-restore safety"
+backup of whatever's currently in the database immediately before
+replacing it — so restoring the wrong file is itself undoable through the
+exact same flow.
+
+**Retention:** `BACKUP_RETENTION_COUNT` (default `7`) caps how many local
+backup files are kept before the oldest is deleted — this only affects the
+local copy; anything already uploaded to Google Drive is untouched by it.
+
+**Required OS package:** `pg_dump`/`psql` are provided by the
+`postgresql-client` apt package, not by the `psycopg2-binary` Python
+dependency — both `backend/Dockerfile` and `Dockerfile.render` already
+install it. If you're running the backend outside Docker (see "Running
+Without Docker" above), install it yourself (e.g.
+`sudo apt install postgresql-client` on Debian/Ubuntu, `brew install
+postgresql` on macOS) or backups/restores will fail with a clear
+"pg_dump is not installed" error.
+
 ## Full API Reference
 
 Full interactive docs (auto-generated from the code, with a "Try it out"
@@ -1087,7 +1233,9 @@ once the backend is running. This table is the high-level map:
 | `POST /assets/{id}/exception/{eid}/recall` | Super Admin / Admin | Return an isolated unit to service. |
 | `POST /assets/{id}/checkin` | Super Admin / Admin | Reconcile newly-found stock. |
 | `POST /assets/{id}/checkout_advanced` | Super Admin / Admin / Manager | Dispatch units to a Staff member, a linked Customer account, or an ad-hoc Outsider. |
-| `POST /assets/import` | Super Admin / Admin | Bulk-create pools from a CSV (max 5 MiB). |
+| `POST /assets/import` | Super Admin / Admin | Bulk-create pools from a CSV (max 5 MiB, columns `name`, `total_quantity`, optional `department`). |
+| `GET /assets/departments` | logged in | Distinct list of departments currently set on any active pool — powers the Asset Inventory Export button's per-department options. |
+| `GET /assets/export` | logged in | Download the Asset Inventory table itself (one row per pool) as `?format=csv\|pdf`, optionally narrowed with `?department=` (omit, or pass `all`, for every pool). |
 | `GET /users` | Super Admin / Admin / Manager | Directory listing (both Managers and Admins see the entire directory — no department-scoping). TRUE server-side pagination + search — `?limit=&offset=&search=` (searches name, email, role, department, department_role). |
 | `POST /users` | Super Admin / Admin / Manager | Provision a new login. |
 | `GET /users/me/items` | logged in | Self-service: my own checked-out items. |
@@ -1114,6 +1262,13 @@ once the backend is running. This table is the high-level map:
 | `POST /audit-logs/export` | Super Admin / Admin / Manager | Enqueue a background export job — `?format=csv` (default) or `?format=pdf`, plus optional `?start_date=&end_date=`. Returns `{task_id, status}` immediately; does not return the file. |
 | `GET /audit-logs/export/{task_id}/status` | Super Admin / Admin / Manager | Poll a job's progress — `{state, ready, error?}`. |
 | `GET /audit-logs/export/{task_id}/download` | Super Admin / Admin / Manager | Download the finished file once `status` reports `SUCCESS` (409 if not ready yet, 404 if the task_id is unknown/expired). |
+| `GET /backup/status` | Super Admin / Admin | Daily-schedule config, Google Drive on/off, and the most recent backup's metadata. |
+| `GET /backup/list` | Super Admin / Admin | Newest-first list of local backup files. |
+| `POST /backup/create` | Super Admin / Admin | Run a `pg_dump` backup right now ("Backup Now" button). |
+| `GET /backup/download/{filename}` | Super Admin / Admin | Download a previously-created backup file. |
+| `DELETE /backup/{filename}` | Super Admin / Admin | Delete a local backup file (does not touch any copy already on Google Drive). |
+| `POST /backup/restore/{filename}` | Super Admin / Admin | **Destructive.** Replace the entire database with a backup already on local disk. Takes an automatic pre-restore safety backup first. |
+| `POST /backup/restore-upload` | Super Admin / Admin | **Destructive.** Same as above, but from an uploaded `.sql`/`.sql.gz` file — the recovery path once local disk has been wiped. |
 | `GET /healthz` | anyone | Trivial liveness check for Docker/orchestrators. |
 
 **Every export endpoint** accepts `?format=csv` or `?format=pdf` and
@@ -1178,7 +1333,8 @@ the actual logic lives. Use this section as a map when you need to find
   applies the identical rule as its own bulk SQL filter — see
   `services/checkout_service.py`'s `list_due_soon_checkouts()`).
 - `class AssetType` — an inventory pool (name, total_quantity,
-  custom_fields).
+  custom_fields, optional `department` describing which internal team the
+  equipment originates from).
 - `class AssetException` — a single serial number pulled out of
   circulation (repair/lost/stolen).
 - `class AuditLog` — an append-only record of every meaningful action.

@@ -20,6 +20,22 @@ class AssetTypeCreate(BaseModel):
     total_quantity: int
     custom_fields: Optional[Dict[str, str]] = {}
 
+    # Optional -- which internal department this pool's equipment
+    # originates from (e.g. "Engineering"). Blank/omitted is a valid,
+    # deliberate choice for orgs that don't track this. Stripped of
+    # surrounding whitespace and normalized to None when empty so a
+    # blank-looking value never gets stored as a literal "" string (same
+    # pattern as NameUpdateRequest._validate_name below).
+    department: Optional[str] = None
+
+    @field_validator("department")
+    @classmethod
+    def _normalize_department(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
 
 class ExceptionCreate(BaseModel):
     serial_number: str
@@ -80,3 +96,19 @@ class NameUpdateRequest(BaseModel):
         if not value:
             raise ValueError("Asset name cannot be blank.")
         return value
+
+
+class DepartmentUpdateRequest(BaseModel):
+    # Unlike NameUpdateRequest.name, this is intentionally Optional/blankable
+    # -- clearing an asset pool's department back to "none set" is a valid,
+    # deliberate action (same reasoning as AssetTypeCreate.department), not
+    # an error like a blank name would be.
+    department: Optional[str] = Field(None, max_length=255)
+
+    @field_validator("department")
+    @classmethod
+    def _normalize_department(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None

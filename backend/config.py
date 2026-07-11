@@ -321,6 +321,81 @@ class Settings(BaseSettings):
     # service on every free-instance spin-down and redeploy).
     RUN_EMBEDDED_WORKER: bool = False
 
+    # --- Database backups (pg_dump/pg_restore + optional Google Drive) ----
+    # See services/backup_service.py for the full implementation. Backups
+    # are gzip-compressed `pg_dump` SQL files. On Render's Free plan the
+    # web service's own disk is EPHEMERAL -- it's wiped on every restart
+    # and every redeploy -- so a local file is convenient for a quick
+    # "oops, undo the last five minutes" restore, but is NOT durable
+    # storage on its own. BACKUP_GDRIVE_ENABLED is what makes a backup
+    # survive a redeploy/spin-down: every backup this app creates (whether
+    # on the daily schedule or via the "Backup Now" button) is uploaded to
+    # Google Drive right after it's written locally, and the Admin
+    # dashboard's Restore flow accepts an uploaded backup file specifically
+    # so you can pull the last good file back down from Drive and restore
+    # it even if local disk was wiped in between.
+    #
+    # ENABLE_AUTO_BACKUP: master switch for the daily scheduled backup (see
+    # backup_service.start_backup_scheduler(), called from main.py's
+    # startup event). This runs as a plain daemon thread inside THIS same
+    # uvicorn process -- unlike RUN_EMBEDDED_WORKER's Celery worker above,
+    # it does not depend on Celery/Redis being configured at all, so it
+    # works identically whether or not the embedded worker is enabled.
+    ENABLE_AUTO_BACKUP: bool = True
+    # Hour of day (UTC, 0-23) the daily scheduled backup runs at.
+    BACKUP_HOUR_UTC: int = 3
+    # Where local backup files (and their index.json metadata file) live
+    # inside the container.
+    BACKUP_DIR: str = "/app/backups"
+    # How many local backup files to keep on disk before deleting the
+    # oldest -- keeps the ephemeral disk from filling up. Google Drive
+    # (if enabled) keeps its own independent copy, unaffected by this.
+    BACKUP_RETENTION_COUNT: int = 7
+
+    # --- Google Drive upload -------------------------------------------
+    # TWO auth modes are supported -- pick whichever matches your Google
+    # account:
+    #
+    # MODE 1: OAuth as a real Google user (BACKUP_GDRIVE_OAUTH_* below) --
+    # what you want for a PERSONAL Gmail account. Uploads count against
+    # that person's own 15GB Drive quota, same as uploading through the
+    # Drive web UI by hand. See backend/scripts/gdrive_oauth_setup.py for
+    # the one-time setup that gets you a refresh token.
+    #
+    # MODE 2: a Google Cloud "service account" (BACKUP_GDRIVE_CREDENTIALS_
+    # JSON below) -- only works if BACKUP_GDRIVE_FOLDER_ID points at a
+    # SHARED DRIVE (Google Workspace only; personal/consumer Google
+    # accounts cannot create Shared Drives at all). Service accounts have
+    # ZERO Drive storage quota of their own -- even a folder a real person
+    # shares with the service account as "Editor" doesn't help, because
+    # any file the service account creates there is still OWNED by the
+    # service account and billed against ITS (nonexistent) quota. That's
+    # exactly the "Service Accounts do not have storage quota... 
+    # storageQuotaExceeded" error this setup produces on a personal
+    # account -- a Shared Drive is the one place storage is billed to the
+    # drive itself rather than the file's creator, which is why this mode
+    # needs one.
+    #
+    # If BOTH are configured, OAuth (Mode 1) takes priority -- see
+    # backup_service.py's upload_to_gdrive().
+    BACKUP_GDRIVE_ENABLED: bool = False
+
+    # --- Mode 1: OAuth (personal Google account) ---
+    BACKUP_GDRIVE_OAUTH_CLIENT_ID: str = ""
+    BACKUP_GDRIVE_OAUTH_CLIENT_SECRET: str = ""
+    BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN: str = ""
+
+    # --- Mode 2: service account (Google Workspace + Shared Drive only) ---
+    BACKUP_GDRIVE_CREDENTIALS_JSON: str = ""
+
+    # The destination folder's Drive ID (the long ID in the folder's URL:
+    # https://drive.google.com/drive/folders/<THIS_PART>). Required either
+    # way. For Mode 1, any regular "My Drive" folder works fine -- create
+    # one, grab its ID from the URL, done (no sharing step needed, since
+    # you're uploading as yourself). For Mode 2 it must be a folder INSIDE
+    # a Shared Drive, per the docstring above.
+    BACKUP_GDRIVE_FOLDER_ID: str = ""
+
     # Tell Pydantic Settings v2 to also look for a `.env` file (useful when
     # running the backend directly with `uvicorn main:app` outside Docker,
     # where environment variables aren't injected by docker-compose.yml).

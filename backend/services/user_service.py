@@ -234,6 +234,11 @@ def get_my_assigned_items(db: Session, user: dict) -> dict:
     ).all()
     items = [{
         "checkout_id": c.id, "asset_name": c.asset.name if c.asset else "Unknown Asset",
+        # Originating department of the EQUIPMENT itself (AssetType.department
+        # -- see models.py), not to be confused with the person's own
+        # department below. Surfaced as a "Department" column on every
+        # properties-assigned export (see _item_export_rows below).
+        "asset_department": c.asset.department if c.asset else None,
         "quantity": c.quantity, "quantity_returned": c.quantity_returned, "outstanding": c.quantity - c.quantity_returned,
         # TIMEZONE FIX: `checkout_date` used to be pre-formatted here with
         # `.strftime("%Y-%m-%d %H:%M:%S")` -- that prints the raw UTC wall-
@@ -282,6 +287,7 @@ def get_user_assigned_items(db: Session, user_id: int, user: dict) -> dict:
     ).all()
     items = [{
         "checkout_id": c.id, "asset_name": c.asset.name if c.asset else "Unknown Asset",
+        "asset_department": c.asset.department if c.asset else None,
         "quantity": c.quantity, "quantity_returned": c.quantity_returned, "outstanding": c.quantity - c.quantity_returned,
         # TIMEZONE FIX -- see get_my_assigned_items() above for the full
         # explanation of why this is `.isoformat()` and not a
@@ -314,7 +320,7 @@ def get_user_assigned_items(db: Session, user_id: int, user: dict) -> dict:
 #                                    checkout (not one row per user).
 # Each returns (file_bytes, media_type, filename) so the router
 # (api/users.py) only has to wrap it in a `Response`.
-_ITEM_EXPORT_HEADERS = ["Asset", "Quantity", "Quantity Returned", "Outstanding", "Checked Out", "Due Date"]
+_ITEM_EXPORT_HEADERS = ["Asset", "Department", "Quantity", "Quantity Returned", "Outstanding", "Checked Out", "Due Date"]
 
 
 def _format_export_datetime(iso_string: Optional[str]) -> str:
@@ -343,7 +349,7 @@ def _item_export_rows(items: list) -> list:
     get_user_assigned_items above) into plain rows for
     export_service.build_csv_bytes()/build_pdf_bytes()."""
     return [
-        [i["asset_name"], i["quantity"], i["quantity_returned"], i["outstanding"], _format_export_datetime(i["checkout_date"]), i["due_date"]]
+        [i["asset_name"], i.get("asset_department") or "—", i["quantity"], i["quantity_returned"], i["outstanding"], _format_export_datetime(i["checkout_date"]), i["due_date"]]
         for i in items
     ]
 
@@ -391,7 +397,7 @@ def export_all_users_items(db: Session, user: dict, fmt: str = "csv"):
     query = db.query(models.User).filter(models.User.is_deleted == False)
     users = query.order_by(models.User.id).all()
 
-    headers = ["User", "Email", "Department", "Role", "Asset", "Quantity", "Outstanding", "Checked Out", "Due Date"]
+    headers = ["User", "Email", "User Department", "Role", "Asset", "Asset Department", "Quantity", "Outstanding", "Checked Out", "Due Date"]
     rows = []
     for u in users:
         for c in u.checkouts:
@@ -400,6 +406,7 @@ def export_all_users_items(db: Session, user: dict, fmt: str = "csv"):
             rows.append([
                 u.name, u.email, u.department or "—", u.role,
                 c.asset.name if c.asset else "Unknown Asset",
+                c.asset.department if c.asset and c.asset.department else "—",
                 c.quantity, c.quantity - c.quantity_returned,
                 c.checkout_date.strftime("%Y-%m-%d %H:%M:%S UTC") if c.checkout_date else "",
                 c.due_date.strftime("%Y-%m-%d") if c.due_date else "No Fixed Due Date",
