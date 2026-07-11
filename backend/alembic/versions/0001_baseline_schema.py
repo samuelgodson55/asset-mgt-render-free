@@ -55,6 +55,8 @@ def upgrade() -> None:
         sa.Column("total_quantity", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("available_quantity", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("custom_fields", sa.JSON(), nullable=True),
+        # --- Originating department (optional) -- see models.py's AssetType docstring ---
+        sa.Column("department", sa.String(), nullable=True),
         # --- Soft delete -- see models.py's AssetType docstring ---
         sa.Column("is_deleted", sa.Boolean(), nullable=False, server_default=sa.false()),
         sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),

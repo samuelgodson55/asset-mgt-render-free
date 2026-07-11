@@ -44,6 +44,18 @@ export async function loadAuditLogs() {
 
     // Whole row is tappable on mobile -- see components/assets.js's
     // renderAssetsTable() for the full explanation of this pattern.
+    //
+    // MOBILE OVERFLOW FIX: this used to render Timestamp (whitespace-nowrap)
+    // and the Action badge as two always-visible columns side-by-side. On a
+    // narrow phone a long action string (e.g. "CHECKOUT_DISPATCHED") plus a
+    // full timestamp don't fit in one row, forcing the whole table into
+    // horizontal scroll and clipping the badge off-screen. Now only the
+    // Timestamp column is a real always-visible column; the Action badge is
+    // nested underneath it (small, `truncate`d so a long action name wraps
+    // to an ellipsis instead of pushing the row wider) and only shown below
+    // `sm` -- its own standalone column (still present for desktop) is
+    // hidden on mobile instead, matching the "one primary column, rest
+    // behind a tap" pattern every other table in this app already uses.
     tbody.innerHTML = result.items.map(l => `
     <tr ${rowDetailsTrigger('Log Entry', [
       ['Timestamp', escapeHtml(l.timestamp)],
@@ -51,15 +63,20 @@ export async function loadAuditLogs() {
       ['Action', escapeHtml(l.action)],
       ['Detail', escapeHtml(l.details)],
     ])} class="cursor-pointer transition hover:bg-card2/40 active:bg-card2/60 sm:cursor-default">
-      <td class="px-5 py-2.5 whitespace-nowrap" title="${escapeHtml(l.timestamp)}">${escapeHtml(formatTimestamp(l.timestamp))}</td>
-      <td class="hidden px-5 py-2.5 sm:table-cell">${escapeHtml(l.operator)}</td>
       <td class="px-5 py-2.5">
         <div class="flex items-center gap-2">
-          <span class="rounded bg-blue-500/10 px-1.5 py-0.5 text-blue-400 ring-1 ring-blue-500/30">${escapeHtml(l.action)}</span>
+          <div class="min-w-0">
+            <p class="whitespace-nowrap" title="${escapeHtml(l.timestamp)}">${escapeHtml(formatTimestamp(l.timestamp))}</p>
+            <span class="mt-1 inline-block max-w-full truncate rounded bg-blue-500/10 px-1.5 py-0.5 align-bottom text-blue-400 ring-1 ring-blue-500/30 sm:hidden">${escapeHtml(l.action)}</span>
+          </div>
           <!-- Mobile-only affordance showing the row itself is tappable
                (replaces the old separate "Details" button). -->
           <svg class="ml-auto h-4 w-4 shrink-0 text-slate-600 sm:hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
         </div>
+      </td>
+      <td class="hidden px-5 py-2.5 sm:table-cell">${escapeHtml(l.operator)}</td>
+      <td class="hidden px-5 py-2.5 sm:table-cell">
+        <span class="rounded bg-blue-500/10 px-1.5 py-0.5 text-blue-400 ring-1 ring-blue-500/30">${escapeHtml(l.action)}</span>
       </td>
       <td class="hidden px-5 py-2.5 text-slate-500 sm:table-cell">${escapeHtml(l.details)}</td>
     </tr>`).join('') || `<tr><td colspan="4" class="px-5 py-6 text-center text-slate-500">No log entries yet.</td></tr>`;

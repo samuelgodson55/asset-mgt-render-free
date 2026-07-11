@@ -6,15 +6,26 @@ reconciliation check-in, the advanced checkout flow, and CSV batch import.
 """
 
 from typing import Optional
-from fastapi import APIRouter, Depends, UploadFile, File, Query
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query, Response
 from sqlalchemy.orm import Session
 
 from database import get_db
 from deps import get_current_user, require_super_admin, require_privileged_role
-from schemas.assets import AssetTypeCreate, ExceptionCreate, AdvancedCheckoutRequest, QuantityUpdateRequest, NameUpdateRequest
+from schemas.assets import AssetTypeCreate, ExceptionCreate, AdvancedCheckoutRequest, QuantityUpdateRequest, NameUpdateRequest, DepartmentUpdateRequest
 import services.asset_service as asset_service
 
 router = APIRouter(prefix="/assets", tags=["assets"])
+
+# Shared by the export route below -- same "unsupported format" validation
+# as api/users.py's/api/outsiders.py's export routes.
+_VALID_EXPORT_FORMATS = ("csv", "pdf")
+
+
+def _validate_export_format(format: str) -> str:
+    fmt = format.lower()
+    if fmt not in _VALID_EXPORT_FORMATS:
+        raise HTTPException(status_code=400, detail="format must be 'csv' or 'pdf'.")
+    return fmt
 
 
 @router.post("", response_model=dict)
@@ -33,6 +44,25 @@ def list_assets(
     return asset_service.list_assets(db, limit, offset, search)
 
 
+@router.get("/departments")
+def get_asset_departments(db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
+    """Distinct department list, powering the Asset Inventory Export button's per-department download options."""
+    return asset_service.list_asset_departments(db)
+
+
+@router.get("/export")
+def export_assets_inventory(
+    format: str = Query("csv", description="Export format: 'csv' or 'pdf'."),
+    department: Optional[str] = Query(None, description="Limit the export to one department; omit or pass 'all' for every pool."),
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    """Downloads the Asset Inventory table itself as a CSV or PDF, optionally narrowed to a single department."""
+    fmt = _validate_export_format(format)
+    content, media_type, filename = asset_service.export_assets_inventory(db, user, department, fmt)
+    return Response(content=content, media_type=media_type, headers={"Content-Disposition": f"attachment; filename={filename}"})
+
+
 @router.get("/{asset_id}/details")
 def get_asset_details(asset_id: int, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
     return asset_service.get_asset_details(db, asset_id)
@@ -46,6 +76,11 @@ def update_asset_quantity(asset_id: int, payload: QuantityUpdateRequest, db: Ses
 @router.put("/{asset_id}/name")
 def update_asset_name(asset_id: int, payload: NameUpdateRequest, db: Session = Depends(get_db), user: dict = Depends(require_super_admin)):
     return asset_service.update_asset_name(db, asset_id, payload, user)
+
+
+@router.put("/{asset_id}/department")
+def update_asset_department(asset_id: int, payload: DepartmentUpdateRequest, db: Session = Depends(get_db), user: dict = Depends(require_super_admin)):
+    return asset_service.update_asset_department(db, asset_id, payload, user)
 
 
 @router.delete("/{asset_id}")

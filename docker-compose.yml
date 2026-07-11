@@ -87,6 +87,14 @@ services:
     build: ./backend
     container_name: snipeit_lite_backend
     restart: unless-stopped
+    volumes:
+      # Local backup files (see backend/services/backup_service.py) --
+      # named volume so they survive `docker compose restart`/`down`
+      # (only `docker compose down -v` wipes it), same pattern as `db`'s
+      # `pgdata` volume above. This is purely a local-dev convenience;
+      # Render's Free plan has no equivalent persistent volume, which is
+      # exactly why BACKUP_GDRIVE_ENABLED exists for production.
+      - backup_data:/app/backups
     environment:
       # "development" or "production" -- gates the startup JWT-secret check
       # in backend/config.py (requirement #5). Defaults to "development" so
@@ -161,6 +169,20 @@ services:
       # backend/config.py's DUE_SOON_REMINDER_DAYS docstring.
       DUE_SOON_REMINDER_DAYS: ${DUE_SOON_REMINDER_DAYS:-2}
       DUE_SOON_NOTIFICATION_INTERVAL_HOURS: ${DUE_SOON_NOTIFICATION_INTERVAL_HOURS:-24}
+      # Database backups -- see backend/config.py's BACKUP_* docstring.
+      ENABLE_AUTO_BACKUP: ${ENABLE_AUTO_BACKUP:-true}
+      BACKUP_HOUR_UTC: ${BACKUP_HOUR_UTC:-3}
+      BACKUP_DIR: ${BACKUP_DIR:-/app/backups}
+      BACKUP_RETENTION_COUNT: ${BACKUP_RETENTION_COUNT:-7}
+      BACKUP_GDRIVE_ENABLED: ${BACKUP_GDRIVE_ENABLED:-false}
+      # Mode 1 -- personal Google account (see backend/config.py's
+      # BACKUP_GDRIVE_* docstring and backend/scripts/gdrive_oauth_setup.py).
+      BACKUP_GDRIVE_OAUTH_CLIENT_ID: ${BACKUP_GDRIVE_OAUTH_CLIENT_ID:-}
+      BACKUP_GDRIVE_OAUTH_CLIENT_SECRET: ${BACKUP_GDRIVE_OAUTH_CLIENT_SECRET:-}
+      BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN: ${BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN:-}
+      # Mode 2 -- Google Workspace service account + Shared Drive.
+      BACKUP_GDRIVE_CREDENTIALS_JSON: ${BACKUP_GDRIVE_CREDENTIALS_JSON:-}
+      BACKUP_GDRIVE_FOLDER_ID: ${BACKUP_GDRIVE_FOLDER_ID:-}
     depends_on:
       db:
         condition: service_healthy
@@ -292,3 +314,4 @@ services:
 volumes:
   pgdata:
   redisdata:
+  backup_data:

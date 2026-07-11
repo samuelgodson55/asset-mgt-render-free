@@ -70,6 +70,7 @@ from api.users import router as users_router
 from api.outsiders import router as outsiders_router
 from api.checkouts import router as checkouts_router
 from api.audit import router as audit_router
+from api.backup import router as backup_router
 
 # ---------------------------------------------------------------------------
 # STRUCTURED LOGGING -- configure this FIRST, before anything else in the
@@ -133,6 +134,14 @@ def on_startup() -> None:
         seed_db()
     else:
         logger.info("AUTO_SEED_DEMO_DATA is disabled -- skipping demo data seeding.")
+
+    # Daily database backup scheduler (see services/backup_service.py). A
+    # plain daemon thread inside this same process -- not Celery -- so it
+    # runs regardless of RUN_EMBEDDED_WORKER/Redis configuration. No-op if
+    # settings.ENABLE_AUTO_BACKUP is false.
+    import services.backup_service as backup_service
+
+    backup_service.start_backup_scheduler()
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +252,7 @@ app.include_router(users_router, prefix="/api")
 app.include_router(outsiders_router, prefix="/api")
 app.include_router(checkouts_router, prefix="/api")
 app.include_router(audit_router, prefix="/api")
+app.include_router(backup_router, prefix="/api")
 
 # ---------------------------------------------------------------------------
 # STATIC FRONTEND (free-tier single-service deployment only)

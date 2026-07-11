@@ -7,7 +7,7 @@
 // =============================================================================
 
 import { apiRequest } from '../api.js';
-import { escapeHtml, openModal, closeModal, toggleRoute, toggleCapacityEdit, toggleNameEdit, statusBadge, debounce, renderServerPaginationBar, rowDetailsTrigger } from '../ui.js';
+import { escapeHtml, openModal, closeModal, toggleRoute, toggleCapacityEdit, toggleNameEdit, toggleDepartmentEdit, statusBadge, debounce, renderServerPaginationBar, rowDetailsTrigger } from '../ui.js';
 import { refreshDashboard } from '../dashboard.js';
 
 let currentDispatchAssetId = null; // remembers which asset the open dispatch drawer is for
@@ -82,13 +82,14 @@ function renderAssetsTable(items) {
     return `
     <tr ${rowDetailsTrigger(escapeHtml(a.name), [
       ['Available / Total', `${a.available_quantity} / ${a.total_quantity} units`],
+      ...(a.department ? [['Department', escapeHtml(a.department)]] : []),
       ['', `<div class="flex flex-wrap gap-2">${actionButtons}</div>`],
     ])} class="cursor-pointer transition hover:bg-card2/40 active:bg-card2/60 sm:cursor-default">
-      <td class="px-5 py-3.5">
+    <td class="px-5 py-3.5">
         <div class="flex items-center gap-2">
           <div>
             <p class="font-medium text-slate-100">${escapeHtml(a.name)}</p>
-            <p class="tag-mono text-[11px] text-slate-500">POOL-${a.id}</p>
+            <p class="tag-mono text-[11px] text-slate-500">POOL-${a.id}${a.department ? ` · ${escapeHtml(a.department)}` : ''}</p>
           </div>
           <!-- Mobile-only affordance showing the row itself is tappable
                (replaces the old separate "Details" button). -->
@@ -255,6 +256,41 @@ export async function openPropsModal(assetId) {
     document.getElementById('propsAssetName').textContent = details.name;
     document.getElementById('propsTotal').textContent = details.total_quantity;
     document.getElementById('propsAvailable').textContent = details.available_quantity;
+
+    // Originating department (optional -- see models.py's AssetType
+    // docstring). manager.html's read-only Properties Hub hides this row
+    // entirely when no department is set on this pool, same "hide the row
+    // rather than show a blank/em-dash" pattern used by
+    // profileDepartmentRow (see components/profile.js).
+    const deptRow = document.getElementById('propsDepartmentRow');
+    if (deptRow) {
+      if (details.department) {
+        document.getElementById('propsDepartment').textContent = details.department;
+        deptRow.classList.remove('hidden');
+      } else {
+        deptRow.classList.add('hidden');
+      }
+    }
+
+    // admin.html's editable version of the same field -- only present
+    // there (deptInput doesn't exist on manager.html). Unlike the
+    // read-only row above, this ALWAYS shows (so a pool with no
+    // department yet has somewhere to add one), falling back to a plain
+    // "No department set" placeholder instead of hiding.
+    const deptInput = document.getElementById('deptInput');
+    if (deptInput) {
+      document.getElementById('propsDepartment').textContent = details.department || 'No department set';
+      deptInput.value = details.department || '';
+    }
+    // Reset back to display mode (not mid-edit) every time the modal is
+    // (re)opened, same reasoning as nameDisplay/nameEdit below.
+    const deptDisplay = document.getElementById('deptDisplay');
+    const deptEdit = document.getElementById('deptEdit');
+    if (deptDisplay && deptEdit) {
+      deptDisplay.classList.remove('hidden');
+      deptEdit.classList.add('hidden');
+      deptEdit.classList.remove('flex');
+    }
     // Outbound + Isolated now come straight from the backend's derived
     // Available = Total - Outbound - Isolated calculation (requirement #3)
     // instead of being re-derived here from possibly-stale numbers.
@@ -365,6 +401,24 @@ export async function saveName() {
   }
 }
 
+// Unlike saveName() above, an empty department input is a valid, deliberate
+// "clear it back to unset" action rather than an error -- so this sends
+// `null` instead of blocking the submit, letting an admin remove a
+// department just as easily as adding one.
+export async function saveDepartment() {
+  const newDepartment = document.getElementById('deptInput').value.trim();
+  try {
+    await apiRequest(`/assets/${currentPropsAssetId}/department`, {
+      method: 'PUT', body: JSON.stringify({ department: newDepartment || null }),
+    });
+    toggleDepartmentEdit();
+    openPropsModal(currentPropsAssetId);
+    refreshDashboard();
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
 export async function submitExceptionForm(event) {
   event.preventDefault();
   const payload = {
@@ -385,9 +439,16 @@ export async function submitExceptionForm(event) {
 // ---- Register New Inventory Pool (Super Admin only) ----
 export async function submitCreatePoolForm(event) {
   event.preventDefault();
+  const departmentInput = document.getElementById('newPoolDepartment');
   const payload = {
     name: document.getElementById('newPoolName').value,
     total_quantity: parseInt(document.getElementById('newPoolQty').value, 10),
+    // Optional -- which internal department this pool's equipment
+    // originates from. Left out entirely (null) rather than sent as an
+    // empty string when the field is blank -- see schemas/assets.py's
+    // AssetTypeCreate.department for the matching server-side
+    // normalization.
+    department: departmentInput && departmentInput.value.trim() ? departmentInput.value.trim() : null,
   };
   try {
     await apiRequest('/assets', { method: 'POST', body: JSON.stringify(payload) });
@@ -398,7 +459,34 @@ export async function submitCreatePoolForm(event) {
   }
 }
 
-// ---- Spreadsheet Batch Import (Super Admin only) ----
+// ---- Asset Inventory Export (CSV / PDF, by department) ----
+// Opens a small modal offering "Download All" plus one option per distinct
+// department currently on file (see GET /assets/departments ->
+// services/asset_service.py's list_asset_departments()), then hands the
+// selected scope off to components/exports.js's exportAssetsInventory()
+// to do the actual authenticated file download. Unlike the
+// properties-assigned exports elsewhere in the app (which export WHO
+// currently holds WHAT), this exports the Asset Inventory table itself --
+// one row per pool.
+export async function openAssetExportModal() {
+  const select = document.getElementById('assetExportDepartment');
+  if (!select) return;
+  select.innerHTML = '<option value="all">Download All</option>';
+  try {
+    const result = await apiRequest('/assets/departments');
+    (result.departments || []).forEach((dept) => {
+      const opt = document.createElement('option');
+      opt.value = dept;
+      opt.textContent = dept;
+      select.appendChild(opt);
+    });
+  } catch (err) {
+    // Non-fatal -- "Download All" still works even if the department list
+    // fails to load for some reason.
+  }
+  openModal('assetExportModal');
+}
+
 export async function submitCsvImportForm(event) {
   event.preventDefault();
   const fileInput = document.getElementById('csvFileInput');

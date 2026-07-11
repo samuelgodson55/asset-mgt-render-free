@@ -304,6 +304,16 @@ export function toggleNameEdit() {
   edit.classList.toggle('flex');
 }
 
+// Same show/hide toggle as toggleNameEdit() above, for the Properties
+// Hub's department field (admin.html only -- see components/assets.js's
+// saveDepartment()/openPropsModal()).
+export function toggleDepartmentEdit() {
+  document.getElementById('deptDisplay').classList.toggle('hidden');
+  const edit = document.getElementById('deptEdit');
+  edit.classList.toggle('hidden');
+  edit.classList.toggle('flex');
+}
+
 // =============================================================================
 // SEARCH + PAGINATION (generic, reused by every listing table)
 // -----------------------------------------------------------------------------

@@ -244,3 +244,37 @@ services:
         value: 2
       - key: DUE_SOON_NOTIFICATION_INTERVAL_HOURS
         value: 24
+      # Database backups -- see backend/config.py's BACKUP_* docstring and
+      # README.md's "Backups" section. Runs daily inside this same web
+      # service process (a plain daemon thread, not Celery), so it works
+      # on the Free plan with no Background Worker service needed.
+      - key: ENABLE_AUTO_BACKUP
+        value: true
+      - key: BACKUP_HOUR_UTC
+        value: 3
+      - key: BACKUP_DIR
+        value: /app/backups
+      # This service's disk is wiped on every restart/redeploy on the Free
+      # plan -- BACKUP_RETENTION_COUNT only limits the LOCAL copy count.
+      # Enable BACKUP_GDRIVE_ENABLED (and fill in one of the two auth modes
+      # below -- see backend/config.py's BACKUP_GDRIVE_* docstring) for
+      # backups that actually survive a redeploy/spin-down.
+      - key: BACKUP_RETENTION_COUNT
+        value: 7
+      - key: BACKUP_GDRIVE_ENABLED
+        value: false
+      # Mode 1 -- personal Google account (recommended unless you have a
+      # Workspace Shared Drive). Run backend/scripts/gdrive_oauth_setup.py
+      # locally first to get these three values.
+      - key: BACKUP_GDRIVE_OAUTH_CLIENT_ID
+        sync: false
+      - key: BACKUP_GDRIVE_OAUTH_CLIENT_SECRET
+        sync: false
+      - key: BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN
+        sync: false
+      # Mode 2 -- Google Workspace service account, only works if
+      # BACKUP_GDRIVE_FOLDER_ID below is a Shared Drive folder.
+      - key: BACKUP_GDRIVE_CREDENTIALS_JSON
+        sync: false
+      - key: BACKUP_GDRIVE_FOLDER_ID
+        sync: false

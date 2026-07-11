@@ -66,3 +66,19 @@ export function exportAllUsers(format) {
 export function exportAllOutsiders(format) {
   downloadExport(`/outsiders/export?format=${format}`, `all_outsiders_properties.${format}`);
 }
+
+// ---- Asset Inventory Export button (Asset Inventory tab) ----
+// Reads the department chosen in the small #assetExportModal (populated by
+// components/assets.js's openAssetExportModal()) -- "all" (the default,
+// "Download All") or one specific department -- and downloads the
+// inventory list itself (one row per pool), not a properties-assigned
+// custody export.
+export function exportAssetsInventory(format) {
+  const select = document.getElementById('assetExportDepartment');
+  const department = select && select.value ? select.value : 'all';
+  const params = new URLSearchParams({ format, department });
+  const fallbackName = department === 'all'
+    ? `asset_inventory_all.${format}`
+    : `asset_inventory_${department.replace(/\s+/g, '_')}.${format}`;
+  downloadExport(`/assets/export?${params.toString()}`, fallbackName);
+}

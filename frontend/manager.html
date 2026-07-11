@@ -209,6 +209,13 @@
             <option value="50">50</option>
           </select>
         </div>
+        <!-- Opens #assetExportModal (department picker + CSV/PDF) -- see
+             js/components/assets.js's openAssetExportModal(). -->
+        <button data-action="open-asset-export" title="Export the Asset Inventory table"
+          class="flex items-center gap-1.5 rounded-md border border-border bg-card2 px-3 py-2 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+          Export
+        </button>
       </div>
     </div>
 
@@ -480,7 +487,7 @@
         <tr class="border-b border-border bg-card2/60 text-[11px] uppercase tracking-wide text-slate-500">
           <th class="px-5 py-2.5 font-semibold">Timestamp</th>
           <th class="hidden px-5 py-2.5 font-semibold sm:table-cell">Operator</th>
-          <th class="px-5 py-2.5 font-semibold">Action</th>
+          <th class="hidden px-5 py-2.5 font-semibold sm:table-cell">Action</th>
           <th class="hidden px-5 py-2.5 font-semibold sm:table-cell">Detail</th>
         </tr>
       </thead>
@@ -667,6 +674,9 @@
       <div>
         <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Asset Pool Details <span class="text-slate-600">(Read-Only)</span></p>
         <h3 id="propsAssetName" class="text-[18px] font-bold text-slate-50">—</h3>
+        <!-- Originating department (optional -- see models.py's AssetType
+             docstring). Hidden entirely when this pool has none set. -->
+        <p id="propsDepartmentRow" class="hidden mt-0.5 text-[12px] text-slate-500">Department: <span id="propsDepartment" class="font-medium text-slate-300">—</span></p>
       </div>
       <button data-action="close-modal" data-modal="propsModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
         <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
@@ -769,6 +779,47 @@
             Update Password
           </button>
         </form>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= ASSET INVENTORY EXPORT (MODAL) =================
+     Opened by the Asset Inventory tab's "Export" button -- see
+     js/components/assets.js's openAssetExportModal() /
+     js/components/exports.js's exportAssetsInventory(). Mirrors
+     admin.html's identical modal. -->
+<div id="assetExportModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative w-full max-w-sm overflow-y-auto sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl shadow-2xl">
+    <div class="flex items-start justify-between border-b border-border px-6 py-5">
+      <div>
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Asset Inventory</p>
+        <h3 class="text-[16px] font-bold text-slate-50">Export Inventory</h3>
+      </div>
+      <button data-action="close-modal" data-modal="assetExportModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="space-y-4 px-6 py-5">
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Category</label>
+        <select id="assetExportDepartment" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60">
+          <option value="all">Download All</option>
+        </select>
+        <p class="mt-1 text-[11px] text-slate-500">Pick a department to export just its pools, or download everything.</p>
+      </div>
+      <div class="flex gap-3 pt-1">
+        <button data-action="export-assets-inventory" data-format="csv"
+          class="flex-1 flex items-center justify-center gap-1.5 rounded-lg border border-border py-2.5 text-[13px] font-semibold text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+          .CSV
+        </button>
+        <button data-action="export-assets-inventory" data-format="pdf"
+          class="flex-1 flex items-center justify-center gap-1.5 rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+          .PDF
+        </button>
       </div>
     </div>
   </div>
