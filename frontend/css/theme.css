@@ -206,8 +206,20 @@ input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(0.7); cur
    it reads as an intentional native-feeling sheet instead of a resized
    desktop dialog. `sm:` and up is untouched -- desktop keeps the original
    centered-dialog treatment.
+
+   KEEP THIS NUMBER IN SYNC WITH build-tailwind/tailwind.config.js's `sm`
+   BREAKPOINT: this file is plain hand-written CSS, not Tailwind utility
+   classes, so Tailwind's compiler can't generate it from that config
+   automatically the way it does for every `sm:*` class in the HTML/JS --
+   it has to be kept lined up here by hand instead. The rule is always:
+       this max-width value  =  tailwind.config.js's `sm` value  -  1px
+   (a plain CSS media query needs "everything narrower than sm" as an
+   explicit max-width, since there's no "not sm:" utility variant to use
+   instead). tailwind.config.js's `sm` is currently 480px, so this is 479px.
+   If you change `sm` there, change the two `479px` values below to match
+   (tailwind.config.js's own comment on `sm` points back to this file too).
    ============================================================================= */
-@media (max-width: 639px) {
+@media (max-width: 479px) {
   .sheet-panel { position: relative; padding-top: 22px; }
   .sheet-panel::before {
     content: '';
@@ -230,9 +242,11 @@ input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(0.7); cur
 
 /* Sheets (and the existing right-docked drawers) slide in rather than just
    appearing -- a small, purely cosmetic touch that reads as considerably
-   more polished on a phone. Respects reduced-motion preferences. */
+   more polished on a phone. Respects reduced-motion preferences.
+   Same "keep in sync with tailwind.config.js's `sm`" rule as the block
+   above applies to the nested 479px query here too. */
 @media (prefers-reduced-motion: no-preference) {
-  @media (max-width: 639px) {
+  @media (max-width: 479px) {
     .sheet-panel { animation: sheet-slide-up .22s cubic-bezier(.32,.72,0,1); }
   }
   .drawer-panel { animation: drawer-slide-in .22s cubic-bezier(.32,.72,0,1); }

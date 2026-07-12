@@ -440,8 +440,9 @@ export async function submitExceptionForm(event) {
 export async function submitCreatePoolForm(event) {
   event.preventDefault();
   const departmentInput = document.getElementById('newPoolDepartment');
+  const poolName = document.getElementById('newPoolName').value;
   const payload = {
-    name: document.getElementById('newPoolName').value,
+    name: poolName,
     total_quantity: parseInt(document.getElementById('newPoolQty').value, 10),
     // Optional -- which internal department this pool's equipment
     // originates from. Left out entirely (null) rather than sent as an
@@ -451,8 +452,16 @@ export async function submitCreatePoolForm(event) {
     department: departmentInput && departmentInput.value.trim() ? departmentInput.value.trim() : null,
   };
   try {
-    await apiRequest('/assets', { method: 'POST', body: JSON.stringify(payload) });
+    // POST /assets already returns a `message` (see
+    // services/asset_service.py's create_asset_type()) -- previously
+    // this was fetched and discarded, so a successful creation gave no
+    // feedback at all and silently reset the form, indistinguishable
+    // from nothing having happened. Surface it the same way every other
+    // successful mutation in this app does (e.g. submitCsvImportForm()
+    // above, submitExtensionRequestForm() in components/extensions.js).
+    const result = await apiRequest('/assets', { method: 'POST', body: JSON.stringify(payload) });
     document.getElementById('createPoolForm').reset();
+    alert(result.message ? `${result.message}: "${poolName}"` : `Stock pool "${poolName}" created successfully.`);
     refreshDashboard();
   } catch (err) {
     alert(err.message);
@@ -485,6 +494,43 @@ export async function openAssetExportModal() {
     // fails to load for some reason.
   }
   openModal('assetExportModal');
+}
+
+// ---- Sample CSV Import Template ----
+// Generates a small, ready-to-fill-in CSV entirely client-side (no
+// round-trip to the backend needed -- it's just a static shape) and
+// triggers a browser download, so a Super Admin prepping an inventory
+// sheet for import has an exact, working example of the expected columns
+// instead of reverse-engineering them from the format hint text or from a
+// rejected-row error after a failed import. Column order/names and the
+// "existing pool quantities ADD, don't replace" behavior demonstrated by
+// the "Dell Latitude 5440" row below must stay in sync with
+// services/asset_service.py's import_assets_from_csv().
+const CSV_IMPORT_TEMPLATE_ROWS = [
+  ['name', 'total_quantity', 'department'],
+  ['Dell Latitude 5440', '10', 'Engineering'],
+  ['Logitech MX Master 3S', '25', 'Engineering'],
+  ['Herman Miller Aeron Chair', '8', ''],
+];
+
+export function downloadCsvImportTemplate() {
+  // Same CSV-safety concern as the backend's csv_safe_cell() -- none of
+  // these fixed sample values start with =, +, -, or @, but escaping any
+  // cell containing a comma/quote/newline via double-quoting is still
+  // done properly so the template opens cleanly in Excel/Sheets/LibreOffice.
+  const csvText = CSV_IMPORT_TEMPLATE_ROWS
+    .map((row) => row.map((cell) => (/[",\n]/.test(cell) ? `"${cell.replace(/"/g, '""')}"` : cell)).join(','))
+    .join('\r\n');
+
+  const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'asset_import_template.csv';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
 
 export async function submitCsvImportForm(event) {

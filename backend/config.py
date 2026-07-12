@@ -114,6 +114,26 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRY_HOURS: int = 12
 
+    # --- Display timezone (Data Quality & Usability: UTC/local consistency) --
+    # Every timestamp is STORED in the database as UTC (see models.py's
+    # utc_now() docstring) -- that part is correct and stays unchanged. The
+    # bug this setting fixes is at the DISPLAY layer: the live UI (Audit
+    # Trail, My Items, etc.) already converts UTC -> the viewer's own
+    # browser-local time via js/ui.js's formatTimestamp(), but the
+    # server-generated CSV/PDF exports (audit ledger, properties-assigned
+    # reports) used to print the raw UTC wall-clock numbers with a literal
+    # "UTC" label instead -- correct in an absolute sense, but an hour (or
+    # more) off from what the Audit Trail on-screen shows for anyone
+    # outside UTC, e.g. Lagos/WAT (UTC+1). Since a static export file has
+    # no browser to localize into, it needs ONE fixed timezone to render
+    # into instead -- this is that timezone. Every export now converts UTC
+    # timestamps into DISPLAY_TIMEZONE before formatting, and labels the
+    # result with that zone's real abbreviation (e.g. "WAT") instead of a
+    # hardcoded "UTC", so the exported hour always matches the Audit Trail
+    # hour a person just looked at on screen. Must be an IANA tz name
+    # (e.g. "Africa/Lagos", "America/New_York", "UTC").
+    DISPLAY_TIMEZONE: str = "Africa/Lagos"
+
     # --- CORS -------------------------------------------------------------
     # Comma-separated list of origins allowed to call this API. Defaults
     # cover local Docker Compose usage out of the box.
@@ -521,6 +541,26 @@ class Settings(BaseSettings):
                 f"least {_MIN_PROD_SUPER_ADMIN_PASSWORD_LENGTH} characters long."
             )
 
+        return self
+
+    # -----------------------------------------------------------------
+    # STARTUP CHECK: DISPLAY_TIMEZONE is a real IANA zone name
+    # -----------------------------------------------------------------
+    # Same fail-fast-at-import-time reasoning as _enforce_prod_jwt_secret
+    # above: a typo'd zone name (e.g. "Africa/Lagoss") would otherwise only
+    # blow up the first time someone generates an export, hours or days
+    # after deploy. Resolving it once here means the container refuses to
+    # boot instead.
+    @model_validator(mode="after")
+    def _validate_display_timezone(self) -> "Settings":
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+        try:
+            ZoneInfo(self.DISPLAY_TIMEZONE)
+        except ZoneInfoNotFoundError:
+            raise ValueError(
+                f"Refusing to start: DISPLAY_TIMEZONE '{self.DISPLAY_TIMEZONE}' is not a "
+                "recognized IANA timezone name (e.g. 'Africa/Lagos', 'America/New_York', 'UTC')."
+            )
         return self
 
     # -----------------------------------------------------------------

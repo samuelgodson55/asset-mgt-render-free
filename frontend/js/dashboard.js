@@ -18,7 +18,7 @@ import { loadOutsiders } from './components/outsiders.js';
 import { loadAuditLogs } from './components/audit.js';
 import { loadOverdueAlerts } from './components/overdue.js';
 import { loadDueSoonAlerts } from './components/due-soon.js';
-import { loadExtensionRequests } from './components/extensions.js';
+import { loadExtensionRequests, loadMyExtensionDecisionsAlert } from './components/extensions.js';
 
 export function refreshDashboard() {
   loadAssets();
@@ -32,6 +32,11 @@ export function refreshDashboard() {
   loadOverdueAlerts();
   loadDueSoonAlerts();
   loadExtensionRequests();
+  // Self-service banner (see components/extensions.js) -- distinct from
+  // loadExtensionRequests() above, which is the REVIEW panel for
+  // decisions this account needs to make on OTHERS' checkouts. A no-op
+  // on any page without #myExtensionDecisionsBanner.
+  loadMyExtensionDecisionsAlert();
 
   // Whatever just changed elsewhere on the dashboard could also change
   // what the three alert widgets above have to show, so a stale "All

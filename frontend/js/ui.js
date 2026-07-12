@@ -84,9 +84,11 @@ export function escapeHtml(str) {
 // MOBILE "ROW DETAILS" POPUP
 // -----------------------------------------------------------------------------
 // Every data table in this app hides its less-critical columns below the
-// `sm` (640px) breakpoint -- see each components/*.js render function's
-// `hidden sm:table-cell` cells -- so a table never forces the page into a
-// long horizontal scroll on a phone. Desktop (`sm:` and up) still renders
+// `sm` breakpoint (480px -- see build-tailwind/tailwind.config.js's
+// `screens.sm` for the single source of truth on this number, and how to
+// change it) -- see each components/*.js render function's `hidden
+// sm:table-cell` cells -- so a table never forces the page into a long
+// horizontal scroll on a phone. Desktop (`sm:` and up) still renders
 // every column exactly as before.
 //
 // Whatever gets hidden isn't lost, though: a small "Details" button (also
@@ -560,6 +562,66 @@ export function clearAlertDismissed(key) {
     // Ignore, same as above.
   }
 }
+
+// =============================================================================
+// PER-ITEM DISMISSAL (My Extension Decisions banner)
+// -----------------------------------------------------------------------------
+// The signature-based helpers above are the right model for Overdue/Due
+// Soon/Extension Requests: those banners always describe the CURRENT
+// state of the world ("these items are overdue right now"), so it's
+// correct for the whole banner to reappear the moment that state changes
+// even slightly -- there's always exactly one aggregate thing to dismiss.
+//
+// "My Extension Decisions" is a different shape: a feed of discrete,
+// one-time notification events ("your request was approved"), much closer
+// to a notification inbox than a live status banner. If dismissal were
+// keyed to a signature of the WHOLE list (like the helpers above), then
+// approving/denying one MORE request later would change that signature and
+// bring back every OTHER decision the person already dismissed, bundled in
+// with the one new one -- "I already saw and closed this, why is it back?"
+// Instead, each decision's own id is added to a small persisted SET the
+// first time it's dismissed, and is filtered out of the list on every
+// future load forever after, however many newer decisions arrive alongside
+// it. A decision only ever needs to be dismissed once, and dismissing it
+// never affects any other decision's visibility.
+//
+// Capped at MAX_DISMISSED_IDS entries (oldest trimmed first) purely as a
+// defensive ceiling on localStorage growth -- in practice this never gets
+// close, since the server itself only ever returns decisions from the last
+// DECISION_ALERT_WINDOW_DAYS (see extension_service.py), so anything older
+// naturally stops being offered for dismissal at all.
+const MAX_DISMISSED_IDS = 200;
+
+function _readDismissedIdSet(key) {
+  try {
+    const raw = window.localStorage.getItem(DISMISS_STORAGE_PREFIX + key + ':ids');
+    return raw ? new Set(JSON.parse(raw)) : new Set();
+  } catch (e) {
+    return new Set(); // corrupt/missing/private-mode -- fail open, same as isAlertDismissed()
+  }
+}
+
+export function isItemDismissed(key, id) {
+  return _readDismissedIdSet(key).has(id);
+}
+
+// Marks every id in `ids` as dismissed (adds to the existing set rather
+// than replacing it -- previously-dismissed ids from earlier visits are
+// preserved). Safe to call with an empty array.
+export function dismissItems(key, ids) {
+  if (!ids || !ids.length) return;
+  try {
+    const merged = _readDismissedIdSet(key);
+    ids.forEach(id => merged.add(id));
+    // Oldest-first trim: Set preserves insertion order in JS, so slicing
+    // from the front of the array drops the oldest entries once over cap.
+    const trimmed = Array.from(merged).slice(-MAX_DISMISSED_IDS);
+    window.localStorage.setItem(DISMISS_STORAGE_PREFIX + key + ':ids', JSON.stringify(trimmed));
+  } catch (e) {
+    // Ignore -- worst case a dismissal only lasts for this page load.
+  }
+}
+
 
 // A person-level (not item-level) alert icon for the User Directory /
 // Ad-Hoc Directory tables. Takes the `alerts: {overdue, due_soon,

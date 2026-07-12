@@ -264,6 +264,75 @@ def list_extension_requests(db: Session, user: dict, status: str | None = None, 
     return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
+# How far back a decided (approved/denied) request stays eligible to show
+# up in the self-service "recent decisions" banner below -- see
+# list_my_recent_extension_decisions()'s docstring for the full rationale.
+DECISION_ALERT_WINDOW_DAYS = 14
+
+
+def list_my_recent_extension_decisions(db: Session, user: dict, limit: int = 10) -> dict:
+    """
+    Self-service, in-app counterpart to the email decide_extension_request()
+    already sends the checkout holder below -- someone doesn't always see
+    (or have) email, and shouldn't have to go dig through the Audit Trail
+    to find out their request was approved/denied. Powers the dismissible
+    banner on staff.html/customer.html (and admin/manager dashboards, since
+    those roles can self-service-request extensions on their own checkouts
+    too) -- see js/components/extensions.js's loadMyExtensionDecisionsAlert().
+
+    Scoped to AssetCheckout.user_id (the actual holder the item is loaned
+    to -- the same recipient the email goes to), NOT to
+    ExtensionRequest.requested_by_label, so this still resolves correctly
+    even when a Manager/Admin logged the original request on someone
+    else's behalf -- the holder still gets notified once it's decided,
+    same as the email does.
+
+    Bounded to the last DECISION_ALERT_WINDOW_DAYS so a years-old decision
+    from long before this feature shipped doesn't suddenly resurface for
+    everyone the first time they load the dashboard after an upgrade. The
+    frontend also remembers a per-request dismissal (same
+    localStorage-signature pattern as every other alert banner in this
+    app -- see js/ui.js's isAlertDismissed()/setAlertDismissed()), so
+    within that window a decision still only ever needs to be seen once.
+    """
+    limit = max(1, min(limit, MAX_LIMIT))
+    cutoff = utc_now() - datetime.timedelta(days=DECISION_ALERT_WINDOW_DAYS)
+
+    requests = (
+        db.query(models.ExtensionRequest)
+        .join(models.AssetCheckout, models.ExtensionRequest.checkout_id == models.AssetCheckout.id)
+        .filter(
+            models.AssetCheckout.user_id == int(user["sub"]),
+            models.ExtensionRequest.status.in_(("approved", "denied")),
+            models.ExtensionRequest.decided_at.isnot(None),
+            models.ExtensionRequest.decided_at >= cutoff,
+        )
+        .order_by(models.ExtensionRequest.decided_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+    items = []
+    for r in requests:
+        checkout = r.checkout
+        items.append({
+            "id": r.id,
+            "checkout_id": r.checkout_id,
+            "asset_name": checkout.asset.name if checkout and checkout.asset else "Unknown Asset",
+            "status": r.status,
+            "requested_new_due_date": r.requested_new_due_date.strftime("%Y-%m-%d") if r.requested_new_due_date else None,
+            "due_date": checkout.due_date.strftime("%Y-%m-%d") if checkout and checkout.due_date else None,
+            "decision_note": r.decision_note,
+            # TIMEZONE FIX -- see services/user_service.py's
+            # get_my_assigned_items() for the full explanation of why this
+            # is `.isoformat()` and not a pre-formatted `.strftime(...)`
+            # string; the frontend banner formats it for display.
+            "decided_at": r.decided_at.isoformat() if r.decided_at else None,
+        })
+
+    return {"items": items, "total": len(items)}
+
+
 def decide_extension_request(db: Session, request_id: int, decision: ExtensionDecisionRequest, user: dict) -> dict:
     """
     Approves or denies a pending extension request. Approving is the ONLY

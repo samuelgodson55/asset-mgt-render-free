@@ -33,6 +33,7 @@ import {
   openDispatchModal, submitDispatchForm, openPropsModal, recallException,
   saveCapacity, saveName, saveDepartment, submitExceptionForm, submitCreatePoolForm, submitCsvImportForm,
   deleteAssetPool, setAssetsSearch, setAssetsPerPage, changeAssetsPage, openAssetExportModal,
+  downloadCsvImportTemplate,
 } from './components/assets.js';
 import {
   deleteProfile, submitCreateUserForm, setUsersSearch, setUsersPerPage, changeUsersPage,
@@ -59,7 +60,7 @@ import {
   openRestoreUploadModal,
   confirmRestore,
 } from './components/backups.js';
-import { openExtensionRequestModal, submitExtensionRequestForm, decideExtensionRequest, openDirectExtendModal, submitDirectExtendForm, dismissExtensionRequestsAlert } from './components/extensions.js';
+import { openExtensionRequestModal, submitExtensionRequestForm, decideExtensionRequest, openDirectExtendModal, submitDirectExtendForm, dismissExtensionRequestsAlert, loadMyExtensionDecisionsAlert, dismissMyExtensionDecisionsAlert } from './components/extensions.js';
 
 // -----------------------------------------------------------------------------
 // DELEGATED "CLICK" ACTIONS
@@ -107,6 +108,7 @@ const CLICK_ACTIONS = {
   'restore-user': (el) => restoreUser(parseInt(el.dataset.userId, 10), el.dataset.userName),
   'delete-asset-pool': (el) => deleteAssetPool(parseInt(el.dataset.assetId, 10), el.dataset.assetName),
   'open-asset-export': () => openAssetExportModal(),
+  'download-csv-template': () => downloadCsvImportTemplate(),
   'change-page': (el) => {
     const key = el.dataset.key;
     const delta = parseInt(el.dataset.delta, 10);
@@ -119,6 +121,7 @@ const CLICK_ACTIONS = {
   'dismiss-overdue-alert': () => dismissOverdueAlert(),
   'dismiss-due-soon-alert': () => dismissDueSoonAlert(),
   'dismiss-extension-requests-alert': () => dismissExtensionRequestsAlert(),
+  'dismiss-my-extension-decisions-alert': () => dismissMyExtensionDecisionsAlert(),
   'dismiss-all-clear-banner': () => {
     const banner = document.getElementById('alertsAllClearBanner');
     if (banner) banner.classList.add('hidden');
@@ -417,6 +420,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (document.getElementById('myItemsTableBody')) {
       loadMyItems();
+      loadMyExtensionDecisionsAlert();
     }
     if (document.getElementById('backupTableBody')) {
       refreshBackupsPanel();

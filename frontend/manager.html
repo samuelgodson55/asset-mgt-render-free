@@ -177,6 +177,31 @@
     <div id="extensionRequestsList" class="mt-2 space-y-2"></div>
   </div>
 
+  <!-- ================= MY EXTENSION REQUEST DECISIONS BANNER =================
+       Distinct from the "Extension Requests" REVIEW panel above (which is
+       for decisions THIS account needs to make on others' checkouts) --
+       this is the self-service counterpart: a Manager can also
+       self-request an extension on their OWN checkout (see
+       services/extension_service.py's create_extension_request()), so they
+       need the same "your request was approved/denied" feedback a
+       staff/customer account gets. Populated by
+       js/components/extensions.js's loadMyExtensionDecisionsAlert() from
+       GET /checkouts/my-extension-decisions. Hidden by default/whenever
+       there's nothing new; dismissible/recallable the same way as the
+       banners above. -->
+  <div id="myExtensionDecisionsBanner" class="hidden rounded-xl border border-blue-500/30 bg-blue-500/5 p-4">
+    <div class="flex items-center justify-between gap-2">
+      <div class="flex items-center gap-2 text-[13px] font-semibold text-blue-400">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="9"/></svg>
+        <span><span id="myExtensionDecisionsCount">0</span> extension request update(s)</span>
+      </div>
+      <button data-action="dismiss-my-extension-decisions-alert" title="Dismiss" class="rounded-md p-1 text-blue-400/70 transition hover:bg-blue-500/10 hover:text-blue-300">
+        <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <ul id="myExtensionDecisionsList" class="mt-2 divide-y divide-blue-500/10 text-[12px]"></ul>
+  </div>
+
   <!-- Swipe hint dots (mobile only) -- see js/ui.js's updateSwipeDots(). -->
   <div id="swipeDots" class="mb-4 flex items-center justify-center gap-1.5 sm:hidden"></div>
 

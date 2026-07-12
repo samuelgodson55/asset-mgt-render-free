@@ -75,12 +75,20 @@ def _filtered_audit_logs_query(db: Session, user: dict, start_date: Optional[dat
     itself whether to stream it (CSV) or materialize it in one shot (PDF).
     """
     query = db.query(models.AuditLog)
+    # `start_date`/`end_date` are plain calendar dates picked from a date
+    # input -- a person choosing "2026-07-10" means "that day, in the time
+    # I'm looking at" (i.e. DISPLAY_TIMEZONE), not "that day in UTC". Since
+    # AuditLog.timestamp is stored/compared as UTC, each boundary is built
+    # in DISPLAY_TIMEZONE first and then converted to UTC for the query --
+    # otherwise a Lagos (UTC+1) person filtering for "today" would silently
+    # lose the last hour of it (and pick up the first hour of the day
+    # before) the way a raw UTC-midnight boundary used to.
     if start_date:
-        start_dt = datetime.datetime.combine(start_date, datetime.time.min, tzinfo=datetime.timezone.utc)
-        query = query.filter(models.AuditLog.timestamp >= start_dt)
+        start_dt = datetime.datetime.combine(start_date, datetime.time.min, tzinfo=export_service.DISPLAY_TZ)
+        query = query.filter(models.AuditLog.timestamp >= start_dt.astimezone(datetime.timezone.utc))
     if end_date:
-        end_dt = datetime.datetime.combine(end_date, datetime.time.max, tzinfo=datetime.timezone.utc)
-        query = query.filter(models.AuditLog.timestamp <= end_dt)
+        end_dt = datetime.datetime.combine(end_date, datetime.time.max, tzinfo=export_service.DISPLAY_TZ)
+        query = query.filter(models.AuditLog.timestamp <= end_dt.astimezone(datetime.timezone.utc))
     return query.order_by(desc(models.AuditLog.timestamp))
 
 
@@ -118,7 +126,7 @@ def export_audit_logs_csv(db: Session, user: dict, start_date: Optional[datetime
             # attacker/user-controlled text), so they're written as-is.
             # Every free-text column goes through `_csv_safe_cell()` first.
             writer.writerow([
-                log.id, log.timestamp.strftime("%Y-%m-%d %H:%M:%S %Z"),
+                log.id, export_service.format_export_datetime(log.timestamp),
                 _csv_safe_cell(log.operator), _csv_safe_cell(log.action),
                 _csv_safe_cell(log.target_type), log.target_id, _csv_safe_cell(log.details),
             ])
@@ -141,7 +149,7 @@ def export_audit_logs_pdf(db: Session, user: dict, start_date: Optional[datetime
     """
     logs = _filtered_audit_logs_query(db, user, start_date, end_date).all()
     rows = [
-        [log.id, log.timestamp.strftime("%Y-%m-%d %H:%M:%S %Z"), log.operator, log.action, log.target_type, log.target_id, log.details]
+        [log.id, export_service.format_export_datetime(log.timestamp), log.operator, log.action, log.target_type, log.target_id, log.details]
         for log in logs
     ]
 

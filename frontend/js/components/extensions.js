@@ -18,7 +18,7 @@
 // =============================================================================
 
 import { apiRequest } from '../api.js';
-import { escapeHtml, openModal, closeModal, isAlertDismissed, setAlertDismissed, clearAlertDismissed, groupByPerson } from '../ui.js';
+import { escapeHtml, openModal, closeModal, isAlertDismissed, setAlertDismissed, clearAlertDismissed, groupByPerson, isItemDismissed, dismissItems } from '../ui.js';
 import { refreshDashboard } from '../dashboard.js';
 import { loadMyItems } from './myitems.js';
 import { getCurrentCustodyEntity, openCustodyModal } from './custody.js';
@@ -167,6 +167,83 @@ export async function decideExtensionRequest(requestId, approve) {
     refreshDashboard();
   } catch (err) {
     alert(err.message);
+  }
+}
+
+// ---- 2b. Self-service "my extension decisions" banner (all dashboards) ----
+// The requester-facing counterpart to the review panel above: once a
+// Manager/Admin decides one of MY OWN extension requests, I should find
+// out even if I never check email -- see backend/services/
+// extension_service.py's list_my_recent_extension_decisions().
+//
+// DISMISSAL MODEL: per-item, not signature-based (unlike the Overdue/Due
+// Soon/Extension Requests banners) -- see js/ui.js's isItemDismissed()/
+// dismissItems() for the full rationale. In short: this is a one-time
+// notification feed, not a live status banner, so once a person closes a
+// decision it must stay gone forever, even after a newer, different
+// decision arrives alongside it later.
+const MY_DECISIONS_STORAGE_KEY = 'myExtensionDecisions';
+let currentDecisionIds = []; // ids currently rendered in the banner, so dismiss() knows exactly what to mark seen
+
+export function dismissMyExtensionDecisionsAlert() {
+  const banner = document.getElementById('myExtensionDecisionsBanner');
+  if (banner) banner.classList.add('hidden');
+  dismissItems(MY_DECISIONS_STORAGE_KEY, currentDecisionIds);
+  currentDecisionIds = [];
+}
+
+export async function loadMyExtensionDecisionsAlert() {
+  const banner = document.getElementById('myExtensionDecisionsBanner');
+  if (!banner) return false; // this page doesn't have the banner
+
+  try {
+    const result = await apiRequest('/checkouts/my-extension-decisions?limit=10');
+
+    // Filter out anything already individually dismissed on a previous
+    // visit -- this is the step that makes "seen it, closed it" permanent
+    // per-decision instead of resetting the moment a newer decision shows
+    // up in the same server response (see the model comment above).
+    const unseen = result.items.filter(item => !isItemDismissed(MY_DECISIONS_STORAGE_KEY, item.id));
+
+    if (!unseen.length) {
+      banner.classList.add('hidden');
+      currentDecisionIds = [];
+      return false;
+    }
+
+    document.getElementById('myExtensionDecisionsCount').textContent = unseen.length;
+
+    const list = document.getElementById('myExtensionDecisionsList');
+    // flex-wrap + break-words (not `truncate`) here on purpose: this
+    // banner sits on staff/customer dashboards which are viewed on
+    // phones far more than admin/manager ones are, and a mid-length
+    // asset name + decision note truncating to an ellipsis on a narrow
+    // screen hides exactly the information ("what got approved, what's
+    // the new due date") this banner exists to surface. Wrapping to a
+    // second line costs a little vertical space; silently cutting off
+    // the answer doesn't.
+    list.innerHTML = unseen.map(item => {
+      const approved = item.status === 'approved';
+      return `
+      <li class="flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5 py-1.5">
+        <span class="font-semibold ${approved ? 'text-emerald-400' : 'text-rose-400'}">${approved ? 'Approved' : 'Denied'}:</span>
+        <span class="font-medium text-slate-200 break-words">${escapeHtml(item.asset_name)}</span>
+        <span class="text-slate-500">
+          ${approved ? `— new due date ${escapeHtml(item.due_date || item.requested_new_due_date)}` : '— current due date unchanged'}
+        </span>
+        ${item.decision_note ? `<span class="italic text-slate-500 break-words">· "${escapeHtml(item.decision_note)}"</span>` : ''}
+      </li>`;
+    }).join('');
+
+    currentDecisionIds = unseen.map(item => item.id);
+    banner.classList.remove('hidden');
+    return true;
+  } catch (err) {
+    // Same "fail quietly" rule as every other alert banner -- this should
+    // never block the rest of the page (My Items table, etc.) from loading.
+    banner.classList.add('hidden');
+    console.error('Failed to load my extension decisions:', err.message);
+    return false;
   }
 }
 

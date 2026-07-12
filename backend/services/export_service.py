@@ -9,8 +9,10 @@ exactly the same way instead of re-implementing it three separate times.
 """
 
 import csv
+import datetime
 import io
-from typing import Iterable, Optional, Sequence
+from typing import Iterable, Optional, Sequence, Union
+from zoneinfo import ZoneInfo
 from xml.sax.saxutils import escape as xml_escape
 
 from reportlab.lib import colors
@@ -18,6 +20,63 @@ from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+from config import settings
+
+# ---------------------------------------------------------------------------
+# UTC -> display-timezone conversion for exports
+# ---------------------------------------------------------------------------
+# Every timestamp is stored/queried as UTC (see models.py's utc_now()) --
+# that never changes here. What used to differ export-to-export was the
+# DISPLAY of that UTC instant: the live UI converts to the viewer's own
+# browser-local time (js/ui.js's formatTimestamp()), while these exports
+# used to print the raw UTC numbers labeled "UTC" -- correct, but an hour
+# (or more) off from what a person had just seen on the Audit Trail page,
+# which is what actually caused the "exports are behind the Audit Trail"
+# mismatch. A static export file has no browser to localize into at
+# generation time, so it needs ONE fixed zone instead -- settings.DISPLAY_TIMEZONE
+# (see config.py) -- and every exporter in the app now goes through this
+# single helper so they all render the same hour, consistently.
+# Public on purpose (unlike a leading-underscore "private" module var) --
+# audit_service.py's date-range export filter also needs to build
+# DISPLAY_TIMEZONE-aware boundaries directly, the same way this module
+# does below.
+DISPLAY_TZ = ZoneInfo(settings.DISPLAY_TIMEZONE)
+
+
+def display_now() -> datetime.datetime:
+    """The current instant, converted to DISPLAY_TIMEZONE -- use this (not
+    utc_now()) anywhere an export prints "today"/"exported at" so those
+    stamps land on the same wall-clock day/hour a person sees in the UI."""
+    return datetime.datetime.now(DISPLAY_TZ)
+
+
+def format_export_datetime(value: Optional[Union[str, datetime.datetime]]) -> str:
+    """
+    Turns a UTC timestamp -- either an aware `datetime` (e.g. an AuditLog's
+    `.timestamp`) or one of the `.isoformat()` strings used throughout
+    user_service.py/outsider_service.py's dicts -- into a
+    "YYYY-MM-DD HH:MM:SS <ZONE>" string in DISPLAY_TIMEZONE, with the
+    real zone abbreviation (e.g. "WAT") rather than a hardcoded "UTC" that
+    would misrepresent the converted time. Every CSV/PDF exporter in the
+    app should call this instead of formatting timestamps itself, so they
+    all stay in sync with each other and with the Audit Trail on screen.
+    """
+    if not value:
+        return ""
+    if isinstance(value, str):
+        try:
+            value = datetime.datetime.fromisoformat(value)
+        except ValueError:
+            return value  # unparseable -- surface it as-is rather than silently dropping it
+    if value.tzinfo is None:
+        # Defensive: every DateTime(timezone=True) column round-trips as
+        # aware UTC already (see models.py), but treat a naive value as
+        # UTC rather than let a TypeError bubble up from astimezone().
+        value = value.replace(tzinfo=datetime.timezone.utc)
+    local = value.astimezone(DISPLAY_TZ)
+    return f"{local.strftime('%Y-%m-%d %H:%M:%S')} {local.tzname()}"
+
 
 # ---------------------------------------------------------------------------
 # CSV / "Formula Injection" protection

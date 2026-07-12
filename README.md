@@ -100,9 +100,13 @@ who uses it.
   "Under Repair", "Stolen", "Missing", etc. It's pulled out of the
   Available pool until someone "Recalls" it back into service.
 - **Bulk import via CSV** — upload a spreadsheet to create many pools at
-  once. Files over 5 MiB are rejected before parsing (denial-of-service
-  protection). Malformed rows are reported back to you individually
-  instead of failing the whole import.
+  once. A "Sample CSV" download sits right next to the import drop zone
+  (client-side generated, no round trip) with the exact `name` /
+  `total_quantity` / `department` columns pre-filled with example rows,
+  so there's a working template to copy your own inventory sheet into
+  instead of guessing at column names. Files over 5 MiB are rejected
+  before parsing (denial-of-service protection). Malformed rows are
+  reported back to you individually instead of failing the whole import.
 - **Dispatch (checkout)** — assign N units of a pool to a Staff member, a
   Customer, or an ad-hoc Outsider, with a due date. A due date is
   **required** for anyone without a login (ad-hoc Outsiders), since
@@ -163,7 +167,14 @@ Everyone gets a piece of this, scoped by role. Four related pieces:
   **Approve**/**Deny** buttons. Approving is what actually moves the
   checkout's real due date; denying leaves it untouched. Both write an
   audit log entry and email the requester back (if they're a logged-in
-  User with an email address).
+  User with an email address) **and** surface a dismissible in-app banner
+  ("N extension request update(s)") the next time the requester loads
+  their own dashboard — see `GET /checkouts/my-extension-decisions` and
+  `backend/services/extension_service.py`'s
+  `list_my_recent_extension_decisions()`, in case they miss the email.
+  Any account can self-request an extension on their own checkout (Staff,
+  Customer, Manager, Admin alike), so this banner appears on every
+  dashboard, not just staff.html/customer.html.
 - **Grant one directly (Manager / Admin / Super Admin)** — see the
   **Extend** button described in [Custody & Returns](#custody--returns-super-admin--manager)
   above. Same unrestricted permission as approving a request, just
@@ -281,6 +292,18 @@ spreadsheets) or **PDF** (for printing/sharing):
 All exports share one formatting/security layer
 (`backend/services/export_service.py`) — see
 [Full API Reference](#full-api-reference) for the exact endpoints.
+
+**Timestamp consistency**: every timestamp is stored/queried as UTC, but
+the *displayed* hour is converted to the `DISPLAY_TIMEZONE` setting (see
+[Environment Variables Reference](#environment-variables-reference))
+before being written into a CSV/PDF cell, labeled with that zone's real
+abbreviation (e.g. "WAT") instead of a hardcoded "UTC". This keeps every
+export's hour in sync with what the Audit Trail already shows on screen
+(which independently converts UTC → the viewer's own browser-local time)
+— previously the two could differ by an hour or more for anyone outside
+UTC. Audit-ledger export date-range filters ("from"/"to") are interpreted
+in the same `DISPLAY_TIMEZONE`, so picking "today" matches the calendar
+day a person is actually looking at.
 
 ### "My Profile" (everyone)
 
@@ -876,6 +899,7 @@ see `.gitignore`) and are read by `backend/config.py` into a single typed
 | `JWT_SECRET_KEY` | *(required, no insecure default allowed)* | Signs/verifies session tokens. **Must** be a long random string in production. |
 | `JWT_ALGORITHM` | `HS256` | JWT signing algorithm. |
 | `JWT_EXPIRY_HOURS` | `12` | How long a login session stays valid. |
+| `DISPLAY_TIMEZONE` | `Africa/Lagos` | IANA timezone every CSV/PDF export (audit ledger, properties-assigned reports) renders its timestamps in, and the zone an export date-range filter's "from"/"to" boundaries are interpreted in. Data is always stored/queried as UTC either way — this only controls the DISPLAY layer, so exported hours match what the Audit Trail already shows on screen (which converts UTC → browser-local automatically). The backend refuses to start if this isn't a real IANA zone name. |
 | `CORS_ORIGINS` | localhost variants | Comma-separated list of origins allowed to call the API. |
 | `AUTO_INIT_DB` | `true` | If true, runs `create_all()` on startup (creates missing tables). Set `false` in production and use Alembic instead. |
 | `AUTO_SEED_DEMO_DATA` | `true` | If true, seeds demo accounts/data on an empty DB at startup. Set `false` in production. |
@@ -1093,7 +1117,17 @@ file to a Google Drive folder you control. This runs as a plain daemon
 thread inside the same `uvicorn` process (see
 `backup_service.start_backup_scheduler()`, called from `main.py`'s startup
 event) — **not** Celery — so it works whether or not `RUN_EMBEDDED_WORKER`
-is enabled, with no Redis dependency.
+is enabled, with no Redis dependency. Backups still *run* on the
+`BACKUP_HOURS_UTC` schedule (that setting is about "when", not
+"how it's displayed"), but each backup's **filename** embeds its creation
+time in `DISPLAY_TIMEZONE` (see [Environment Variables
+Reference](#environment-variables-reference)) with the real zone
+abbreviation, e.g. `snipeit_backup_20260711_004500_WAT.sql.gz` — matching
+the "Created" column right next to it in the System Backups panel (which
+independently converts to browser-local time), instead of a raw,
+unlabeled UTC timestamp that used to disagree with it by an hour.
+Sorting/retention (`BACKUP_RETENTION_COUNT`) are unaffected — they key off
+the stored `created_at` (a real UTC instant), never the filename text.
 
 **Why Google Drive, not just local disk:** on Render's Free plan, this
 service's own disk is **ephemeral** — wiped on every restart, every
@@ -1257,6 +1291,7 @@ once the backend is running. This table is the high-level map:
 | `GET /checkouts/due-soon` | Super Admin / Admin / Manager | Dashboard alert feed of checkouts due within `DUE_SOON_REMINDER_DAYS` but not yet overdue — "a reminder before something goes overdue," system-wide for both roles. |
 | `POST /checkouts/{id}/extension-requests` | logged in | Request more time on your own active checkout (or, if Manager/Admin/Super Admin, on behalf of an Ad-Hoc Individual). Creates a **pending** request — does not change the due date by itself. |
 | `GET /checkouts/extension-requests` | Super Admin / Admin / Manager | List extension requests — `?status=pending\|approved\|denied&limit=&offset=` (Managers see every request, same as Admin/Super Admin). |
+| `GET /checkouts/my-extension-decisions` | logged in | Self-service: the caller's own extension requests decided (approved/denied) in the last 14 days — powers the in-app "extension request update(s)" banner on every dashboard. |
 | `POST /checkouts/extension-requests/{id}/decision` | Super Admin / Admin / Manager | Approve or deny a pending request — `{approve, override_due_date?, note?}`. Approving is what actually updates the checkout's due date. |
 | `POST /checkouts/{id}/extend` | Super Admin / Admin / Manager | Grant more time **directly** — `{new_due_date, reason?}` — no request/decision round trip. Used by the Custody Ledger drawer's "Extend" button. |
 | `GET /audit-logs` | Super Admin / Admin / Manager | TRUE server-side paginated audit ledger — `?limit=&offset=` (no search param; see [Feature Tour](#feature-tour)). |

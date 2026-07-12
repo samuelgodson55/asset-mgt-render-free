@@ -119,16 +119,12 @@ _ITEM_EXPORT_HEADERS = ["Asset", "Department", "Quantity", "Quantity Returned", 
 def _format_export_datetime(iso_string: Optional[str]) -> str:
     """
     Mirrors services/user_service.py's `_format_export_datetime()` -- turns
-    a `.isoformat()` checkout_date back into a friendly, explicitly-UTC
-    string for a CSV/PDF export cell (a static file has no browser to
-    localize it into the viewer's own timezone the way the live UI does).
+    a `.isoformat()` checkout_date back into a friendly export string.
+    Delegates to services/export_service.py's format_export_datetime(), so
+    this renders in the same configured DISPLAY_TIMEZONE, with the same
+    real zone abbreviation, as every other exporter in the app.
     """
-    if not iso_string:
-        return ""
-    try:
-        return datetime.datetime.fromisoformat(iso_string).strftime("%Y-%m-%d %H:%M:%S UTC")
-    except ValueError:
-        return iso_string  # unparseable -- surface it as-is rather than silently dropping it
+    return export_service.format_export_datetime(iso_string)
 
 
 def _item_export_rows(items: list) -> list:
@@ -177,7 +173,7 @@ def export_all_outsiders_items(db: Session, user: dict, fmt: str = "csv"):
                 c.asset.name if c.asset else "Unknown Asset",
                 c.asset.department if c.asset and c.asset.department else "—",
                 c.quantity, c.quantity - c.quantity_returned,
-                c.checkout_date.strftime("%Y-%m-%d %H:%M:%S UTC") if c.checkout_date else "",
+                export_service.format_export_datetime(c.checkout_date),
                 c.due_date.strftime("%Y-%m-%d") if c.due_date else "No Fixed Due Date",
             ])
 
