@@ -44,6 +44,24 @@ class DirectExtensionRequest(BaseModel):
     reason: Optional[str] = Field(default=None, max_length=500)
 
 
+class BulkExtendRequest(BaseModel):
+    """
+    Powers POST /checkouts/bulk-extend. Same idea as DirectExtensionRequest,
+    but applies ONE new due date to MANY active checkouts at once -- the
+    Custody Ledger drawer's "Bulk Extend Selected" action (components/
+    custody.js), reusing the same checkbox-selection UI already used for
+    Bulk Process Returns. Only a Manager/Admin/Super Admin may call this
+    (see api/checkouts.py's `require_privileged_role`); each checkout_id is
+    extended independently via extend_checkout_directly() under the hood,
+    so one bad id in the batch (e.g. already returned, or an earlier due
+    date) doesn't stop the rest from going through -- see
+    services/extension_service.py's extend_checkouts_bulk().
+    """
+    checkout_ids: list[int] = Field(..., min_length=1, max_length=200)
+    new_due_date: datetime.date
+    reason: Optional[str] = Field(default=None, max_length=500)
+
+
 class ExtensionDecisionRequest(BaseModel):
     """
     Powers POST /checkouts/extension-requests/{id}/decision. `approve=True`

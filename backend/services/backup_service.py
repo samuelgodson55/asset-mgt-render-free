@@ -46,10 +46,25 @@ import datetime
 from typing import Optional
 from urllib.parse import urlparse
 
+import redis
+
 from config import settings
 import services.export_service as export_service
 
 logger = logging.getLogger(__name__)
+
+# Lazily-created shared Redis client, used only for the scheduled-backup
+# distributed lock below (_acquire_scheduled_backup_lock) -- kept separate
+# from Celery's own Redis usage so this module has no hard dependency on
+# celery_app.py importing cleanly first.
+_redis_client: Optional["redis.Redis"] = None
+
+
+def _get_redis_client() -> "redis.Redis":
+    global _redis_client
+    if _redis_client is None:
+        _redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+    return _redis_client
 
 INDEX_FILENAME = "index.json"
 _index_lock = threading.Lock()
@@ -549,6 +564,39 @@ def _seconds_until_next_run(hours_utc: list[int]) -> float:
     return (min(candidates) - now).total_seconds()
 
 
+def _acquire_scheduled_backup_lock(run_label: str) -> bool:
+    """
+    Distributed leader lock so that, when the `backend` service is scaled
+    to multiple replicas (see DEPLOYMENT.md's load balancing section),
+    only ONE of them actually runs a given scheduled backup -- every
+    replica runs its own copy of `_scheduler_loop` (it's a plain daemon
+    thread per process, deliberately -- see start_backup_scheduler's
+    docstring), and without this lock every one of them would wake up at
+    the same target hour and each fire its own full `pg_dump`.
+
+    `run_label` identifies THIS specific scheduled run (e.g.
+    "2026-07-12T03:00") rather than being a fixed key, so the lock only
+    needs to be held long enough to decide "am I the one running the
+    03:00 backup today" -- it does not need to be held for the entire
+    duration of the backup itself. `SET key value NX EX ttl` is atomic:
+    exactly one replica's call can ever return True for a given
+    `run_label`, no matter how close together the competing replicas'
+    clocks wake them up.
+    """
+    key = f"backup:scheduled-lock:{run_label}"
+    try:
+        acquired = _get_redis_client().set(key, "1", nx=True, ex=300)
+        return bool(acquired)
+    except redis.RedisError:
+        # Redis briefly unreachable -- fail OPEN here (let this replica run
+        # the backup) rather than silently skipping a scheduled backup
+        # entirely. Worst case on a multi-replica deployment during a
+        # Redis blip is a duplicate backup, which is harmless; worst case
+        # of failing closed is NO backup running at all.
+        logger.warning("backup_service: Redis unavailable for scheduler lock -- proceeding without it.", exc_info=True)
+        return True
+
+
 def _scheduler_loop() -> None:
     hours = settings.backup_hours_utc_list
     hours_label = ", ".join(f"{h:02d}:00" for h in hours)
@@ -556,10 +604,15 @@ def _scheduler_loop() -> None:
     while True:
         sleep_seconds = _seconds_until_next_run(settings.backup_hours_utc_list)
         time.sleep(sleep_seconds)
-        try:
-            create_backup(triggered_by="scheduled")
-        except Exception:
-            logger.exception("backup_service: scheduled backup failed.")
+        now = datetime.datetime.now(datetime.timezone.utc)
+        run_label = now.strftime("%Y-%m-%dT%H")
+        if _acquire_scheduled_backup_lock(run_label):
+            try:
+                create_backup(triggered_by="scheduled")
+            except Exception:
+                logger.exception("backup_service: scheduled backup failed.")
+        else:
+            logger.info("backup_service: another replica already claimed the %s scheduled backup -- skipping.", run_label)
         # Small buffer so a slightly-early wakeup (clock drift) can't fire twice.
         time.sleep(5)
 
@@ -574,6 +627,13 @@ def start_backup_scheduler() -> None:
     Celery Beat: this way the daily backup runs whether or not
     RUN_EMBEDDED_WORKER/Redis are configured, since it lives directly
     inside the same uvicorn process Render always keeps running.
+
+    Every replica of this service runs its own copy of this thread when
+    scaled horizontally (see DEPLOYMENT.md's load balancing section) --
+    that's safe because `_scheduler_loop` acquires a short-lived Redis
+    leader lock (`_acquire_scheduled_backup_lock`) before actually firing
+    each scheduled backup, so only one replica's `pg_dump` ever runs per
+    scheduled time even though every replica independently wakes up for it.
     """
     global _scheduler_started
     with _scheduler_lock:

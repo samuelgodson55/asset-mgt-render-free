@@ -75,6 +75,128 @@ export function initModalBackdropDismiss() {
   });
 }
 
+// =============================================================================
+// TRANSIENT TOAST (start of moving this app off browser alert())
+// -----------------------------------------------------------------------------
+// A small, self-contained "toast" notification -- built and appended to
+// <body> on first use, so no per-page HTML markup is needed anywhere. Used
+// right now for the one thing every export/download button in this app
+// used to finish completely silently (no alert(), no confirmation of any
+// kind): components/exports.js's downloadExport() and
+// components/backups.js's downloadBackup() both call this once the file
+// has actually been handed to the browser.
+//
+// Deliberately NOT used yet for error paths -- this is a gradual move off
+// alert(), not a rewrite of every alert() in one pass (see the
+// showFieldError()/clearFieldError() pair further down for the other half
+// of that effort, covering form validation instead of confirmations).
+const TOAST_AUTO_DISMISS_MS = 2500;
+let toastContainer = null;
+
+function getToastContainer() {
+  if (toastContainer && document.body.contains(toastContainer)) return toastContainer;
+  toastContainer = document.createElement('div');
+  toastContainer.id = 'toastContainer';
+  // Stacked bottom-right, above everything (including modals, since a
+  // download can be triggered from inside one -- e.g. the Custody Ledger
+  // drawer's export buttons).
+  toastContainer.className = 'fixed bottom-4 right-4 z-[100] flex flex-col items-end gap-2';
+  document.body.appendChild(toastContainer);
+  return toastContainer;
+}
+
+// `message` should stay short -- this is a passing confirmation, not a
+// place to explain anything (that's what the export/download itself, or an
+// error alert(), is for).
+export function showToast(message) {
+  const container = getToastContainer();
+  const toast = document.createElement('div');
+  toast.className = 'flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-[#141922] px-4 py-2.5 text-[13px] font-medium text-slate-200 shadow-2xl opacity-0 translate-y-1 transition-all duration-200';
+  toast.innerHTML = `
+    <svg class="h-4 w-4 shrink-0 text-emerald-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+    <span></span>
+  `;
+  toast.querySelector('span').textContent = message;
+  container.appendChild(toast);
+
+  // Two rAFs (not one) so the browser has definitely committed the
+  // "opacity-0 translate-y-1" starting state to the layout before we
+  // remove it -- otherwise the transition can get coalesced away and the
+  // toast just pops in with no fade, since the class add/remove would
+  // happen inside the same paint frame.
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    toast.classList.remove('opacity-0', 'translate-y-1');
+  }));
+
+  setTimeout(() => {
+    toast.classList.add('opacity-0', 'translate-y-1');
+    setTimeout(() => toast.remove(), 200); // let the fade-out finish before removing
+  }, TOAST_AUTO_DISMISS_MS);
+}
+
+// =============================================================================
+// INLINE FIELD VALIDATION (start of moving simple "you missed a field"
+// checks off browser alert(), same spirit as showToast() above)
+// -----------------------------------------------------------------------------
+// Every one of this app's forms already gives each input a stable `id`
+// (that's how e.g. saveName()/processReturn()/submitExtensionRequestForm()
+// read the value out in the first place) -- so rather than a new markup
+// convention, showFieldError() just finds the input by that same id and
+// inserts one small error message right after it, creating that message
+// element the first time and reusing/updating it on every call after (so
+// re-submitting with the same mistake doesn't stack up duplicate error
+// lines under the field).
+//
+// Deliberately scoped to ONE field at a time, not a whole-form
+// summary -- every current caller only ever has exactly one thing wrong at
+// a time (an empty required field), so there's nothing to aggregate yet.
+// `floating`: pass true for an input that lives in a `flex`/`grid` ROW
+// alongside other controls (e.g. custody.js's Return Quantity field, which
+// sits next to the Extend/Process Return buttons) -- the error message is
+// then positioned absolutely below just the input instead of becoming its
+// own flex/grid item, which would otherwise wedge a wide error message in
+// between the narrow input and whatever comes after it. Every current
+// caller with a normal block-stacked form (Asset Name, the two Extension
+// modals) leaves this false, letting the message push layout below the
+// field the same way a native validation message would.
+export function showFieldError(inputId, message, floating = false) {
+  const input = document.getElementById(inputId);
+  if (!input) return;
+
+  input.classList.add('border-rose-500', 'focus:border-rose-500');
+  // Only meaningful on a border that was already `border-blue-500/60` on
+  // focus -- harmless no-op to remove on inputs that don't have it.
+  input.classList.remove('focus:border-blue-500/60', 'focus:border-emerald-500/60');
+
+  const errorId = `${inputId}-error`;
+  let errorEl = document.getElementById(errorId);
+  if (!errorEl) {
+    errorEl = document.createElement('p');
+    errorEl.id = errorId;
+    errorEl.className = floating
+      ? 'absolute left-0 top-full mt-1 whitespace-nowrap text-[11px] font-medium text-rose-400'
+      : 'mt-1 text-[11px] font-medium text-rose-400';
+    input.insertAdjacentElement('afterend', errorEl);
+  }
+  errorEl.textContent = message;
+
+  // Clearing on the field's very next edit (rather than requiring another
+  // failed submit, or leaving the error up until the form is resubmitted
+  // successfully) is what makes this feel like real-time validation
+  // instead of just a relocated alert() -- `{ once: true }` means this
+  // never needs its own removeEventListener bookkeeping.
+  input.addEventListener('input', () => clearFieldError(inputId), { once: true });
+}
+
+export function clearFieldError(inputId) {
+  const input = document.getElementById(inputId);
+  if (input) {
+    input.classList.remove('border-rose-500', 'focus:border-rose-500');
+  }
+  const errorEl = document.getElementById(`${inputId}-error`);
+  if (errorEl) errorEl.remove();
+}
+
 export function escapeHtml(str) {
   if (str === null || str === undefined) return '';
   return String(str).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -341,6 +463,11 @@ export function toggleNameEdit() {
   const edit = document.getElementById('nameEdit');
   edit.classList.toggle('hidden');
   edit.classList.toggle('flex');
+  // Whichever direction this toggle just went (opening fresh or cancelling
+  // out), any leftover "Asset name cannot be empty." from a previous
+  // attempt shouldn't still be showing -- see saveName()'s
+  // showFieldError('nameInput', ...) in components/assets.js.
+  clearFieldError('nameInput');
 }
 
 // Same show/hide toggle as toggleNameEdit() above, for the Properties
@@ -514,54 +641,21 @@ export function renderServerPaginationBar(key, state) {
 }
 
 // =============================================================================
-// DISMISSIBLE ALERT BANNERS (Overdue / Due Soon / Extension Requests)
+// PER-ITEM DISMISSAL PREFIX (shared with the "My Extension Decisions"
+// notification feed below)
 // -----------------------------------------------------------------------------
-// Each of those three banners has the exact same "click X, it goes away,
-// but a routine background refresh shouldn't immediately pop it back open"
-// requirement. A plain in-memory flag handles that within a single page
-// load, but it resets the instant the tab is reloaded or the person
-// navigates away and back -- from a user's point of view that looks
-// exactly like "clicking X did nothing", since the banner they *just*
-// dismissed is right back the next time they land on the page.
-//
-// This keeps the dismissal in localStorage instead, keyed to a signature
-// of exactly what was on screen when it was dismissed (e.g. which
-// checkout ids, how many days until due). That means:
-//   - Reloading the page / switching tabs and back respects the dismissal.
-//   - The moment the underlying situation actually changes -- a new item
-//     becomes due soon, one drops off, a days-until-due count ticks over --
-//     the signature no longer matches, so the banner comes back on its own
-//     even without an explicit "Check Alerts" click, since that's now
-//     genuinely new information the person hasn't seen and dismissed yet.
+// This used to also back a signature-based "dismiss this whole banner until
+// its content changes" mechanism for the Overdue/Due Soon/Extension
+// Requests banners, back when they were always-visible dashboard banners.
+// Now that they render inside the Notification Center bell's dropdown
+// instead (closed by default, opened on demand -- see
+// js/components/notifications.js), that mechanism is no longer needed:
+// there's nothing to "dismiss", the dropdown just always reflects whatever
+// is currently true whenever it's opened. The prefix itself lives on here
+// because the per-item dismissal helpers just below (isItemDismissed()/
+// dismissItems(), still used by the "My Extension Decisions" feed) share
+// the same localStorage namespace.
 const DISMISS_STORAGE_PREFIX = 'snipeit:alertDismissed:';
-
-export function isAlertDismissed(key, signature) {
-  if (!signature) return false;
-  try {
-    return window.localStorage.getItem(DISMISS_STORAGE_PREFIX + key) === signature;
-  } catch (e) {
-    // Storage can throw in some private-browsing modes -- fail open (i.e.
-    // just show the banner) rather than let a storage quirk crash the page.
-    return false;
-  }
-}
-
-export function setAlertDismissed(key, signature) {
-  if (!signature) return;
-  try {
-    window.localStorage.setItem(DISMISS_STORAGE_PREFIX + key, signature);
-  } catch (e) {
-    // Ignore -- worst case the dismissal only lasts for this page load.
-  }
-}
-
-export function clearAlertDismissed(key) {
-  try {
-    window.localStorage.removeItem(DISMISS_STORAGE_PREFIX + key);
-  } catch (e) {
-    // Ignore, same as above.
-  }
-}
 
 // =============================================================================
 // PER-ITEM DISMISSAL (My Extension Decisions banner)

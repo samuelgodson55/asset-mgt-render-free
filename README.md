@@ -1993,9 +1993,13 @@ A checklist before you deploy this anywhere real:
       the TLS-terminating layer, not here.
 - [ ] Drop `--reload` from the backend's `uvicorn` command and run with
       multiple `--workers` instead (see `backend/Dockerfile`'s comment).
-- [ ] Consider swapping the in-memory login rate limiter for a
-      Redis-backed one if you run more than one backend replica (see
-      `middleware/rate_limit.py`'s docstring).
+- [ ] The login rate limiter is Redis-backed (see
+      `middleware/rate_limit.py`'s docstring), so it's already safe to run
+      more than one `backend` replica — just confirm every replica points
+      at the SAME `REDIS_URL`. See **[DEPLOYMENT.md](./DEPLOYMENT.md)** for
+      the full production deployment, safety, and load balancing guide
+      (scaling `backend`/`worker` during peak traffic, the scheduled-backup
+      leader lock, disk-backed exports, and more).
 - [ ] Review and tighten `ACCOUNT_LOCKOUT_MAX_ATTEMPTS` /
       `ACCOUNT_LOCKOUT_DURATION_MINUTES` and
       `LOGIN_RATE_LIMIT_MAX`/`LOGIN_RATE_LIMIT_WINDOW_SECONDS` for your

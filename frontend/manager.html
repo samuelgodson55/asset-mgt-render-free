@@ -46,10 +46,112 @@
       </div>
 
       <div class="flex items-center gap-1.5 sm:gap-4">
-        <button data-action="check-alerts" id="checkAlertsBtn" title="Check Overdue, Due Soon &amp; Extension Requests" class="flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 sm:px-3 text-[13px] font-medium text-slate-300 transition hover:border-amber-500/40 hover:text-amber-400 disabled:cursor-not-allowed disabled:opacity-60">
-          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.13-3.36L23 10M1 14l5.36 4.36A9 9 0 0020.49 15"/></svg>
-          <span class="hidden lg:inline">Check Alerts</span>
-        </button>
+        <!-- ================= NOTIFICATION CENTER BELL =================
+             Replaces the old "Check Alerts" refresh button + always-visible
+             dashboard banners. See js/components/notifications.js for the
+             full rationale. Badge shows the combined count across every
+             section below; dropdown is closed by default and only loads/
+             refreshes its contents when opened (see toggleNotificationDropdown()). -->
+        <div class="relative">
+          <button type="button" data-action="toggle-notifications" id="notificationBellBtn" title="Notifications" aria-label="Notifications" aria-haspopup="true" aria-expanded="false"
+            class="relative flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border bg-card text-slate-300 transition hover:border-amber-500/40 hover:text-amber-400 sm:h-9 sm:w-9">
+            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 00-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>
+            <span id="notificationBadge" class="hidden absolute -right-1 -top-1 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-rose-500 px-1 text-[10px] font-bold leading-none text-white ring-2 ring-card">0</span>
+          </button>
+
+          <div id="notificationDropdown" class="hidden absolute right-0 z-40 mt-2 w-[22rem] max-w-[90vw] overflow-hidden rounded-xl border border-border bg-card shadow-2xl sm:w-96">
+            <div class="flex items-center justify-between border-b border-border px-4 py-3">
+              <p class="text-[13px] font-semibold text-slate-100">Notifications</p>
+              <div class="flex items-center gap-2">
+                <span id="notificationEmptyLabel" class="hidden text-[11px] text-slate-500">All caught up</span>
+                <button type="button" data-action="close-notifications" title="Close" aria-label="Close notifications"
+                  class="rounded-md p-1 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+                  <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                </button>
+              </div>
+            </div>
+            <div class="max-h-[70vh] overflow-y-auto p-3 space-y-3">
+
+              <div id="notificationEmptyState" class="hidden flex flex-col items-center gap-2 py-8 text-center">
+                <svg class="h-6 w-6 text-emerald-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><path d="M22 4L12 14.01l-3-3"/></svg>
+                <p class="text-[12px] text-slate-500">Nothing overdue, due soon, or awaiting review.</p>
+              </div>
+
+              <!-- ---- OVERDUE CHECKOUTS (review -- Super Admin/Manager) ---- -->
+              <div id="overdueAlertBanner" class="hidden rounded-lg border border-rose-500/30 bg-rose-500/5 p-3">
+                <div class="flex items-center gap-2 text-[12px] font-semibold text-rose-400">
+                  <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01M10.29 3.86l-8.18 14.18A2 2 0 003.82 21h16.36a2 2 0 001.71-2.96L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
+                  <span><span id="overdueAlertCount">0</span> checkout(s) are overdue</span>
+                </div>
+                <ul id="overdueAlertList" class="mt-1.5 divide-y divide-rose-500/10 pl-6 text-[12px]"></ul>
+              </div>
+
+              <!-- ---- DUE SOON (review -- Super Admin/Manager) ---- -->
+              <div id="dueSoonAlertBanner" class="hidden rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
+                <div class="flex items-center gap-2 text-[12px] font-semibold text-amber-400">
+                  <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+                  <span><span id="dueSoonAlertCount">0</span> checkout(s) due soon</span>
+                </div>
+                <ul id="dueSoonAlertList" class="mt-1.5 divide-y divide-amber-500/10 pl-6 text-[12px]"></ul>
+              </div>
+
+              <!-- ---- EXTENSION REQUESTS AWAITING REVIEW (Super Admin/Manager) ----
+                   Clicking straight into Approve/Deny right here IS "taking
+                   action" -- no extra navigation needed. -->
+              <div id="extensionRequestsPanel" class="hidden rounded-lg border border-violet-500/30 bg-violet-500/5 p-3">
+                <div class="flex items-center gap-2 text-[12px] font-semibold text-violet-300">
+                  <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="9"/></svg>
+                  <span><span id="extensionRequestsCount">0</span> extension request(s) awaiting your review</span>
+                </div>
+                <ul id="extensionRequestsList" class="mt-1.5 divide-y divide-violet-500/10 pl-6 text-[12px]"></ul>
+              </div>
+
+              <!-- ---- MY OWN OVERDUE ITEMS (personal -- every role) ---- -->
+              <div id="notifMyOverdueSection" class="hidden rounded-lg border border-rose-500/30 bg-rose-500/5 p-3">
+                <div class="flex items-center gap-2 text-[12px] font-semibold text-rose-400">
+                  <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01M10.29 3.86l-8.18 14.18A2 2 0 003.82 21h16.36a2 2 0 001.71-2.96L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
+                  <span><span id="notifMyOverdueCount">0</span> item(s) you hold are overdue</span>
+                </div>
+                <ul id="notifMyOverdueList" class="mt-1.5 divide-y divide-rose-500/10 pl-6 text-[12px]"></ul>
+              </div>
+
+              <!-- ---- MY OWN DUE-SOON ITEMS (personal -- every role) ---- -->
+              <div id="notifMyDueSoonSection" class="hidden rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
+                <div class="flex items-center gap-2 text-[12px] font-semibold text-amber-400">
+                  <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+                  <span><span id="notifMyDueSoonCount">0</span> item(s) you hold are due soon</span>
+                </div>
+                <ul id="notifMyDueSoonList" class="mt-1.5 divide-y divide-amber-500/10 pl-6 text-[12px]"></ul>
+              </div>
+
+              <!-- ---- MY OWN PENDING EXTENSION REQUESTS (personal -- every role) ---- -->
+              <div id="notifMyPendingExtensionSection" class="hidden rounded-lg border border-violet-500/30 bg-violet-500/5 p-3">
+                <div class="flex items-center gap-2 text-[12px] font-semibold text-violet-300">
+                  <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="9"/></svg>
+                  <span><span id="notifMyPendingExtensionCount">0</span> of your extension request(s) awaiting review</span>
+                </div>
+                <ul id="notifMyPendingExtensionList" class="mt-1.5 divide-y divide-violet-500/10 pl-6 text-[12px]"></ul>
+              </div>
+
+              <!-- ---- MY EXTENSION REQUEST DECISIONS (personal -- every role) ----
+                   Once one of MY OWN extension requests gets approved/denied,
+                   I find out here even if I miss the email. -->
+              <div id="myExtensionDecisionsBanner" class="hidden rounded-lg border border-blue-500/30 bg-blue-500/5 p-3">
+                <div class="flex items-center justify-between gap-2">
+                  <div class="flex items-center gap-2 text-[12px] font-semibold text-blue-400">
+                    <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="9"/></svg>
+                    <span><span id="myExtensionDecisionsCount">0</span> extension request update(s)</span>
+                  </div>
+                  <button data-action="dismiss-my-extension-decisions-alert" title="Clear" class="rounded-md p-1 text-blue-400/70 transition hover:bg-blue-500/10 hover:text-blue-300">
+                    <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                  </button>
+                </div>
+                <ul id="myExtensionDecisionsList" class="mt-1.5 divide-y divide-blue-500/10 text-[12px]"></ul>
+              </div>
+
+            </div>
+          </div>
+        </div>
 
         <!-- Manager Mode pill: amber/orange instead of the Super Admin rose pill -->
         <span class="hidden items-center gap-1.5 rounded-full border border-amber-500/50 bg-amber-500/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-wide text-amber-400 glow-amber sm:flex">
@@ -93,114 +195,6 @@
 </header>
 
 <main class="mx-auto max-w-[1440px] px-4 py-6 space-y-6 sm:px-6 sm:py-8 sm:space-y-8">
-
-  <!-- ================= ALL CAUGHT UP BANNER =================
-       Shown only right after a manual "Check Now" (header button, see
-       checkAlertsNow() in js/dashboard.js) finds nothing across all three
-       alert widgets below -- routine background refreshes never touch
-       this, so it never shows up uninvited. -->
-  <div id="alertsAllClearBanner" class="hidden rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-4">
-    <div class="flex items-center justify-between gap-2">
-      <div class="flex items-center gap-2 text-[13px] font-semibold text-emerald-400">
-        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><path d="M22 4L12 14.01l-3-3"/></svg>
-        <span>All caught up — nothing overdue, due soon, or awaiting extension review.</span>
-      </div>
-      <button data-action="dismiss-all-clear-banner" title="Dismiss" class="rounded-md p-1 text-emerald-400/70 transition hover:bg-emerald-500/10 hover:text-emerald-300">
-        <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
-      </button>
-    </div>
-  </div>
-
-  <!-- ================= OVERDUE CHECKOUTS ALERT BANNER =================
-       Operations & Observability requirement #5: populated by
-       js/components/overdue.js -> loadOverdueAlerts() from
-       GET /checkouts/overdue (system-wide, same as Admin -- Managers no
-       longer have department-scoping -- see services/checkout_service.py).
-       Hidden by default/whenever there are zero overdue items.
-       Dismissible via the X below (dismissOverdueAlert()) -- closing it
-       keeps it closed through ordinary dashboard refreshes, but the
-       header's "Check Alerts" button (checkAlertsNow()) always forces it
-       back open if there's still something to show, so it's never lost
-       for good. -->
-  <div id="overdueAlertBanner" class="hidden rounded-xl border border-rose-500/30 bg-rose-500/5 p-4">
-    <div class="flex items-center justify-between gap-2">
-      <div class="flex items-center gap-2 text-[13px] font-semibold text-rose-400">
-        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01M10.29 3.86l-8.18 14.18A2 2 0 003.82 21h16.36a2 2 0 001.71-2.96L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
-        <span><span id="overdueAlertCount">0</span> checkout(s) are overdue</span>
-      </div>
-      <button data-action="dismiss-overdue-alert" title="Dismiss" class="rounded-md p-1 text-rose-400/70 transition hover:bg-rose-500/10 hover:text-rose-300">
-        <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
-      </button>
-    </div>
-    <ul id="overdueAlertList" class="mt-2 divide-y divide-rose-500/10 text-[12px]"></ul>
-  </div>
-
-  <!-- ================= DUE SOON ALERT BANNER =================
-       "A reminder before something goes overdue" -- the proactive
-       counterpart to the Overdue banner just above. Populated by
-       js/components/due-soon.js -> loadDueSoonAlerts() from GET
-       /checkouts/due-soon (system-wide, same as Admin -- Managers no
-       longer have department-scoping). Hidden by default/whenever
-       nothing is due within settings.DUE_SOON_REMINDER_DAYS. Amber
-       rather than red, since nothing here has actually gone wrong yet --
-       it's a nudge to act before it does. Dismissible/recallable the
-       same way as the Overdue banner above. -->
-  <div id="dueSoonAlertBanner" class="hidden rounded-xl border border-amber-500/30 bg-amber-500/5 p-4">
-    <div class="flex items-center justify-between gap-2">
-      <div class="flex items-center gap-2 text-[13px] font-semibold text-amber-400">
-        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
-        <span><span id="dueSoonAlertCount">0</span> checkout(s) due soon</span>
-      </div>
-      <button data-action="dismiss-due-soon-alert" title="Dismiss" class="rounded-md p-1 text-amber-400/70 transition hover:bg-amber-500/10 hover:text-amber-300">
-        <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
-      </button>
-    </div>
-    <ul id="dueSoonAlertList" class="mt-2 divide-y divide-amber-500/10 text-[12px]"></ul>
-  </div>
-
-  <!-- ================= EXTENSION REQUESTS PANEL =================
-       Populated by js/components/extensions.js -> loadExtensionRequests()
-       from GET /checkouts/extension-requests?status=pending. Hidden by
-       default/whenever there are zero pending requests -- toggled visible
-       only when result.total > 0, same pattern as the overdue banner above.
-       Dismissible/recallable the same way as the other two banners. -->
-  <div id="extensionRequestsPanel" class="hidden rounded-xl border border-amber-500/30 bg-amber-500/5 p-4">
-    <div class="flex items-center justify-between gap-2">
-      <div class="flex items-center gap-2 text-[13px] font-semibold text-amber-400">
-        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="9"/></svg>
-        <span><span id="extensionRequestsCount">0</span> extension request(s) awaiting your review</span>
-      </div>
-      <button data-action="dismiss-extension-requests-alert" title="Dismiss" class="rounded-md p-1 text-amber-400/70 transition hover:bg-amber-500/10 hover:text-amber-300">
-        <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
-      </button>
-    </div>
-    <div id="extensionRequestsList" class="mt-2 space-y-2"></div>
-  </div>
-
-  <!-- ================= MY EXTENSION REQUEST DECISIONS BANNER =================
-       Distinct from the "Extension Requests" REVIEW panel above (which is
-       for decisions THIS account needs to make on others' checkouts) --
-       this is the self-service counterpart: a Manager can also
-       self-request an extension on their OWN checkout (see
-       services/extension_service.py's create_extension_request()), so they
-       need the same "your request was approved/denied" feedback a
-       staff/customer account gets. Populated by
-       js/components/extensions.js's loadMyExtensionDecisionsAlert() from
-       GET /checkouts/my-extension-decisions. Hidden by default/whenever
-       there's nothing new; dismissible/recallable the same way as the
-       banners above. -->
-  <div id="myExtensionDecisionsBanner" class="hidden rounded-xl border border-blue-500/30 bg-blue-500/5 p-4">
-    <div class="flex items-center justify-between gap-2">
-      <div class="flex items-center gap-2 text-[13px] font-semibold text-blue-400">
-        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="9"/></svg>
-        <span><span id="myExtensionDecisionsCount">0</span> extension request update(s)</span>
-      </div>
-      <button data-action="dismiss-my-extension-decisions-alert" title="Dismiss" class="rounded-md p-1 text-blue-400/70 transition hover:bg-blue-500/10 hover:text-blue-300">
-        <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
-      </button>
-    </div>
-    <ul id="myExtensionDecisionsList" class="mt-2 divide-y divide-blue-500/10 text-[12px]"></ul>
-  </div>
 
   <!-- Swipe hint dots (mobile only) -- see js/ui.js's updateSwipeDots(). -->
   <div id="swipeDots" class="mb-4 flex items-center justify-center gap-1.5 sm:hidden"></div>
@@ -597,12 +591,12 @@
 <div id="custodyModal" class="fixed inset-0 z-40 hidden items-center justify-end">
   <div class="absolute inset-0 bg-black/60 backdrop"></div>
   <div class="relative h-full w-full max-w-md overflow-y-auto drawer-panel border-l border-border bg-[#141922] p-4 shadow-2xl sm:p-6">
-    <div class="mb-5 flex items-start justify-between">
-      <div>
+    <div class="mb-5 flex items-start justify-between gap-3">
+      <div class="min-w-0">
         <h3 class="text-[16px] font-bold text-slate-50">Custody Ledger</h3>
-        <p id="custodyUserName" class="text-[12px] text-slate-500">—</p>
+        <p id="custodyUserName" class="truncate text-[12px] text-slate-500">—</p>
       </div>
-      <div class="flex items-center gap-1.5">
+      <div class="flex shrink-0 items-center gap-1.5">
         <button data-action="export-custody" data-format="csv" title="Export this account's items (CSV)"
           class="rounded-md border border-border px-2 py-1.5 text-[11px] font-semibold text-slate-400 transition hover:border-blue-500/50 hover:text-blue-400">
           CSV
@@ -632,10 +626,14 @@
           Process Return of All Items
         </button>
       </div>
-      <div class="mb-4">
+      <div class="mb-4 flex flex-col gap-2 sm:flex-row">
         <button id="bulkReturnBtn" data-action="bulk-process-returns" disabled
-          class="w-full rounded-lg bg-emerald-600 px-3 py-2 text-[12px] font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed">
+          class="flex-1 rounded-lg bg-emerald-600 px-3 py-2 text-[12px] font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed">
           Bulk Process Selected Returns (<span id="custodySelectedCount">0</span>)
+        </button>
+        <button id="bulkExtendBtn" data-action="open-bulk-extend" disabled
+          class="flex-1 rounded-lg border border-blue-500/40 px-3 py-2 text-[12px] font-semibold text-blue-400 transition hover:border-blue-500/70 hover:text-blue-300 disabled:opacity-40 disabled:cursor-not-allowed">
+          Bulk Extend Selected
         </button>
       </div>
 
@@ -684,6 +682,81 @@
       <div class="flex gap-3 pt-1">
         <button type="button" data-action="close-modal" data-modal="directExtendModal" class="flex-1 rounded-lg border border-border py-2.5 text-[13px] font-semibold text-slate-300 transition hover:border-slate-500">Cancel</button>
         <button type="submit" class="flex-1 rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500">Extend</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ================= BULK EXTEND DUE DATE (MODAL) =================
+     Same one-new-due-date idea as the single Extend modal above, applied
+     to every item currently CHECKED in the Custody Ledger drawer's item
+     list -- reuses the same checkbox selection already used for Bulk
+     Process Selected Returns. Submits to POST /checkouts/bulk-extend --
+     see js/components/custody.js's submitBulkExtendForm(). -->
+<div id="bulkExtendModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative w-full max-w-sm overflow-y-auto sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl shadow-2xl">
+    <div class="flex items-start justify-between border-b border-border px-6 py-5">
+      <div>
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Custody</p>
+        <h3 class="text-[16px] font-bold text-slate-50">Bulk Extend Due Date</h3>
+        <p class="text-[12px] text-slate-500"><span id="bulkExtendCount">0</span> item(s) selected</p>
+      </div>
+      <button data-action="close-modal" data-modal="bulkExtendModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <form id="bulkExtendForm" class="space-y-4 px-6 py-5">
+      <p class="text-[12px] text-slate-400">Every selected item gets this same new due date. An item whose current due date is already later than what's chosen here will simply be skipped, not fail the whole batch.</p>
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">New Due Date</label>
+        <input type="date" id="bulkExtendNewDueDate" required
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60" />
+      </div>
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Reason (optional)</label>
+        <textarea id="bulkExtendReason" rows="2" placeholder="e.g. Department-wide extension for end-of-quarter inventory"
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60"></textarea>
+      </div>
+      <div class="flex gap-3 pt-1">
+        <button type="button" data-action="close-modal" data-modal="bulkExtendModal" class="flex-1 rounded-lg border border-border py-2.5 text-[13px] font-semibold text-slate-300 transition hover:border-slate-500">Cancel</button>
+        <button type="submit" class="flex-1 rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500">Extend Selected</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ================= DENY EXTENSION REQUEST -- REASON (MODAL) =================
+     Replaces a bare window.prompt() when denying a pending extension
+     request (from either the Notification Center's Extension Requests
+     panel or the Custody Ledger drawer's inline Approve/Deny buttons) --
+     see js/components/extensions.js's openDenyReasonModal()/
+     submitDenyReasonForm(). Approving needs no such detour (nothing to
+     explain when granting exactly what was asked for), so only Deny
+     routes through here. -->
+<div id="denyReasonModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative w-full max-w-sm overflow-y-auto sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl shadow-2xl">
+    <div class="flex items-start justify-between border-b border-border px-6 py-5">
+      <div>
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-rose-400">Deny Request</p>
+        <h3 class="text-[16px] font-bold text-slate-50">Reason for Denial</h3>
+      </div>
+      <button data-action="close-modal" data-modal="denyReasonModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <form id="denyReasonForm" class="space-y-4 px-6 py-5">
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Note back to the requester (optional, but recommended)</label>
+        <textarea id="denyReasonText" rows="3" placeholder="e.g. This pool is needed back for a training session next Monday"
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-rose-500/60"></textarea>
+      </div>
+      <div class="flex gap-3 pt-1">
+        <button type="button" data-action="close-modal" data-modal="denyReasonModal" class="flex-1 rounded-lg border border-border py-2.5 text-[13px] font-semibold text-slate-300 transition hover:border-slate-500">Cancel</button>
+        <button type="submit" class="flex-1 rounded-lg bg-rose-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-rose-500">Deny Request</button>
       </div>
     </form>
   </div>

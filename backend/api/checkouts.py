@@ -11,6 +11,7 @@ GET  /checkouts/extension-requests                     -- list requests (privile
 GET  /checkouts/my-extension-decisions                 -- self-service: my own recently decided requests
 POST /checkouts/extension-requests/{id}/decision       -- approve/deny (privileged)
 POST /checkouts/{id}/extend                            -- direct grant, no request/decision round trip (privileged)
+POST /checkouts/bulk-extend                             -- direct grant, one due date applied to many checkouts (privileged)
 See services/extension_service.py for the full workflow writeup.
 """
 
@@ -21,7 +22,7 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from deps import require_privileged_role, get_current_user
-from schemas.checkouts import ReturnRequest, ExtensionRequestCreate, ExtensionDecisionRequest, DirectExtensionRequest
+from schemas.checkouts import ReturnRequest, ExtensionRequestCreate, ExtensionDecisionRequest, DirectExtensionRequest, BulkExtendRequest
 import services.checkout_service as checkout_service
 import services.extension_service as extension_service
 
@@ -133,3 +134,18 @@ def extend_checkout(
     see services/extension_service.py's extend_checkout_directly().
     """
     return extension_service.extend_checkout_directly(db, checkout_id, req, user)
+
+
+# NOTE ON ROUTE ORDERING: same reasoning as "/overdue" above -- this is a
+# literal path with no {checkout_id} segment.
+@router.post("/bulk-extend")
+def bulk_extend_checkouts(
+    req: BulkExtendRequest, db: Session = Depends(get_db), user: dict = Depends(require_privileged_role),
+):
+    """
+    Applies one new due date to many active checkouts at once -- the
+    Custody Ledger drawer's "Bulk Extend Selected" action, reusing the same
+    checkbox selection already used for Bulk Process Returns. See
+    services/extension_service.py's extend_checkouts_bulk().
+    """
+    return extension_service.extend_checkouts_bulk(db, req, user)

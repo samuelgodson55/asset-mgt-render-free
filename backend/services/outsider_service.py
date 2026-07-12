@@ -74,6 +74,20 @@ def list_outsiders(db: Session, limit: int = DEFAULT_LIMIT, offset: int = 0, sea
     return {"items": results, "total": total, "limit": limit, "offset": offset}
 
 
+def _pending_extension_fields(checkout: "models.AssetCheckout") -> dict:
+    """Same as user_service.py's helper of the same name -- see that
+    docstring for the full rationale (Custody Ledger drawer Approve/Deny
+    on the specific pending request, instead of just "Extend")."""
+    pending = next((er for er in checkout.extension_requests if er.status == "pending"), None)
+    if not pending:
+        return {"pending_extension_request_id": None, "pending_extension_new_due_date": None, "pending_extension_reason": None}
+    return {
+        "pending_extension_request_id": pending.id,
+        "pending_extension_new_due_date": pending.requested_new_due_date.strftime("%Y-%m-%d") if pending.requested_new_due_date else None,
+        "pending_extension_reason": pending.reason,
+    }
+
+
 def get_outsider_assigned_items(db: Session, outsider_id: int) -> dict:
     """Ad-hoc equivalent of user_service.get_user_assigned_items -- powers their Custody Ledger modal."""
     target = db.query(models.Outsider).filter(models.Outsider.id == outsider_id).first()
@@ -95,6 +109,7 @@ def get_outsider_assigned_items(db: Session, outsider_id: int) -> dict:
         "due_soon": models.is_due_soon(c.due_date),
         "overdue": models.is_overdue(c.due_date),
         "pending_extension": any(er.status == "pending" for er in c.extension_requests),
+        **_pending_extension_fields(c),
     } for c in active_checkouts]
 
     return {

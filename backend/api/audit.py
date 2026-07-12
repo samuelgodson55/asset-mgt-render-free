@@ -20,12 +20,13 @@ enqueue that work and let the frontend poll for it, never to build the
 file itself.
 """
 
-import base64
 import datetime
+import os
 from typing import Optional
 
 from celery.result import AsyncResult
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from celery_app import celery_app
@@ -109,8 +110,16 @@ def download_audit_export(task_id: str, user: dict = Depends(require_privileged_
     Returns the finished file for a completed export job. 409s if the job
     hasn't finished yet (the frontend is expected to have already polled
     .../status to SUCCESS before calling this) and 404s if the task_id is
-    unknown or its result already expired out of Redis (see
-    settings.EXPORT_RESULT_TTL_SECONDS).
+    unknown, its result already expired out of Redis (see
+    settings.EXPORT_RESULT_TTL_SECONDS), or the underlying file has already
+    been swept off disk by tasks/export_tasks.py's
+    _sweep_expired_exports().
+
+    SPEED: the file is streamed straight off disk (FileResponse) rather
+    than being base64-decoded out of the Celery/Redis result -- see
+    tasks/export_tasks.py's module docstring for why generation now writes
+    to settings.EXPORT_RESULT_DIR instead of embedding the bytes in the
+    job result.
     """
     result = AsyncResult(task_id, app=celery_app)
     if result.state == "FAILURE":
@@ -122,6 +131,12 @@ def download_audit_export(task_id: str, user: dict = Depends(require_privileged_
     if not payload:
         raise HTTPException(status_code=404, detail="Export result not found -- it may have expired. Please start a new export.")
 
-    file_bytes = base64.b64decode(payload["content_b64"])
-    headers = {"Content-Disposition": f"attachment; filename={payload['filename']}"}
-    return Response(content=file_bytes, media_type=payload["content_type"], headers=headers)
+    disk_path = payload.get("disk_path")
+    if not disk_path or not os.path.isfile(disk_path):
+        raise HTTPException(status_code=404, detail="Export file not found -- it may have expired. Please start a new export.")
+
+    return FileResponse(
+        path=disk_path,
+        media_type=payload["content_type"],
+        filename=payload["filename"],
+    )

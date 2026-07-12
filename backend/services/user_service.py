@@ -218,6 +218,26 @@ def list_users(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offset: int 
     return {"items": results, "total": total, "limit": limit, "offset": offset}
 
 
+def _pending_extension_fields(checkout: "models.AssetCheckout") -> dict:
+    """
+    Surfaces the actual pending ExtensionRequest (if any) alongside the
+    plain `pending_extension` boolean already computed above -- lets the
+    Custody Ledger drawer (components/custody.js) swap that item's
+    "Extend" button for Approve/Deny buttons acting on THIS SPECIFIC
+    request, instead of a Manager/Admin having to open the notification
+    bell separately or (worse) firing off a brand new direct extension
+    while one is already awaiting a decision.
+    """
+    pending = next((er for er in checkout.extension_requests if er.status == "pending"), None)
+    if not pending:
+        return {"pending_extension_request_id": None, "pending_extension_new_due_date": None, "pending_extension_reason": None}
+    return {
+        "pending_extension_request_id": pending.id,
+        "pending_extension_new_due_date": pending.requested_new_due_date.strftime("%Y-%m-%d") if pending.requested_new_due_date else None,
+        "pending_extension_reason": pending.reason,
+    }
+
+
 def get_my_assigned_items(db: Session, user: dict) -> dict:
     """
     Self-service version of get_user_assigned_items: lets ANY logged-in
@@ -265,6 +285,7 @@ def get_my_assigned_items(db: Session, user: dict) -> dict:
         "due_soon": models.is_due_soon(c.due_date),
         "overdue": models.is_overdue(c.due_date),
         "pending_extension": any(er.status == "pending" for er in c.extension_requests),
+        **_pending_extension_fields(c),
     } for c in active_checkouts]
 
     return {
@@ -297,6 +318,7 @@ def get_user_assigned_items(db: Session, user_id: int, user: dict) -> dict:
         "due_soon": models.is_due_soon(c.due_date),
         "overdue": models.is_overdue(c.due_date),
         "pending_extension": any(er.status == "pending" for er in c.extension_requests),
+        **_pending_extension_fields(c),
     } for c in active_checkouts]
 
     return {

@@ -7,18 +7,23 @@
 //      see js/components/myitems.js) -> POST /checkouts/{id}/extension-requests.
 //   2. The "Extension Requests" review panel (admin.html / manager.html,
 //      same idea as js/components/overdue.js's alert banner) -> lists
-//      pending requests from GET /checkouts/extension-requests and lets a
-//      Manager/Admin/Super Admin approve or deny each one inline ->
-//      POST /checkouts/extension-requests/{id}/decision.
+//      pending requests from GET /checkouts/extension-requests, grouped by
+//      requester, as a pure summary -- clicking one opens that requester's
+//      Custody Ledger drawer, which is where the Manager/Admin/Super Admin
+//      actually approves or denies (see #3 below and
+//      POST /checkouts/extension-requests/{id}/decision).
 //   3. The "Extend" button inside the Custody Ledger drawer (admin.html /
 //      manager.html -- User Directory AND Ad-Hoc Directory both use the
 //      same drawer, see js/components/custody.js) -> lets a Manager/Admin/
 //      Super Admin set a new due date on the spot, with no request/decision
-//      round trip -> POST /checkouts/{id}/extend.
+//      round trip -> POST /checkouts/{id}/extend. When a request is already
+//      pending on that item, this button is replaced by Approve/Deny acting
+//      on that specific request instead -- this is the ONLY place Approve/
+//      Deny happens now (see components/custody.js's item row template).
 // =============================================================================
 
 import { apiRequest } from '../api.js';
-import { escapeHtml, openModal, closeModal, isAlertDismissed, setAlertDismissed, clearAlertDismissed, groupByPerson, isItemDismissed, dismissItems } from '../ui.js';
+import { escapeHtml, openModal, closeModal, groupByPerson, isItemDismissed, dismissItems, showFieldError, clearFieldError } from '../ui.js';
 import { refreshDashboard } from '../dashboard.js';
 import { loadMyItems } from './myitems.js';
 import { getCurrentCustodyEntity, openCustodyModal } from './custody.js';
@@ -34,6 +39,7 @@ export function openExtensionRequestModal(checkoutId, assetName, currentDueDate)
   document.getElementById('extensionRequestCurrentDue').textContent = currentDueDate;
   document.getElementById('extensionNewDueDate').value = '';
   document.getElementById('extensionReason').value = '';
+  clearFieldError('extensionNewDueDate');
   openModal('extensionRequestModal');
 }
 
@@ -44,9 +50,10 @@ export async function submitExtensionRequestForm(event) {
   const newDueDate = document.getElementById('extensionNewDueDate').value;
   const reason = document.getElementById('extensionReason').value.trim();
   if (!newDueDate) {
-    alert('Choose the new due date you would like to request.');
+    showFieldError('extensionNewDueDate', 'Choose a date.');
     return;
   }
+  clearFieldError('extensionNewDueDate');
 
   try {
     await apiRequest(`/checkouts/${pendingExtensionCheckoutId}/extension-requests`, {
@@ -61,34 +68,23 @@ export async function submitExtensionRequestForm(event) {
   }
 }
 
-// ---- 2. Manager/Admin review panel (admin.html / manager.html) ------------
+// ---- 2. Manager/Admin review panel (bell dropdown, admin.html/manager.html) ---
+// Renders into the Notification Center's "Extension Requests" section. See
+// components/overdue.js's module docstring for why there's no dismiss/
+// recall logic here anymore -- living inside a closed-by-default bell
+// dropdown removes the need for it. This panel is now a pure summary --
+// clicking a row opens the requester's Custody Ledger, where the actual
+// Approve/Deny decision happens (see components/custody.js).
 
-// Same dismiss/recall pattern as components/overdue.js's loadOverdueAlerts()
-// -- see the comment there, and js/ui.js's isAlertDismissed()/
-// setAlertDismissed(), for the full rationale. Persisted to localStorage
-// so dismissing it actually sticks across a page reload/tab switch instead
-// of silently resetting, and still comes back on its own the moment the
-// underlying pending-requests list actually changes.
-const STORAGE_KEY = 'extensionRequests';
-let currentSignature = '';
-
-export function dismissExtensionRequestsAlert() {
-  const panel = document.getElementById('extensionRequestsPanel');
-  if (panel) panel.classList.add('hidden');
-  setAlertDismissed(STORAGE_KEY, currentSignature);
-}
-
-export async function loadExtensionRequests(force = false) {
+export async function loadExtensionRequests() {
   const panel = document.getElementById('extensionRequestsPanel');
   if (!panel) return false; // this page doesn't have the panel (e.g. staff/customer dashboards)
-  if (force) clearAlertDismissed(STORAGE_KEY);
 
   try {
     const result = await apiRequest('/checkouts/extension-requests?status=pending&limit=10');
 
     if (!result.total) {
       panel.classList.add('hidden');
-      currentSignature = '';
       return false;
     }
 
@@ -97,67 +93,82 @@ export async function loadExtensionRequests(force = false) {
     // Grouped by PERSON so someone with several pending requests gets one
     // heading, not several indistinguishable rows -- same "don't flag
     // once per item" idea as the Overdue/Due Soon banners (see
-    // components/due-soon.js's loadDueSoonAlerts()). Unlike those two,
-    // though, each individual request here still needs its OWN Approve/
-    // Deny action (a decision is always made on one specific request, not
-    // "all of this person's requests at once"), so the grouping is purely
-    // visual: one collapsed heading per requester, their pending requests
-    // listed underneath it.
+    // components/due-soon.js's loadDueSoonAlerts()).
+    //
+    // Approve/Deny used to live right here as buttons on each individual
+    // request -- now this panel is purely a summary, same shape as the
+    // Overdue/Due Soon sections above it: one line per requester, a single
+    // "Custody Ledger ->" link, and nothing to accidentally misclick. The
+    // actual decision is made on the Custody Ledger drawer itself (see
+    // components/custody.js's item row template, which already swaps that
+    // item's "Extend" button for Approve/Deny the moment a request is
+    // pending on it) -- so approving/denying always happens in the one
+    // place that also shows the full context (due date, outstanding
+    // quantity, every other item this person holds), not in a cramped
+    // dropdown.
     const groups = groupByPerson(result.items);
     const list = document.getElementById('extensionRequestsList');
     list.innerHTML = groups.map(g => {
       const canOpen = g.entityType && g.entityId != null;
-      const headingCount = g.items.length;
+      const count = g.items.length;
       return `
-      <div class="rounded-lg border border-border bg-card2/50 px-3 py-2.5">
-        <div class="flex items-center justify-between gap-3 pb-2 ${headingCount > 1 ? 'mb-2 border-b border-border/70' : ''}">
-          <span class="truncate text-[13px] text-slate-200 ${canOpen ? 'cursor-pointer hover:text-blue-300' : ''}"
-            ${canOpen ? `data-action="open-custody" data-entity-id="${g.entityId}" data-entity-type="${g.entityType}"` : ''}>
-            <span class="font-medium">${escapeHtml(g.assigneeName)}</span>
-            <span class="text-slate-500"> has ${headingCount} pending extension request${headingCount === 1 ? '' : 's'}</span>
-          </span>
-          ${canOpen ? `<span class="shrink-0 tag-mono text-[11px] font-semibold text-blue-400">Custody Ledger →</span>` : ''}
-        </div>
-        <div class="space-y-2">
-          ${g.items.map(item => `
-          <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <div class="min-w-0">
-              <p class="truncate text-[12px] text-slate-300">${escapeHtml(item.asset_name)}</p>
-              <p class="tag-mono text-[11px] text-slate-500">
-                ${item.previous_due_date ? `was ${escapeHtml(item.previous_due_date)} → ` : ''}requesting ${escapeHtml(item.requested_new_due_date)}
-              </p>
-              ${item.reason ? `<p class="mt-0.5 text-[11px] italic text-slate-500">"${escapeHtml(item.reason)}"</p>` : ''}
-            </div>
-            <div class="flex shrink-0 items-center gap-2">
-              <button data-action="approve-extension" data-request-id="${item.id}" class="rounded-md bg-emerald-600/90 px-2.5 py-1.5 text-[11px] font-semibold text-white transition hover:bg-emerald-500">Approve</button>
-              <button data-action="deny-extension" data-request-id="${item.id}" class="rounded-md border border-border px-2.5 py-1.5 text-[11px] font-semibold text-slate-300 transition hover:border-rose-500/60 hover:text-rose-400">Deny</button>
-            </div>
-          </div>`).join('')}
-        </div>
-      </div>`;
+      <li class="flex items-center justify-between gap-3 py-1.5 ${canOpen ? 'cursor-pointer transition hover:text-violet-200' : ''}"
+        ${canOpen ? `data-action="open-custody" data-entity-id="${g.entityId}" data-entity-type="${g.entityType}" data-action-notification="1"` : ''}>
+        <span class="truncate text-slate-200">
+          <span class="font-medium">${escapeHtml(g.assigneeName)}</span>
+          <span class="text-slate-500"> has ${count} pending extension request${count === 1 ? '' : 's'}</span>
+        </span>
+        <span class="shrink-0 tag-mono text-[11px] font-semibold text-violet-400">Custody Ledger →</span>
+      </li>`;
     }).join('');
 
-    // A signature of exactly what's being shown right now -- see
-    // due-soon.js's loadDueSoonAlerts() for the identical idea.
-    currentSignature = `total:${result.total}|` + result.items.map(i => i.id).join(',');
-
-    if (!isAlertDismissed(STORAGE_KEY, currentSignature)) panel.classList.remove('hidden');
+    panel.classList.remove('hidden');
     return true;
   } catch (err) {
-    // Same "fail quietly" rule as the overdue alert banner -- a broken
+    // Same "fail quietly" rule as the overdue alert section -- a broken
     // extension-requests panel should never block the rest of the
-    // dashboard from loading.
+    // dashboard/dropdown from loading.
     panel.classList.add('hidden');
     console.error('Failed to load extension requests:', err.message);
     return false;
   }
 }
 
+// Denying a request without saying why leaves the requester (and anyone
+// looking back at the Audit Trail later) guessing, but a browser
+// window.prompt() is cramped, has no room for a real explanation, and
+// looks completely different from every other form in this app. Deny now
+// opens the same kind of modal as everything else, with a proper textarea
+// -- see openDenyReasonModal()/submitDenyReasonForm() below. Approving
+// doesn't need this detour: there's nothing to explain when granting
+// exactly what was asked for, so it still decides immediately.
+let pendingDenyRequestId = null;
+
+export function openDenyReasonModal(requestId) {
+  pendingDenyRequestId = requestId;
+  document.getElementById('denyReasonText').value = '';
+  clearFieldError('denyReasonText');
+  openModal('denyReasonModal');
+}
+
+export async function submitDenyReasonForm(event) {
+  event.preventDefault();
+  if (!pendingDenyRequestId) return;
+  const note = document.getElementById('denyReasonText').value.trim();
+  closeModal('denyReasonModal');
+  await finalizeExtensionDecision(pendingDenyRequestId, false, note || null);
+  pendingDenyRequestId = null;
+}
+
 export async function decideExtensionRequest(requestId, approve) {
-  let note = null;
   if (!approve) {
-    note = window.prompt('Optional note to include when denying this request:', '') || null;
+    openDenyReasonModal(requestId);
+    return;
   }
+  await finalizeExtensionDecision(requestId, true, null);
+}
+
+async function finalizeExtensionDecision(requestId, approve, note) {
   try {
     await apiRequest(`/checkouts/extension-requests/${requestId}/decision`, {
       method: 'POST',
@@ -165,6 +176,15 @@ export async function decideExtensionRequest(requestId, approve) {
     });
     loadExtensionRequests();
     refreshDashboard();
+    // If a Custody Ledger drawer is open right now (e.g. the Manager/Admin
+    // decided this straight from the item's own Approve/Deny buttons --
+    // see components/custody.js's row template), re-render it so the
+    // item's due date/badge reflects the decision immediately instead of
+    // going stale until the drawer is closed and reopened.
+    const { id, type } = getCurrentCustodyEntity();
+    if (!document.getElementById('custodyModal').classList.contains('hidden') && id) {
+      openCustodyModal(id, type);
+    }
   } catch (err) {
     alert(err.message);
   }
@@ -260,6 +280,7 @@ export function openDirectExtendModal(checkoutId, assetName, currentDueDate) {
   document.getElementById('directExtendCurrentDue').textContent = currentDueDate;
   document.getElementById('directExtendNewDueDate').value = '';
   document.getElementById('directExtendReason').value = '';
+  clearFieldError('directExtendNewDueDate');
   openModal('directExtendModal');
 }
 
@@ -270,9 +291,10 @@ export async function submitDirectExtendForm(event) {
   const newDueDate = document.getElementById('directExtendNewDueDate').value;
   const reason = document.getElementById('directExtendReason').value.trim();
   if (!newDueDate) {
-    alert('Choose the new due date.');
+    showFieldError('directExtendNewDueDate', 'Choose a date.');
     return;
   }
+  clearFieldError('directExtendNewDueDate');
 
   try {
     await apiRequest(`/checkouts/${pendingDirectExtendCheckoutId}/extend`, {

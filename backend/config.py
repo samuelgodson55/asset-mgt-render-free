@@ -96,18 +96,49 @@ class Settings(BaseSettings):
     # `worker` service in docker-compose.yml); the API only ever enqueues a
     # job and polls/returns its result.
     #
-    # REDIS_URL is used as BOTH the Celery broker (where jobs queue up) and
-    # the Celery result backend (where a finished job's file bytes are
-    # stashed, base64-encoded, until the frontend downloads them). "redis"
-    # is the docker-compose service name below, same pattern as
+    # REDIS_URL is used as the Celery broker (where jobs queue up), the
+    # Celery result backend (where a finished job's small JSON metadata --
+    # filename/content-type/where-the-file-lives -- is stashed until the
+    # frontend downloads it), the shared counter store for the login rate
+    # limiter (see middleware/rate_limit.py), and the distributed lock the
+    # scheduled-backup thread uses so only one replica actually fires it
+    # (see services/backup_service.py's _acquire_scheduled_backup_lock).
+    # "redis" is the docker-compose service name below, same pattern as
     # DATABASE_URL's "db" hostname above.
     REDIS_URL: str = "redis://redis:6379/0"
-    # How long a finished export's result (and its file bytes) stays in
-    # Redis before expiring, in seconds. Long enough for a normal
-    # "click export, wait a few seconds, download" flow with some slack
-    # for a slow connection; short enough that finished export files
-    # don't sit in Redis forever if nobody downloads them.
+    # How long a finished export's result metadata stays in Redis before
+    # expiring, in seconds. Long enough for a normal "click export, wait a
+    # few seconds, download" flow with some slack for a slow connection;
+    # short enough that finished exports don't sit around forever if nobody
+    # downloads them. The actual FILE on disk (see EXPORT_RESULT_DIR below)
+    # is swept out on the same schedule -- see tasks/export_tasks.py's
+    # _sweep_expired_exports().
     EXPORT_RESULT_TTL_SECONDS: int = 3600
+    # --- Export file storage (SPEED: disk instead of RAM) -------------------
+    # Export files used to be embedded directly in the Celery result --
+    # base64-encoded bytes sitting in Redis (an in-memory datastore) for up
+    # to EXPORT_RESULT_TTL_SECONDS, for EVERY export, concurrently. A single
+    # wide-date-range audit PDF can run into the tens of megabytes; base64
+    # inflates that by ~33%, and Redis has to hold the whole thing in RAM
+    # for the entire TTL window even after the file's been downloaded. Under
+    # a few concurrent exports (easy to hit once this app is scaled to
+    # multiple replicas, each capable of enqueuing its own jobs -- see
+    # DEPLOYMENT.md's load balancing section) that RAM usage stacks up fast
+    # and makes Redis itself slower for every OTHER thing it's doing at the
+    # same time (session/rate-limit lookups, the job queue itself).
+    #
+    # Now, `tasks/export_tasks.py` writes the finished file to plain disk
+    # under this directory and only stores a small JSON dict (filename,
+    # content type, disk path) as the Celery result -- Redis goes back to
+    # holding kilobytes instead of megabytes per export, and disk space is
+    # far cheaper to burn through than RAM. This directory must be on a
+    # volume shared between the `backend` and `worker` containers (see
+    # docker-compose.yml's `export_data` volume) since `worker` writes the
+    # file and `backend` is what serves it back for download; in the
+    # single-container Render free-tier mode (Dockerfile.render) they're
+    # already the same filesystem, so no extra configuration is needed
+    # there.
+    EXPORT_RESULT_DIR: str = "/app/export_results"
 
     # --- JWT / Auth -----------------------------------------------------
     JWT_SECRET_KEY: str = "dev-secret-change-me-in-production"

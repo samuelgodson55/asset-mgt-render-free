@@ -85,7 +85,13 @@ services:
 
   backend:
     build: ./backend
-    container_name: snipeit_lite_backend
+    # NOTE: no `container_name` here (unlike the single-instance `db` and
+    # `redis` services above) -- a fixed container name can only ever be
+    # used by ONE running container at a time, which blocks `docker
+    # compose up --scale backend=N` from starting a second replica at all.
+    # See DEPLOYMENT.md's load balancing section for how/why to scale this
+    # service; Compose auto-generates unique names per replica instead
+    # (snipeit-lite-backend-1, -2, ...).
     restart: unless-stopped
     volumes:
       # Local backup files (see backend/services/backup_service.py) --
@@ -93,8 +99,19 @@ services:
       # (only `docker compose down -v` wipes it), same pattern as `db`'s
       # `pgdata` volume above. This is purely a local-dev convenience;
       # Render's Free plan has no equivalent persistent volume, which is
-      # exactly why BACKUP_GDRIVE_ENABLED exists for production.
+      # exactly why BACKUP_GDRIVE_ENABLED exists for production. When
+      # scaled to multiple replicas, every replica mounts this SAME named
+      # volume (Compose does this automatically), which is what lets any
+      # replica see/download a backup created by any other -- and why
+      # backup_service.py's index.json writes and the scheduled-backup
+      # Redis lock both exist (see that file) to keep concurrent replicas
+      # from corrupting each other's writes to it.
       - backup_data:/app/backups
+      # Finished CSV/PDF exports (see backend/tasks/export_tasks.py) --
+      # written by the `worker` container below, served back out by
+      # whichever `backend` replica happens to receive the download
+      # request, which only works because they share this SAME volume.
+      - export_data:/app/export_results
     environment:
       # "development" or "production" -- gates the startup JWT-secret check
       # in backend/config.py (requirement #5). Defaults to "development" so
@@ -110,6 +127,12 @@ services:
       # resolved by Compose's internal DNS the same way "db" is for
       # Postgres.
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      # Where finished CSV/PDF export files land on disk (see
+      # backend/tasks/export_tasks.py) -- must match the `export_data`
+      # volume's mount path above, and the SAME value the `worker` service
+      # below is given, since one container writes here and the other
+      # reads from it.
+      EXPORT_RESULT_DIR: ${EXPORT_RESULT_DIR:-/app/export_results}
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in your .env file -- see .env.example}
       JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
       JWT_EXPIRY_HOURS: ${JWT_EXPIRY_HOURS:-12}
@@ -227,13 +250,32 @@ services:
   # directly, only via the job queue.
   worker:
     build: ./backend
-    container_name: snipeit_lite_worker
+    # No `container_name` here either (see `backend` service's comment
+    # above) -- this is what lets you run
+    # `docker compose up --scale worker=3` during peak load (see
+    # DEPLOYMENT.md) to process more CSV/PDF export jobs in parallel.
     restart: unless-stopped
-    command: ["celery", "-A", "celery_app", "worker", "-B", "--loglevel=info", "--concurrency=2"]
+    # LOAD BALANCING FIX: this used to run `celery ... worker -B`, embedding
+    # Celery BEAT (the periodic-task scheduler) directly inside the worker
+    # process. celery_app.py's beat_schedule comment already flagged this
+    # as NOT safe to scale past one replica: every replica would run its
+    # own Beat and fire the overdue/due-soon notification digests once per
+    # replica, sending duplicate emails. The `-B` flag is gone from this
+    # command -- Beat now runs in its own single-replica `beat` service
+    # below, so `worker` itself can be freely scaled to handle more
+    # concurrent export jobs during peak use without that risk.
+    command: ["celery", "-A", "celery_app", "worker", "--loglevel=info", "--concurrency=2"]
+    volumes:
+      # Shares the SAME volume as the `backend` service's own mount of
+      # this path -- `worker` is what actually writes finished export
+      # files here (see backend/tasks/export_tasks.py), `backend` is what
+      # reads them back out for download.
+      - export_data:/app/export_results
     environment:
       ENVIRONMENT: ${ENVIRONMENT:-development}
       DATABASE_URL: ${DATABASE_URL:-postgresql://admin:supersecret@db:5432/asset_db}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      EXPORT_RESULT_DIR: ${EXPORT_RESULT_DIR:-/app/export_results}
       # The worker never issues/verifies JWTs itself (export jobs are
       # enqueued with an already-validated user's role/email baked in --
       # see api/audit.py), but Settings() still requires a JWT_SECRET_KEY
@@ -252,6 +294,47 @@ services:
       # needs them too. Kept identical/copy-pasted rather than factored out
       # since docker-compose.yml has no "shared env block" feature without
       # YAML anchors, which this project avoids for beginner-readability.
+      NOTIFICATIONS_ENABLED: ${NOTIFICATIONS_ENABLED:-false}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-}
+      ADMIN_NOTIFICATION_EMAILS: ${ADMIN_NOTIFICATION_EMAILS:-}
+      OVERDUE_NOTIFICATION_INTERVAL_HOURS: ${OVERDUE_NOTIFICATION_INTERVAL_HOURS:-24}
+      DUE_SOON_REMINDER_DAYS: ${DUE_SOON_REMINDER_DAYS:-2}
+      DUE_SOON_NOTIFICATION_INTERVAL_HOURS: ${DUE_SOON_NOTIFICATION_INTERVAL_HOURS:-24}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------
+  # beat (Celery periodic-task scheduler -- fires the overdue/due-soon
+  # notification digests on a schedule; see celery_app.py's beat_schedule)
+  # ---------------------------------------------------------------------
+  # Split out into its own service, deliberately with NO `deploy.replicas`
+  # or `--scale` usage, EVER: Celery Beat firing more than once for the
+  # same scheduled task, from more than one process, sends duplicate
+  # notification emails. Keeping Beat as this one dedicated, never-scaled
+  # service (instead of the old `-B` flag embedded in `worker`, which
+  # WOULD duplicate if `worker` were scaled) is what makes `worker` itself
+  # safe to scale to N replicas above.
+  beat:
+    build: ./backend
+    restart: unless-stopped
+    command: ["celery", "-A", "celery_app", "beat", "--loglevel=info"]
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://admin:supersecret@db:5432/asset_db}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in your .env file -- see .env.example}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      AUTO_INIT_DB: "false"
+      AUTO_SEED_DEMO_DATA: "false"
       NOTIFICATIONS_ENABLED: ${NOTIFICATIONS_ENABLED:-false}
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
@@ -318,3 +401,4 @@ volumes:
   pgdata:
   redisdata:
   backup_data:
+  export_data:

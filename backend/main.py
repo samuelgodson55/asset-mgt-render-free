@@ -170,7 +170,29 @@ def on_startup() -> None:
 #   -> your route handlers
 app.add_middleware(
     RateLimitMiddleware,
-    limited_paths={"/auth/login"},
+    # BUG FIX: every router below is mounted with `prefix="/api"` (see
+    # `app.include_router(auth_router, prefix="/api")` further down), and
+    # `auth_router` itself already declares `prefix="/auth"` (see
+    # api/auth.py) -- so the real, final path a POST request to log in
+    # actually hits is "/api/auth/login", NOT "/auth/login". This
+    # middleware runs at the raw ASGI layer, BEFORE FastAPI's router ever
+    # sees the request, so it only ever gets the full incoming path -- it
+    # has no idea about route-level prefixes. With the old bare
+    # "/auth/login" entry, `scope.get("path") not in self.limited_paths`
+    # was ALWAYS True for every real login request, so this middleware
+    # silently passed every single one straight through untouched: the
+    # per-IP throttle documented above (module docstring) never actually
+    # engaged, no matter how many login attempts came from the same IP in
+    # the same window. That removed the outer layer of brute-force
+    # protection entirely and let unlimited rapid-fire guesses reach the
+    # inner, per-ACCOUNT lockout in services/auth_service.py -- so a
+    # single noisy IP (an attacker, a misbehaving script, or even someone
+    # fat-fingering their password several times fast) could run a
+    # legitimate account straight into a 15-minute lockout (HTTP 423)
+    # without the IP-based limiter ever stepping in first to slow them
+    # down, which is exactly the scenario the two layers together were
+    # supposed to prevent.
+    limited_paths={"/api/auth/login"},
     max_requests=settings.LOGIN_RATE_LIMIT_MAX,
     window_seconds=settings.LOGIN_RATE_LIMIT_WINDOW_SECONDS,
 )
