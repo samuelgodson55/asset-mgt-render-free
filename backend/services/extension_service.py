@@ -45,7 +45,7 @@ from sqlalchemy.orm import Session
 
 import models
 from models import utc_now
-from schemas.checkouts import ExtensionRequestCreate, ExtensionDecisionRequest, DirectExtensionRequest
+from schemas.checkouts import ExtensionRequestCreate, ExtensionDecisionRequest, DirectExtensionRequest, BulkExtendRequest
 from tasks.notification_tasks import send_email_task
 from config import settings
 
@@ -482,4 +482,40 @@ def extend_checkout_directly(db: Session, checkout_id: int, req: DirectExtension
         "checkout_id": checkout.id,
         "due_date": checkout.due_date.strftime("%Y-%m-%d"),
         "message": "Due date extended.",
+    }
+
+
+def extend_checkouts_bulk(db: Session, req: BulkExtendRequest, user: dict) -> dict:
+    """
+    POST /checkouts/bulk-extend -- applies ONE new due date to MANY active
+    checkouts at once, powering the Custody Ledger drawer's "Bulk Extend
+    Selected" action (components/custody.js) -- the same checkbox-selection
+    UI already used for Bulk Process Returns, just for extensions instead.
+
+    Each checkout is extended independently through extend_checkout_directly()
+    -- same validation (must be active, new date must be later than the
+    current one), same audit trail entry, same holder-notification email --
+    so this is genuinely "do the single-extend action N times" rather than a
+    separate code path. A failure on one checkout_id (already returned, or
+    this particular due date isn't actually later than its current one) is
+    recorded per-item and does NOT stop the rest of the batch from going
+    through -- a bulk action over a handful of unrelated people's equipment
+    shouldn't succeed-or-fail as all-or-nothing.
+    """
+    single_req = DirectExtensionRequest(new_due_date=req.new_due_date, reason=req.reason)
+    results = []
+    for checkout_id in req.checkout_ids:
+        try:
+            outcome = extend_checkout_directly(db, checkout_id, single_req, user)
+            results.append({"checkout_id": checkout_id, "success": True, "due_date": outcome["due_date"]})
+        except HTTPException as e:
+            db.rollback()
+            results.append({"checkout_id": checkout_id, "success": False, "error": e.detail})
+
+    succeeded = sum(1 for r in results if r["success"])
+    return {
+        "results": results,
+        "succeeded": succeeded,
+        "failed": len(results) - succeeded,
+        "message": f"Extended {succeeded} of {len(results)} selected item(s).",
     }

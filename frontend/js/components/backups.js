@@ -19,7 +19,7 @@
 
 import { apiRequest, API_URL } from '../api.js';
 import { getSession } from '../auth.js';
-import { escapeHtml, openModal, closeModal } from '../ui.js';
+import { escapeHtml, openModal, closeModal, showToast } from '../ui.js';
 
 let pendingRestore = null; // { mode: 'local' | 'upload', filename?: string, file?: File }
 
@@ -185,6 +185,7 @@ export async function downloadBackup(el) {
     a.download = filename;
     a.click();
     window.URL.revokeObjectURL(url);
+    showToast('Download complete.');
   } catch (err) {
     alert(err.message);
   }

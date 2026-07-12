@@ -7,7 +7,7 @@
 // =============================================================================
 
 import { apiRequest } from '../api.js';
-import { escapeHtml, openModal, closeModal, toggleRoute, toggleCapacityEdit, toggleNameEdit, toggleDepartmentEdit, statusBadge, debounce, renderServerPaginationBar, rowDetailsTrigger } from '../ui.js';
+import { escapeHtml, openModal, closeModal, toggleRoute, toggleCapacityEdit, toggleNameEdit, toggleDepartmentEdit, statusBadge, debounce, renderServerPaginationBar, rowDetailsTrigger, showFieldError, clearFieldError } from '../ui.js';
 import { refreshDashboard } from '../dashboard.js';
 
 let currentDispatchAssetId = null; // remembers which asset the open dispatch drawer is for
@@ -386,9 +386,10 @@ export async function saveCapacity() {
 export async function saveName() {
   const newName = document.getElementById('nameInput').value.trim();
   if (!newName) {
-    alert('Asset name cannot be empty.');
+    showFieldError('nameInput', 'Asset name cannot be empty.');
     return;
   }
+  clearFieldError('nameInput');
   try {
     await apiRequest(`/assets/${currentPropsAssetId}/name`, {
       method: 'PUT', body: JSON.stringify({ name: newName }),

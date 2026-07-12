@@ -25,9 +25,8 @@
 import { checkAccess, startIdleWatchdog, login, redirectByUserRole, logout, getSession } from './auth.js';
 import { closeModal, switchTab, toggleRoute, toggleCapacityEdit, toggleNameEdit, toggleDepartmentEdit, changePage, setSearch, setPerPage, openRowDetailsFromElement, initSwipeNav, initModalBackdropDismiss } from './ui.js';
 import { toggleTheme, initThemeToggle } from './theme.js';
-import { refreshDashboard, checkAlertsNow } from './dashboard.js';
-import { dismissOverdueAlert } from './components/overdue.js';
-import { dismissDueSoonAlert } from './components/due-soon.js';
+import { refreshDashboard } from './dashboard.js';
+import { initNotificationBell, toggleNotificationDropdown, closeNotificationDropdown, refreshNotifications } from './components/notifications.js';
 
 import {
   openDispatchModal, submitDispatchForm, openPropsModal, recallException,
@@ -47,7 +46,7 @@ import {
 } from './components/outsiders.js';
 import {
   openCustodyModal, processReturn, updateCustodySelection, toggleSelectAllCustody,
-  processAllReturns, bulkProcessReturns,
+  processAllReturns, bulkProcessReturns, openBulkExtendModal, submitBulkExtendForm,
 } from './components/custody.js';
 import { openProfileModal, submitChangePasswordForm, ROLE_LABELS } from './components/profile.js';
 import { exportMyItems, exportCustodyItems, exportAllUsers, exportAllOutsiders, exportAssetsInventory } from './components/exports.js';
@@ -60,7 +59,7 @@ import {
   openRestoreUploadModal,
   confirmRestore,
 } from './components/backups.js';
-import { openExtensionRequestModal, submitExtensionRequestForm, decideExtensionRequest, openDirectExtendModal, submitDirectExtendForm, dismissExtensionRequestsAlert, loadMyExtensionDecisionsAlert, dismissMyExtensionDecisionsAlert } from './components/extensions.js';
+import { openExtensionRequestModal, submitExtensionRequestForm, decideExtensionRequest, openDirectExtendModal, submitDirectExtendForm, dismissMyExtensionDecisionsAlert, submitDenyReasonForm } from './components/extensions.js';
 
 // -----------------------------------------------------------------------------
 // DELEGATED "CLICK" ACTIONS
@@ -117,28 +116,26 @@ const CLICK_ACTIONS = {
     else changePage(key, delta);
   },
   'open-profile': () => openProfileModal(),
-  'check-alerts': () => checkAlertsNow(),
-  'dismiss-overdue-alert': () => dismissOverdueAlert(),
-  'dismiss-due-soon-alert': () => dismissDueSoonAlert(),
-  'dismiss-extension-requests-alert': () => dismissExtensionRequestsAlert(),
+  'toggle-notifications': () => toggleNotificationDropdown(),
+  'close-notifications': () => closeNotificationDropdown(),
   'dismiss-my-extension-decisions-alert': () => dismissMyExtensionDecisionsAlert(),
-  'dismiss-all-clear-banner': () => {
-    const banner = document.getElementById('alertsAllClearBanner');
-    if (banner) banner.classList.add('hidden');
-  },
 
   // Due-date extension requests -- see components/extensions.js.
   'open-extension-request': (el) => openExtensionRequestModal(parseInt(el.dataset.checkoutId, 10), el.dataset.assetName, el.dataset.dueDate),
   'approve-extension': (el) => decideExtensionRequest(parseInt(el.dataset.requestId, 10), true),
   'deny-extension': (el) => decideExtensionRequest(parseInt(el.dataset.requestId, 10), false),
   'open-direct-extend': (el) => openDirectExtendModal(parseInt(el.dataset.checkoutId, 10), el.dataset.assetName, el.dataset.dueDate),
+  'open-bulk-extend': () => openBulkExtendModal(),
 
   // Properties-assigned exports (CSV/PDF) -- see components/exports.js.
-  'export-my-items': (el) => exportMyItems(el.dataset.format),
-  'export-custody': (el) => exportCustodyItems(el.dataset.format),
-  'export-all-users': (el) => exportAllUsers(el.dataset.format),
-  'export-all-outsiders': (el) => exportAllOutsiders(el.dataset.format),
-  'export-assets-inventory': (el) => exportAssetsInventory(el.dataset.format),
+  // `el` (the clicked button) is passed through as the second argument so
+  // each export function can disable/relabel it to "Exporting..." for the
+  // duration of the download, same progress feedback as the backup button.
+  'export-my-items': (el) => exportMyItems(el.dataset.format, el),
+  'export-custody': (el) => exportCustodyItems(el.dataset.format, el),
+  'export-all-users': (el) => exportAllUsers(el.dataset.format, el),
+  'export-all-outsiders': (el) => exportAllOutsiders(el.dataset.format, el),
+  'export-assets-inventory': (el) => exportAssetsInventory(el.dataset.format, el),
 
   // The audit ledger pages itself server-side (true limit/offset re-fetch
   // on every click) rather than through the shared client-side
@@ -387,6 +384,12 @@ document.addEventListener('DOMContentLoaded', () => {
   const directExtendForm = document.getElementById('directExtendForm');
   if (directExtendForm) directExtendForm.addEventListener('submit', submitDirectExtendForm);
 
+  const bulkExtendForm = document.getElementById('bulkExtendForm');
+  if (bulkExtendForm) bulkExtendForm.addEventListener('submit', submitBulkExtendForm);
+
+  const denyReasonForm = document.getElementById('denyReasonForm');
+  if (denyReasonForm) denyReasonForm.addEventListener('submit', submitDenyReasonForm);
+
   const exportBtn = document.getElementById('exportAuditBtn');
   if (exportBtn) exportBtn.addEventListener('click', () => exportAuditLogs('csv'));
 
@@ -395,6 +398,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // --- Search boxes / rows-per-page selects on whichever tables exist ---
   wireTableControls();
+
+  // --- Notification Center bell (every dashboard page) ---
+  initNotificationBell();
 
   // --- Populate the navbar name/role + dashboard tables on any dashboard page ---
   const session = getSession();
@@ -420,10 +426,23 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (document.getElementById('myItemsTableBody')) {
       loadMyItems();
-      loadMyExtensionDecisionsAlert();
+      // Personal Notification Center sections (My Overdue/Due Soon/Pending
+      // Extension/My Extension Decisions) -- see components/notifications.js.
+      // refreshDashboard() already covers this on admin.html/manager.html
+      // above; staff.html/customer.html have no dashboard tables to refresh,
+      // so trigger it directly here instead.
+      refreshNotifications();
     }
     if (document.getElementById('backupTableBody')) {
       refreshBackupsPanel();
     }
+
+    // Keep the bell's badge count reasonably fresh even if the person just
+    // leaves a dashboard tab open for a while without clicking anything --
+    // same "quiet background upkeep" idea as auth.js's idle watchdog, just
+    // for notification data instead of session expiry. 60s is frequent
+    // enough to feel "live" without hammering the four/five endpoints this
+    // fans out to on every tick.
+    setInterval(refreshNotifications, 60000);
   }
 });

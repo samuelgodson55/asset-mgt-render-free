@@ -46,6 +46,87 @@
       </div>
 
       <div class="flex items-center gap-1.5 sm:gap-4">
+        <!-- ================= NOTIFICATION CENTER BELL =================
+             Personal alerts only (staff/customer accounts don't review
+             others' checkouts) -- my own items overdue/due soon, my own
+             pending extension requests, and updates on decisions made
+             about them. See js/components/notifications.js. -->
+        <div class="relative">
+          <button type="button" data-action="toggle-notifications" id="notificationBellBtn" title="Notifications" aria-label="Notifications" aria-haspopup="true" aria-expanded="false"
+            class="relative flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border bg-card text-slate-300 transition hover:border-violet-500/40 hover:text-violet-400 sm:h-9 sm:w-9">
+            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 00-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>
+            <span id="notificationBadge" class="hidden absolute -right-1 -top-1 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-rose-500 px-1 text-[10px] font-bold leading-none text-white ring-2 ring-card">0</span>
+          </button>
+
+          <div id="notificationDropdown" class="hidden absolute right-0 z-40 mt-2 w-[22rem] max-w-[90vw] overflow-hidden rounded-xl border border-border bg-card shadow-2xl sm:w-96">
+            <div class="flex items-center justify-between border-b border-border px-4 py-3">
+              <p class="text-[13px] font-semibold text-slate-100">Notifications</p>
+              <div class="flex items-center gap-2">
+                <span id="notificationEmptyLabel" class="hidden text-[11px] text-slate-500">All caught up</span>
+                <button type="button" data-action="close-notifications" title="Close" aria-label="Close notifications"
+                  class="rounded-md p-1 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+                  <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                </button>
+              </div>
+            </div>
+            <div class="max-h-[70vh] overflow-y-auto p-3 space-y-3">
+
+              <div id="notificationEmptyState" class="hidden flex flex-col items-center gap-2 py-8 text-center">
+                <svg class="h-6 w-6 text-emerald-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><path d="M22 4L12 14.01l-3-3"/></svg>
+                <p class="text-[12px] text-slate-500">Nothing overdue, due soon, or awaiting review.</p>
+              </div>
+
+              <!-- ---- MY OWN OVERDUE ITEMS ---- -->
+              <div id="notifMyOverdueSection" class="hidden rounded-lg border border-rose-500/30 bg-rose-500/5 p-3">
+                <div class="flex items-center gap-2 text-[12px] font-semibold text-rose-400">
+                  <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01M10.29 3.86l-8.18 14.18A2 2 0 003.82 21h16.36a2 2 0 001.71-2.96L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
+                  <span><span id="notifMyOverdueCount">0</span> item(s) you hold are overdue</span>
+                </div>
+                <ul id="notifMyOverdueList" class="mt-1.5 divide-y divide-rose-500/10 pl-6 text-[12px]"></ul>
+              </div>
+
+              <!-- ---- MY OWN DUE-SOON ITEMS ---- -->
+              <div id="notifMyDueSoonSection" class="hidden rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
+                <div class="flex items-center gap-2 text-[12px] font-semibold text-amber-400">
+                  <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+                  <span><span id="notifMyDueSoonCount">0</span> item(s) you hold are due soon</span>
+                </div>
+                <ul id="notifMyDueSoonList" class="mt-1.5 divide-y divide-amber-500/10 pl-6 text-[12px]"></ul>
+              </div>
+
+              <!-- ---- MY OWN PENDING EXTENSION REQUESTS ---- -->
+              <div id="notifMyPendingExtensionSection" class="hidden rounded-lg border border-violet-500/30 bg-violet-500/5 p-3">
+                <div class="flex items-center gap-2 text-[12px] font-semibold text-violet-300">
+                  <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="9"/></svg>
+                  <span><span id="notifMyPendingExtensionCount">0</span> of your extension request(s) awaiting review</span>
+                </div>
+                <ul id="notifMyPendingExtensionList" class="mt-1.5 divide-y divide-violet-500/10 pl-6 text-[12px]"></ul>
+              </div>
+
+              <!-- ---- MY EXTENSION REQUEST DECISIONS =================
+                   Populated by js/components/extensions.js's
+                   loadMyExtensionDecisionsAlert() from GET
+                   /checkouts/my-extension-decisions -- shows up once one of
+                   your own extension requests has been approved or denied,
+                   in case you miss the email backend/services/
+                   extension_service.py already sends. -->
+              <div id="myExtensionDecisionsBanner" class="hidden rounded-lg border border-blue-500/30 bg-blue-500/5 p-3">
+                <div class="flex items-center justify-between gap-2">
+                  <div class="flex items-center gap-2 text-[12px] font-semibold text-blue-400">
+                    <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="9"/></svg>
+                    <span><span id="myExtensionDecisionsCount">0</span> extension request update(s)</span>
+                  </div>
+                  <button data-action="dismiss-my-extension-decisions-alert" title="Clear" class="rounded-md p-1 text-blue-400/70 transition hover:bg-blue-500/10 hover:text-blue-300">
+                    <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                  </button>
+                </div>
+                <ul id="myExtensionDecisionsList" class="mt-1.5 divide-y divide-blue-500/10 text-[12px]"></ul>
+              </div>
+
+            </div>
+          </div>
+        </div>
+
         <span class="hidden items-center gap-1.5 rounded-full border border-violet-500/50 bg-violet-500/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-wide text-violet-400 glow-violet sm:flex">
           <span class="h-1.5 w-1.5 rounded-full bg-violet-500"></span>
           Customer Portal
@@ -74,29 +155,6 @@
 </header>
 
 <main class="mx-auto max-w-[1100px] px-4 py-6 space-y-5 sm:px-6 sm:py-8 sm:space-y-6">
-  <!-- ================= MY EXTENSION REQUEST DECISIONS BANNER =================
-       Self-service counterpart to admin.html's Overdue/Due Soon/Extension
-       Requests banners -- populated by js/components/extensions.js's
-       loadMyExtensionDecisionsAlert() from GET /checkouts/my-extension-decisions.
-       Shows up for the checkout HOLDER once one of their own extension
-       requests has been approved or denied, in case they miss the email
-       backend/services/extension_service.py already sends. Hidden by
-       default/whenever there's nothing new -- dismissible via the X below,
-       same signature-based localStorage pattern as every other alert
-       banner in this app (see js/ui.js's isAlertDismissed()). -->
-  <div id="myExtensionDecisionsBanner" class="hidden rounded-xl border border-blue-500/30 bg-blue-500/5 p-4">
-    <div class="flex items-center justify-between gap-2">
-      <div class="flex items-center gap-2 text-[13px] font-semibold text-blue-400">
-        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="9"/></svg>
-        <span><span id="myExtensionDecisionsCount">0</span> extension request update(s)</span>
-      </div>
-      <button data-action="dismiss-my-extension-decisions-alert" title="Dismiss" class="rounded-md p-1 text-blue-400/70 transition hover:bg-blue-500/10 hover:text-blue-300">
-        <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
-      </button>
-    </div>
-    <ul id="myExtensionDecisionsList" class="mt-2 divide-y divide-blue-500/10 text-[12px]"></ul>
-  </div>
-
   <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
     <div>
       <h1 class="text-xl font-bold tracking-tight text-slate-50">My Checked-Out Items</h1>

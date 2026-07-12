@@ -91,15 +91,17 @@ celery_app.conf.update(
 # temporarily set one of these to a couple of minutes and watch your
 # terminal/mail-catcher for the first send) without waiting a full day.
 #
-# THIS APP DOES NOT RUN A SEPARATE `celery beat` CONTAINER: docker-compose.yml
-# runs `celery -A celery_app worker -B`, which embeds Beat directly inside the
-# single worker process (the `-B` flag) instead of adding a fourth container.
-# That's the right tradeoff for a small, single-worker "lite" deployment like
-# this one -- it does NOT scale to running multiple worker replicas (each
-# replica would embed its OWN Beat scheduler and every one of them would fire
-# these tasks independently, sending duplicate emails). If you ever scale the
-# `worker` service to more than one replica, split Beat back out into its own
-# single-replica `celery -A celery_app beat` service/container instead.
+# LOAD BALANCING: Beat runs as its OWN dedicated `beat` service in
+# docker-compose.yml (`celery -A celery_app beat`), separate from `worker`.
+# It used to be embedded inside the worker process via the `-B` flag,
+# which was fine for a single, never-scaled worker container -- but every
+# REPLICA of a `-B`-embedded worker would run its own independent Beat
+# scheduler and each fire these tasks on its own timer, sending duplicate
+# notification emails. Splitting Beat out into its own single-replica
+# service (never scaled -- see docker-compose.yml's `beat` service
+# comment) is what makes `worker` itself safe to scale to N replicas
+# during peak load (see DEPLOYMENT.md's load balancing section) without
+# that risk.
 celery_app.conf.beat_schedule = {
     "send-overdue-checkout-notifications": {
         "task": "tasks.send_overdue_notifications",

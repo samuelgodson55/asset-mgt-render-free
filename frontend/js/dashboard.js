@@ -16,9 +16,7 @@ import { loadAssets } from './components/assets.js';
 import { loadUsers, loadDeletedUsers } from './components/users.js';
 import { loadOutsiders } from './components/outsiders.js';
 import { loadAuditLogs } from './components/audit.js';
-import { loadOverdueAlerts } from './components/overdue.js';
-import { loadDueSoonAlerts } from './components/due-soon.js';
-import { loadExtensionRequests, loadMyExtensionDecisionsAlert } from './components/extensions.js';
+import { refreshNotifications } from './components/notifications.js';
 
 export function refreshDashboard() {
   loadAssets();
@@ -29,50 +27,11 @@ export function refreshDashboard() {
   loadDeletedUsers();
   loadAuditLogs();
   loadOutsiders();
-  loadOverdueAlerts();
-  loadDueSoonAlerts();
-  loadExtensionRequests();
-  // Self-service banner (see components/extensions.js) -- distinct from
-  // loadExtensionRequests() above, which is the REVIEW panel for
-  // decisions this account needs to make on OTHERS' checkouts. A no-op
-  // on any page without #myExtensionDecisionsBanner.
-  loadMyExtensionDecisionsAlert();
 
-  // Whatever just changed elsewhere on the dashboard could also change
-  // what the three alert widgets above have to show, so a stale "All
-  // caught up" toast left over from an earlier manual check (see
-  // checkAlertsNow() below) should never linger past this point.
-  const allClearBanner = document.getElementById('alertsAllClearBanner');
-  if (allClearBanner) allClearBanner.classList.add('hidden');
-}
-
-// Manual "Check Now" entry point for the button next to the three alert
-// widgets (Overdue / Due Soon / Extension Requests). Those three already
-// auto-load on every refreshDashboard() above, but each one only ever
-// renders when it has something to show (Operations & Observability
-// requirement #5's `result.total > 0` gate -- see components/overdue.js,
-// components/due-soon.js, components/extensions.js), so a routine
-// background refresh gives no visible confirmation either way. A person
-// who explicitly clicks "Check Now" deserves SOME feedback that the
-// check actually ran even when every widget comes back clean -- hence
-// the "All caught up" banner, shown only when all three report nothing.
-export async function checkAlertsNow() {
-  const allClearBanner = document.getElementById('alertsAllClearBanner');
-  const btn = document.getElementById('checkAlertsBtn');
-  if (allClearBanner) allClearBanner.classList.add('hidden');
-  if (btn) btn.disabled = true;
-
-  try {
-    const [hasOverdue, hasDueSoon, hasExtensionRequests] = await Promise.all([
-      loadOverdueAlerts(true),
-      loadDueSoonAlerts(true),
-      loadExtensionRequests(true),
-    ]);
-
-    if (allClearBanner && !hasOverdue && !hasDueSoon && !hasExtensionRequests) {
-      allClearBanner.classList.remove('hidden');
-    }
-  } finally {
-    if (btn) btn.disabled = false;
-  }
+  // Notification Center bell (see js/components/notifications.js) --
+  // Overdue / Due Soon / Extension Requests / My Extension Decisions / My
+  // own item alerts all live there now instead of always-visible dashboard
+  // banners, so whatever just changed elsewhere on the dashboard should
+  // also refresh whatever the bell has to show.
+  refreshNotifications();
 }
