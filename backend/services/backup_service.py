@@ -47,6 +47,7 @@ from typing import Optional
 from urllib.parse import urlparse
 
 from config import settings
+import services.export_service as export_service
 
 logger = logging.getLogger(__name__)
 
@@ -136,7 +137,26 @@ def create_backup(triggered_by: str = "manual") -> dict:
     _require_binary("pg_dump")
     conn = _db_connection_kwargs()
     timestamp = datetime.datetime.now(datetime.timezone.utc)
-    filename = f"snipeit_backup_{timestamp.strftime('%Y%m%d_%H%M%S')}.sql.gz"
+    # TIMEZONE FIX (matches the audit/properties-assigned export fix in
+    # services/export_service.py): `created_at` below stays a real UTC
+    # instant (correct, unambiguous, and what every comparison/sort in
+    # this module uses) -- but the FILENAME is what a person actually
+    # reads on screen next to it (js/components/backups.js renders
+    # `entry.filename` as plain text), and that column's `created_at` is
+    # separately displayed via `new Date(...).toLocaleString()`
+    # (browser-local). A raw UTC timestamp baked into the filename with
+    # no zone marker used to silently disagree with that adjacent
+    # browser-local column by an hour (or more) for anyone outside UTC --
+    # same bug, same fix: render the filename's timestamp in
+    # DISPLAY_TIMEZONE (see config.py) and label it with the zone's real
+    # abbreviation instead of leaving it unlabeled.
+    display_timestamp = timestamp.astimezone(export_service.DISPLAY_TZ)
+    # Defensive: most IANA zone abbreviations (WAT, EST, JST, ...) are
+    # already filename-safe, but sanitize anyway in case DISPLAY_TIMEZONE
+    # is ever set to an unusual zone whose abbreviation contains a
+    # character (space, '+', ':') that isn't safe in a filename.
+    tz_label = "".join(ch for ch in display_timestamp.tzname() if ch.isalnum()) or "TZ"
+    filename = f"snipeit_backup_{display_timestamp.strftime('%Y%m%d_%H%M%S')}_{tz_label}.sql.gz"
     backup_dir = _ensure_backup_dir()
     filepath = os.path.join(backup_dir, filename)
 
@@ -256,12 +276,46 @@ def _enforce_retention() -> None:
     logger.info("backup_service: retention removed %d old local backup(s) (Google Drive copies, if any, are untouched).", len(to_delete))
 
 
+def _display_schedule_hours(hours_utc: list[int]) -> list[str]:
+    """
+    Converts BACKUP_HOURS_UTC's schedule hours into DISPLAY_TIMEZONE
+    "HH:MM" strings for the System Backups panel -- same "don't show a
+    person a raw UTC number with no zone label" fix as everywhere else in
+    this app (see export_service.py's module docstring). A schedule hour
+    has no specific calendar date of its own, so this projects each one
+    onto TODAY (UTC) purely so zoneinfo can do a correct, DST-aware
+    conversion, then keeps only the resulting local HH:MM -- the date
+    component is thrown away since only the daily wall-clock time matters
+    for a recurring schedule. Sorted/deduped afterwards because converting
+    can reorder hours (e.g. 23:00 UTC becomes 00:00 the next day in WAT)
+    or, rarely, land two different UTC hours on the same local minute.
+    """
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    local_hhmm = set()
+    for hour in hours_utc:
+        utc_dt = datetime.datetime.combine(today, datetime.time(hour=hour), tzinfo=datetime.timezone.utc)
+        local_dt = utc_dt.astimezone(export_service.DISPLAY_TZ)
+        local_hhmm.add(local_dt.strftime("%H:%M"))
+    return sorted(local_hhmm)
+
+
 def get_status() -> dict:
     entries = list_backups()
     latest = entries[0] if entries else None
+    hours_utc = settings.backup_hours_utc_list
     return {
         "auto_backup_enabled": settings.ENABLE_AUTO_BACKUP,
-        "backup_hours_utc": settings.backup_hours_utc_list,
+        # Raw UTC hours -- kept for anything that still wants the
+        # unconverted scheduling value (e.g. a future API consumer that
+        # isn't a person reading a dashboard).
+        "backup_hours_utc": hours_utc,
+        # What the System Backups panel actually renders now -- see
+        # js/components/backups.js's loadBackupStatus(). Pre-converted to
+        # DISPLAY_TIMEZONE with the real zone abbreviation attached
+        # separately (display_timezone_label) so the frontend never needs
+        # its own copy of the UTC->local conversion logic.
+        "backup_hours_display": _display_schedule_hours(hours_utc),
+        "display_timezone_label": datetime.datetime.now(export_service.DISPLAY_TZ).tzname(),
         "gdrive_enabled": settings.BACKUP_GDRIVE_ENABLED,
         "retention_count": settings.BACKUP_RETENTION_COUNT,
         "backup_count": len(entries),

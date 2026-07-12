@@ -330,18 +330,14 @@ def _format_export_datetime(iso_string: Optional[str]) -> str:
     "TIMEZONE FIX" comment above for why they're ISO in the first place)
     back into a friendly string for a CSV/PDF export cell.
 
-    Unlike the live UI (js/ui.js's formatTimestamp(), which converts to the
-    browser's local timezone), a static export file has no viewer-specific
-    timezone to convert to at generation time -- so this keeps it in UTC
-    and says so explicitly, rather than risk it being misread as local
-    time the way the old un-labeled pre-formatted string could be.
+    Delegates to services/export_service.py's format_export_datetime() so
+    this export renders in the same DISPLAY_TIMEZONE (see config.py), with
+    the same real zone abbreviation, as every other exporter in the app --
+    that shared helper is what keeps this in sync with the Audit Trail's
+    on-screen (browser-local) time instead of silently drifting an hour
+    behind it the way a hardcoded "UTC" label used to.
     """
-    if not iso_string:
-        return ""
-    try:
-        return datetime.datetime.fromisoformat(iso_string).strftime("%Y-%m-%d %H:%M:%S UTC")
-    except ValueError:
-        return iso_string  # unparseable -- surface it as-is rather than silently dropping it
+    return export_service.format_export_datetime(iso_string)
 
 
 def _item_export_rows(items: list) -> list:
@@ -370,7 +366,8 @@ def export_my_assigned_items(db: Session, user: dict, fmt: str = "csv"):
     (staff, customer, manager, super_admin) can download their OWN custody
     ledger as a CSV or PDF, no elevated privileges required."""
     data = get_my_assigned_items(db, user)
-    subtitle = f"{data['name']} ({data['email']}) · Exported {utc_now().strftime('%Y-%m-%d %H:%M UTC')}"
+    _exported_at = export_service.display_now()
+    subtitle = f"{data['name']} ({data['email']}) · Exported {_exported_at.strftime('%Y-%m-%d %H:%M')} {_exported_at.tzname()}"
     return _build_items_export("Properties Assigned To Me", subtitle, data["assigned_items"], fmt, "my_properties")
 
 
@@ -408,7 +405,7 @@ def export_all_users_items(db: Session, user: dict, fmt: str = "csv"):
                 c.asset.name if c.asset else "Unknown Asset",
                 c.asset.department if c.asset and c.asset.department else "—",
                 c.quantity, c.quantity - c.quantity_returned,
-                c.checkout_date.strftime("%Y-%m-%d %H:%M:%S UTC") if c.checkout_date else "",
+                export_service.format_export_datetime(c.checkout_date),
                 c.due_date.strftime("%Y-%m-%d") if c.due_date else "No Fixed Due Date",
             ])
 

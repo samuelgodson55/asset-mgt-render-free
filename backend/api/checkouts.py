@@ -8,6 +8,7 @@ GET  /checkouts/due-soon    -- dashboard alert feed of checkouts due soon
 
 POST /checkouts/{id}/extension-requests               -- request more time
 GET  /checkouts/extension-requests                     -- list requests (privileged)
+GET  /checkouts/my-extension-decisions                 -- self-service: my own recently decided requests
 POST /checkouts/extension-requests/{id}/decision       -- approve/deny (privileged)
 POST /checkouts/{id}/extend                            -- direct grant, no request/decision round trip (privileged)
 See services/extension_service.py for the full workflow writeup.
@@ -92,6 +93,23 @@ def get_extension_requests(
 ):
     """Dashboard panel feed: extension requests awaiting (or already given) a decision."""
     return extension_service.list_extension_requests(db, user, status, limit, offset)
+
+
+# NOTE ON ROUTE ORDERING: same reasoning as "/overdue" above -- this is a
+# literal path with no {checkout_id} segment.
+@router.get("/my-extension-decisions")
+def get_my_extension_decisions(
+    limit: int = Query(10, ge=1, le=extension_service.MAX_LIMIT),
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    """
+    Self-service alert feed: any of the CALLER'S OWN active/former checkouts
+    whose extension request was approved or denied recently. Any logged-in
+    account can call this (staff/customer/manager/admin) -- it's scoped to
+    their own checkouts only, same trust boundary as GET /users/me/items.
+    """
+    return extension_service.list_my_recent_extension_decisions(db, user, limit)
 
 
 @router.post("/extension-requests/{request_id}/decision")

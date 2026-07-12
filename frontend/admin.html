@@ -180,6 +180,31 @@
     <div id="extensionRequestsList" class="mt-2 space-y-2"></div>
   </div>
 
+  <!-- ================= MY EXTENSION REQUEST DECISIONS BANNER =================
+       Distinct from the "Extension Requests" REVIEW panel above (which is
+       for decisions THIS account needs to make on others' checkouts) --
+       this is the self-service counterpart: a Super Admin can also
+       self-request an extension on their OWN checkout (see
+       services/extension_service.py's create_extension_request()), so they
+       need the same "your request was approved/denied" feedback a
+       staff/customer account gets. Populated by
+       js/components/extensions.js's loadMyExtensionDecisionsAlert() from
+       GET /checkouts/my-extension-decisions. Hidden by default/whenever
+       there's nothing new; dismissible/recallable the same way as the
+       banners above. -->
+  <div id="myExtensionDecisionsBanner" class="hidden rounded-xl border border-blue-500/30 bg-blue-500/5 p-4">
+    <div class="flex items-center justify-between gap-2">
+      <div class="flex items-center gap-2 text-[13px] font-semibold text-blue-400">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="9"/></svg>
+        <span><span id="myExtensionDecisionsCount">0</span> extension request update(s)</span>
+      </div>
+      <button data-action="dismiss-my-extension-decisions-alert" title="Dismiss" class="rounded-md p-1 text-blue-400/70 transition hover:bg-blue-500/10 hover:text-blue-300">
+        <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <ul id="myExtensionDecisionsList" class="mt-2 divide-y divide-blue-500/10 text-[12px]"></ul>
+  </div>
+
   <!-- Swipe hint dots (mobile only) -- see js/ui.js's updateSwipeDots(). -->
   <div id="swipeDots" class="mb-4 flex items-center justify-center gap-1.5 sm:hidden"></div>
 
@@ -289,8 +314,23 @@
 
       <!-- Spreadsheet Batch Import -->
       <div class="rounded-xl border border-border bg-card p-5">
-        <h2 class="mb-1 text-[14px] font-semibold text-slate-100">Spreadsheet Batch Import</h2>
-        <p class="mb-4 text-[12px] text-slate-500">Bulk-load asset pools from a formatted CSV export (columns: name, total_quantity, department [optional]).</p>
+        <div class="mb-1 flex items-center justify-between gap-3">
+          <h2 class="text-[14px] font-semibold text-slate-100">Spreadsheet Batch Import</h2>
+          <!-- Generates and downloads a ready-to-fill-in sample CSV
+               client-side -- see js/components/assets.js's
+               downloadCsvImportTemplate(). Placed right next to the
+               format hint below so someone about to prep an inventory
+               sheet sees "here's exactly what that looks like" before
+               they start typing, instead of guessing at column names or
+               reverse-engineering them from an error message after a
+               failed import. -->
+          <button type="button" data-action="download-csv-template" title="Download a sample CSV to see the exact column format"
+            class="flex shrink-0 items-center gap-1.5 rounded-md border border-border bg-card2 px-2.5 py-1.5 text-[11px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
+            <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+            Sample CSV
+          </button>
+        </div>
+        <p class="mb-4 text-[12px] text-slate-500">Bulk-load asset pools from a formatted CSV export (columns: name, total_quantity, department [optional]). Not sure of the format? Download the sample CSV above, fill it in to match your inventory sheet, then drop it below.</p>
         <form id="csvImportForm">
           <!-- id="csvDropZone" is what js/main.js's wireCsvDragAndDrop()
                attaches dragover/dragleave/drop listeners to -- see that

@@ -16,7 +16,67 @@ module.exports = {
   ],
   darkMode: 'class',
   theme: {
+    // =========================================================================
+    // RESPONSIVE BREAKPOINTS ("screens")
+    // -------------------------------------------------------------------------
+    // HOW THIS WORKS: every `sm:something` class in the HTML/JS (e.g.
+    // `sm:flex-row`, `sm:table-cell`, `sm:px-6`) only takes effect once the
+    // BROWSER VIEWPORT is AT LEAST as wide as whatever `sm` is set to below.
+    // Below that width, the plain (non-prefixed) class wins instead -- e.g.
+    // `flex-col sm:flex-row` is a column on a narrow screen and switches to a
+    // row once the viewport crosses the `sm` value. That's the entire
+    // mechanism behind every "mobile view" difference in this app: there is
+    // no separate mobile template, just one HTML file per page where classes
+    // conditionally apply based on this cutoff.
+    //
+    // TAILWIND'S BUILT-IN DEFAULTS (what you'd get with no override at all)
+    // are:
+    //   sm: 640px   md: 768px   lg: 1024px   xl: 1280px   2xl: 1536px
+    //
+    // THIS PROJECT OVERRIDES `sm` (set inside `extend` below -- see the
+    // `screens:` line right under `extend: {`) to make the switch from
+    // "mobile" to "desktop-ish" styling happen at a NARROWER width than
+    // Tailwind's default 640px -- i.e. a wider range of small/narrow browser
+    // windows now get the `sm:` (roomier, side-by-side) treatment instead of
+    // the stacked mobile one, since 640px meant a lot of ordinary, easily-
+    // resized desktop browser windows were being treated as "mobile" the
+    // moment they were resized even slightly narrower than full-width.
+    //
+    // *** IMPORTANT GOTCHA IF YOU EDIT THIS: *** `screens` MUST stay nested
+    // inside `extend: {...}` (a few lines below), NOT placed directly under
+    // `theme: {...}` the way `colors`/`fontFamily` are further down. Putting
+    // it directly under `theme` REPLACES Tailwind's entire screens list with
+    // ONLY what you define there -- md:/lg:/xl:/2xl: (`md:block`, `lg:inline`,
+    // `lg:grid-cols-2`, `lg:border-b-0`, `lg:border-r`, all currently used in
+    // this app) would silently stop working everywhere. Inside `extend`,
+    // Tailwind instead MERGES your override with its defaults, so `sm` is the
+    // only one that changes and md/lg/xl/2xl stay exactly as Tailwind ships
+    // them.
+    //
+    // TO CHANGE THIS YOURSELF LATER: edit the pixel number on the `sm:` line
+    // a few lines down, then rebuild the compiled CSS from `build-tailwind/`:
+    //     cd build-tailwind && npm install && npm run build
+    // (npm run build writes the result to ../frontend/css/tailwind.css --
+    // that compiled file, NOT this config file, is what the browser actually
+    // loads, so a rebuild is required every time this number changes.)
+    //
+    // ONE MORE FILE TO KEEP IN SYNC: `frontend/css/theme.css` has a couple of
+    // hand-written `@media (max-width: 479px)` blocks (mobile bottom-sheet
+    // modals, the swipe-nav dot strip) that are plain CSS, not Tailwind
+    // utilities -- Tailwind's JIT compiler has no way to generate those from
+    // class names, so they can't read this config automatically. If you
+    // change `sm` below, that file's `@media (max-width: ...)` value should
+    // become (your new `sm` value - 1)px to stay lined up with it -- see the
+    // comment directly above each of those blocks in theme.css for exactly
+    // which lines to touch.
     extend: {
+      screens: {
+        sm: '480px', // was Tailwind's default 640px; lowered so more ordinary
+                     // (non-phone) narrow browser windows get sm:'s side-by-
+                     // side/roomier treatment instead of the stacked mobile one.
+                     // md/lg/xl/2xl are untouched (see the "IMPORTANT GOTCHA"
+                     // comment above for why this must stay inside `extend`).
+      },
       fontFamily: {
         sans: ['Inter', 'ui-sans-serif', 'system-ui'],
         mono: ['"JetBrains Mono"', 'ui-monospace', 'SFMono-Regular', 'monospace'],
