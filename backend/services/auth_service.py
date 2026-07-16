@@ -108,8 +108,8 @@ def login(db: Session, req: LoginRequest) -> dict:
 
     user = db.query(models.User).filter(
         or_(models.User.email == identifier, models.User.username == identifier),
-        models.User.is_active == True,
-        models.User.is_deleted == False,
+        models.User.is_active,
+        ~models.User.is_deleted,
     ).first()
 
     if not user:
@@ -241,7 +241,7 @@ def update_password(db: Session, req: PasswordUpdateRequest, current_user: dict)
         raise HTTPException(status_code=403, detail="You may only update your own password.")
 
     target = db.query(models.User).filter(
-        models.User.id == req.user_id, models.User.is_deleted == False
+        models.User.id == req.user_id, ~models.User.is_deleted
     ).first()
     if not target:
         raise HTTPException(status_code=404, detail="User not found.")

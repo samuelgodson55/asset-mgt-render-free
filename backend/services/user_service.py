@@ -6,7 +6,6 @@ api/users.py.
 """
 
 from typing import Optional
-import datetime
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -165,7 +164,7 @@ def update_user(db: Session, user_id: int, req: UserUpdateRequest, user: dict) -
     lookup below returns nothing and this raises a 404), exactly like
     reset_user_password()'s equivalent case.
     """
-    target = db.query(models.User).filter(models.User.id == user_id, models.User.is_deleted == False).first()
+    target = db.query(models.User).filter(models.User.id == user_id, ~models.User.is_deleted).first()
     if not target:
         raise HTTPException(status_code=404, detail="User not found.")
 
@@ -243,7 +242,7 @@ def list_users(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offset: int 
     # Managers get the same unscoped view as a Super Admin here -- no
     # department filter is applied for either role. (See list_users()'s
     # docstring above.)
-    query = db.query(models.User).filter(models.User.is_deleted == False)
+    query = db.query(models.User).filter(~models.User.is_deleted)
     query = apply_search_filter(query, search, [
         models.User.name, models.User.email, models.User.role,
         models.User.department, models.User.department_role,
@@ -393,7 +392,7 @@ def get_my_assigned_items(db: Session, user: dict) -> dict:
 
 
 def get_user_assigned_items(db: Session, user_id: int, user: dict) -> dict:
-    target = db.query(models.User).filter(models.User.id == user_id, models.User.is_deleted == False).first()
+    target = db.query(models.User).filter(models.User.id == user_id, ~models.User.is_deleted).first()
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -507,7 +506,7 @@ def export_all_users_items(db: Session, user: dict, fmt: str = "csv"):
     combined row). Scope mirrors list_users() exactly: both a Super Admin
     and a Manager get the entire directory.
     """
-    query = db.query(models.User).filter(models.User.is_deleted == False)
+    query = db.query(models.User).filter(~models.User.is_deleted)
     users = query.order_by(models.User.id).all()
 
     headers = ["User", "Email", "User Department", "Role", "Asset", "Asset Category", "Vendor / Source", "Quantity", "Outstanding", "Checked Out", "Due Date"]
@@ -566,7 +565,7 @@ def delete_user(db: Session, user_id: int, user: dict) -> dict:
     if user_id == SUPER_ADMIN_ID:
         raise HTTPException(status_code=400, detail="The Super Admin account cannot be deleted.")
 
-    target = db.query(models.User).filter(models.User.id == user_id, models.User.is_deleted == False).first()
+    target = db.query(models.User).filter(models.User.id == user_id, ~models.User.is_deleted).first()
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -653,7 +652,7 @@ def reset_user_password(db: Session, user_id: int, new_password: str, admin_pass
     # password to reset until a Super Admin restores it first (see
     # restore_user() below). Trying to reset a deleted account's password
     # would just be confusing: the account still couldn't log in afterward.
-    target = db.query(models.User).filter(models.User.id == user_id, models.User.is_deleted == False).first()
+    target = db.query(models.User).filter(models.User.id == user_id, ~models.User.is_deleted).first()
     if not target:
         raise HTTPException(status_code=404, detail="User not found.")
 
@@ -688,7 +687,7 @@ def list_deleted_users(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offs
     js/ui.js's renderServerPaginationBar()) against a second, independent
     table state.
     """
-    query = db.query(models.User).filter(models.User.is_deleted == True)
+    query = db.query(models.User).filter(models.User.is_deleted)
     query = apply_search_filter(query, search, [
         models.User.name, models.User.email, models.User.role,
         models.User.department, models.User.department_role,
@@ -731,7 +730,7 @@ def restore_user(db: Session, user_id: int, admin_user: dict) -> dict:
     if user_id == SUPER_ADMIN_ID:
         raise HTTPException(status_code=400, detail="The Super Admin account cannot be deleted, so it never needs restoring.")
 
-    target = db.query(models.User).filter(models.User.id == user_id, models.User.is_deleted == True).first()
+    target = db.query(models.User).filter(models.User.id == user_id, models.User.is_deleted).first()
     if not target:
         raise HTTPException(status_code=404, detail="Deleted user not found.")
 

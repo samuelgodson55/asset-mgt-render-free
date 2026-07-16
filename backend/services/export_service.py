@@ -25,6 +25,8 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
+from config import settings
+
 # ---------------------------------------------------------------------------
 # Unicode-capable font (currency symbols)
 # ---------------------------------------------------------------------------
@@ -50,8 +52,6 @@ try:
     FONT_BOLD = "DejaVuSans-Bold"
 except Exception:
     pass
-
-from config import settings
 
 # ---------------------------------------------------------------------------
 # UTC -> display-timezone conversion for exports

@@ -110,7 +110,7 @@ def list_assets(db: Session, limit: int = DEFAULT_LIMIT, offset: int = 0, search
     limit = max(1, min(limit, MAX_LIMIT))
     offset = max(0, offset)
 
-    query = db.query(models.AssetType).filter(models.AssetType.is_deleted == False)
+    query = db.query(models.AssetType).filter(~models.AssetType.is_deleted)
     query = apply_search_filter(query, search, [models.AssetType.name])
     query = query.order_by(models.AssetType.id)
     total = query.count()
@@ -120,7 +120,7 @@ def list_assets(db: Session, limit: int = DEFAULT_LIMIT, offset: int = 0, search
 
 def get_asset_details(db: Session, asset_id: int) -> dict:
     asset = db.query(models.AssetType).filter(
-        models.AssetType.id == asset_id, models.AssetType.is_deleted == False
+        models.AssetType.id == asset_id, ~models.AssetType.is_deleted
     ).first()
     if not asset:
         raise HTTPException(status_code=404, detail="Asset category not found")
@@ -188,7 +188,7 @@ def get_asset_details(db: Session, asset_id: int) -> dict:
 def update_asset_quantity(db: Session, asset_id: int, payload: QuantityUpdateRequest, user: dict) -> dict:
     # Adjusting total pool capacity is a Super Admin-only action.
     asset = db.query(models.AssetType).filter(
-        models.AssetType.id == asset_id, models.AssetType.is_deleted == False
+        models.AssetType.id == asset_id, ~models.AssetType.is_deleted
     ).first()
     if not asset:
         raise HTTPException(status_code=404, detail="Asset type not found")
@@ -221,7 +221,7 @@ def update_asset_name(db: Session, asset_id: int, payload: NameUpdateRequest, us
     # Renaming a stock pool is a Super Admin-only action -- same privilege
     # tier as adjusting its capacity above.
     asset = db.query(models.AssetType).filter(
-        models.AssetType.id == asset_id, models.AssetType.is_deleted == False
+        models.AssetType.id == asset_id, ~models.AssetType.is_deleted
     ).first()
     if not asset:
         raise HTTPException(status_code=404, detail="Asset type not found")
@@ -233,7 +233,7 @@ def update_asset_name(db: Session, asset_id: int, payload: NameUpdateRequest, us
     duplicate = db.query(models.AssetType).filter(
         models.AssetType.name == payload.name,
         models.AssetType.id != asset_id,
-        models.AssetType.is_deleted == False,
+        ~models.AssetType.is_deleted,
     ).first()
     if duplicate:
         raise HTTPException(status_code=400, detail="Asset type name already exists")
@@ -254,7 +254,7 @@ def update_asset_category(db: Session, asset_id: int, payload: CategoryUpdateReq
     # Super Admin backfill a category onto pools that were created
     # without one (or correct/clear one that's already set).
     asset = db.query(models.AssetType).filter(
-        models.AssetType.id == asset_id, models.AssetType.is_deleted == False
+        models.AssetType.id == asset_id, ~models.AssetType.is_deleted
     ).first()
     if not asset:
         raise HTTPException(status_code=404, detail="Asset type not found")
@@ -287,7 +287,7 @@ def update_asset_price(db: Session, asset_id: int, payload: PriceUpdateRequest, 
     # lets a Super Admin backfill a price onto pools that were created
     # without one (or correct/clear one that's already set).
     asset = db.query(models.AssetType).filter(
-        models.AssetType.id == asset_id, models.AssetType.is_deleted == False
+        models.AssetType.id == asset_id, ~models.AssetType.is_deleted
     ).first()
     if not asset:
         raise HTTPException(status_code=404, detail="Asset type not found")
@@ -336,7 +336,7 @@ def delete_asset_type(db: Session, asset_id: int, user: dict) -> dict:
     active custody or maintenance record.
     """
     asset = db.query(models.AssetType).filter(
-        models.AssetType.id == asset_id, models.AssetType.is_deleted == False
+        models.AssetType.id == asset_id, ~models.AssetType.is_deleted
     ).first()
     if not asset:
         raise HTTPException(status_code=404, detail="Asset type not found")
@@ -385,7 +385,7 @@ def flag_asset_exception(db: Session, asset_id: int, exc: ExceptionCreate, user:
     recalculate_asset_stock() derive the new Available count from it.
     """
     asset = db.query(models.AssetType).filter(
-        models.AssetType.id == asset_id, models.AssetType.is_deleted == False
+        models.AssetType.id == asset_id, ~models.AssetType.is_deleted
     ).first()
     if not asset:
         raise HTTPException(status_code=404, detail="Asset type not found")
@@ -432,7 +432,7 @@ def recall_asset_exception(db: Session, asset_id: int, exception_id: int, user: 
     that same amount, Total Capacity never changes.
     """
     asset = db.query(models.AssetType).filter(
-        models.AssetType.id == asset_id, models.AssetType.is_deleted == False
+        models.AssetType.id == asset_id, ~models.AssetType.is_deleted
     ).first()
     if not asset:
         raise HTTPException(status_code=404, detail="Asset type not found")
@@ -471,7 +471,7 @@ def checkin_asset(db: Session, asset_id: int, quantity: int, user: dict) -> dict
     by `quantity`; Available then rises automatically by the same amount.
     """
     asset = db.query(models.AssetType).filter(
-        models.AssetType.id == asset_id, models.AssetType.is_deleted == False
+        models.AssetType.id == asset_id, ~models.AssetType.is_deleted
     ).first()
     if not asset:
         raise HTTPException(status_code=404, detail="Asset type not found")
@@ -507,7 +507,7 @@ def checkout_advanced(db: Session, asset_id: int, req: AdvancedCheckoutRequest, 
     # releases it, so the second request re-reads the already-updated stock
     # and is correctly rejected if there's no longer enough available.
     asset = db.query(models.AssetType).filter(
-        models.AssetType.id == asset_id, models.AssetType.is_deleted == False
+        models.AssetType.id == asset_id, ~models.AssetType.is_deleted
     ).with_for_update().first()
     if not asset:
         raise HTTPException(status_code=404, detail="Asset type not found")
@@ -542,7 +542,7 @@ def checkout_advanced(db: Session, asset_id: int, req: AdvancedCheckoutRequest, 
             if not req.user_id:
                 raise HTTPException(status_code=400, detail="User ID is required.")
             target_user = db.query(models.User).filter(
-                models.User.id == req.user_id, models.User.is_deleted == False
+                models.User.id == req.user_id, ~models.User.is_deleted
             ).first()
             if not target_user:
                 raise HTTPException(status_code=404, detail="System user not found.")
@@ -764,7 +764,7 @@ def list_asset_categories(db: Session) -> dict:
     below), just not offered as a specific category filter to pick.
     """
     rows = db.query(models.AssetType.category).filter(
-        models.AssetType.is_deleted == False,
+        ~models.AssetType.is_deleted,
         models.AssetType.category.isnot(None),
         models.AssetType.category != "",
     ).distinct().all()
@@ -785,7 +785,7 @@ def export_assets_inventory(db: Session, user: dict, category: Optional[str], fm
     means "Download All" -- every active pool regardless of category.
     Soft-deleted pools are excluded, same as the live Asset Inventory table.
     """
-    query = db.query(models.AssetType).filter(models.AssetType.is_deleted == False)
+    query = db.query(models.AssetType).filter(~models.AssetType.is_deleted)
 
     cat_filter = (category or "").strip()
     if cat_filter and cat_filter.lower() != "all":

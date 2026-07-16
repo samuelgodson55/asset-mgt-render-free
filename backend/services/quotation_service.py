@@ -51,7 +51,6 @@ one asset).
 """
 
 import datetime
-import io
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
 from fastapi import HTTPException
@@ -173,7 +172,7 @@ def list_catalog(db: Session, user: dict) -> dict:
 
     pools = (
         db.query(models.AssetType)
-        .filter(models.AssetType.is_deleted == False)
+        .filter(~models.AssetType.is_deleted)
         .order_by(models.AssetType.name)
         .all()
     )
@@ -480,7 +479,7 @@ def add_my_submitted_item(db: Session, user: dict, quotation_id: int, payload: Q
     updates quantity/dates instead of creating a duplicate row."""
     quotation = _get_own_editable_quotation(db, user, quotation_id)
     asset = db.query(models.AssetType).filter(
-        models.AssetType.id == payload.asset_id, models.AssetType.is_deleted == False,
+        models.AssetType.id == payload.asset_id, ~models.AssetType.is_deleted,
     ).first()
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found.")
@@ -505,7 +504,7 @@ def add_my_submitted_item(db: Session, user: dict, quotation_id: int, payload: Q
 
 def add_item(db: Session, user: dict, payload: QuotationItemCreate) -> dict:
     asset = db.query(models.AssetType).filter(
-        models.AssetType.id == payload.asset_id, models.AssetType.is_deleted == False,
+        models.AssetType.id == payload.asset_id, ~models.AssetType.is_deleted,
     ).first()
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found.")
@@ -689,7 +688,7 @@ def admin_add_item(db: Session, actor: dict, quotation_id: int, payload: Quotati
     quotation = _get_quotation_or_404(db, quotation_id)
     _ensure_admin_editable(quotation)
     asset = db.query(models.AssetType).filter(
-        models.AssetType.id == payload.asset_id, models.AssetType.is_deleted == False,
+        models.AssetType.id == payload.asset_id, ~models.AssetType.is_deleted,
     ).first()
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found.")
@@ -843,7 +842,7 @@ def admin_create_quotation(db: Session, actor: dict, payload: QuotationCreateReq
 
     if payload.assignee_type == "user":
         target = db.query(models.User).filter(
-            models.User.id == payload.assigned_user_id, models.User.is_deleted == False,
+            models.User.id == payload.assigned_user_id, ~models.User.is_deleted,
         ).first()
         if not target:
             raise HTTPException(status_code=404, detail="That user was not found.")
@@ -898,7 +897,7 @@ def assign_quotation(db: Session, actor: dict, quotation_id: int, payload: Quota
 
     if payload.assignee_type == "user":
         target = db.query(models.User).filter(
-            models.User.id == payload.user_id, models.User.is_deleted == False,
+            models.User.id == payload.user_id, ~models.User.is_deleted,
         ).first()
         if not target:
             raise HTTPException(status_code=404, detail="That user was not found.")
@@ -1102,7 +1101,7 @@ def bulk_checkout_quotation(
     else:
         target_user_id = quotation.assigned_to_id or quotation.user_id
         target_user = db.query(models.User).filter(
-            models.User.id == target_user_id, models.User.is_deleted == False,
+            models.User.id == target_user_id, ~models.User.is_deleted,
         ).first()
         if not target_user:
             raise HTTPException(status_code=400, detail="The user this Quotation is for could not be found -- reassign it before checking out.")
@@ -1115,7 +1114,7 @@ def bulk_checkout_quotation(
         assets_by_id = {
             a.id: a for a in (
                 db.query(models.AssetType)
-                .filter(models.AssetType.id.in_(asset_ids), models.AssetType.is_deleted == False)
+                .filter(models.AssetType.id.in_(asset_ids), ~models.AssetType.is_deleted)
                 .with_for_update()
                 .order_by(models.AssetType.id)
                 .all()

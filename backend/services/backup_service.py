@@ -33,7 +33,6 @@ Drive, upload it back through the dashboard's Restore modal.
 from __future__ import annotations
 
 import gzip
-import io
 import json
 import logging
 import os
