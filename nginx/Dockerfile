@@ -15,9 +15,65 @@
 #         dockerfile: nginx/Dockerfile
 # If building manually instead of via Compose, run this from the project
 # root:
-#     docker build -f nginx/Dockerfile -t snipeit-lite-frontend .
+#     docker build -f nginx/Dockerfile -t snipeit-lite-frontend \
+#         --build-arg BUILD_ENV=production .
 # =============================================================================
 
+# =============================================================================
+# Stage 1/2: frontend-build
+# -----------------------------------------------------------------------------
+# Runs build-frontend/build.js against frontend/js BEFORE anything reaches the
+# actual nginx image below. What it does to the JS depends entirely on
+# BUILD_ENV (passed in as a Docker build ARG -- see docker-compose.yml's
+# `frontend.build.args`, which sets it from .env's ENVIRONMENT value, so
+# changing ENVIRONMENT in .env and rebuilding is all you need to do):
+#
+#   BUILD_ENV=local        -- untouched: byte-for-byte copy of frontend/js
+#                              ("personal PC" -- readable source in DevTools)
+#   BUILD_ENV=development  -- minified (Terser: whitespace/comments gone,
+#                              identifiers shortened, dead code folded)
+#   BUILD_ENV=production   -- minified AND obfuscated (Terser, then
+#                              javascript-obfuscator: control-flow
+#                              flattening, string-array encoding, dead-code
+#                              injection, self-defending output)
+#
+# See build-frontend/build.js's own header comment for the full reasoning.
+# This stage prints a per-file size report to stdout, so `docker compose
+# build` (or `docker build`) output shows exactly what happened for the
+# mode you just built -- that's the "real-time build characteristics" this
+# stage exists to surface.
+# =============================================================================
+FROM node:20-alpine AS frontend-build
+
+ARG BUILD_ENV=development
+ENV BUILD_ENV=${BUILD_ENV}
+
+WORKDIR /build
+
+# Install build-frontend's own deps (terser + javascript-obfuscator) first,
+# separately from copying frontend/ itself, so this layer stays cached and
+# is only re-run when build-frontend/package.json actually changes -- not
+# every time an application JS file changes.
+COPY build-frontend/package.json build-frontend/package-lock.json* /build/build-frontend/
+RUN cd build-frontend && npm install --no-audit --no-fund
+
+COPY build-frontend/build.js /build/build-frontend/build.js
+
+# The whole frontend/ tree (html/css/js/images) goes in as the source dir;
+# build.js copies non-.js assets through untouched and only transforms
+# .js files -- see that script's own comment for why it's written that way.
+COPY frontend/ /build/frontend-src/
+
+RUN node build-frontend/build.js /build/frontend-src /build/frontend-out
+
+# =============================================================================
+# Stage 2/2: nginx
+# -----------------------------------------------------------------------------
+# Unchanged from before this build step was introduced, except the frontend
+# COPY now pulls from the frontend-build stage's *output* directory instead
+# of the raw frontend/ folder on disk -- everything else about how this
+# image serves the site and proxies /api/* is identical.
+# =============================================================================
 FROM nginx:1.27-alpine
 
 # Drop nginx's stock default site -- we ship our own (see below).
@@ -39,10 +95,11 @@ COPY nginx/default.conf.template /etc/nginx/templates/default.conf.template
 # that file's own comment for why that distinction matters here.
 COPY nginx/docker-entrypoint.d/15-detect-resolver-ip.sh /docker-entrypoint.d/15-detect-resolver-ip.sh
 
-# The plain static site: index.html/admin.html/staff.html/manager.html/
-# customer.html and js/*. Nothing here is built/compiled -- it's just
-# copied as-is into nginx's web root.
-COPY frontend/ /usr/share/nginx/html/
+# The static site: index.html/admin.html/staff.html/manager.html/
+# customer.html and js/*. HTML/CSS/images pass through the frontend-build
+# stage untouched; js/* has already been minified and/or obfuscated by that
+# stage depending on BUILD_ENV -- see that stage's own comment above.
+COPY --from=frontend-build /build/frontend-out/ /usr/share/nginx/html/
 
 # ---------------------------------------------------------------------------
 # Default values baked into the image, so it runs correctly out of the box

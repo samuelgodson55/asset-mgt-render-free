@@ -22,6 +22,7 @@
 import { API_URL } from '../api.js';
 import { getSession } from '../auth.js';
 import { getCurrentCustodyEntity } from './custody.js';
+import { getCurrentQuoteId, getCurrentMyQuoteDetailId } from './quotation.js';
 import { showToast } from '../ui.js';
 
 // Performs the authenticated fetch, reads the real filename the backend
@@ -31,7 +32,7 @@ import { showToast } from '../ui.js';
 // might not have one) -- when present, it's disabled and relabeled for the
 // duration of the request so the person gets the same progress feedback
 // the backup button already gives.
-async function downloadExport(path, fallbackName, button) {
+export async function downloadExport(path, fallbackName, button) {
   const original = button ? button.textContent : null;
   if (button) {
     button.disabled = true;
@@ -91,18 +92,39 @@ export function exportAllOutsiders(format, button) {
   downloadExport(`/outsiders/export?format=${format}`, `all_outsiders_properties.${format}`, button);
 }
 
+// ---- Self-service: "My Order" equipment quotation (staff.html / customer.html) ----
+export function exportQuotation(button) {
+  downloadExport('/quotations/export', 'equipment_quotation.pdf', button);
+}
+
+// ---- Admin/Manager: Quotes tab detail modal export (any Quotation by ID) ----
+export function exportQuoteDetail(button) {
+  const quoteId = getCurrentQuoteId();
+  if (!quoteId) return;
+  downloadExport(`/quotations/${quoteId}/export`, `quotation_${quoteId}.pdf`, button);
+}
+
+// ---- Self-service: "My Quote Detail" modal export (one of the caller's OWN
+// submitted quotes, or one assigned to them, by ID) -- staff.html / customer.html ----
+export function exportMyQuoteDetail(button) {
+  const quoteId = getCurrentMyQuoteDetailId();
+  if (!quoteId) return;
+  downloadExport(`/quotations/me/${quoteId}/export`, `quotation_${quoteId}.pdf`, button);
+}
+
+
 // ---- Asset Inventory Export button (Asset Inventory tab) ----
-// Reads the department chosen in the small #assetExportModal (populated by
+// Reads the category chosen in the small #assetExportModal (populated by
 // components/assets.js's openAssetExportModal()) -- "all" (the default,
-// "Download All") or one specific department -- and downloads the
+// "Download All") or one specific category -- and downloads the
 // inventory list itself (one row per pool), not a properties-assigned
 // custody export.
 export function exportAssetsInventory(format, button) {
-  const select = document.getElementById('assetExportDepartment');
-  const department = select && select.value ? select.value : 'all';
-  const params = new URLSearchParams({ format, department });
-  const fallbackName = department === 'all'
+  const select = document.getElementById('assetExportCategory');
+  const category = select && select.value ? select.value : 'all';
+  const params = new URLSearchParams({ format, category });
+  const fallbackName = category === 'all'
     ? `asset_inventory_all.${format}`
-    : `asset_inventory_${department.replace(/\s+/g, '_')}.${format}`;
+    : `asset_inventory_${category.replace(/\s+/g, '_')}.${format}`;
   downloadExport(`/assets/export?${params.toString()}`, fallbackName, button);
 }

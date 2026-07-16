@@ -76,6 +76,14 @@ export async function openCustodyModal(entityId, entityType = 'user') {
       const extensionReasonLine = (item.pending_extension && item.pending_extension_reason)
         ? `<p class="mt-0.5 text-[11px] italic text-slate-500">"${escapeHtml(item.pending_extension_reason)}"</p>`
         : '';
+      // Manager/Admin-only view -- see models.py's AssetCheckout comment:
+      // this tag (and the vendor it names, via item.outsourced_source --
+      // see QuotationOutsourcedItem.sourced_from) is deliberately never
+      // shown on the self-service "My Items" view (myitems.js), only
+      // here, where a Manager/Admin is looking at someone else's custody.
+      const outsourcedBadge = item.is_outsourced
+        ? `<span class="ml-2 inline-flex max-w-full items-center break-words rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold text-amber-400 ring-1 ring-amber-500/30">Outsourced${item.outsourced_source ? ` · ${escapeHtml(item.outsourced_source)}` : ''}</span>`
+        : '';
       const extendOrDecideButtons = item.pending_extension && item.pending_extension_request_id
         ? `
           <button data-action="approve-extension" data-request-id="${item.pending_extension_request_id}" class="rounded-md bg-emerald-600/90 px-2.5 py-1.5 text-[11px] font-semibold text-white transition hover:bg-emerald-500">Approve</button>
@@ -88,7 +96,7 @@ export async function openCustodyModal(entityId, entityType = 'user') {
         <input type="checkbox" data-checkout-id="${item.checkout_id}" data-outstanding="${item.outstanding}" data-action="update-custody-selection"
           class="custody-item-checkbox mt-0.5 h-4 w-4 shrink-0 rounded border-border bg-card2 text-blue-600 focus:ring-0 focus:ring-offset-0 sm:mt-0" />
         <div class="min-w-0">
-          <p class="break-words text-[13px] font-medium text-slate-200">${escapeHtml(item.asset_name)}${extensionBadge}</p>
+          <p class="break-words text-[13px] font-medium text-slate-200">${escapeHtml(item.asset_name)}${extensionBadge}${outsourcedBadge}</p>
           <p class="tag-mono text-[11px] ${dueDateClass}">
             Outstanding ${item.outstanding} / ${item.quantity} · due ${escapeHtml(item.due_date)}${dueDateSuffix}
           </p>

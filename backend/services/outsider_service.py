@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 import models
 import services.export_service as export_service
 from services.search_utils import apply_search_filter
+from schemas.outsiders import OutsiderUpdateRequest
 
 # Same reasoning as user_service.DEFAULT_LIMIT/MAX_LIMIT -- bounds how many
 # ad-hoc profiles a single request can return (Data Quality & Usability
@@ -74,6 +75,47 @@ def list_outsiders(db: Session, limit: int = DEFAULT_LIMIT, offset: int = 0, sea
     return {"items": results, "total": total, "limit": limit, "offset": offset}
 
 
+def update_outsider(db: Session, outsider_id: int, req: OutsiderUpdateRequest, user: dict) -> dict:
+    """
+    Edits an ad-hoc individual's name, contact details, and/or company.
+    Available to both a Super Admin/Admin and a Manager (see
+    deps.py's require_privileged_role, which the route sits behind), with
+    no further role-based restriction beyond that -- ad-hoc profiles aren't
+    tied to a system-user role the way models.User rows are, so there's
+    nothing narrower to scope a Manager down to here, same reasoning as
+    list_outsiders() above giving Managers the full, unscoped Ad-Hoc
+    Directory.
+
+    Only the fields actually present on the request are touched (Pydantic
+    `exclude_unset`) -- omitting a field leaves it exactly as it was rather
+    than blanking it out. An explicit empty string for `company` DOES clear
+    it (company is nullable), same as leaving it blank at ad-hoc dispatch
+    time.
+    """
+    target = db.query(models.Outsider).filter(models.Outsider.id == outsider_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Ad-hoc individual not found")
+
+    updates = req.model_dump(exclude_unset=True)
+    if "name" in updates:
+        target.name = updates["name"]
+    if "contact_details" in updates:
+        target.contact_details = updates["contact_details"]
+    if "company" in updates:
+        target.company = updates["company"] or None
+
+    db.add(models.AuditLog(
+        operator=user["email"], action="OUTSIDER_UPDATED", target_type="Outsider", target_id=target.id,
+        details=f"Updated ad-hoc profile for {target.name}.",
+    ))
+    db.commit()
+    db.refresh(target)
+    return {
+        "message": f"Profile for {target.name} updated successfully.",
+        "id": target.id, "name": target.name, "contact_details": target.contact_details, "company": target.company,
+    }
+
+
 def _pending_extension_fields(checkout: "models.AssetCheckout") -> dict:
     """Same as user_service.py's helper of the same name -- see that
     docstring for the full rationale (Custody Ledger drawer Approve/Deny
@@ -98,8 +140,14 @@ def get_outsider_assigned_items(db: Session, outsider_id: int) -> dict:
         models.AssetCheckout.outsider_id == outsider_id, models.AssetCheckout.status == "active"
     ).all()
     items = [{
-        "checkout_id": c.id, "asset_name": c.asset.name if c.asset else "Unknown Asset",
-        "asset_department": c.asset.department if c.asset else None,
+        "checkout_id": c.id, "asset_name": models.checkout_display_name(c),
+        "asset_category": c.asset.category if c.asset else None,
+        # This ledger is ALWAYS Manager/Admin-only (Ad-Hoc individuals have
+        # no login of their own to view it self-service) -- see
+        # models.py's AssetCheckout comment for the visibility rule this
+        # mirrors on the linked-User side (get_user_assigned_items()).
+        "is_outsourced": c.is_outsourced,
+        "outsourced_source": c.outsourced_source,
         "quantity": c.quantity, "quantity_returned": c.quantity_returned, "outstanding": c.quantity - c.quantity_returned,
         # TIMEZONE FIX -- see services/user_service.py's
         # get_my_assigned_items() for the full explanation of why this is
@@ -128,7 +176,7 @@ def get_outsider_assigned_items(db: Session, outsider_id: int) -> dict:
 # aren't tied to a department at all), so "ad-hoc individuals under a
 # Manager's purview" means the same thing here as it does everywhere else
 # in this codebase: every ad-hoc profile in the system.
-_ITEM_EXPORT_HEADERS = ["Asset", "Department", "Quantity", "Quantity Returned", "Outstanding", "Checked Out", "Due Date"]
+_ITEM_EXPORT_HEADERS = ["Asset", "Category", "Quantity", "Quantity Returned", "Outstanding", "Checked Out", "Due Date"]
 
 
 def _format_export_datetime(iso_string: Optional[str]) -> str:
@@ -146,7 +194,7 @@ def _item_export_rows(items: list) -> list:
     """Turns the `assigned_items` list shape (see get_outsider_assigned_items
     above) into plain rows for export_service.build_csv_bytes()/build_pdf_bytes()."""
     return [
-        [i["asset_name"], i.get("asset_department") or "—", i["quantity"], i["quantity_returned"], i["outstanding"], _format_export_datetime(i["checkout_date"]), i["due_date"]]
+        [i["asset_name"], i.get("asset_category") or "—", i["quantity"], i["quantity_returned"], i["outstanding"], _format_export_datetime(i["checkout_date"]), i["due_date"]]
         for i in items
     ]
 
@@ -177,7 +225,7 @@ def export_all_outsiders_items(db: Session, user: dict, fmt: str = "csv"):
     """
     outsiders = db.query(models.Outsider).order_by(models.Outsider.id).all()
 
-    headers = ["Individual", "Contact", "Company", "Asset", "Department", "Quantity", "Outstanding", "Checked Out", "Due Date"]
+    headers = ["Individual", "Contact", "Company", "Asset", "Category", "Quantity", "Outstanding", "Checked Out", "Due Date"]
     rows = []
     for o in outsiders:
         for c in o.checkouts:
@@ -185,8 +233,8 @@ def export_all_outsiders_items(db: Session, user: dict, fmt: str = "csv"):
                 continue
             rows.append([
                 o.name, o.contact_details, o.company or "—",
-                c.asset.name if c.asset else "Unknown Asset",
-                c.asset.department if c.asset and c.asset.department else "—",
+                models.checkout_display_name(c),
+                c.asset.category if c.asset and c.asset.category else "—",
                 c.quantity, c.quantity - c.quantity_returned,
                 export_service.format_export_datetime(c.checkout_date),
                 c.due_date.strftime("%Y-%m-%d") if c.due_date else "No Fixed Due Date",

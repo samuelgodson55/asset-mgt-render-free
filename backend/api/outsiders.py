@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from deps import require_privileged_role
+from schemas.outsiders import OutsiderUpdateRequest
 import services.outsider_service as outsider_service
 
 router = APIRouter(prefix="/outsiders", tags=["outsiders"])
@@ -54,6 +55,16 @@ def export_all_outsiders(
 @router.get("/{outsider_id}/items")
 def get_outsider_assigned_items(outsider_id: int, db: Session = Depends(get_db), user: dict = Depends(require_privileged_role)):
     return outsider_service.get_outsider_assigned_items(db, outsider_id)
+
+
+@router.patch("/{outsider_id}")
+def update_outsider(outsider_id: int, req: OutsiderUpdateRequest, db: Session = Depends(get_db), user: dict = Depends(require_privileged_role)):
+    """
+    Edits an ad-hoc individual's name/contact details/company. Both a
+    Super Admin/Admin and a Manager may call this (no narrower role
+    boundary applies -- see services/outsider_service.py -> update_outsider()).
+    """
+    return outsider_service.update_outsider(db, outsider_id, req, user)
 
 
 @router.get("/{outsider_id}/items/export")

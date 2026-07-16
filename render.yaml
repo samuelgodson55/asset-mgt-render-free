@@ -168,6 +168,11 @@ services:
           type: web
           name: snipeit-lite-web
           envVarKey: RENDER_EXTERNAL_URL
+      # Deployment brand name -- on-screen navbar/login header + <title>
+      # AND the Quotation/Checkout Receipt PDF letterhead
+      # (see backend/config.py's SITE_NAME docstring).
+      - key: SITE_NAME
+        value: Snipe-IT Lite
       # Demo/staging-friendly defaults. Flip both to "false" for a real
       # production deployment with real data -- see README.md's "Database
       # Migrations" section for running `alembic upgrade head` as an

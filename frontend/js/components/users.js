@@ -8,7 +8,7 @@
 
 import { apiRequest } from '../api.js';
 import { getSession } from '../auth.js';
-import { escapeHtml, debounce, renderServerPaginationBar, openModal, personAlertIcon, formatTimestamp, rowDetailsTrigger } from '../ui.js';
+import { escapeHtml, debounce, renderServerPaginationBar, openModal, closeModal, personAlertIcon, formatTimestamp, rowDetailsTrigger } from '../ui.js';
 import { refreshDashboard } from '../dashboard.js';
 
 // TRUE server-side search + pagination (same pattern as components/
@@ -17,6 +17,13 @@ import { refreshDashboard } from '../dashboard.js';
 // change re-fetches just that slice from `GET /users?search=&limit=&
 // offset=` instead of re-filtering an already-downloaded array.
 const usersState = { page: 1, perPage: 5, search: '', total: 0 };
+
+// Keyed by id -> the full row object from the most recent renderUsersTable()
+// call. openEditUserModal() reads straight from here to prefill the Edit
+// form instead of firing off a separate GET -- the User Directory table
+// already has every field the edit form needs (name/username/email) sitting
+// right there on each row.
+let usersById = {};
 
 // ---- User Directory / Team Allocation Matrix table ----
 export async function loadUsers() {
@@ -39,7 +46,14 @@ export async function loadUsers() {
     // Directory's search box.
     const staffSelect = document.getElementById('staffSelect');
     const customerSelect = document.getElementById('customerSelect');
-    if (staffSelect || customerSelect) {
+    // Create Quote modal's own Staff/Customer selects -- separate element
+    // ids from the dispatch drawer's above since both modals can exist on
+    // the same admin.html/manager.html page at once, but populated from
+    // the exact same roster fetch/filtering (see components/quotation.js's
+    // openCreateQuoteModal()).
+    const quoteStaffSelect = document.getElementById('quoteStaffSelect');
+    const quoteCustomerSelect = document.getElementById('quoteCustomerSelect');
+    if (staffSelect || customerSelect || quoteStaffSelect || quoteCustomerSelect) {
       const roster = await apiRequest('/users?limit=1000');
       if (staffSelect) {
         // The "Staff Member" route is for internal personnel only --
@@ -64,6 +78,18 @@ export async function loadUsers() {
           ? customers.map(u => `<option value="${u.id}">${escapeHtml(u.name)} (${escapeHtml(u.email)})</option>`).join('')
           : `<option value="" disabled selected>No linked customer accounts on file</option>`;
       }
+      if (quoteStaffSelect) {
+        const staff = roster.items.filter(u => u.role !== 'customer');
+        quoteStaffSelect.innerHTML = staff.length
+          ? staff.map(u => `<option value="${u.id}">${escapeHtml(u.name)} (${escapeHtml(u.department_role || u.role)})</option>`).join('')
+          : `<option value="" disabled selected>No staff accounts on file</option>`;
+      }
+      if (quoteCustomerSelect) {
+        const customers = roster.items.filter(u => u.role === 'customer');
+        quoteCustomerSelect.innerHTML = customers.length
+          ? customers.map(u => `<option value="${u.id}">${escapeHtml(u.name)} (${escapeHtml(u.email)})</option>`).join('')
+          : `<option value="" disabled selected>No linked customer accounts on file</option>`;
+      }
     }
   } catch (err) {
     tbody.innerHTML = `<tr><td colspan="4" class="px-5 py-6 text-center text-rose-400">${escapeHtml(err.message)}</td></tr>`;
@@ -77,12 +103,21 @@ function renderUsersTable(users) {
 
   document.querySelectorAll('.user-count').forEach(el => el.textContent = usersState.total);
 
+  usersById = Object.fromEntries(users.map(u => [u.id, u]));
+
   tbody.innerHTML = users.map(u => {
     const initials = u.name.split(' ').map(p => p[0]).join('').slice(0, 2).toUpperCase();
     // `checkout_count` comes straight from the backend (GET /users), which
     // sums up the outstanding quantity across that user's active checkouts.
     const custodyLabel = `${u.checkout_count ?? 0} item${(u.checkout_count ?? 0) === 1 ? '' : 's'} checked out`;
+    // Edit is available to a Super Admin/Admin for every account, but a
+    // Manager only ever sees it on "staff"/"customer" rows -- mirrors the
+    // exact same MANAGER_PROVISIONABLE_ROLES boundary the backend enforces
+    // in services/user_service.py -> update_user(), so a Manager is never
+    // shown a button that would just come back as a 403.
+    const canEdit = !isManagerView || u.role === 'staff' || u.role === 'customer';
     const actionButtons = `
+      ${canEdit ? `<button data-action="edit-user" data-user-id="${u.id}" class="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">Edit</button>` : ''}
       <button data-action="open-custody" data-entity-id="${u.id}" data-entity-type="user" class="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">Custody Ledger</button>
       ${isManagerView ? '' : `<button data-action="reset-password" data-user-id="${u.id}" data-user-name="${escapeHtml(u.name)}" class="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-amber-500/50 hover:text-amber-400">Reset Password</button>`}
       ${isManagerView ? '' : `<button data-action="delete-profile" data-user-id="${u.id}" data-user-name="${escapeHtml(u.name)}" class="rounded-md border border-rose-500/30 px-2.5 py-1.5 text-[12px] font-medium text-rose-400 transition hover:border-rose-500 hover:bg-rose-500/10">Delete Profile</button>`}`;
@@ -142,6 +177,53 @@ export function changeUsersPage(delta) {
   if (nextPage < 1) return;
   usersState.page = nextPage;
   loadUsers();
+}
+
+// ---- Edit User Details (Super Admin/Admin: all accounts; Manager: Staff/Customer only) ----
+// Same "remember which row the open modal is acting on" pattern as
+// pendingResetPasswordUserId below.
+let pendingEditUserId = null;
+
+function setEditUserMessage(text, isError) {
+  const msgEl = document.getElementById('editUserMessage');
+  if (!msgEl) return;
+  msgEl.textContent = text || '';
+  msgEl.classList.toggle('hidden', !text);
+  msgEl.classList.toggle('text-rose-400', !!isError);
+  msgEl.classList.toggle('text-emerald-400', !isError);
+}
+
+export function openEditUserModal(userId) {
+  const u = usersById[userId];
+  if (!u) return;
+  pendingEditUserId = userId;
+  document.getElementById('editUserTargetName').textContent = u.name;
+  document.getElementById('editUserName').value = u.name || '';
+  document.getElementById('editUserUsername').value = u.username || '';
+  document.getElementById('editUserEmail').value = u.email || '';
+  setEditUserMessage('', false);
+  openModal('editUserModal');
+}
+
+export async function submitEditUserForm(event) {
+  event.preventDefault();
+  if (!pendingEditUserId) return;
+  setEditUserMessage('', false);
+
+  const payload = {
+    name: document.getElementById('editUserName').value,
+    username: document.getElementById('editUserUsername').value,
+    email: document.getElementById('editUserEmail').value,
+  };
+
+  try {
+    await apiRequest(`/users/${pendingEditUserId}`, { method: 'PATCH', body: JSON.stringify(payload) });
+    closeModal('editUserModal');
+    loadUsers();
+    refreshDashboard();
+  } catch (err) {
+    setEditUserMessage(err.message, true);
+  }
 }
 
 // ---- Delete Profile (Super Admin only) ----

@@ -61,7 +61,11 @@ def return_checkout(db: Session, checkout_id: int, req: ReturnRequest, user: dic
         checkout.status = "returned"
         checkout.returned_at = utc_now()
 
-    recalculate_asset_stock(db, asset)  # Outbound drops, Available rises by req.quantity
+    # OUTSOURCED checkouts have no real AssetType behind them (asset_id is
+    # NULL -- see models.py's AssetCheckout comment), so there's no
+    # inventory stock to recalculate.
+    if asset is not None:
+        recalculate_asset_stock(db, asset)  # Outbound drops, Available rises by req.quantity
 
     # AUDIT TRAIL: identify WHO the equipment is being returned FROM (the
     # custodian), not just who (the Super Admin/Manager) clicked "Process
@@ -79,7 +83,7 @@ def return_checkout(db: Session, checkout_id: int, req: ReturnRequest, user: dic
     db.add(models.AuditLog(
         operator=user["email"], action="CHECKIN_RETURN", target_type="AssetCheckout", target_id=checkout.id,
         details=(
-            f"Processed return of {req.quantity} unit(s) of '{asset.name}' from {holder_label} "
+            f"Processed return of {req.quantity} unit(s) of '{models.checkout_display_name(checkout)}' from {holder_label} "
             f"({checkout.quantity - checkout.quantity_returned} still outstanding on this checkout)."
         ),
     ))
@@ -147,7 +151,8 @@ def list_overdue_checkouts(db: Session, user: dict, limit: int = DEFAULT_LIMIT, 
         items.append({
             "checkout_id": c.id,
             "asset_id": c.asset_id,
-            "asset_name": c.asset.name if c.asset else "Unknown Asset",
+            "asset_name": models.checkout_display_name(c),
+            "is_outsourced": c.is_outsourced,
             "assignee_name": assignee_name,
             "assignee_type": assignee_type,
             "entity_id": entity_id,
@@ -222,7 +227,8 @@ def list_due_soon_checkouts(db: Session, user: dict, limit: int = DEFAULT_LIMIT,
         items.append({
             "checkout_id": c.id,
             "asset_id": c.asset_id,
-            "asset_name": c.asset.name if c.asset else "Unknown Asset",
+            "asset_name": models.checkout_display_name(c),
+            "is_outsourced": c.is_outsourced,
             "assignee_name": assignee_name,
             "assignee_type": assignee_type,
             "entity_id": entity_id,

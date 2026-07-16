@@ -46,7 +46,7 @@ baseline migration.
 """
 
 import datetime
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, JSON, Boolean
+from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, JSON, Boolean, Numeric, Date
 from sqlalchemy.orm import declarative_base, relationship
 
 Base = declarative_base()
@@ -69,6 +69,34 @@ def utc_now() -> datetime.datetime:
 get_utc_now = utc_now
 
 
+def _as_aware_utc(value: "datetime.datetime") -> "datetime.datetime":
+    """
+    Normalizes a possibly-naive datetime to timezone-aware UTC before it's
+    compared against `utc_now()`.
+
+    BUG FIX: `AssetCheckout.due_date` is declared `DateTime(timezone=True)`
+    (see below), which Postgres honors as a real `TIMESTAMPTZ` -- rows read
+    back from it are always tz-aware, so `due_date < utc_now()` just works
+    in every real deployment of this app (docker-compose/Render always run
+    against Postgres). SQLite has no native timezone-aware datetime type
+    though, so SQLAlchemy's `timezone=True` is a silent no-op on that
+    dialect: a value written as UTC-aware round-trips back out as a NAIVE
+    datetime. That's harmless for local dev... until this function tried
+    to compare it against `utc_now()`'s aware value and Python raised
+    `TypeError: can't compare offset-naive and offset-aware datetimes` --
+    turning `GET /users`, `GET /users/me/items`, and any other endpoint
+    that serializes a checkout with an active due date into a 500 the
+    moment SQLite was involved (see the "throwaway SQLite database"
+    testing pattern in README.md's "Testing Your Changes" section, which
+    this fix makes actually usable end-to-end). Since every datetime this
+    app ever writes is UTC to begin with (see `utc_now()` above), treating
+    a naive value as "already UTC" here is correct, not a guess.
+    """
+    if value.tzinfo is None:
+        return value.replace(tzinfo=datetime.timezone.utc)
+    return value
+
+
 def is_due_soon(due_date: "datetime.datetime | None") -> bool:
     """
     Shared "reminder before something goes overdue" test, used everywhere
@@ -89,11 +117,35 @@ def is_due_soon(due_date: "datetime.datetime | None") -> bool:
     """
     if due_date is None:
         return False
+    due_date = _as_aware_utc(due_date)
     now = utc_now()
     if due_date < now:
         return False
     from config import settings  # deferred: avoids a models<->config import cycle at module load time
     return due_date <= now + datetime.timedelta(days=settings.DUE_SOON_REMINDER_DAYS)
+
+
+def checkout_display_name(checkout: "AssetCheckout") -> str:
+    """
+    The equipment name to show for one AssetCheckout row, whether it's a
+    real AssetType pool or a Manager/Admin-added OUTSOURCED (not-in-
+    inventory) item -- see AssetCheckout.is_outsourced below. Centralizing
+    this (rather than repeating `c.asset.name if c.asset else "Unknown
+    Asset"` in every service that lists checkouts) is what keeps an
+    outsourced checkout's real item name showing up correctly instead of
+    falling into the generic "Unknown Asset" fallback that's meant for a
+    genuinely deleted/missing asset pool.
+
+    Callers decide for THEMSELVES whether to also surface
+    `checkout.is_outsourced` as a separate "Outsourced" flag/badge --
+    this function only ever returns the display name, never a hint that
+    the item came from outside inventory (see services/user_service.py's
+    get_my_assigned_items() vs get_user_assigned_items() for where that
+    visibility line is actually drawn).
+    """
+    if checkout.is_outsourced:
+        return checkout.outsourced_item_name or "Outsourced Item"
+    return checkout.asset.name if checkout.asset else "Unknown Asset"
 
 
 def is_overdue(due_date: "datetime.datetime | None") -> bool:
@@ -110,7 +162,7 @@ def is_overdue(due_date: "datetime.datetime | None") -> bool:
     """
     if due_date is None:
         return False
-    return due_date < utc_now()
+    return _as_aware_utc(due_date) < utc_now()
 
 
 class AssetType(Base):
@@ -122,21 +174,37 @@ class AssetType(Base):
     available_quantity = Column(Integer, default=0, nullable=False)
     custom_fields = Column(JSON, default=dict, nullable=True)
 
-    # --- Originating department (OPTIONAL) ---------------------------------
-    # Which internal department this pool's equipment originates from/
-    # belongs to (e.g. "Engineering", "Design"). Purely descriptive/
-    # organizational -- unlike User.department (below), it does NOT scope
-    # who can see or dispatch the pool; every role that can see the Asset
-    # Inventory today still sees every pool regardless of this value.
-    # Settable when a pool is first registered (POST /assets) or via CSV
-    # batch import (POST /assets/import, "department" column), and left
-    # NULL when not provided since not every org tracks this. Surfaced next
-    # to the pool's POOL-{id} tag in the Asset Inventory table, inside the
-    # Properties Hub modal, as a "Department" column on every checked-out-
+    # --- Category (OPTIONAL) -------------------------------------------
+    # Which internal category this pool's equipment belongs to (e.g.
+    # "Engineering", "Design"). Purely descriptive/organizational --
+    # unlike User.department (below), it does NOT scope who can see or
+    # dispatch the pool; every role that can see the Asset Inventory
+    # today still sees every pool regardless of this value. Settable when
+    # a pool is first registered (POST /assets) or via CSV batch import
+    # (POST /assets/import, "category" column), and left NULL when not
+    # provided since not every org tracks this. Surfaced next to the
+    # pool's POOL-{id} tag in the Asset Inventory table, inside the
+    # Properties Hub modal, as a "Category" column on every checked-out-
     # items export, and as the filter categories on the Asset Inventory's
     # own export (see services/asset_service.py's
-    # export_assets_inventory() / list_asset_departments()).
-    department = Column(String, nullable=True)
+    # export_assets_inventory() / list_asset_categories()).
+    category = Column(String, nullable=True)
+
+    # --- Per-unit price (OPTIONAL) ------------------------------------------
+    # The per-unit purchase/replacement price of this pool's equipment (e.g.
+    # 1899.00 for a MacBook Pro). Purely informational, same "descriptive,
+    # not access-scoping" treatment as `category` above -- every role that
+    # can see the Asset Inventory today still sees every pool regardless of
+    # price. Settable when a pool is first registered (POST /assets) or via
+    # CSV batch import (POST /assets/import, "price" column), and left NULL
+    # when not provided since not every org tracks unit cost. Surfaced next
+    # to the pool's POOL-{id} tag / category on the Asset Inventory table
+    # and inside the Properties Hub modal, editable there the same way
+    # `category` is (PUT /assets/{id}/price -- see
+    # services/asset_service.py's update_asset_price()). Numeric(10, 2)
+    # rather than Float so currency values round-trip exactly (no binary
+    # floating-point drift on repeated reads/writes).
+    price = Column(Numeric(10, 2), nullable=True)
 
     # --- Soft delete ------------------------------------------------------
     # We NEVER hard-delete an asset pool row (same rationale as User below):
@@ -247,6 +315,9 @@ class User(Base):
     # `department` groups users into teams (e.g. "Engineering", "Design").
     # A manager only ever sees users/audit activity within their own
     # department; a super_admin sees everything regardless of department.
+    # Distinct from AssetType.category above -- that's which category an
+    # asset POOL belongs to, purely descriptive; this is which team a
+    # PERSON belongs to, and (for Managers) actually scopes visibility.
     department = Column(String, nullable=True)
     department_role = Column(String, nullable=True)  # e.g. "Senior Engineer", "Product Designer"
 
@@ -266,9 +337,30 @@ class Outsider(Base):
 class AssetCheckout(Base):
     __tablename__ = "asset_checkouts"
     id = Column(Integer, primary_key=True, index=True)
-    asset_id = Column(Integer, ForeignKey("asset_types.id"), nullable=False)
+    # Nullable -- a normal checkout always has a real AssetType pool here,
+    # but an OUTSOURCED checkout (see is_outsourced below) never does;
+    # there's no inventory row to point at.
+    asset_id = Column(Integer, ForeignKey("asset_types.id"), nullable=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     outsider_id = Column(Integer, ForeignKey("outsiders.id"), nullable=True)
+
+    # Set only when this checkout was created by the Quote-to-Checkout
+    # Fulfillment Drawer's bulk physical checkout (see
+    # services/quotation_service.py's bulk_checkout_quotation()) --
+    # NULL for every "regular" dispatch made directly from the Asset
+    # Inventory's own Dispatch drawer. Purely a traceability link back to
+    # the originating Quotation; nothing reads it to change behavior.
+    # BUG FIX (migration drift): the Alembic baseline migration
+    # (alembic/versions/0001_baseline_schema.py) creates a real index here
+    # ("ix_asset_checkouts_quotation_id"), but this model was missing
+    # `index=True` -- so a fresh database stood up via `Base.metadata.
+    # create_all()` (AUTO_INIT_DB=true; see database.py's init_db()) would
+    # NOT get this index, while one stood up via `alembic upgrade head`
+    # (the production path -- see DEPLOYMENT.md) would. `index=True` here
+    # doesn't re-create anything for databases that already ran the
+    # migration (Postgres no-ops an index of the same name), it just makes
+    # this model's declared schema match what's actually deployed.
+    quotation_id = Column(Integer, ForeignKey("quotations.id"), nullable=True, index=True)
 
     # `quantity` always stays the ORIGINAL amount checked out -- it is the
     # permanent historical record and must never be mutated after creation.
@@ -283,9 +375,40 @@ class AssetCheckout(Base):
     returned_at = Column(DateTime(timezone=True), nullable=True)
     status = Column(String, default="active")  # "active" | "returned"
 
+    # --- Outsourced (not-in-inventory) items -------------------------------
+    # Set when this checkout line came from a Manager/Admin-added
+    # QuotationOutsourcedItem (equipment that was never part of the Asset
+    # Inventory catalog) rather than a real AssetType pool -- `asset_id`
+    # is NULL for these rows and the `asset` relationship resolves to
+    # None. `outsourced_item_name`/`outsourced_unit_price` snapshot what
+    # the Manager/Admin typed in at add-item time (mirrors
+    # QuotationOutsourcedItem.name/unit_price below) since there's no
+    # catalog row left to join back to once this becomes a real checkout.
+    #
+    # VISIBILITY: `is_outsourced` is surfaced to a Manager/Admin/Super
+    # Admin viewing someone ELSE's Custody Ledger
+    # (services/user_service.py's get_user_assigned_items(),
+    # services/outsider_service.py's get_outsider_assigned_items()) as an
+    # "Outsourced" tag, but deliberately OMITTED from the self-service "My
+    # Items" payload (services/user_service.py's get_my_assigned_items())
+    # -- the Staff/Customer/Manager/Admin holding the item themselves just
+    # sees it listed like any other checked-out item, never told it was
+    # sourced from outside inventory. See models.checkout_display_name()
+    # for the shared "what name do I show for this row" helper both sides
+    # rely on.
+    is_outsourced = Column(Boolean, default=False, nullable=False)
+    outsourced_item_name = Column(String, nullable=True)
+    outsourced_unit_price = Column(Numeric(10, 2), nullable=True)
+    # Vendor/supplier this outsourced item came from (e.g. "Fountain
+    # Rentals") -- snapshotted from QuotationOutsourcedItem.sourced_from
+    # at checkout time. Same Manager/Admin-only visibility as
+    # is_outsourced itself.
+    outsourced_source = Column(String, nullable=True)
+
     asset = relationship("AssetType", back_populates="checkouts")
     user = relationship("User", back_populates="checkouts")
     outsider = relationship("Outsider", back_populates="checkouts")
+    quotation = relationship("Quotation")
     extension_requests = relationship("ExtensionRequest", back_populates="checkout")
 
 
@@ -343,3 +466,260 @@ class ExtensionRequest(Base):
     created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
 
     checkout = relationship("AssetCheckout", back_populates="extension_requests")
+
+
+class AppSetting(Base):
+    """
+    Tiny key/value store for the small number of values that must be
+    editable at RUNTIME by an Admin -- unlike everything in config.py,
+    which is read once from environment variables at process startup and
+    requires a restart to change. Today this holds exactly one key,
+    "vat_percent" (see services/quotation_service.py's get_vat_percent()/
+    set_vat_percent()), but is generic on purpose so a future runtime-
+    editable value doesn't need its own bespoke table.
+
+    Only a Super Admin/Admin can write here (PUT /settings/vat --
+    require_super_admin, same gate as update_asset_price()), and every
+    change is logged to AuditLog the same way any other admin-only
+    mutation in this app is.
+    """
+    __tablename__ = "app_settings"
+
+    key = Column(String, primary_key=True)
+    value = Column(String, nullable=False)
+    updated_by = Column(String, nullable=True)  # email of the Admin/Super Admin who last changed it
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=True)
+
+
+class Quotation(Base):
+    """
+    A staff/customer account's self-service equipment rental request --
+    the "shopping cart" a person builds while browsing the Asset
+    Inventory Catalog (see services/quotation_service.py) before either
+    sharing it with their manager offline as an exported PDF, or
+    formally SUBMITTING it (see `status`/`reference_number` below) so an
+    Admin/Manager can pull it up by its quote ID, adjust it, and assign
+    it to a user.
+
+    LIFECYCLE: each account has at most one row with `status="draft"` at
+    a time (their standing "My Order" cart -- adding an item lazily
+    creates this row the first time, see
+    quotation_service._get_or_create_draft()). Calling
+    quotation_service.submit_my_quotation() stamps that row with a
+    generated `reference_number` (e.g. "QT-000001"), flips it to
+    `status="submitted"`, and records `submitted_at` -- it then becomes
+    read-only to the person who created it (they see it in "My Order"
+    history but no longer edit it) and visible/editable to any
+    Admin/Manager via the "Quotes" tab. The NEXT item that same person
+    adds to their cart lazily creates a brand new `status="draft"` row,
+    exactly like the old one-cart-forever behavior. `user_id` therefore
+    is NOT unique any more (a person accumulates one row per submitted
+    quote, plus at most one open draft).
+
+    QUOTE-TO-CHECKOUT WORKFLOW (status="submitted" -> "approved" ->
+    "fulfilled"): a submitted Quotation sits in the Admin/Manager "Quotes"
+    master queue where it can still be adjusted (items/notes/assignment)
+    exactly like before. Calling quotation_service.approve_quotation()
+    flips it to `status="approved"` and stamps `approved_at`/
+    `approved_by_id` -- this is the gray "Draft"-style badge turning into
+    the sharp green "Approved / Ready for Pickup" badge the frontend
+    renders (see components/quotation.js's quotationStatusBadge()).
+    Approval only locks the REQUESTER/assignee's own self-service side
+    (see quotation_service._get_own_editable_quotation(), which requires
+    `status == "submitted"`) -- an Admin/Manager can still keep adjusting
+    items/notes/assignment on an approved quote (see
+    _ensure_admin_editable() in services/quotation_service.py) right up
+    until quotation_service.bulk_checkout_quotation() -- the Fulfillment
+    Drawer's "physical bulk checkout" action -- turns EVERY line item
+    into a real AssetCheckout row (see AssetCheckout.quotation_id) in one
+    atomic transaction, flips this row to `status="fulfilled"`, and
+    stamps `fulfilled_at`/`fulfilled_by_id`. THAT is the point the quote
+    is truly closed -- fulfilled quotes are locked against every further
+    edit, by anyone, Admin/Manager included. Inventory stock is NEVER
+    reserved or deducted at "draft", "submitted", or "approved" --
+    `AssetType.available_quantity` is only ever touched at this final
+    "fulfilled" step (see services/stock.py's recalculate_asset_stock()),
+    exactly like a normal single-asset checkout.
+
+    `assigned_to_id` is who an Admin/Manager has designated the quote is
+    FOR (who will ultimately receive/check out the equipment) -- distinct
+    from `user_id` (who originally built/submitted the request), since a
+    manager might submit or adjust a quote on behalf of someone else. It's
+    also who bulk_checkout_quotation() dispatches the equipment TO (falling
+    back to `user_id`, the original requester, when never explicitly
+    assigned).
+
+    Line-item pricing is NEVER snapshotted onto this row or its items --
+    every read/export always joins back to the live AssetType.price and
+    the live global VAT setting (AppSetting["vat_percent"]), so an
+    Admin's global price or VAT edit is reflected immediately in every
+    saved order, exactly like "the price changes globally through the
+    Admin's edit" from the feature request. `discount_percent` (below) is
+    the one exception -- it's a per-quote negotiated value, not a global
+    setting, so it IS stored directly on this row.
+    """
+    __tablename__ = "quotations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
+
+    # --- Submission workflow (Quotation ID lookup + Admin/Manager adjust + assign) ---
+    # BUG FIX (migration drift): same issue/fix as AssetCheckout.quotation_id
+    # above -- the baseline migration creates "ix_quotations_status" but this
+    # column was missing `index=True`, so create_all() (dev/local, when
+    # AUTO_INIT_DB=true) and `alembic upgrade head` (production) produced two
+    # different schemas. Also genuinely useful here: the Quotation Catalog
+    # and Admin/Manager dashboards filter quotations by status constantly.
+    status = Column(String, default="draft", nullable=False, index=True)  # "draft" | "submitted" | "approved" | "fulfilled"
+    reference_number = Column(String, nullable=True, index=True, unique=True)
+    submitted_at = Column(DateTime(timezone=True), nullable=True)
+    assigned_to_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    # Ad-Hoc (unlinked) counterpart to assigned_to_id -- set instead of
+    # assigned_to_id when an Admin/Manager assigns this Quotation to an
+    # Ad-Hoc Individual rather than a linked Staff/Customer account,
+    # exactly like AssetCheckout's own user_id/outsider_id split. At most
+    # one of assigned_to_id/assigned_outsider_id is ever set at a time --
+    # see services/quotation_service.py's admin_create_quotation()/
+    # assign_quotation(). bulk_checkout_quotation() (the Fulfillment
+    # Drawer) checks an Ad-Hoc-assigned quote out to this Outsider
+    # directly, same as it would a linked user.
+    assigned_outsider_id = Column(Integer, ForeignKey("outsiders.id"), nullable=True)
+    notes = Column(String, nullable=True)
+
+    # --- Quote-to-Checkout workflow: who/when approved this request (the
+    # gray "Draft"/"Pending" -> green "Approved / Ready for Pickup" badge
+    # flip) and who/when it was physically bulk-checked-out. Both are
+    # nullable/None until that step actually happens. See the class
+    # docstring above for the full lifecycle. ---
+    approved_at = Column(DateTime(timezone=True), nullable=True)
+    approved_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    fulfilled_at = Column(DateTime(timezone=True), nullable=True)
+    fulfilled_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    # --- Discount (Admin/Manager-only, per-quote) ---------------------------
+    # A single percentage (0-100) knocked off THIS quote's subtotal, before
+    # VAT is calculated on what remains -- see services/quotation_service.py's
+    # _serialize_quotation() for the exact
+    # subtotal -> discount -> VAT -> grand total order. Defaults to 0 (no
+    # discount) so every pre-existing quote and every brand new one behaves
+    # exactly like before this field existed unless an Admin/Manager
+    # deliberately sets it. Editable via update_quotation_discount() under
+    # the exact same _ensure_admin_editable() lock as every other line
+    # item/note/assignment edit on this quote -- i.e. right up until
+    # `status="fulfilled"`, same as "the other quote items" per the feature
+    # request. Unlike price/VAT, this IS snapshotted onto the row itself
+    # (rather than re-derived from a global setting) since it's a
+    # per-quote negotiated concession, not a store-wide policy.
+    discount_percent = Column(Numeric(5, 2), default=0, nullable=False)
+
+    user = relationship("User", foreign_keys=[user_id])
+    assigned_to = relationship("User", foreign_keys=[assigned_to_id])
+    assigned_outsider = relationship("Outsider", foreign_keys=[assigned_outsider_id])
+    approved_by = relationship("User", foreign_keys=[approved_by_id])
+    fulfilled_by = relationship("User", foreign_keys=[fulfilled_by_id])
+    items = relationship("QuotationItem", back_populates="quotation", cascade="all, delete-orphan", order_by="QuotationItem.id")
+    # Manager/Admin-only "not currently in inventory" lines -- see
+    # QuotationOutsourcedItem's own docstring below for the full rationale.
+    outsourced_items = relationship(
+        "QuotationOutsourcedItem", back_populates="quotation", cascade="all, delete-orphan", order_by="QuotationOutsourcedItem.id",
+    )
+
+
+class QuotationItem(Base):
+    """
+    One line of a Quotation: "N units of this AssetType pool, from
+    start_date to due_date". `quantity` is editable in place (unlike
+    AssetCheckout.quantity, there's no real checkout yet to preserve a
+    historical record of -- this is still just a draft request), and a
+    row is hard-deleted outright when the person removes that asset from
+    their order (see services/quotation_service.py's remove_item()) --
+    there's no soft-delete/audit requirement for a draft cart line the
+    way there is for actual checkouts.
+
+    `start_date`/`due_date` are plain calendar Dates (not TIMESTAMPTZ --
+    see the timezone note at the top of this file) since a rental period
+    is a whole-day concept ("July 12 through July 15"), not a precise
+    instant; the number of rental days -- `(due_date - start_date).days`,
+    floored at 1 so a same-day request still bills a full day -- is what
+    services/quotation_service.py multiplies against AssetType.price and
+    `quantity` to get this line's total, computed fresh on every read.
+    """
+    __tablename__ = "quotation_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    quotation_id = Column(Integer, ForeignKey("quotations.id"), nullable=False)
+    asset_id = Column(Integer, ForeignKey("asset_types.id"), nullable=False)
+    quantity = Column(Integer, default=1, nullable=False)
+    start_date = Column(Date, nullable=False)
+    due_date = Column(Date, nullable=False)
+    added_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+    quotation = relationship("Quotation", back_populates="items")
+    asset = relationship("AssetType")
+
+
+class QuotationOutsourcedItem(Base):
+    """
+    A Manager/Admin-only line on a Quotation for equipment that is NOT
+    currently part of the Asset Inventory catalog -- e.g. a specialty
+    rental the business has to source externally to fulfill a request.
+    Added exclusively by services/quotation_service.py's
+    admin_add_outsourced_item() (POST /quotations/{id}/outsourced-items,
+    require_privileged_role-gated) -- there is no equivalent self-service
+    "add to my order" route for this table, which is what makes it
+    structurally impossible for a Staff/Customer account to add, edit, or
+    remove one of these lines even though they CAN see it once a
+    Manager/Admin adds it during review: it's merged into the same
+    "items" array a Quotation's regular QuotationItem lines already use,
+    flagged `is_outsourced=True`, by _serialize_quotation() in
+    services/quotation_service.py -- the requester's own item-level
+    routes (PUT/DELETE /quotations/me/{id}/items/{item_id}) only ever
+    query the QuotationItem table, so they 404 if pointed at one of
+    these, and the frontend never even renders their qty/remove controls
+    for a flagged-outsourced line to begin with.
+
+    Unlike QuotationItem (which always prices itself LIVE off the joined
+    AssetType.price, so an Admin's global price edit is reflected
+    immediately -- see that model's docstring), this table stores its OWN
+    `unit_price`: there is no catalog row to join back to, so whatever a
+    Manager/Admin typed in when adding the item is the price for that
+    line, permanently, exactly like typing a one-off price into an
+    invoice.
+
+    QUOTE-TO-CHECKOUT: when the Fulfillment Drawer bulk-checks-out an
+    approved Quotation (services/quotation_service.py's
+    bulk_checkout_quotation()), each row here becomes a real
+    AssetCheckout with `asset_id=NULL` and `is_outsourced=True` (see
+    AssetCheckout's own docstring/comment) -- never touching any
+    AssetType's stock, since there's no inventory pool to deduct from in
+    the first place.
+    """
+    __tablename__ = "quotation_outsourced_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    quotation_id = Column(Integer, ForeignKey("quotations.id"), nullable=False)
+    name = Column(String, nullable=False)
+    description = Column(String, nullable=True)
+    unit_price = Column(Numeric(10, 2), nullable=False)
+    quantity = Column(Integer, default=1, nullable=False)
+    # Which external vendor/supplier this line is being sourced from (e.g.
+    # "Fountain Rentals") -- purely an internal Manager/Admin tracking
+    # note, free-text, optional. Snapshotted onto the resulting
+    # AssetCheckout.outsourced_source at checkout time (see
+    # bulk_checkout_quotation()) so the sourcing trail survives past this
+    # row's own lifetime. Never shown to the requester -- see
+    # _serialize_quotation()'s `reveal_sourcing` parameter below.
+    sourced_from = Column(String, nullable=True)
+    start_date = Column(Date, nullable=False)
+    due_date = Column(Date, nullable=False)
+    # Which Manager/Admin added this line -- NULL only for the single
+    # hardcoded Super Admin identity (not a real `users` row -- same FK
+    # caveat as Quotation.approved_by_id/fulfilled_by_id, see
+    # services/quotation_service.py's approve_quotation()).
+    added_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    added_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+    quotation = relationship("Quotation", back_populates="outsourced_items")
+    added_by = relationship("User", foreign_keys=[added_by_id])

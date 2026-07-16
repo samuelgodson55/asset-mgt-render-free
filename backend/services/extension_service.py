@@ -176,7 +176,7 @@ def create_extension_request(db: Session, checkout_id: int, req: ExtensionReques
     db.add(models.AuditLog(
         operator=user["email"], action="EXTENSION_REQUESTED", target_type="AssetCheckout", target_id=checkout.id,
         details=(
-            f"Extension requested on '{checkout.asset.name if checkout.asset else 'Unknown Asset'}' "
+            f"Extension requested on '{models.checkout_display_name(checkout)}' "
             f"by {requested_by_label} -- new due date requested: {req.new_due_date.isoformat()}."
         ),
     ))
@@ -191,7 +191,7 @@ def create_extension_request(db: Session, checkout_id: int, req: ExtensionReques
 
     recipients = _notification_recipients(db)
     if recipients:
-        asset_name = checkout.asset.name if checkout.asset else "Unknown Asset"
+        asset_name = models.checkout_display_name(checkout)
         _notify(
             to=recipients,
             subject=f"[Snipe-IT Lite] Extension requested: {asset_name}",
@@ -242,7 +242,7 @@ def list_extension_requests(db: Session, user: dict, status: str | None = None, 
         items.append({
             "id": r.id,
             "checkout_id": r.checkout_id,
-            "asset_name": checkout.asset.name if checkout and checkout.asset else "Unknown Asset",
+            "asset_name": models.checkout_display_name(checkout) if checkout else "Unknown Asset",
             "assignee_name": assignee_name,
             "entity_id": entity_id,
             "entity_type": entity_type,
@@ -318,7 +318,7 @@ def list_my_recent_extension_decisions(db: Session, user: dict, limit: int = 10)
         items.append({
             "id": r.id,
             "checkout_id": r.checkout_id,
-            "asset_name": checkout.asset.name if checkout and checkout.asset else "Unknown Asset",
+            "asset_name": models.checkout_display_name(checkout) if checkout else "Unknown Asset",
             "status": r.status,
             "requested_new_due_date": r.requested_new_due_date.strftime("%Y-%m-%d") if r.requested_new_due_date else None,
             "due_date": checkout.due_date.strftime("%Y-%m-%d") if checkout and checkout.due_date else None,
@@ -359,7 +359,7 @@ def decide_extension_request(db: Session, request_id: int, decision: ExtensionDe
     extension_request.decided_at = utc_now()
     extension_request.decision_note = decision.note
 
-    asset_name = checkout.asset.name if checkout.asset else "Unknown Asset"
+    asset_name = models.checkout_display_name(checkout)
 
     if decision.approve:
         extension_request.status = "approved"
@@ -447,7 +447,7 @@ def extend_checkout_directly(db: Session, checkout_id: int, req: DirectExtension
 
     previous_due_date = checkout.due_date
     checkout.due_date = new_due_date
-    asset_name = checkout.asset.name if checkout.asset else "Unknown Asset"
+    asset_name = models.checkout_display_name(checkout)
     holder_label = checkout.user.name if checkout.user else (checkout.outsider.name if checkout.outsider else "Unknown holder")
 
     db.add(models.AuditLog(

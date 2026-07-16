@@ -74,10 +74,18 @@ class Settings(BaseSettings):
     """
 
     # --- Environment ----------------------------------------------------
-    # "development" (default, safe for local docker compose) or
-    # "production". Drives the JWT-secret startup check below -- it never
-    # changes runtime behavior beyond that, so it's safe to leave unset
-    # locally.
+    # "local", "development" (default, safe for local docker compose), or
+    # "production". As far as THIS backend process is concerned, only
+    # "production" is special -- it drives the JWT-secret/Super Admin
+    # password startup checks below; "local" is treated identically to
+    # "development" and never changes backend runtime behavior beyond that,
+    # so it's safe to leave unset locally.
+    #
+    # This same value is also read by docker-compose.yml at *image build*
+    # time (not by this backend process) to decide how frontend/js gets
+    # processed -- see nginx/Dockerfile's frontend-build stage and
+    # build-frontend/build.js: local = untouched, development = minified,
+    # production = minified + obfuscated.
     ENVIRONMENT: str = "development"
 
     # --- Database -----------------------------------------------------
@@ -340,6 +348,47 @@ class Settings(BaseSettings):
     # timedelta-since-boot reasoning as OVERDUE_NOTIFICATION_INTERVAL_HOURS
     # just above -- see celery_app.py's `beat_schedule` comment.
     DUE_SOON_NOTIFICATION_INTERVAL_HOURS: int = 24
+
+    # --- Equipment Quotation self-service (staff/customer asset catalog) --
+    # ISO 4217 currency code applied to every price shown/exported anywhere
+    # in the app (the Asset Inventory's per-unit `price`, the Quotation
+    # Catalog's day-rate, and every line/subtotal/VAT/total on a Quotation
+    # PDF export). Defaults to Naira since that's this deployment's home
+    # currency; change it here (not in code) for a different market --
+    # see js/ui.js's formatPrice() and services/export_service.py's
+    # quotation PDF builder, both of which read this same value via
+    # GET /config/public rather than hardcoding a symbol.
+    CURRENCY_CODE: str = "NGN"
+
+    # --- Brand name shown across the deployment: the on-screen navbar/login
+    # brand AND the Quotation PDF's letterhead ---------------------------
+    # The frontend's navbar brand + <title> (every page: index.html,
+    # admin.html, manager.html, staff.html, customer.html) reads this value
+    # at runtime from GET /config/public (see
+    # services/quotation_service.py's get_public_config() and
+    # js/ui.js's applySiteName(), called once on every page load including
+    # the unauthenticated login page) -- there's no separate frontend-only
+    # setting to keep in sync. The printable Quotation/Checkout Receipt PDF
+    # (services/quotation_service.py's _build_quotation_pdf(), via
+    # services/export_service.py's build_quotation_document_pdf()) sources
+    # its own letterhead from this exact same setting. Change it here (not
+    # in code) to rebrand the on-screen UI and every future PDF export at
+    # once, following the exact same env-var pattern as CURRENCY_CODE above.
+    SITE_NAME: str = "Snipe-IT Lite"
+
+    # Whether a "staff" or "customer" account browsing the self-service
+    # Quotation Catalog (GET /assets/catalog) can see each pool's
+    # available-quantity count and in-stock/out-of-stock status.
+    #
+    # False (the default, and the recommended production value) shows
+    # them ONLY name, category, and price -- exactly what's needed to
+    # build a quotation -- hiding live stock levels from external/
+    # unprivileged accounts. Flip to True if your organization wants
+    # staff/customers to see stock availability before requesting it.
+    # A Manager/Admin/Super Admin's own Asset Inventory view (GET /assets)
+    # is completely unaffected by this flag either way -- they always see
+    # full stock detail, same as today.
+    CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER: bool = False
 
     # --- Single-service (free-tier) deployment mode ------------------------
     # Render's Free instance type only supports Web Services, Postgres, and

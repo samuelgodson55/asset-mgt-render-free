@@ -27,21 +27,48 @@
 # NOT replace that file. See README.md's "Deploying on Render's Free Plan"
 # section for the full picture, including this approach's tradeoffs
 # (everything spins down and restarts together, no horizontal scaling).
+#
+# Three stages, same reasoning as nginx/Dockerfile and backend/Dockerfile:
+#   1. "frontend-build" -- processes frontend/js per BUILD_ARG (defaults to
+#      "production" here, since Render is a production deploy target: JS
+#      ships minified + obfuscated, same as the nginx-fronted deployment
+#      shape gets -- see build-frontend/build.js). render.yaml can override
+#      this via a build arg if you ever want a staging service on "local"
+#      or "development" instead.
+#   2. "backend-builder" -- installs Python deps into a venv.
+#   3. final stage -- copies ONLY the venv + processed frontend + app code
+#      into a fresh base. No pip cache, no node_modules, no build metadata
+#      of any kind ends up in the image that's actually deployed.
 # =============================================================================
 
-FROM python:3.11-slim
+# ---------------------------------------------------------------------------
+# Stage 1/3: frontend-build -- see build-frontend/build.js for what each
+# BUILD_ENV value does. Defaults to "production" (minified + obfuscated)
+# since this Dockerfile's whole purpose is a production deployment target.
+# ---------------------------------------------------------------------------
+FROM node:20-alpine AS frontend-build
+
+ARG BUILD_ENV=production
+ENV BUILD_ENV=${BUILD_ENV}
+
+WORKDIR /build
+COPY build-frontend/package.json build-frontend/package-lock.json* /build/build-frontend/
+RUN cd build-frontend && npm install --no-audit --no-fund
+COPY build-frontend/build.js /build/build-frontend/build.js
+COPY frontend/ /build/frontend-src/
+RUN node build-frontend/build.js /build/frontend-src /build/frontend-out
+
+# ---------------------------------------------------------------------------
+# Stage 2/3: backend-builder -- installs Python deps into a venv so stage
+# 3 can copy just that directory, without pip's own cache/build metadata.
+# ---------------------------------------------------------------------------
+FROM python:3.11-slim AS backend-builder
 
 WORKDIR /app
-
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-
-# postgresql-client provides pg_dump/psql -- required by
-# services/backup_service.py (database backup/restore). Same reasoning as
-# backend/Dockerfile's identical block.
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends postgresql-client && \
-    rm -rf /var/lib/apt/lists/*
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
 # Same requirements.txt the backend/worker images use -- celery/redis are
 # already listed there since docker-compose.yml's `worker` service depends
@@ -51,17 +78,48 @@ COPY backend/requirements.txt /app/
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir --default-timeout=100 -r requirements.txt
 
+# ---------------------------------------------------------------------------
+# Stage 3/3: runtime -- this is the image that actually ships to Render.
+# ---------------------------------------------------------------------------
+FROM python:3.11-slim
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:$PATH"
+
+# postgresql-client provides pg_dump/psql -- required by
+# services/backup_service.py (database backup/restore). Same reasoning as
+# backend/Dockerfile's identical block.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends postgresql-client && \
+    rm -rf /var/lib/apt/lists/*
+
+# Installed Python deps, copied from backend-builder -- no pip cache/build
+# metadata included.
+COPY --from=backend-builder /opt/venv /opt/venv
+
 # Backend application code.
 COPY backend/ /app/
 
-# The static frontend, copied into the SAME image so FastAPI's StaticFiles
-# mount (backend/main.py, gated on SERVE_FRONTEND) can serve it directly --
-# see config.py's FRONTEND_DIR default ("/app/frontend"), which this COPY
-# destination matches.
-COPY frontend/ /app/frontend/
+# The processed static frontend (minified+obfuscated by default -- see
+# stage 1 above) instead of raw frontend/ source, so FastAPI's StaticFiles
+# mount (backend/main.py, gated on SERVE_FRONTEND) serves the same kind of
+# production build the nginx-fronted deployment does. Destination path
+# still matches config.py's FRONTEND_DIR default ("/app/frontend").
+COPY --from=frontend-build /build/frontend-out/ /app/frontend/
 
 COPY render-start.sh /app/render-start.sh
 RUN chmod +x /app/render-start.sh
+
+# Precompile every backend .py file (and every installed dependency) to
+# .pyc at build time instead of paying that cost on the container's first
+# request/import -- meaningfully shortens cold start, which matters more
+# here than on docker-compose's backend/worker services since a Render
+# Free instance spins ALL the way down after 15 minutes idle and has to
+# cold-start again on the next request (see render.yaml's comment).
+RUN python -m compileall -q /app /opt/venv
 
 # SECURITY: run as a dedicated, unprivileged user -- same reasoning as
 # backend/Dockerfile's identical block.
