@@ -21,6 +21,36 @@ class UserCreateRequest(BaseModel):
         return validate_password_strength(value)
 
 
+class UserUpdateRequest(BaseModel):
+    """
+    Body for PATCH /users/{user_id} -- edits an existing account's basic
+    identity details (name, username, email). Distinct from
+    UserCreateRequest (provisioning) and UserPasswordResetRequest
+    (credential recovery): this never touches role, department, or
+    password_hash.
+
+    Every field is optional so a caller only needs to send the ones that
+    actually changed -- services/user_service.py -> update_user() uses
+    Pydantic's `exclude_unset` to leave anything omitted exactly as it was,
+    rather than blanking it out. See that function's docstring for the full
+    Super Admin/Admin-vs-Manager permission model.
+    """
+    name: Optional[str] = None
+    username: Optional[str] = None
+    email: Optional[str] = None
+
+    # A field that IS present must not be an empty/whitespace-only string --
+    # that would silently blank out someone's name/username/email, which is
+    # never what "edit this field" means. Omit the field entirely (leave it
+    # unset) if it shouldn't change.
+    @field_validator("name", "username", "email")
+    @classmethod
+    def _reject_blank(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and not value.strip():
+            raise ValueError("This field cannot be blank.")
+        return value.strip() if value is not None else value
+
+
 class UserPasswordResetRequest(BaseModel):
     """
     Body for POST /users/{user_id}/reset-password -- a Super Admin/Admin

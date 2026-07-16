@@ -8,7 +8,7 @@
 // =============================================================================
 
 import { apiRequest } from '../api.js';
-import { escapeHtml, debounce, renderServerPaginationBar, personAlertIcon, rowDetailsTrigger } from '../ui.js';
+import { escapeHtml, debounce, renderServerPaginationBar, openModal, closeModal, personAlertIcon, rowDetailsTrigger } from '../ui.js';
 
 // TRUE server-side search + pagination (same pattern as components/
 // audit.js's `auditState` / components/assets.js's `assetsState` /
@@ -17,6 +17,12 @@ import { escapeHtml, debounce, renderServerPaginationBar, personAlertIcon, rowDe
 // slice from `GET /outsiders?search=&limit=&offset=` instead of
 // re-filtering an already-downloaded array.
 const outsidersState = { page: 1, perPage: 5, search: '', total: 0 };
+
+// Keyed by id -> the full row object from the most recent
+// renderOutsidersTable() call -- openEditOutsiderModal() reads straight
+// from here to prefill the Edit form, same pattern as components/users.js's
+// `usersById`.
+let outsidersById = {};
 
 export async function loadOutsiders() {
   const tbody = document.getElementById('outsiderTableBody');
@@ -39,9 +45,17 @@ function renderOutsidersTable(outsiders) {
 
   document.querySelectorAll('.outsider-count').forEach(el => el.textContent = outsidersState.total);
 
+  outsidersById = Object.fromEntries(outsiders.map(o => [o.id, o]));
+
   tbody.innerHTML = outsiders.map(o => {
     const initials = o.name.split(' ').map(p => p[0]).join('').slice(0, 2).toUpperCase();
-    const actionButtons = `<button data-action="open-custody" data-entity-id="${o.id}" data-entity-type="outsider" class="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">Custody Ledger</button>`;
+    // Edit is available to both Super Admin/Admin and Manager -- ad-hoc
+    // profiles aren't tied to a system-user role, so there's no narrower
+    // boundary to enforce here (see services/outsider_service.py ->
+    // update_outsider()).
+    const actionButtons = `
+      <button data-action="edit-outsider" data-outsider-id="${o.id}" class="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">Edit</button>
+      <button data-action="open-custody" data-entity-id="${o.id}" data-entity-type="outsider" class="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">Custody Ledger</button>`;
 
     // Whole row is tappable on mobile -- see components/assets.js's
     // renderAssetsTable() for the full explanation of this pattern.
@@ -94,4 +108,48 @@ export function changeOutsidersPage(delta) {
   if (nextPage < 1) return;
   outsidersState.page = nextPage;
   loadOutsiders();
+}
+
+// ---- Edit Ad-Hoc Individual (Super Admin/Admin and Manager) ----
+let pendingEditOutsiderId = null;
+
+function setEditOutsiderMessage(text, isError) {
+  const msgEl = document.getElementById('editOutsiderMessage');
+  if (!msgEl) return;
+  msgEl.textContent = text || '';
+  msgEl.classList.toggle('hidden', !text);
+  msgEl.classList.toggle('text-rose-400', !!isError);
+  msgEl.classList.toggle('text-emerald-400', !isError);
+}
+
+export function openEditOutsiderModal(outsiderId) {
+  const o = outsidersById[outsiderId];
+  if (!o) return;
+  pendingEditOutsiderId = outsiderId;
+  document.getElementById('editOutsiderTargetName').textContent = o.name;
+  document.getElementById('editOutsiderName').value = o.name || '';
+  document.getElementById('editOutsiderContact').value = o.contact_details || '';
+  document.getElementById('editOutsiderCompany').value = o.company || '';
+  setEditOutsiderMessage('', false);
+  openModal('editOutsiderModal');
+}
+
+export async function submitEditOutsiderForm(event) {
+  event.preventDefault();
+  if (!pendingEditOutsiderId) return;
+  setEditOutsiderMessage('', false);
+
+  const payload = {
+    name: document.getElementById('editOutsiderName').value,
+    contact_details: document.getElementById('editOutsiderContact').value,
+    company: document.getElementById('editOutsiderCompany').value,
+  };
+
+  try {
+    await apiRequest(`/outsiders/${pendingEditOutsiderId}`, { method: 'PATCH', body: JSON.stringify(payload) });
+    closeModal('editOutsiderModal');
+    loadOutsiders();
+  } catch (err) {
+    setEditOutsiderMessage(err.message, true);
+  }
 }

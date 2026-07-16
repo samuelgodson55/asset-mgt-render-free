@@ -11,15 +11,45 @@ exactly the same way instead of re-implementing it three separate times.
 import csv
 import datetime
 import io
+from pathlib import Path
 from typing import Iterable, Optional, Sequence, Union
 from zoneinfo import ZoneInfo
 from xml.sax.saxutils import escape as xml_escape
 
 from reportlab.lib import colors
+from reportlab.lib.enums import TA_RIGHT
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+# ---------------------------------------------------------------------------
+# Unicode-capable font (currency symbols)
+# ---------------------------------------------------------------------------
+# reportlab's built-in "Helvetica"/"Helvetica-Bold" are the standard 14 PDF
+# core fonts -- Latin-1 only. This app's default currency (settings.
+# CURRENCY_CODE = "NGN", see config.py) prints with the Naira sign "₦"
+# (U+20A6), which Latin-1 doesn't cover -- every export that runs
+# format_money() through Helvetica would silently render it as a missing-
+# glyph box. We vendor DejaVu Sans (backend/assets/fonts/, same "ship it in
+# the repo instead of relying on what happens to be installed on the host"
+# approach as build-tailwind's vendored CLI) and register it under the
+# names below so every exporter in this module can reach for a font that
+# actually has the glyph. Wrapped in try/except so a missing font file
+# degrades to the old Latin-1-only behavior instead of crashing every PDF
+# export outright.
+_FONT_DIR = Path(__file__).resolve().parent.parent / "assets" / "fonts"
+FONT_REGULAR = "Helvetica"
+FONT_BOLD = "Helvetica-Bold"
+try:
+    pdfmetrics.registerFont(TTFont("DejaVuSans", str(_FONT_DIR / "DejaVuSans.ttf")))
+    pdfmetrics.registerFont(TTFont("DejaVuSans-Bold", str(_FONT_DIR / "DejaVuSans-Bold.ttf")))
+    FONT_REGULAR = "DejaVuSans"
+    FONT_BOLD = "DejaVuSans-Bold"
+except Exception:
+    pass
 
 from config import settings
 
@@ -92,6 +122,36 @@ def format_export_datetime(value: Optional[Union[str, datetime.datetime]]) -> st
 # such value with a single quote (') before writing it to the CSV, which
 # makes every spreadsheet program render it as plain literal text instead.
 _FORMULA_TRIGGER_CHARS = ("=", "+", "-", "@")
+
+
+# Currency symbols for the small set of codes this deployment is likely to
+# use -- settings.CURRENCY_CODE (see config.py) defaults to "NGN". Falls
+# back to printing the raw ISO code (e.g. "KES 1,000.00") for anything not
+# in this table rather than guessing at a symbol.
+_CURRENCY_SYMBOLS = {
+    "NGN": "₦",
+    "USD": "$",
+    "GBP": "£",
+    "EUR": "€",
+    "GHS": "GH₵",
+    "KES": "KSh",
+    "ZAR": "R",
+}
+
+
+def format_money(value, currency_code: Optional[str] = None) -> str:
+    """
+    Formats a numeric amount as a "₦1,899.00"-style string for CSV/PDF
+    exports, using settings.CURRENCY_CODE (see config.py) by default.
+    Shared by every exporter that prints a price/total (Asset Inventory
+    export, Quotation PDF export) so the symbol/format never drifts
+    between them -- mirrors js/ui.js's formatPrice() on the frontend.
+    """
+    if value is None:
+        return "—"
+    code = (currency_code or settings.CURRENCY_CODE or "NGN").upper()
+    symbol = _CURRENCY_SYMBOLS.get(code, f"{code} ")
+    return f"{symbol}{float(value):,.2f}"
 
 
 def csv_safe_cell(value) -> str:
@@ -198,13 +258,15 @@ def build_pdf_bytes(title: str, subtitle: Optional[str], headers: Sequence[str],
         leftMargin=0.5 * inch, rightMargin=0.5 * inch, topMargin=0.6 * inch, bottomMargin=0.5 * inch,
     )
     styles = getSampleStyleSheet()
-    elements = [Paragraph(xml_escape(title), styles["Title"])]
+    title_style = ParagraphStyle("ExportTitle", parent=styles["Title"], fontName=FONT_BOLD)
+    subtitle_style = ParagraphStyle("ExportSubtitle", parent=styles["Normal"], fontName=FONT_REGULAR)
+    elements = [Paragraph(xml_escape(title), title_style)]
     if subtitle:
-        elements.append(Paragraph(xml_escape(subtitle), styles["Normal"]))
+        elements.append(Paragraph(xml_escape(subtitle), subtitle_style))
     elements.append(Spacer(1, 0.25 * inch))
 
-    header_style = ParagraphStyle("AuditTableHeader", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=8, leading=10, textColor=colors.white)
-    cell_style = ParagraphStyle("AuditTableCell", parent=styles["Normal"], fontName="Helvetica", fontSize=7.5, leading=9.5)
+    header_style = ParagraphStyle("AuditTableHeader", parent=styles["Normal"], fontName=FONT_BOLD, fontSize=8, leading=10, textColor=colors.white)
+    cell_style = ParagraphStyle("AuditTableCell", parent=styles["Normal"], fontName=FONT_REGULAR, fontSize=7.5, leading=9.5)
 
     def cell(value, style):
         text = "" if value is None else str(value)
@@ -226,5 +288,244 @@ def build_pdf_bytes(title: str, subtitle: Optional[str], headers: Sequence[str],
         ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
     ]))
     elements.append(table)
+    doc.build(elements)
+    return buffer.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Quotation / Checkout Receipt PDF -- a letterhead-style document, distinct
+# from build_pdf_bytes() above (which is a bare "title + one big table"
+# layout used by the Properties Assigned / Audit Ledger exports). This one
+# mirrors the printed layout of the business's own paper rental-quotation
+# template: a company letterhead + quote-number box, a bordered "CLIENT
+# DETAILS" panel, the line-item table, a right-aligned totals box, a notes
+# panel, and a Terms & Conditions / Authorisation footer -- so a Quotation
+# exported at ANY status (Draft/Pending Review/Approved/Fulfilled -- see
+# quotation_service.py's STATUS_LABELS) prints as a document a client can
+# recognize, rather than a generic data table.
+#
+# Only services/quotation_service.py's _build_quotation_pdf() calls this;
+# every other exporter in the app (users/outsiders/audit) keeps using the
+# simpler build_pdf_bytes() above, since those really are just "one table"
+# exports with no letterhead/client-details concept to render.
+# ---------------------------------------------------------------------------
+
+_DARK = colors.HexColor("#1f2937")
+_BORDER = colors.HexColor("#94a3b8")
+_STRIPE = colors.HexColor("#f1f5f9")
+
+_ITEM_HEADERS = ["Item / Description", "Category", "Qty", "Daily Rate", "Days", "Total"]
+
+
+def _qp_styles():
+    """Paragraph styles shared across the Quotation PDF's sections."""
+    base = getSampleStyleSheet()
+    return {
+        "company": ParagraphStyle("QPCompany", parent=base["Title"], fontName=FONT_BOLD, fontSize=15, leading=18, alignment=0),
+        "doctype": ParagraphStyle("QPDocType", parent=base["Normal"], fontName=FONT_BOLD, fontSize=10, textColor=_DARK),
+        "meta": ParagraphStyle("QPMeta", parent=base["Normal"], fontName=FONT_REGULAR, fontSize=9, leading=13, alignment=TA_RIGHT),
+        "section": ParagraphStyle("QPSection", parent=base["Normal"], fontName=FONT_BOLD, fontSize=9, textColor=colors.white),
+        "label": ParagraphStyle("QPLabel", parent=base["Normal"], fontName=FONT_BOLD, fontSize=8, leading=11),
+        "value": ParagraphStyle("QPValue", parent=base["Normal"], fontName=FONT_REGULAR, fontSize=8, leading=11),
+        "itemHeader": ParagraphStyle("QPItemHeader", parent=base["Normal"], fontName=FONT_BOLD, fontSize=8, leading=10, textColor=colors.white),
+        "itemCell": ParagraphStyle("QPItemCell", parent=base["Normal"], fontName=FONT_REGULAR, fontSize=7.5, leading=9.5),
+        "itemCellRight": ParagraphStyle("QPItemCellRight", parent=base["Normal"], fontName=FONT_REGULAR, fontSize=7.5, leading=9.5, alignment=TA_RIGHT),
+        "summaryLabel": ParagraphStyle("QPSummaryLabel", parent=base["Normal"], fontName=FONT_REGULAR, fontSize=8.5, alignment=TA_RIGHT),
+        "summaryValue": ParagraphStyle("QPSummaryValue", parent=base["Normal"], fontName=FONT_REGULAR, fontSize=8.5, alignment=TA_RIGHT),
+        "summaryTotalLabel": ParagraphStyle("QPSummaryTotalLabel", parent=base["Normal"], fontName=FONT_BOLD, fontSize=9.5, alignment=TA_RIGHT),
+        "summaryTotalValue": ParagraphStyle("QPSummaryTotalValue", parent=base["Normal"], fontName=FONT_BOLD, fontSize=9.5, alignment=TA_RIGHT),
+        "notes": ParagraphStyle("QPNotes", parent=base["Normal"], fontName=FONT_REGULAR, fontSize=8.5, leading=12),
+        "terms": ParagraphStyle("QPTerms", parent=base["Normal"], fontName=FONT_REGULAR, fontSize=7.5, leading=11),
+        "footer": ParagraphStyle("QPFooter", parent=base["Normal"], fontName=FONT_REGULAR, fontSize=7.5, alignment=1, textColor=colors.HexColor("#64748b")),
+    }
+
+
+def _qp_p(text, style):
+    text = "" if text is None else str(text)
+    return Paragraph(xml_escape(text), style)
+
+
+def _qp_section_bar(text, width, style):
+    """A single full-width shaded bar, e.g. 'CLIENT DETAILS' / 'QUOTED ITEMS' --
+    mirrors the merged section-header row in the paper template."""
+    t = Table([[_qp_p(text, style)]], colWidths=[width])
+    t.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), _DARK),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("BOX", (0, 0), (-1, -1), 0.5, _DARK),
+    ]))
+    return t
+
+
+def build_quotation_document_pdf(
+    site_name: str,
+    reference_number: Optional[str],
+    date_str: str,
+    status_label: str,
+    client_fields: Sequence[tuple],
+    items: Sequence[Sequence],
+    summary_rows: Sequence[tuple],
+    notes: Optional[str],
+    terms: Sequence[str],
+) -> bytes:
+    """
+    Builds the full letterhead-style Quotation / Checkout Receipt PDF.
+
+    client_fields: list of (label, value) pairs rendered as a 2-column x
+        N-row grid, e.g. ("Customer Name", "Fatherland").
+    items: rows already formatted as display strings, matching
+        _ITEM_HEADERS column-for-column.
+    summary_rows: list of (label, value, is_grand_total) tuples rendered
+        right-aligned, e.g. ("Subtotal", "₦2,826,000.00", False).
+    terms: plain-text lines rendered as a numbered Terms & Conditions list.
+    """
+    styles = _qp_styles()
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer, pagesize=letter,
+        leftMargin=0.5 * inch, rightMargin=0.5 * inch, topMargin=0.5 * inch, bottomMargin=0.5 * inch,
+    )
+    width = doc.width
+    elements = []
+
+    # --- Letterhead: company name / doc type (left) + quote no / date / status (right) ---
+    meta_lines = [
+        f"Quotation No: {reference_number or 'DRAFT'}",
+        f"Date: {date_str}",
+        f"Status: {status_label}",
+    ]
+    meta_text = "<br/>".join(xml_escape(line) for line in meta_lines)
+    letterhead = Table(
+        [[
+            [_qp_p(site_name, styles["company"]), _qp_p("EQUIPMENT RENTAL QUOTATION", styles["doctype"])],
+            Paragraph(meta_text, styles["meta"]),
+        ]],
+        colWidths=[width * 0.62, width * 0.38],
+    )
+    letterhead.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 0.75, _DARK),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+    ]))
+    elements.append(letterhead)
+    elements.append(Spacer(1, 0.15 * inch))
+
+    # --- Client details panel ---
+    elements.append(_qp_section_bar("CLIENT DETAILS", width, styles["section"]))
+    grid_rows = []
+    for i in range(0, len(client_fields), 2):
+        pair = client_fields[i:i + 2]
+        row = []
+        for label, value in pair:
+            row.append(_qp_p(label, styles["label"]))
+            row.append(_qp_p(value, styles["value"]))
+        if len(pair) == 1:
+            row += [Paragraph("", styles["label"]), Paragraph("", styles["value"])]
+        grid_rows.append(row)
+    client_table = Table(grid_rows, colWidths=[width * 0.16, width * 0.34] * 2)
+    client_table.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.5, _BORDER),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    elements.append(client_table)
+    elements.append(Spacer(1, 0.15 * inch))
+
+    # --- Quoted items ---
+    elements.append(_qp_section_bar("QUOTED ITEMS", width, styles["section"]))
+    header_row = [_qp_p(h, styles["itemHeader"]) for h in _ITEM_HEADERS]
+    body_rows = []
+    for row in items:
+        formatted = [
+            _qp_p(row[0], styles["itemCell"]),
+            _qp_p(row[1], styles["itemCell"]),
+            _qp_p(row[2], styles["itemCellRight"]),
+            _qp_p(row[3], styles["itemCellRight"]),
+            _qp_p(row[4], styles["itemCellRight"]),
+            _qp_p(row[5], styles["itemCellRight"]),
+        ]
+        body_rows.append(formatted)
+    item_col_widths = [width * 0.34, width * 0.16, width * 0.08, width * 0.16, width * 0.08, width * 0.18]
+    item_table = Table([header_row] + body_rows, colWidths=item_col_widths, repeatRows=1)
+    item_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), _DARK),
+        ("GRID", (0, 0), (-1, -1), 0.5, _BORDER),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, _STRIPE]),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]))
+    elements.append(item_table)
+    elements.append(Spacer(1, 0.15 * inch))
+
+    # --- Summary (right-aligned totals box, same width as the letterhead's right column) ---
+    elements.append(_qp_section_bar("SUMMARY", width, styles["section"]))
+    summary_data = []
+    for label, value, is_total in summary_rows:
+        label_style = styles["summaryTotalLabel"] if is_total else styles["summaryLabel"]
+        value_style = styles["summaryTotalValue"] if is_total else styles["summaryValue"]
+        summary_data.append([_qp_p(label, label_style), _qp_p(value, value_style)])
+    summary_table = Table(summary_data, colWidths=[width * 0.75, width * 0.25])
+    summary_row_styles = [
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("BOX", (0, 0), (-1, -1), 0.5, _BORDER),
+        ("LINEBELOW", (0, 0), (-1, -2), 0.5, _BORDER),
+    ]
+    for idx, (_, _, is_total) in enumerate(summary_rows):
+        if is_total:
+            summary_row_styles.append(("BACKGROUND", (0, idx), (-1, idx), _STRIPE))
+    summary_table.setStyle(TableStyle(summary_row_styles))
+    elements.append(summary_table)
+    elements.append(Spacer(1, 0.15 * inch))
+
+    # --- Special notes ---
+    elements.append(_qp_section_bar("SPECIAL NOTES", width, styles["section"]))
+    notes_table = Table([[_qp_p(notes or "N/A", styles["notes"])]], colWidths=[width])
+    notes_table.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 0.5, _BORDER),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+    ]))
+    elements.append(notes_table)
+    elements.append(Spacer(1, 0.15 * inch))
+
+    # --- Terms & Conditions (left) / Authorisation signature lines (right) ---
+    terms_text = "<br/>".join(f"{i}. {xml_escape(t)}" for i, t in enumerate(terms, start=1))
+    terms_para = Paragraph(terms_text, styles["terms"])
+    sig_lines = (
+        f"{'_' * 34}<br/>Authorised Signature<br/><br/>"
+        f"{'_' * 34}<br/>Customer Signature<br/><br/>"
+        f"{'_' * 34}<br/>Date Accepted"
+    )
+    sig_para = Paragraph(sig_lines, styles["value"])
+    footer_table = Table([[terms_para, sig_para]], colWidths=[width * 0.58, width * 0.42])
+    footer_table.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 0.5, _BORDER),
+        ("LINEAFTER", (0, 0), (0, 0), 0.5, _BORDER),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ]))
+    elements.append(footer_table)
+    elements.append(Spacer(1, 0.12 * inch))
+    elements.append(_qp_p(f"Thank you for choosing {site_name}.", styles["footer"]))
+
     doc.build(elements)
     return buffer.getvalue()

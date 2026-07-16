@@ -23,14 +23,14 @@
 // =============================================================================
 
 import { checkAccess, startIdleWatchdog, login, redirectByUserRole, logout, getSession } from './auth.js';
-import { closeModal, switchTab, toggleRoute, toggleCapacityEdit, toggleNameEdit, toggleDepartmentEdit, changePage, setSearch, setPerPage, openRowDetailsFromElement, initSwipeNav, initModalBackdropDismiss } from './ui.js';
+import { closeModal, switchTab, toggleRoute, toggleCapacityEdit, toggleNameEdit, toggleCategoryEdit, togglePriceEdit, changePage, setSearch, setPerPage, openRowDetailsFromElement, initSwipeNav, initModalBackdropDismiss, switchDashboardTab, initDashSwipeNav } from './ui.js';
 import { toggleTheme, initThemeToggle } from './theme.js';
 import { refreshDashboard } from './dashboard.js';
 import { initNotificationBell, toggleNotificationDropdown, closeNotificationDropdown, refreshNotifications } from './components/notifications.js';
 
 import {
   openDispatchModal, submitDispatchForm, openPropsModal, recallException,
-  saveCapacity, saveName, saveDepartment, submitExceptionForm, submitCreatePoolForm, submitCsvImportForm,
+  saveCapacity, saveName, saveCategory, savePrice, submitExceptionForm, submitCreatePoolForm, submitCsvImportForm,
   deleteAssetPool, setAssetsSearch, setAssetsPerPage, changeAssetsPage, openAssetExportModal,
   downloadCsvImportTemplate,
 } from './components/assets.js';
@@ -38,18 +38,36 @@ import {
   deleteProfile, submitCreateUserForm, setUsersSearch, setUsersPerPage, changeUsersPage,
   openResetPasswordModal, submitResetPasswordForm,
   setDeletedUsersSearch, setDeletedUsersPerPage, changeDeletedUsersPage, restoreUser,
+  openEditUserModal, submitEditUserForm,
 } from './components/users.js';
 import { exportAuditLogs, changeAuditPage, setAuditPerPage } from './components/audit.js';
 import { loadMyItems } from './components/myitems.js';
 import {
   setOutsidersSearch, setOutsidersPerPage, changeOutsidersPage,
+  openEditOutsiderModal, submitEditOutsiderForm,
 } from './components/outsiders.js';
 import {
   openCustodyModal, processReturn, updateCustodySelection, toggleSelectAllCustody,
   processAllReturns, bulkProcessReturns, openBulkExtendModal, submitBulkExtendForm,
 } from './components/custody.js';
 import { openProfileModal, submitChangePasswordForm, ROLE_LABELS } from './components/profile.js';
-import { exportMyItems, exportCustodyItems, exportAllUsers, exportAllOutsiders, exportAssetsInventory } from './components/exports.js';
+import { exportMyItems, exportCustodyItems, exportAllUsers, exportAllOutsiders, exportAssetsInventory, exportQuotation, exportQuoteDetail, exportMyQuoteDetail } from './components/exports.js';
+import {
+  initQuotationPage, addAssetToOrder, updateOrderItemQuantity, removeOrderItem,
+  loadVatSetting, submitVatSettingsForm, loadPublicConfig, submitMyQuotation,
+  initQuotesTab, setQuotesSearch, setQuotesPerPage, changeQuotesPage, openQuoteDetail,
+  updateAdminQuoteItemQuantity, removeAdminQuoteItem, saveQuoteNotes, saveQuoteDiscount, addQuoteDetailItem,
+  addQuoteOutsourcedItem, removeQuoteOutsourcedItem,
+  searchAssignUsers, assignQuoteToUser, unassignQuote,
+  switchQuotationTab, searchQuoteDetailAssets, selectQuoteDetailAsset, clearQuoteDetailAsset,
+  openCreateQuoteModal, toggleQuoteRoute, submitCreateQuote,
+  approveQuote, getCurrentQuoteId,
+  openFulfillmentDrawer, updateFulfillmentSelection, toggleSelectAllFulfillment, processFulfillmentSelected,
+  addShortfallAllocationRow, removeShortfallAllocationRow,
+  openMyQuoteDetail, updateMyQuoteItemQuantity, removeMyQuoteItem,
+  addMyQuoteDetailItem, searchMyQuoteDetailAssets, selectMyQuoteDetailAsset, clearMyQuoteDetailAsset,
+  toggleQuoteAssignAdhocForm, submitQuoteAssignAdhoc,
+} from './components/quotation.js';
 import {
   refreshBackupsPanel,
   createBackupNow,
@@ -79,10 +97,12 @@ const SERVER_PAGE_CHANGERS = {
   users: changeUsersPage,
   outsiders: changeOutsidersPage,
   deletedUsers: changeDeletedUsersPage,
+  quotes: changeQuotesPage,
 };
 
 const CLICK_ACTIONS = {
   'switch-tab': (el) => switchTab(el.dataset.tab),
+  'switch-dash-tab': (el) => switchDashboardTab(el.dataset.tab),
   'close-modal': (el) => closeModal(el.dataset.modal),
   'toggle-theme': () => toggleTheme(),
   // Mobile-only "Details" button rendered by every table's component file
@@ -93,8 +113,10 @@ const CLICK_ACTIONS = {
   'save-capacity': () => saveCapacity(),
   'toggle-name-edit': () => toggleNameEdit(),
   'save-name': () => saveName(),
-  'toggle-department-edit': () => toggleDepartmentEdit(),
-  'save-department': () => saveDepartment(),
+  'toggle-category-edit': () => toggleCategoryEdit(),
+  'save-category': () => saveCategory(),
+  'toggle-price-edit': () => togglePriceEdit(),
+  'save-price': () => savePrice(),
   'open-dispatch': (el) => openDispatchModal(parseInt(el.dataset.assetId, 10), el.dataset.assetName, parseInt(el.dataset.available, 10)),
   'open-props': (el) => openPropsModal(parseInt(el.dataset.assetId, 10)),
   'recall-exception': (el) => recallException(parseInt(el.dataset.assetId, 10), parseInt(el.dataset.exceptionId, 10)),
@@ -105,6 +127,8 @@ const CLICK_ACTIONS = {
   'delete-profile': (el) => deleteProfile(parseInt(el.dataset.userId, 10), el.dataset.userName),
   'reset-password': (el) => openResetPasswordModal(parseInt(el.dataset.userId, 10), el.dataset.userName),
   'restore-user': (el) => restoreUser(parseInt(el.dataset.userId, 10), el.dataset.userName),
+  'edit-user': (el) => openEditUserModal(parseInt(el.dataset.userId, 10)),
+  'edit-outsider': (el) => openEditOutsiderModal(parseInt(el.dataset.outsiderId, 10)),
   'delete-asset-pool': (el) => deleteAssetPool(parseInt(el.dataset.assetId, 10), el.dataset.assetName),
   'open-asset-export': () => openAssetExportModal(),
   'download-csv-template': () => downloadCsvImportTemplate(),
@@ -137,6 +161,53 @@ const CLICK_ACTIONS = {
   'export-all-outsiders': (el) => exportAllOutsiders(el.dataset.format, el),
   'export-assets-inventory': (el) => exportAssetsInventory(el.dataset.format, el),
 
+  // Self-service Equipment Quotation -- see components/quotation.js.
+  // `data-context` distinguishes the desktop table's inputs from the
+  // mobile card layout's ("-m" suffixed) copies of the same asset row, so
+  // Add always reads the quantity/date inputs actually visible to the
+  // person who clicked it.
+  'add-to-order': (el) => addAssetToOrder(parseInt(el.dataset.assetId, 10), el.dataset.context || ''),
+  'remove-order-item': (el) => removeOrderItem(parseInt(el.dataset.itemId, 10)),
+  'export-quotation': (el) => exportQuotation(el),
+  'submit-quotation': (el) => submitMyQuotation(el),
+
+  // Admin/Manager "Quotes" tab -- see components/quotation.js.
+  'open-quote-detail': (el) => openQuoteDetail(parseInt(el.dataset.quoteId, 10)),
+  'remove-admin-quote-item': (el) => removeAdminQuoteItem(parseInt(el.dataset.itemId, 10)),
+  'remove-quote-outsourced-item': (el) => removeQuoteOutsourcedItem(parseInt(el.dataset.outsourcedItemId, 10)),
+  'save-quote-notes': () => saveQuoteNotes(),
+  'save-quote-discount': () => saveQuoteDiscount(),
+  'add-quote-detail-item': () => addQuoteDetailItem(),
+  'add-quote-outsourced-item': () => addQuoteOutsourcedItem(),
+  'assign-quote-to-user': (el) => assignQuoteToUser(parseInt(el.dataset.userId, 10)),
+  'unassign-quote': () => unassignQuote(),
+  'toggle-quote-assign-adhoc': () => toggleQuoteAssignAdhocForm(),
+  'submit-quote-assign-adhoc': () => submitQuoteAssignAdhoc(),
+  'export-quote-detail': (el) => exportQuoteDetail(el),
+  'export-my-quote-detail': (el) => exportMyQuoteDetail(el),
+  'select-quote-detail-asset': (el) => selectQuoteDetailAsset(parseInt(el.dataset.assetId, 10), el.dataset.assetName),
+  'clear-quote-detail-asset': () => clearQuoteDetailAsset(),
+  'open-create-quote-modal': () => openCreateQuoteModal(),
+  'submit-create-quote': (el) => submitCreateQuote(el),
+
+  // Quote-to-Checkout workflow: approve (master queue row + Quote Detail
+  // modal's own button) and the Fulfillment Drawer's bulk physical
+  // checkout -- see components/quotation.js.
+  'approve-quote': (el) => approveQuote(parseInt(el.dataset.quoteId, 10)),
+  'approve-quote-detail': () => approveQuote(getCurrentQuoteId()),
+  'open-fulfillment-drawer': () => openFulfillmentDrawer(),
+  'process-fulfillment-selected': (el) => processFulfillmentSelected(el),
+  'add-shortfall-row': (el) => addShortfallAllocationRow(el),
+  'remove-shortfall-row': (el) => removeShortfallAllocationRow(el),
+
+  // Self-service "My Order" / "My Quotes" tabs -- see components/quotation.js.
+  'switch-quotation-tab': (el) => switchQuotationTab(el.dataset.tab),
+  'open-my-quote-detail': (el) => openMyQuoteDetail(parseInt(el.dataset.quotationId, 10)),
+  'remove-my-quote-item': (el) => removeMyQuoteItem(parseInt(el.dataset.itemId, 10)),
+  'add-my-quote-detail-item': () => addMyQuoteDetailItem(),
+  'select-my-quote-detail-asset': (el) => selectMyQuoteDetailAsset(parseInt(el.dataset.assetId, 10), el.dataset.assetName),
+  'clear-my-quote-detail-asset': () => clearMyQuoteDetailAsset(),
+
   // The audit ledger pages itself server-side (true limit/offset re-fetch
   // on every click) rather than through the shared client-side
   // tableState/changePage() machinery used by My Items -- see
@@ -160,7 +231,13 @@ const CHANGE_ACTIONS = {
   'update-custody-selection': () => updateCustodySelection(),
   'toggle-select-all-custody': (el) => toggleSelectAllCustody(el),
   'toggle-route': () => toggleRoute(),
+  'toggle-quote-route': () => toggleQuoteRoute(),
   'set-audit-perpage': (el) => setAuditPerPage(el.value),
+  'update-order-qty': (el) => updateOrderItemQuantity(parseInt(el.dataset.itemId, 10), el.value),
+  'update-my-quote-item-qty': (el) => updateMyQuoteItemQuantity(parseInt(el.dataset.itemId, 10), el.value),
+  'update-admin-quote-qty': (el) => updateAdminQuoteItemQuantity(parseInt(el.dataset.itemId, 10), el.value),
+  'toggle-fulfillment-selection': () => updateFulfillmentSelection(),
+  'toggle-select-all-fulfillment': (el) => toggleSelectAllFulfillment(el),
 };
 
 function wireDelegatedEvents() {
@@ -208,6 +285,7 @@ function wireTableControls() {
     { searchId: 'userSearchInput', perPageId: 'userPerPageSelect', setSearch: setUsersSearch, setPerPage: setUsersPerPage },
     { searchId: 'outsiderSearchInput', perPageId: 'outsiderPerPageSelect', setSearch: setOutsidersSearch, setPerPage: setOutsidersPerPage },
     { searchId: 'deletedUserSearchInput', perPageId: 'deletedUserPerPageSelect', setSearch: setDeletedUsersSearch, setPerPage: setDeletedUsersPerPage },
+    { searchId: 'quotesSearchInput', perPageId: 'quotesPerPageSelect', setSearch: setQuotesSearch, setPerPage: setQuotesPerPage },
   ];
   serverDrivenControls.forEach(({ searchId, perPageId, setSearch: setServerSearch, setPerPage: setServerPerPage }) => {
     const searchInput = document.getElementById(searchId);
@@ -220,7 +298,8 @@ function wireTableControls() {
     }
   });
 
-  // My Items: unchanged client-side path.
+  // My Items + Quotation Catalog: client-side path (small, bounded lists --
+  // see js/ui.js's tableState).
   const myItemsSearchInput = document.getElementById('myItemsSearchInput');
   if (myItemsSearchInput) {
     myItemsSearchInput.addEventListener('input', () => setSearch('myItems', myItemsSearchInput.value));
@@ -228,6 +307,38 @@ function wireTableControls() {
   const myItemsPerPageSelect = document.getElementById('myItemsPerPageSelect');
   if (myItemsPerPageSelect) {
     myItemsPerPageSelect.addEventListener('change', () => setPerPage('myItems', myItemsPerPageSelect.value));
+  }
+
+  const quotationCatalogSearchInput = document.getElementById('quotationCatalogSearchInput');
+  if (quotationCatalogSearchInput) {
+    quotationCatalogSearchInput.addEventListener('input', () => setSearch('quotationCatalog', quotationCatalogSearchInput.value));
+  }
+  const quotationCatalogPerPageSelect = document.getElementById('quotationCatalogPerPageSelect');
+  if (quotationCatalogPerPageSelect) {
+    quotationCatalogPerPageSelect.addEventListener('change', () => setPerPage('quotationCatalog', quotationCatalogPerPageSelect.value));
+  }
+
+  // Admin/Manager Quotes tab detail modal: "Assign to user" search box --
+  // not tied to a table, just a debounced typeahead (see components/
+  // quotation.js's searchAssignUsers()).
+  const quoteAssignSearchInput = document.getElementById('quoteAssignSearchInput');
+  if (quoteAssignSearchInput) {
+    quoteAssignSearchInput.addEventListener('input', () => searchAssignUsers(quoteAssignSearchInput.value));
+  }
+
+  // Quote Detail modal: "Add another asset" search box (replaces the old
+  // long dropdown) -- see components/quotation.js's searchQuoteDetailAssets().
+  const quoteDetailAssetSearchInput = document.getElementById('quoteDetailAssetSearchInput');
+  if (quoteDetailAssetSearchInput) {
+    quoteDetailAssetSearchInput.addEventListener('input', () => searchQuoteDetailAssets(quoteDetailAssetSearchInput.value));
+  }
+
+  // My Quote Detail modal (self-service, staff.html/customer.html): its own
+  // "Add item" search box -- same pattern as quoteDetailAssetSearchInput
+  // above, just scoped to the requester/assignee's own quote.
+  const myQuoteDetailAssetSearchInput = document.getElementById('myQuoteDetailAssetSearchInput');
+  if (myQuoteDetailAssetSearchInput) {
+    myQuoteDetailAssetSearchInput.addEventListener('input', () => searchMyQuoteDetailAssets(myQuoteDetailAssetSearchInput.value));
   }
 }
 
@@ -315,10 +426,20 @@ document.addEventListener('DOMContentLoaded', () => {
   startIdleWatchdog();
   wireDelegatedEvents();
   initThemeToggle();
+  // GET /config/public needs no auth, and every page -- including the
+  // unauthenticated login page (index.html) -- shows the deployment's
+  // brand name in its navbar/login header and <title>, so this runs here
+  // unconditionally rather than only inside the `if (session)` block
+  // below. See components/quotation.js's loadPublicConfig() /
+  // js/ui.js's applySiteName().
+  loadPublicConfig();
   // Only does anything on admin.html/manager.html, where the Asset
   // Inventory / User Directory / Ad-Hoc Directory tabs exist -- a no-op
   // (returns immediately) on every other page.
   initSwipeNav();
+  // Only does anything on staff.html/customer.html, where the My Items /
+  // Equipment Quotation top-level tabs exist -- a no-op everywhere else.
+  initDashSwipeNav();
   // App-wide (every page with a modal) -- lets a click on the dimmed
   // backdrop behind any modal close it, same as its Cancel/X button.
   initModalBackdropDismiss();
@@ -372,6 +493,12 @@ document.addEventListener('DOMContentLoaded', () => {
   const resetPasswordForm = document.getElementById('resetPasswordForm');
   if (resetPasswordForm) resetPasswordForm.addEventListener('submit', submitResetPasswordForm);
 
+  const editUserForm = document.getElementById('editUserForm');
+  if (editUserForm) editUserForm.addEventListener('submit', submitEditUserForm);
+
+  const editOutsiderForm = document.getElementById('editOutsiderForm');
+  if (editOutsiderForm) editOutsiderForm.addEventListener('submit', submitEditOutsiderForm);
+
   const dispatchForm = document.getElementById('dispatchForm');
   if (dispatchForm) dispatchForm.addEventListener('submit', submitDispatchForm);
 
@@ -389,6 +516,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const denyReasonForm = document.getElementById('denyReasonForm');
   if (denyReasonForm) denyReasonForm.addEventListener('submit', submitDenyReasonForm);
+
+  const vatSettingsForm = document.getElementById('vatSettingsForm');
+  if (vatSettingsForm) {
+    vatSettingsForm.addEventListener('submit', submitVatSettingsForm);
+    loadVatSetting();
+  }
 
   const exportBtn = document.getElementById('exportAuditBtn');
   if (exportBtn) exportBtn.addEventListener('click', () => exportAuditLogs('csv'));
@@ -433,8 +566,21 @@ document.addEventListener('DOMContentLoaded', () => {
       // so trigger it directly here instead.
       refreshNotifications();
     }
+    // Self-service Equipment Quotation panel -- staff.html/customer.html
+    // only (see components/quotation.js). Independent of the My Items
+    // table above, but lives on the same two pages.
+    if (document.getElementById('quotationCatalogBody')) {
+      initQuotationPage();
+    }
     if (document.getElementById('backupTableBody')) {
       refreshBackupsPanel();
+    }
+    // Admin/Manager "Quotes" tab -- see components/quotation.js. Loads
+    // lazily/independently of the Asset Inventory/User Directory tables
+    // above, since it lives behind its own tab and doesn't need to block
+    // the rest of the dashboard's initial render.
+    if (document.getElementById('quotesTableBody')) {
+      initQuotesTab();
     }
 
     // Keep the bell's badge count reasonably fresh even if the person just

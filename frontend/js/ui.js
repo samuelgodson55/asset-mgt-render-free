@@ -304,17 +304,19 @@ export function switchTab(tab) {
   const assets = document.getElementById('assetInventorySection');
   const users = document.getElementById('userDirectorySection');
   const adhoc = document.getElementById('adhocDirectorySection');
+  const quotes = document.getElementById('quotesSection');
   const logs = document.getElementById('auditBackupsSection');
   const tabAssets = document.getElementById('tabAssets');
   const tabUsers = document.getElementById('tabUsers');
   const tabAdhoc = document.getElementById('tabAdhoc');
+  const tabQuotes = document.getElementById('tabQuotes');
   const tabLogs = document.getElementById('tabLogs');
   if (!assets || !users) return;
 
   const activeCls = ['border-blue-500', 'text-slate-50', 'font-semibold'];
   const inactiveCls = ['border-transparent', 'text-slate-500', 'font-medium'];
-  const allTabs = [tabAssets, tabUsers, tabAdhoc, tabLogs].filter(Boolean);
-  const allSections = [assets, users, adhoc, logs].filter(Boolean);
+  const allTabs = [tabAssets, tabUsers, tabAdhoc, tabQuotes, tabLogs].filter(Boolean);
+  const allSections = [assets, users, adhoc, quotes, logs].filter(Boolean);
 
   allSections.forEach(s => s.classList.add('hidden'));
   allTabs.forEach(t => { t.classList.add(...inactiveCls); t.classList.remove(...activeCls); });
@@ -328,6 +330,10 @@ export function switchTab(tab) {
     activeSection = adhoc;
     adhoc.classList.remove('hidden');
     tabAdhoc.classList.add(...activeCls); tabAdhoc.classList.remove(...inactiveCls);
+  } else if (tab === 'quotes' && quotes) {
+    activeSection = quotes;
+    quotes.classList.remove('hidden');
+    tabQuotes.classList.add(...activeCls); tabQuotes.classList.remove(...inactiveCls);
   } else if (tab === 'logs' && logs) {
     activeSection = logs;
     logs.classList.remove('hidden');
@@ -357,10 +363,13 @@ export function switchTab(tab) {
 // SWIPE-BETWEEN-TABS (mobile)
 // -----------------------------------------------------------------------------
 // admin.html / manager.html are the only pages with this tabbed nav (see
-// switchTab() above) -- admin.html has 4 tabs (Asset Inventory / User
-// Directory / Ad-Hoc Directory / Audit & Backups), manager.html only 3
-// (no Audit & Backups tab there -- see admin.html's own comment on
-// #auditBackupsSection for why backups are Super Admin/Admin-only).
+// switchTab() above) -- both have 5 tabs (Asset Inventory / User
+// Directory / Ad-Hoc Directory / Quotes / Audit Logs). manager.html's
+// #auditBackupsSection only contains the Audit Trail table -- no System
+// Backups panel next to it, since backups stay Super Admin/Admin-only
+// (see admin.html's own comment on #auditBackupsSection). It reuses the
+// same section id as admin.html purely so this shared switchTab()/
+// getSwipeTabOrder() logic below works on both pages unmodified.
 // getSwipeTabOrder()'s `document.getElementById` filter below means both
 // pages "just work" here without any per-page branching; on every other
 // page the `#tabAssets` lookup fails fast and both functions are no-ops.
@@ -370,11 +379,11 @@ export function switchTab(tab) {
 // exist for every role), rather than a hardcoded list, so it can't ever
 // try to switch to a tab that isn't there.
 function getSwipeTabOrder() {
-  return ['assets', 'users', 'adhoc', 'logs'].filter(t => document.getElementById(`tab${t[0].toUpperCase()}${t.slice(1)}`));
+  return ['assets', 'users', 'adhoc', 'quotes', 'logs'].filter(t => document.getElementById(`tab${t[0].toUpperCase()}${t.slice(1)}`));
 }
 
 function getActiveSwipeTab(order) {
-  const sectionIds = { assets: 'assetInventorySection', users: 'userDirectorySection', adhoc: 'adhocDirectorySection', logs: 'auditBackupsSection' };
+  const sectionIds = { assets: 'assetInventorySection', users: 'userDirectorySection', adhoc: 'adhocDirectorySection', quotes: 'quotesSection', logs: 'auditBackupsSection' };
   return order.find(t => {
     const el = document.getElementById(sectionIds[t]);
     return el && !el.classList.contains('hidden');
@@ -444,6 +453,86 @@ export function initSwipeNav() {
   }, { passive: true });
 }
 
+// -----------------------------------------------------------------------------
+// TOP-LEVEL "My Items" / "Equipment Quotation" TABS (staff.html/customer.html)
+// -----------------------------------------------------------------------------
+// Same visual language and swipe-gesture pattern as switchTab()/initSwipeNav()
+// above (admin.html/manager.html) and components/quotation.js's own
+// switchQuotationTab() (the Order/History pair *inside* the Equipment
+// Quotation card) -- this is a third, independent pair scoped to the two
+// top-level sections on the customer/staff dashboards: #dashItemsSection
+// ("My Checked-Out Items") and #dashQuotationSection ("Equipment
+// Quotation", which itself has its own Order/History tabs nested inside).
+// Kept separate from switchTab() rather than generalizing it further since
+// admin/manager's tab set and this one never appear on the same page.
+// =============================================================================
+const DASH_TAB_ORDER = ['items', 'quotation'];
+
+export function switchDashboardTab(tab) {
+  const itemsSection = document.getElementById('dashItemsSection');
+  const quotationSection = document.getElementById('dashQuotationSection');
+  const tabItems = document.getElementById('dashTabItems');
+  const tabQuotation = document.getElementById('dashTabQuotation');
+  if (!itemsSection || !quotationSection) return;
+
+  const activeCls = ['border-blue-500', 'text-slate-50', 'font-semibold'];
+  const inactiveCls = ['border-transparent', 'text-slate-500', 'font-medium'];
+  const isItems = tab !== 'quotation';
+
+  itemsSection.classList.toggle('hidden', !isItems);
+  quotationSection.classList.toggle('hidden', isItems);
+  if (tabItems) { tabItems.classList.remove(...activeCls, ...inactiveCls); tabItems.classList.add(...(isItems ? activeCls : inactiveCls)); }
+  if (tabQuotation) { tabQuotation.classList.remove(...activeCls, ...inactiveCls); tabQuotation.classList.add(...(isItems ? inactiveCls : activeCls)); }
+
+  updateDashSwipeDots(isItems ? 'items' : 'quotation');
+
+  const activeSection = isItems ? itemsSection : quotationSection;
+  activeSection.classList.remove('swipe-content-enter');
+  void activeSection.offsetWidth; // force reflow so the CSS animation re-plays
+  activeSection.classList.add('swipe-content-enter');
+}
+
+function updateDashSwipeDots(activeTab) {
+  const strip = document.getElementById('dashSwipeDots');
+  if (!strip) return;
+  strip.innerHTML = DASH_TAB_ORDER.map(t =>
+    `<span class="swipe-dot${t === activeTab ? ' is-active' : ''}"></span>`
+  ).join('');
+}
+
+// Same conservative swipe heuristic as initSwipeNav()/initQuotationSwipeNav()
+// above -- a no-op on any page without #dashSwipeArea (i.e. every page
+// except staff.html/customer.html).
+export function initDashSwipeNav() {
+  const swipeArea = document.getElementById('dashSwipeArea');
+  if (!swipeArea) return;
+  updateDashSwipeDots('items');
+
+  const H_THRESHOLD = 60;
+  let startX = 0, startY = 0, tracking = false;
+
+  swipeArea.addEventListener('touchstart', (event) => {
+    if (event.touches.length !== 1) { tracking = false; return; }
+    if (document.querySelector('.fixed.flex[id$="Modal"]')) { tracking = false; return; }
+    startX = event.touches[0].clientX;
+    startY = event.touches[0].clientY;
+    tracking = true;
+  }, { passive: true });
+
+  swipeArea.addEventListener('touchend', (event) => {
+    if (!tracking) return;
+    tracking = false;
+    const dx = event.changedTouches[0].clientX - startX;
+    const dy = event.changedTouches[0].clientY - startY;
+    if (Math.abs(dx) < H_THRESHOLD || Math.abs(dx) < Math.abs(dy) * 1.3) return;
+
+    const quotationSection = document.getElementById('dashQuotationSection');
+    const currentlyOnItems = quotationSection ? quotationSection.classList.contains('hidden') : true;
+    if (dx < 0 && currentlyOnItems) switchDashboardTab('quotation'); // swipe left -> next tab
+    else if (dx > 0 && !currentlyOnItems) switchDashboardTab('items'); // swipe right -> previous tab
+  }, { passive: true });
+}
+
 export function toggleRoute() {
   const val = document.getElementById('routeSelect').value;
   document.getElementById('staffField').classList.toggle('hidden', val !== 'staff');
@@ -471,13 +560,98 @@ export function toggleNameEdit() {
 }
 
 // Same show/hide toggle as toggleNameEdit() above, for the Properties
-// Hub's department field (admin.html only -- see components/assets.js's
-// saveDepartment()/openPropsModal()).
-export function toggleDepartmentEdit() {
-  document.getElementById('deptDisplay').classList.toggle('hidden');
-  const edit = document.getElementById('deptEdit');
+// Hub's category field (admin.html only -- see components/assets.js's
+// saveCategory()/openPropsModal()).
+export function toggleCategoryEdit() {
+  document.getElementById('categoryDisplay').classList.toggle('hidden');
+  const edit = document.getElementById('categoryEdit');
   edit.classList.toggle('hidden');
   edit.classList.toggle('flex');
+}
+
+// Same show/hide toggle as toggleCategoryEdit() above, for the
+// Properties Hub's price field (admin.html only -- see components/
+// assets.js's savePrice()/openPropsModal()).
+export function togglePriceEdit() {
+  document.getElementById('priceDisplay').classList.toggle('hidden');
+  const edit = document.getElementById('priceEdit');
+  edit.classList.toggle('hidden');
+  edit.classList.toggle('flex');
+}
+
+// Formats a numeric price (or null/undefined) as a "₦1,899.00"-style
+// string for display -- shared by the Asset Inventory table row subline,
+// the Properties Hub, the Register New Inventory Pool form's live
+// preview, and the Quotation Catalog/My Order tables, so the format never
+// drifts between them. Mirrors the backend's services/export_service.py
+// format_money() but adds the thousands separator Intl.NumberFormat gives
+// us for free.
+//
+// The active currency defaults to Naira but is overridable at runtime via
+// setCurrencyCode() -- see components/quotation.js's loadPublicConfig(),
+// which reads the real deployment value from GET /config/public
+// (settings.CURRENCY_CODE, config.py) once on page load so this never has
+// to be hardcoded here.
+let _currencyCode = 'NGN';
+
+export function setCurrencyCode(code) {
+  if (code) _currencyCode = code;
+}
+
+// The <title> suffix ("— Login", "— My Assets", "— Manager", "— Super
+// Admin") is baked into each page's own <title> tag and never changes at
+// runtime -- captured once, the first time applySiteName() runs, so a
+// second call (e.g. a re-fetch) never accidentally chains "Acme — Login
+// — Login" onto itself.
+let _titleSuffix = null;
+let _titleSuffixCaptured = false;
+
+// Applies settings.SITE_NAME (read once from GET /config/public --
+// see components/quotation.js's loadPublicConfig(), called on EVERY page
+// load including the unauthenticated login page) to the two places the
+// deployment's name is shown on screen: the navbar/login brand (the
+// `#siteBrandName` element present in index.html/admin.html/manager.html/
+// staff.html/customer.html) and the browser tab's <title>. Keeps the
+// two-tone "Word <muted>Word</muted>" styling the hardcoded "Snipe-IT
+// Lite" brand used by splitting on the LAST space in the configured name
+// (e.g. "Acme Corp" -> bold "Acme" + muted "Corp"); a single-word name
+// just renders as one bold word, no muted half. A missing/empty
+// site_name is a no-op -- whatever's already in the markup (the
+// "Snipe-IT Lite" default) stays put rather than being blanked out.
+export function applySiteName(siteName) {
+  if (!siteName) return;
+  const trimmed = String(siteName).trim();
+  if (!trimmed) return;
+
+  const brandEl = document.getElementById('siteBrandName');
+  if (brandEl) {
+    const lastSpace = trimmed.lastIndexOf(' ');
+    if (lastSpace === -1) {
+      brandEl.textContent = trimmed;
+    } else {
+      const lead = trimmed.slice(0, lastSpace);
+      const tail = trimmed.slice(lastSpace + 1);
+      brandEl.innerHTML = `${escapeHtml(lead)} <span class="font-medium text-slate-400">${escapeHtml(tail)}</span>`;
+    }
+  }
+
+  if (!_titleSuffixCaptured) {
+    const parts = document.title.split(' — ');
+    _titleSuffix = parts.length > 1 ? parts.slice(1).join(' — ') : null;
+    _titleSuffixCaptured = true;
+  }
+  document.title = _titleSuffix ? `${trimmed} — ${_titleSuffix}` : trimmed;
+}
+
+export function formatPrice(price) {
+  if (price === null || price === undefined) return null;
+  try {
+    return new Intl.NumberFormat('en-NG', { style: 'currency', currency: _currencyCode }).format(price);
+  } catch (e) {
+    // Unknown/unsupported currency code -- fall back to a plain number
+    // rather than letting Intl throw and break the whole render.
+    return `${_currencyCode} ${Number(price).toFixed(2)}`;
+  }
 }
 
 // =============================================================================
@@ -516,6 +690,15 @@ export function toggleDepartmentEdit() {
 // =============================================================================
 export const tableState = {
   myItems: { raw: [], search: '', page: 1, perPage: 5 },
+  // Self-service Equipment Quotation catalog (staff.html/customer.html) --
+  // like My Items, this is a small, bounded list (every active asset pool)
+  // so it uses the same fetch-once-then-filter-in-memory approach rather
+  // than true server-side search/pagination. See components/quotation.js.
+  // Default is 1 (not 5) at the user's request -- the catalog rows-per-page
+  // selector on staff.html/customer.html only offers 1/3/5 (see the
+  // #quotationCatalogPerPageSelect markup there) instead of the usual
+  // 5/10/25/50 used elsewhere, so this needs to match its default option.
+  quotationCatalog: { raw: [], search: '', page: 1, perPage: 1 },
 };
 
 // Maps a table key to the function that should re-render it. Each

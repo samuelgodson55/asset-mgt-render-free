@@ -71,6 +71,7 @@ from api.outsiders import router as outsiders_router
 from api.checkouts import router as checkouts_router
 from api.audit import router as audit_router
 from api.backup import router as backup_router
+from api.quotations import router as quotations_router
 
 # ---------------------------------------------------------------------------
 # STRUCTURED LOGGING -- configure this FIRST, before anything else in the
@@ -112,11 +113,37 @@ app = FastAPI(
 # sections).
 @app.on_event("startup")
 def on_startup() -> None:
-    if settings.AUTO_INIT_DB:
-        logger.info("AUTO_INIT_DB is enabled -- ensuring tables exist.")
-        init_db()
-    else:
-        logger.info("AUTO_INIT_DB is disabled -- skipping create_all(). Run 'alembic upgrade head' instead.")
+    # BUG FIX: wrap the first real database touch in a try/except that logs
+    # a clear, actionable diagnostic before re-raising. Previously, if
+    # DATABASE_URL pointed at something unreachable (wrong host, firewall
+    # not open yet, credentials wrong, sslmode missing/wrong for a managed
+    # Postgres that requires it -- see .env.azure.example), this call would
+    # raise a raw SQLAlchemy/psycopg2 traceback with no indication of WHAT
+    # to check, straight into the startup event where it's easy to miss
+    # amid everything else in a production log stream. We still fail fast
+    # (a container that can't reach its database should not silently start
+    # serving requests) -- this only makes the failure legible.
+    try:
+        if settings.AUTO_INIT_DB:
+            logger.info("AUTO_INIT_DB is enabled -- ensuring tables exist.")
+            init_db()
+        else:
+            logger.info("AUTO_INIT_DB is disabled -- skipping create_all(). Run 'alembic upgrade head' instead.")
+    except Exception:
+        logger.error(
+            "Could not reach the database at startup. Common causes: (1) "
+            "DATABASE_URL is wrong/unset -- check host, port, credentials, "
+            "and database name; (2) a managed Postgres (Azure Flexible "
+            "Server, Render, etc.) requires '?sslmode=require' in "
+            "DATABASE_URL and it's missing -- see .env.azure.example; (3) "
+            "a firewall/network rule is blocking this container's outbound "
+            "IP -- see infra/main.bicep's postgresFirewallAzure rule for "
+            "the Azure case; (4) the database server isn't up yet -- if "
+            "you're on docker-compose, confirm the 'db' service is healthy. "
+            "Refusing to continue starting up.",
+            exc_info=True,
+        )
+        raise
 
     if settings.AUTO_SEED_DEMO_DATA:
         if settings.is_production:
@@ -275,6 +302,7 @@ app.include_router(outsiders_router, prefix="/api")
 app.include_router(checkouts_router, prefix="/api")
 app.include_router(audit_router, prefix="/api")
 app.include_router(backup_router, prefix="/api")
+app.include_router(quotations_router, prefix="/api")
 
 # ---------------------------------------------------------------------------
 # STATIC FRONTEND (free-tier single-service deployment only)

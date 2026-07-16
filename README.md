@@ -102,7 +102,7 @@ who uses it.
 - **Bulk import via CSV** — upload a spreadsheet to create many pools at
   once. A "Sample CSV" download sits right next to the import drop zone
   (client-side generated, no round trip) with the exact `name` /
-  `total_quantity` / `department` columns pre-filled with example rows,
+  `total_quantity` / `category` columns pre-filled with example rows,
   so there's a working template to copy your own inventory sheet into
   instead of guessing at column names. Files over 5 MiB are rejected
   before parsing (denial-of-service protection). Malformed rows are
@@ -278,6 +278,69 @@ the app locally.
   Through The App](#how-a-request-flows-through-the-app) and
   `services/search_utils.py` for how the search matching works.
 
+### Equipment Quotations (Quote-to-Checkout)
+
+A self-service "shopping cart" for equipment rental requests, built on
+top of the Asset Inventory, with a full request → approve → fulfill
+workflow behind it. See `backend/services/quotation_service.py` and
+`frontend/js/components/quotation.js` for the implementation.
+
+**Staff / Customer, self-service:**
+- **Browse the Asset Catalog** (`GET /assets/catalog`) — a read-only view
+  of every active asset pool showing name, category, and day-rate
+  price. Stock levels (available quantity, in/out-of-stock) are hidden
+  by default — see `CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER` below — since a
+  Staff/Customer account doesn't need to see live inventory to request
+  equipment.
+- **Build an order** — add items with a quantity and a start/due date to
+  one standing draft order ("My Order"). Editing a quantity or removing a
+  line updates the running subtotal/VAT/total immediately; pricing is
+  always read live off the current asset price and the global VAT
+  setting, never snapshotted, so an Admin's price/VAT edit is reflected
+  the next time the cart is opened.
+- **Export as PDF** — download the current draft as a branded PDF (asset,
+  category, quantity, dates, VAT, total) to share with a manager
+  offline, before ever submitting it.
+- **Submit the order** — turns the draft into a permanent, ID-tagged
+  Quotation (e.g. `QT-000001`) an Admin/Manager can look up. It becomes
+  read-only to view in "My Order" history, though the requester can still
+  adjust quantities or remove lines on their own submitted quote while it
+  sits in the initial "submitted" state — an Admin/Manager takes over
+  edits from "Approved" onward. Adding a new item afterward starts a
+  fresh draft, exactly like the old always-one-cart behavior.
+
+**Admin / Manager, the "Quotes" tab:**
+- **Look up any submitted Quotation** by its reference number or the
+  requester's name/email, or start a brand-new one directly on someone's
+  behalf.
+- **Adjust it** — change quantities, remove lines, add/remove a
+  **not-in-inventory line** (a specialty rental sourced externally, with
+  its own one-off price — visible to the requester but only ever
+  editable by an Admin/Manager), edit internal notes, and assign the
+  quote to a specific user (or an Ad-Hoc Individual who has no login).
+- **Approve** — flips a Quotation to "Approved / Ready for Pickup" and
+  locks it against further item/notes/assignment edits, by anyone.
+- **Fulfill (the Fulfillment Drawer)** — bulk physical checkout: turns
+  every line on an approved Quotation into a real `AssetCheckout` in one
+  atomic transaction, evaluating and deducting stock only at this exact
+  moment (never earlier in the workflow), and marks the Quotation
+  fulfilled.
+- **Export as PDF** — the same branded PDF export, available for any
+  Quotation by ID.
+
+**Global settings (Admin/Super Admin only):**
+- **VAT percentage** — one editable value applied to every Quotation's
+  total, everywhere, immediately.
+- **`CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER`** (default `false`) — whether
+  Staff/Customer accounts can see stock availability in the catalog. A
+  Manager/Admin/Super Admin's own Asset Inventory view is unaffected
+  either way.
+- **`CURRENCY_CODE`** (default `NGN`) and **`SITE_NAME`** — the currency
+  applied to every price shown/exported, and the deployment's brand name
+  shown in the navbar/login header, `<title>`, AND the letterhead printed
+  on every Quotation PDF. See [Environment Variables
+  Reference](#environment-variables-reference).
+
 ### Exporting Data (all roles, scoped by permission)
 
 Everyone can export the data they're allowed to see, as **CSV** (for
@@ -379,14 +442,21 @@ Click your name in the navbar on any dashboard to:
   Served by an nginx reverse proxy built from
   [`nginx/Dockerfile`](nginx/Dockerfile) (see
   [Deploying Across Environments](#deploying-across-environments-nginx-reverse-proxy)).
-- **Infra:** Docker Compose, 5 services: `db` (Postgres), `redis`
-  (Celery broker/result backend, not exposed to the host), `backend`
+- **Infra:** Docker Compose, 6 services: `db` (Postgres), `redis`
+  (Celery broker/result backend, and the shared counter store for the
+  Redis-backed login rate limiter — see [Security
+  Model](#security-model) — not exposed to the host), `backend`
   (FastAPI/uvicorn, not exposed to the host), `worker` (Celery — builds
-  audit-ledger CSV/PDF exports, sends every email notification, and runs
-  the embedded Celery Beat scheduler for the daily overdue AND due-soon
-  digests, all out-of-band; not exposed to the host), `frontend` (nginx —
-  serves the static site AND reverse-proxies `/api/*` to `backend`, the
-  only publicly-exposed service).
+  audit-ledger/quotation CSV/PDF exports and sends every email
+  notification, out-of-band; can be scaled to multiple replicas during
+  peak use — see `docker-compose.yml`'s comments and
+  [`DEPLOYMENT.md`](DEPLOYMENT.md)), `beat` (Celery Beat — runs the daily
+  overdue AND due-soon scheduled digests; deliberately kept as its own
+  single, never-scaled service so a scaled-up `worker` never fires the
+  same digest more than once — see the comment at the top of the `beat`
+  service in `docker-compose.yml`), `frontend` (nginx — serves the static
+  site AND reverse-proxies `/api/*` to `backend`, the only
+  publicly-exposed service).
 
 Because `frontend/css/tailwind.css` is a plain committed file (not
 generated inside the Docker build), **editing an `.html` or `.js` file
@@ -413,7 +483,11 @@ snipe-it-lite/
 │                                          # Free-plan target (works around
 │                                          # Free's lack of preDeployCommand)
 │
-├── docker-compose.yml        # 5 services: db, redis, backend, worker, frontend
+├── docker-compose.yml        # 6 services: db, redis, backend, worker, beat,
+│                                # frontend -- worker/beat are split apart
+│                                # specifically so worker can be scaled to
+│                                # multiple replicas without duplicating the
+│                                # scheduled digest jobs (see DEPLOYMENT.md)
 ├── render.yaml                # Render Blueprint (free-plan shape: db + redis +
 │                                # one combined web service) -- see "Deploying
 │                                # Across Environments" section above
@@ -451,8 +525,26 @@ snipe-it-lite/
 │   │                                        # (producer) and `worker` (consumer)
 │   ├── requirements.txt                  # Python dependencies
 │   ├── Dockerfile                         # Backend container build (also used,
-│   │                                        # unmodified, by the `worker` service --
-│   │                                        # see docker-compose.yml)
+│   │                                        # unmodified, by the `worker` and
+│   │                                        # `beat` services -- see docker-compose.yml)
+│   ├── alembic.ini                         # Alembic config (points at alembic/)
+│   │
+│   ├── scripts/                    # One-off/manual admin scripts -- never run
+│   │   │                             # by Docker automatically
+│   │   └── gdrive_oauth_setup.py     # Interactive, run-once helper that
+│   │                                   # exchanges a downloaded Google OAuth
+│   │                                   # client JSON for a long-lived refresh
+│   │                                   # token -- prints the three
+│   │                                   # BACKUP_GDRIVE_OAUTH_* env values to
+│   │                                   # paste into .env. See "Backups" below.
+│   │
+│   ├── assets/                     # Static binary assets bundled INTO the
+│   │   │                             # backend image (not user-uploaded data)
+│   │   └── fonts/
+│   │       ├── DejaVuSans.ttf         # Unicode-capable fonts `reportlab` embeds
+│   │       └── DejaVuSans-Bold.ttf     # into every PDF export so non-ASCII
+│   │                                    # currency symbols (e.g. Naira "₦")
+│   │                                    # render correctly instead of as boxes
 │   │
 │   ├── tasks/                     # Celery tasks -- run on the `worker` container
 │   │   ├── export_tasks.py          # generate_audit_export(): builds the CSV/PDF
@@ -470,9 +562,22 @@ snipe-it-lite/
 │   │
 │   ├── api/                       # Thin FastAPI routers (HTTP layer only)
 │   │   ├── auth.py, assets.py, users.py, outsiders.py, checkouts.py, audit.py
+│   │   ├── backup.py                  # System Backups panel -- status, list,
+│   │   │                                # create, download, delete, restore
+│   │   └── quotations.py               # Self-service Asset Catalog + the
+│   │                                      # whole Equipment Quotation /
+│   │                                      # quote-to-checkout workflow (see
+│   │                                      # "Equipment Quotations" below)
 │   │
 │   ├── schemas/                   # Pydantic request/response models
 │   │   ├── auth.py, assets.py, users.py, checkouts.py
+│   │   └── quotations.py               # QuotationItemCreate,
+│   │                                      # QuotationItemQuantityUpdate,
+│   │                                      # VatUpdateRequest,
+│   │                                      # QuotationAssignRequest,
+│   │                                      # QuotationMetaUpdate,
+│   │                                      # QuotationCreateRequest,
+│   │                                      # QuotationOutsourcedItemCreate
 │   │
 │   ├── services/                  # All business logic / DB queries live here
 │   │   ├── auth_service.py           # Login, password changes, account lockout
@@ -485,6 +590,15 @@ snipe-it-lite/
 │   │   ├── notification_service.py         # The one place that calls smtplib --
 │   │   │                                     # see services/notification_service.py
 │   │   ├── audit_service.py               # Audit ledger + CSV/PDF export
+│   │   ├── backup_service.py               # pg_dump/psql backup+restore,
+│   │   │                                     # optional Google Drive upload,
+│   │   │                                     # the daemon-thread scheduler
+│   │   ├── quotation_service.py             # Asset Catalog, draft "cart",
+│   │   │                                      # submit -> approve -> fulfill
+│   │   │                                      # workflow, VAT setting, PDF
+│   │   │                                      # export -- the biggest service
+│   │   │                                      # module in the app; see
+│   │   │                                      # "Equipment Quotations" below
 │   │   ├── export_service.py               # Shared CSV/PDF builders
 │   │   ├── search_utils.py                  # Shared ILIKE search-filter helper
 │   │   │                                       # (GET /assets, /users, /outsiders)
@@ -511,13 +625,31 @@ snipe-it-lite/
     ├── staff.html            # Staff self-service dashboard
     ├── customer.html         # Customer self-service dashboard
     ├── css/
-    │   └── tailwind.css       # Compiled by build-tailwind/ -- committed as a
-    │                            # plain static file, not generated by Docker
+    │   ├── tailwind.css       # Compiled by build-tailwind/ -- committed as a
+    │   │                        # plain static file, not generated by Docker
+    │   ├── theme.css           # Hand-written CSS the Tailwind build doesn't
+    │   │                         # cover: dark-theme variables, the same
+    │   │                         # narrow-desktop breakpoint override as
+    │   │                         # tailwind.config.js's `sm`, small
+    │   │                         # animation/utility classes
+    │   └── auth-guard.css       # Tiny stylesheet loaded before auth.js runs,
+    │                              # so a not-yet-authorized dashboard is
+    │                              # hidden (not just unstyled) during the
+    │                              # instant it takes JS to redirect -- avoids
+    │                              # a "flash of protected content"
     └── js/
         ├── main.js            # Wires up every DOM event (event delegation)
         ├── api.js             # The one place that calls fetch()
         ├── auth.js            # Login/session/JWT-decode/role guard
+        ├── auth-guard.js       # Runs BEFORE the rest of the page's JS --
+        │                         # immediately kicks an unauthorized visitor
+        │                         # back to the login page (pairs with
+        │                         # css/auth-guard.css above)
         ├── ui.js               # Shared table/pagination/modal helpers
+        ├── theme.js             # Light/dark theme toggle button + persistence
+        ├── theme-init.js         # Inlined-early theme bootstrap -- applies
+        │                           # the saved theme before first paint so
+        │                           # there's no flash of the wrong theme
         ├── dashboard.js         # refreshDashboard() orchestrates all loads
         └── components/           # One file per feature area
             ├── assets.js           # Inventory table, dispatch, exceptions, CSV import
@@ -530,6 +662,12 @@ snipe-it-lite/
             ├── outsiders.js             # Ad-Hoc directory table
             ├── overdue.js                # Overdue-checkouts alert banner
             ├── profile.js                 # "My Profile" modal + change password
+            ├── quotation.js                # Asset Catalog browsing, the
+            │                                 # self-service cart, the
+            │                                 # Admin/Manager "Quotes" tab, and
+            │                                 # the Fulfillment Drawer bulk
+            │                                 # checkout -- see "Equipment
+            │                                 # Quotations" below
             └── users.js                    # User directory table, provisioning,
                                               #   admin password reset, restore
 ```
@@ -543,10 +681,17 @@ understand this, every file's purpose becomes obvious.
 Browser (frontend/js)
    │  fetch('/api/...') — see js/api.js (relative path, no hardcoded host)
    ▼
-nginx (frontend container)   <-- reverse proxy: strips the "/api" prefix and
-                                  forwards to the backend container. See
-                                  nginx/default.conf.template and the
-                                  "Deploying Across Environments" section.
+nginx (frontend container)   <-- reverse proxy: forwards the FULL path,
+                                  "/api" prefix included, straight through
+                                  to the backend container unchanged (no
+                                  rewriting — see nginx/default.conf.template's
+                                  `proxy_pass http://$backend_upstream$request_uri;`
+                                  and the "Deploying Across Environments"
+                                  section). The backend's own routers are
+                                  mounted at that same "/api" prefix (see
+                                  `backend/main.py`), so the path a route
+                                  handler actually sees is identical to what
+                                  the browser sent.
    │
    ▼
 api/*.py            <-- HTTP layer only: parses the request body, checks
@@ -895,7 +1040,8 @@ see `.gitignore`) and are read by `backend/config.py` into a single typed
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | see `.env.example` | Postgres credentials, shared by the `db` and `backend` services. |
 | `DATABASE_URL` | built from the above | Full SQLAlchemy connection string. |
 | `REDIS_URL` | `redis://redis:6379/0` | Celery broker **and** result backend, shared by `backend` (producer) and `worker` (consumer) — used for async audit-ledger exports and every email notification (see [Due-Date Extensions & Notifications](#due-date-extensions--notifications)). |
-| `EXPORT_RESULT_TTL_SECONDS` | `3600` | How long a finished export job's file bytes stay cached in Redis before expiring. |
+| `EXPORT_RESULT_DIR` | `/app/export_results` | Where the `worker` service writes finished audit/quotation export files to disk (a volume shared with `backend`, which streams them back out on download) — used instead of embedding the file's bytes in the Celery/Redis result, to keep memory use down under load. |
+| `EXPORT_RESULT_TTL_SECONDS` | `3600` | How long a finished export file is kept on disk under `EXPORT_RESULT_DIR` before a cleanup pass deletes it. Only the small `{task_id, status, filename}` JSON result (not the file itself) lives in Redis, for this same duration. |
 | `JWT_SECRET_KEY` | *(required, no insecure default allowed)* | Signs/verifies session tokens. **Must** be a long random string in production. |
 | `JWT_ALGORITHM` | `HS256` | JWT signing algorithm. |
 | `JWT_EXPIRY_HOURS` | `12` | How long a login session stays valid. |
@@ -933,6 +1079,9 @@ see `.gitignore`) and are read by `backend/config.py` into a single typed
 | `BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN` | *(empty)* | Mode 1, paired with the above. |
 | `BACKUP_GDRIVE_CREDENTIALS_JSON` | *(empty)* | Mode 2 (Google Workspace) — the raw contents of a service account's JSON key. Only works if `BACKUP_GDRIVE_FOLDER_ID` is a Shared Drive folder. See [Backups](#backups) for the 5-minute setup. |
 | `BACKUP_GDRIVE_FOLDER_ID` | *(empty)* | The destination Drive folder's ID (from its URL). Mode 1: any folder in your own Drive. Mode 2: must be inside a Shared Drive, shared with the service account as an Editor. |
+| `CURRENCY_CODE` | `NGN` | ISO 4217 currency code applied to every price shown/exported anywhere in the app — the Asset Inventory's per-unit price, the Quotation Catalog's day-rate, and every line/subtotal/VAT/total on a Quotation PDF export. See [Equipment Quotations](#equipment-quotations-quote-to-checkout). |
+| `SITE_NAME` | `Snipe-IT Lite` | Brand name shown across the deployment — the on-screen navbar/login brand + browser tab `<title>` (read live from `GET /config/public` on every page load) AND the letterhead printed on the Quotation PDF. One setting rebrands both. |
+| `CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER` | `false` | Whether a Staff/Customer account browsing the self-service Quotation Catalog can see each pool's available-quantity/in-stock status. `false` (recommended for production) shows them only name, category, and price. A Manager/Admin/Super Admin's own Asset Inventory view is unaffected either way. |
 
 The four below are read by the **`frontend`** service (the nginx reverse
 proxy), not the backend — see [Deploying Across Environments](#deploying-across-environments-nginx-reverse-proxy).
@@ -985,6 +1134,18 @@ for the full rule and its docstrings:
 | Request more time **on behalf of** an Ad-Hoc Individual (Outsider) | Manager / Admin / Super Admin only — Outsiders have no login to do this themselves. |
 | Approve/deny a pending request | Manager / Admin / Super Admin. No department-scoping — a Manager can decide any request, same as Admin/Super Admin. |
 | Grant an extension **directly**, no request first | Manager / Admin / Super Admin, same unrestricted access as approving. See the "Extend" button in the Custody Ledger drawer. |
+
+### Equipment Quotation permissions
+
+See [Equipment Quotations](#equipment-quotations-quote-to-checkout) above
+for the full workflow; the short version of who can do what:
+
+| Action | Who |
+|---|---|
+| Browse the catalog, build/edit/submit your own draft order, export it as a PDF | Any logged-in User (Staff/Customer/Manager/Admin). |
+| See live stock levels in the catalog | Manager/Admin/Super Admin always; Staff/Customer only if `CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER=true`. |
+| Look up / adjust / assign any submitted Quotation, add a not-in-inventory line, approve, bulk-fulfill | Manager / Admin / Super Admin only (`require_privileged_role`). No department-scoping. |
+| Change the global VAT percentage | Super Admin / Admin only (`require_super_admin`). |
 
 ### The hardcoded Super Admin
 
@@ -1268,9 +1429,9 @@ once the backend is running. This table is the high-level map:
 | `POST /assets/{id}/exception/{eid}/recall` | Super Admin / Admin | Return an isolated unit to service. |
 | `POST /assets/{id}/checkin` | Super Admin / Admin | Reconcile newly-found stock. |
 | `POST /assets/{id}/checkout_advanced` | Super Admin / Admin / Manager | Dispatch units to a Staff member, a linked Customer account, or an ad-hoc Outsider. |
-| `POST /assets/import` | Super Admin / Admin | Bulk-create pools from a CSV (max 5 MiB, columns `name`, `total_quantity`, optional `department`). |
-| `GET /assets/departments` | logged in | Distinct list of departments currently set on any active pool — powers the Asset Inventory Export button's per-department options. |
-| `GET /assets/export` | logged in | Download the Asset Inventory table itself (one row per pool) as `?format=csv\|pdf`, optionally narrowed with `?department=` (omit, or pass `all`, for every pool). |
+| `POST /assets/import` | Super Admin / Admin | Bulk-create pools from a CSV (max 5 MiB, columns `name`, `total_quantity`, optional `category`). |
+| `GET /assets/categories` | logged in | Distinct list of categories currently set on any active pool — powers the Asset Inventory Export button's per-category options. |
+| `GET /assets/export` | logged in | Download the Asset Inventory table itself (one row per pool) as `?format=csv\|pdf`, optionally narrowed with `?category=` (omit, or pass `all`, for every pool). |
 | `GET /users` | Super Admin / Admin / Manager | Directory listing (both Managers and Admins see the entire directory — no department-scoping). TRUE server-side pagination + search — `?limit=&offset=&search=` (searches name, email, role, department, department_role). |
 | `POST /users` | Super Admin / Admin / Manager | Provision a new login. |
 | `GET /users/me/items` | logged in | Self-service: my own checked-out items. |
@@ -1305,6 +1466,35 @@ once the backend is running. This table is the high-level map:
 | `DELETE /backup/{filename}` | Super Admin / Admin | Delete a local backup file (does not touch any copy already on Google Drive). |
 | `POST /backup/restore/{filename}` | Super Admin / Admin | **Destructive.** Replace the entire database with a backup already on local disk. Takes an automatic pre-restore safety backup first. |
 | `POST /backup/restore-upload` | Super Admin / Admin | **Destructive.** Same as above, but from an uploaded `.sql`/`.sql.gz` file — the recovery path once local disk has been wiped. |
+| `GET /config/public` | logged in | Non-secret config the frontend needs before rendering the catalog/cart — `{currency_code, show_stock_to_staff_customer}`. |
+| `GET /assets/catalog` | logged in | The self-service Quotation Catalog — every active asset pool, shaped by role + `CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER`. |
+| `GET /quotations/me` | logged in | The caller's own open draft order, with live-computed totals. |
+| `GET /quotations/me/history` | logged in | Every Quotation the caller has formally submitted. |
+| `GET /quotations/me/{id}` | logged in | Full detail for one of the caller's own submitted Quotations. |
+| `PUT /quotations/me/{id}/items/{item_id}` | logged in | Requester adjusts a quantity on their own quotation while still "submitted". |
+| `DELETE /quotations/me/{id}/items/{item_id}` | logged in | Requester removes a line from their own quotation while still "submitted". |
+| `POST /quotations/items` | logged in | Add (or update) an item on the caller's own draft cart. |
+| `PUT /quotations/items/{id}` | logged in | Update a quantity on the caller's own draft cart. |
+| `DELETE /quotations/items/{id}` | logged in | Remove an item from the caller's own draft cart. |
+| `POST /quotations/submit` | logged in | Finalize the caller's draft — stamps it with a Quotation reference number (e.g. `QT-000001`). |
+| `GET /quotations/export` | logged in | Download the caller's current draft order as a PDF. |
+| `GET /quotations` | Super Admin / Admin / Manager | The "Quotes" tab — every submitted Quotation, `?search=&status=&limit=&offset=`. |
+| `POST /quotations` | Super Admin / Admin / Manager | Start a brand-new Quotation on someone's behalf (starts empty). |
+| `GET /quotations/fulfillment-queue` | Super Admin / Admin / Manager | Every Approved / Ready for Pickup Quotation, oldest first — the Fulfillment Drawer's data. |
+| `GET /quotations/{id}` | Super Admin / Admin / Manager | Full detail for one Quotation by numeric ID. |
+| `PUT /quotations/{id}` | Super Admin / Admin / Manager | Update a Quotation's internal notes. |
+| `PUT /quotations/{id}/discount` | Super Admin / Admin / Manager | Set the discount percentage (0-100) applied to this Quotation's subtotal, before VAT. Editable right up until the quote is fulfilled, same as its line items. |
+| `POST /quotations/{id}/items` | Super Admin / Admin / Manager | Add/update a line on someone else's submitted Quotation. |
+| `PUT /quotations/{id}/items/{item_id}` | Super Admin / Admin / Manager | Update a quantity on someone else's submitted Quotation. |
+| `DELETE /quotations/{id}/items/{item_id}` | Super Admin / Admin / Manager | Remove a line from someone else's submitted Quotation. |
+| `POST /quotations/{id}/outsourced-items` | Super Admin / Admin / Manager | Add a "not currently in inventory" line with its own name/price. |
+| `DELETE /quotations/{id}/outsourced-items/{item_id}` | Super Admin / Admin / Manager | Remove a previously-added outsourced line. |
+| `POST /quotations/{id}/assign` | Super Admin / Admin / Manager | Assign (or clear the assignment of) a Quotation to a user. |
+| `POST /quotations/{id}/approve` | Super Admin / Admin / Manager | Flip a submitted Quotation to "approved" and lock it against further edits. |
+| `POST /quotations/{id}/checkout` | Super Admin / Admin / Manager | The Fulfillment Drawer's bulk physical checkout — turns every line into a real `AssetCheckout`. |
+| `GET /quotations/{id}/export` | Super Admin / Admin / Manager | PDF export of any Quotation by ID. |
+| `GET /settings/vat` | logged in | The current global VAT percentage. |
+| `PUT /settings/vat` | Super Admin / Admin | Change the global VAT percentage applied to every Quotation immediately. |
 | `GET /healthz` | anyone | Trivial liveness check for Docker/orchestrators. |
 
 **Every export endpoint** accepts `?format=csv` or `?format=pdf` and
@@ -1369,7 +1559,7 @@ the actual logic lives. Use this section as a map when you need to find
   applies the identical rule as its own bulk SQL filter — see
   `services/checkout_service.py`'s `list_due_soon_checkouts()`).
 - `class AssetType` — an inventory pool (name, total_quantity,
-  custom_fields, optional `department` describing which internal team the
+  custom_fields, optional `category` describing which internal team the
   equipment originates from).
 - `class AssetException` — a single serial number pulled out of
   circulation (repair/lost/stolen).
@@ -1386,6 +1576,22 @@ the actual logic lives. Use this section as a map when you need to find
   due date (`pending` → `approved`/`denied`), recording who asked, why,
   who decided it, and what was actually granted. See [Due-Date Extensions
   & Notifications](#due-date-extensions--notifications).
+- `class AppSetting` — tiny runtime-editable key/value store (unlike
+  `config.py`, which needs a restart to change) — today holds exactly one
+  key, `vat_percent`. See `services/quotation_service.py`'s
+  `get_vat_percent()`/`set_vat_percent()`.
+- `class Quotation` — a staff/customer account's self-service equipment
+  rental request (the "cart"). Lifecycle: `draft` → `submitted` →
+  `approved` → `fulfilled`. Stock is only ever deducted at the final
+  `fulfilled` step. See [Equipment
+  Quotations](#equipment-quotations-quote-to-checkout).
+- `class QuotationItem` — one line of a Quotation (asset, quantity,
+  start/due date); always priced live off the current `AssetType.price`,
+  never snapshotted.
+- `class QuotationOutsourcedItem` — a Manager/Admin-only Quotation line
+  for equipment not currently in the Asset Inventory catalog, with its
+  own one-off `unit_price` (unlike `QuotationItem`, this price IS
+  snapshotted, since there's no catalog row to join back to).
 
 #### `backend/security.py`
 - `hash_password(plain_password)` — Argon2id hash of a plaintext password.
@@ -1429,8 +1635,13 @@ the actual logic lives. Use this section as a map when you need to find
 - **`request_context.py`** — `class RequestContextMiddleware`
   assigns/reuses an `X-Request-ID` per request, stores it for the logger,
   echoes it back on the response.
-- **`rate_limit.py`** — `class RateLimitMiddleware`, an in-memory sliding-
-  window limiter applied only to `POST /auth/login`.
+- **`rate_limit.py`** — `class RateLimitMiddleware`, a Redis-backed
+  fixed-window limiter (shared `INCR`/`EXPIRE` counters keyed by client
+  IP, on the same Redis instance as the Celery broker) applied only to
+  `POST /auth/login` — Redis-backed specifically so the limit is enforced
+  consistently across every `backend` replica when scaled, instead of
+  each replica keeping its own independent count. See
+  [`DEPLOYMENT.md`](DEPLOYMENT.md)'s load balancing section.
 - **`security_headers.py`** — `class SecurityHeadersMiddleware` stamps
   `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, and a
   restrictive `Permissions-Policy` onto every response.
@@ -1453,6 +1664,23 @@ the actual logic lives. Use this section as a map when you need to find
   `get_due_soon_checkouts`, `request_extension`, `get_extension_requests`,
   `decide_extension_request`, `extend_checkout`.
 - **`api/audit.py`** — `get_audit_logs`, `export_audit_logs`.
+- **`api/backup.py`** — `backup_status`, `list_backups`,
+  `create_backup_now`, `download_backup`, `delete_backup`,
+  `restore_backup`, `restore_backup_upload`. Thin router — see
+  `services/backup_service.py` for the actual `pg_dump`/`psql`/Google
+  Drive implementation.
+- **`api/quotations.py`** — `get_public_config`, `get_asset_catalog`;
+  self-service cart routes (`get_my_quotation`,
+  `get_my_quotation_history`, `add_quotation_item`,
+  `update_quotation_item`, `remove_quotation_item`, `submit_quotation`,
+  `export_quotation`); Admin/Manager "Quotes" tab routes
+  (`list_quotations`, `create_quotation`, `get_fulfillment_queue`,
+  `get_quotation`, `update_quotation`, `admin_add_item`/`admin_update_item`/
+  `admin_remove_item`, `add_quotation_outsourced_item`,
+  `assign_quotation`, `approve_quotation`, `checkout_quotation`,
+  `export_quotation_admin`); and the global `get_vat_setting`/
+  `update_vat_setting`. See [Equipment
+  Quotations](#equipment-quotations-quote-to-checkout).
 
 ### Backend — Services (`backend/services/`) — the business logic layer
 
@@ -1531,10 +1759,32 @@ the actual logic lives. Use this section as a map when you need to find
   characters in what someone typed so they aren't misread as SQL wildcards.
 - **`services/export_service.py`** — `csv_safe_cell` (neutralizes
   formula-injection payloads), `build_csv_bytes`, `build_pdf_bytes` — the
-  shared CSV/PDF machinery every exporter in the app uses.
+  shared CSV/PDF machinery every exporter in the app uses (fonts loaded
+  from `backend/assets/fonts/` so non-ASCII currency symbols render).
+- **`services/backup_service.py`** — `create_backup()` (`pg_dump` to a
+  gzip file under `BACKUP_DIR`, optional Google Drive upload),
+  `list_backups()`/`get_status()`, `restore_from_file()` (takes an
+  automatic pre-restore safety backup first), the daemon-thread scheduler
+  that fires at each hour in `BACKUP_HOURS_UTC`, and the Google Drive
+  upload helpers for both OAuth modes. See [Backups](#backups).
+- **`services/quotation_service.py`** — the largest service module in the
+  app; see [Equipment Quotations](#equipment-quotations-quote-to-checkout)
+  for the full picture. Key functions: `list_catalog()` (role- and
+  `CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER`-shaped), `_get_or_create_draft()`
+  (lazily creates a user's standing cart), `add_item()`/
+  `update_item_quantity()`/`remove_item()` (self-service cart),
+  `submit_my_quotation()` (stamps a `QT-######` reference number),
+  `admin_create_quotation()`/`assign_quotation()`/`approve_quotation()`
+  (the "Quotes" tab and quote-to-checkout state machine),
+  `bulk_checkout_quotation()` (Fulfillment Drawer — turns every line into
+  a real `AssetCheckout`, deducting stock only at this step),
+  `admin_add_outsourced_item()` (not-in-inventory lines),
+  `get_vat_percent()`/`set_vat_percent()` (the `AppSetting` row), and the
+  PDF builders `export_quotation_pdf()`/`export_quotation_pdf_by_id()`.
 - **`services/stock.py`** — `recalculate_asset_stock(db, asset)`, the
   single shared formula for `Available = Total − Outbound − Isolated`,
-  called after every mutation that could change it.
+  called after every mutation that could change it (including
+  `bulk_checkout_quotation()` above).
 
 ### Backend — Async Workers (Celery) (`backend/celery_app.py`, `backend/tasks/`)
 
@@ -1595,6 +1845,20 @@ Pure Pydantic request/response models, no logic:
   `override_due_date`/`note`); `DirectExtensionRequest` (the "Extend"
   button's request body — same shape as `ExtensionRequestCreate`, but
   skips the request/approval workflow entirely).
+- **`schemas/quotations.py`** — `QuotationItemCreate`/
+  `QuotationItemQuantityUpdate` (self-service cart line bodies);
+  `QuotationOutsourcedItemCreate` (Admin/Manager not-in-inventory line);
+  `QuotationCreateRequest`/`QuotationMetaUpdate`/`QuotationAssignRequest`
+  (the "Quotes" tab); `VatUpdateRequest` (the global VAT setting).
+
+### Backend — Scripts (`backend/scripts/`)
+
+- **`scripts/gdrive_oauth_setup.py`** — a one-off, interactive script you
+  run manually on your own machine (never inside Docker/CI) to set up
+  Google Drive backup uploads. Walks you through exchanging a downloaded
+  OAuth client JSON for a refresh token and prints the
+  `BACKUP_GDRIVE_OAUTH_*` values to paste into `.env`. See
+  [Backups](#backups) for the full walkthrough.
 
 ### Frontend — Core (`frontend/js/`)
 
@@ -1606,6 +1870,22 @@ Pure Pydantic request/response models, no logic:
 - **`js/auth.js`** — `parseJwt`, `getSession`, `logout`, `login`,
   `currentPageName`, `checkAccess`, `redirectByUserRole`,
   `startIdleWatchdog` (auto-logout after inactivity).
+- **`js/auth-guard.js`** — a tiny, render-blocking, non-module script
+  loaded first in every role-restricted dashboard's `<head>` (paired with
+  `css/auth-guard.css`). Decodes the JWT and checks it against the
+  `data-allowed-roles` attribute on its own `<script>` tag *before* the
+  page paints, so an unauthorized visitor never sees a flash of the real
+  dashboard before being redirected to `index.html`. `js/auth.js`'s
+  `checkAccess` re-checks the same rule again once the full module bundle
+  has loaded, as defense-in-depth.
+- **`js/theme.js`** — `getTheme`, `setTheme`, `toggleTheme`,
+  `initThemeToggle` (wires the navbar's dark/light toggle button, persists
+  the choice to `localStorage`).
+- **`js/theme-init.js`** — a tiny, synchronous, non-module script loaded
+  before `css/tailwind.css` — applies the saved (or OS-preferred) theme
+  class to `<html>` before first paint, so there's no flash of the wrong
+  theme on load. `js/theme.js` above handles the toggle button itself;
+  this file only handles the initial, pre-paint choice.
 - **`js/dashboard.js`** — `refreshDashboard()` calls every component's
   `load*()` function together.
 - **`js/main.js`** — `wireDelegatedEvents()` (one `click` listener on
@@ -1683,6 +1963,22 @@ Pure Pydantic request/response models, no logic:
 - **`overdue.js`** — `loadOverdueAlerts`.
 - **`profile.js`** — `openProfileModal`, `submitChangePasswordForm`,
   `setProfileFormMessage`.
+- **`quotation.js`** — the biggest component file in the app; see
+  [Equipment Quotations](#equipment-quotations-quote-to-checkout) for the
+  feature itself. Self-service: `renderCatalogTable` (Asset Catalog,
+  shaped by `CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER`), `renderMyQuotation`/
+  `renderMyQuotationHistory`/`renderMyQuoteDetail` ("My Order" cart +
+  submitted-quote history), `switchQuotationTab`/`initQuotationSwipeNav`
+  (Catalog ↔ My Order tabs, with swipe support on mobile). Admin/Manager
+  "Quotes" tab: `renderQuotesTable`/`changeQuotesPage` (server-side
+  pagination, same pattern as `audit.js`), `renderQuoteDetail`/
+  `refreshQuoteDetail`, `selectQuoteDetailAsset`/`clearQuoteDetailAsset`
+  (adding a catalog item to someone else's quote), `openCreateQuoteModal`,
+  `toggleQuoteAssignAdhocForm` (assign to a linked user vs. an Ad-Hoc
+  Individual), `renderFulfillmentQueue`/`updateFulfillmentSelection`/
+  `toggleSelectAllFulfillment` (the Fulfillment Drawer's bulk checkout
+  selection). Shared: `quotationStatusBadge` (draft/submitted/approved/
+  fulfilled badge styling).
 - **`users.js`** — `loadUsers` (TRUE server-side search + pagination —
   `usersState` + `setUsersSearch`/`setUsersPerPage`/`changeUsersPage`;
   also separately re-fetches an unfiltered roster to populate both the
@@ -1847,12 +2143,12 @@ from main import app
 client = TestClient(app)
 
 # Log in as the demo Super Admin
-r = client.post("/auth/login", json={"identifier": "r.adeyemi@corp.io", "password": "SuperAdmin123!"})
+r = client.post("/api/auth/login", json={"identifier": "r.adeyemi@corp.io", "password": "Admin123!"})
 token = r.json()["token"]
 headers = {"Authorization": f"Bearer {token}"}
 
 # Try whatever you just built, e.g.:
-r = client.get("/assets", headers=headers)
+r = client.get("/api/assets", headers=headers)
 print(r.status_code, r.json())
 EOF
 
@@ -1862,6 +2158,17 @@ rm -f /tmp/test.db   # clean up when you're done
 This is exactly the pattern used to verify the exports, audit trail, and
 account-lockout features described in this README while they were built —
 copy/adapt the snippet above for whatever endpoint you're changing.
+
+**Why this is safe against any endpoint:** SQLite has no native
+timezone-aware datetime type, so a `DateTime(timezone=True)` column (e.g.
+`AssetCheckout.due_date`) silently round-trips as a naive datetime here,
+even though the exact same column always comes back tz-aware against real
+Postgres. `models.py`'s `is_overdue()`/`is_due_soon()` — used by
+`GET /users`, `GET /users/me/items`, `GET /outsiders`, and the Custody
+Ledger — normalize a naive `due_date` to UTC before comparing, specifically
+so this SQLite testing pattern behaves the same as production instead of
+raising `TypeError: can't compare offset-naive and offset-aware datetimes`
+the moment a checkout with a due date is involved.
 
 ### Frontend
 
@@ -1991,8 +2298,14 @@ A checklist before you deploy this anywhere real:
       set `Strict-Transport-Security` itself — see
       `middleware/security_headers.py`'s docstring for why that belongs at
       the TLS-terminating layer, not here.
-- [ ] Drop `--reload` from the backend's `uvicorn` command and run with
-      multiple `--workers` instead (see `backend/Dockerfile`'s comment).
+- [x] ~~Drop `--reload` from the backend's `uvicorn` command and run with
+      multiple `--workers` instead~~ — automatic now: `backend/start.sh`
+      picks the right `uvicorn` invocation based on `ENVIRONMENT` at
+      container start (no `--reload`, `UVICORN_WORKERS` worker processes
+      for `production`; `--reload` for anything else). Nothing to do here
+      as long as `ENVIRONMENT=production` is set — just confirm
+      `UVICORN_WORKERS` (default `2`) matches the CPU you've given the
+      container.
 - [ ] The login rate limiter is Redis-backed (see
       `middleware/rate_limit.py`'s docstring), so it's already safe to run
       more than one `backend` replica — just confirm every replica points
@@ -2164,10 +2477,6 @@ Small, well-scoped follow-ups if you want to keep extending this project:
   SQLite or test-Postgres database) — see
   [Testing Your Changes](#testing-your-changes) for the manual pattern
   this would formalize.
-- **Redis-backed rate limiting** (e.g. `slowapi` or `fastapi-limiter`) if
-  the backend is ever scaled to multiple workers/replicas, so all
-  instances share one counter instead of each enforcing its own limit
-  independently.
 - **A `deleted_by` column** recording which admin performed a given
   soft-delete (good first Alembic migration exercise) — `restore_user()`
   itself (undoing a soft-delete) already shipped; see [Directories](#directories-super-admin--manager).

@@ -20,21 +20,36 @@ class AssetTypeCreate(BaseModel):
     total_quantity: int
     custom_fields: Optional[Dict[str, str]] = {}
 
-    # Optional -- which internal department this pool's equipment
-    # originates from (e.g. "Engineering"). Blank/omitted is a valid,
+    # Optional -- which internal category this pool's equipment
+    # belongs to (e.g. "Engineering"). Blank/omitted is a valid,
     # deliberate choice for orgs that don't track this. Stripped of
     # surrounding whitespace and normalized to None when empty so a
     # blank-looking value never gets stored as a literal "" string (same
     # pattern as NameUpdateRequest._validate_name below).
-    department: Optional[str] = None
+    category: Optional[str] = None
 
-    @field_validator("department")
+    @field_validator("category")
     @classmethod
-    def _normalize_department(cls, value: Optional[str]) -> Optional[str]:
+    def _normalize_category(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
             return None
         value = value.strip()
         return value or None
+
+    # Optional -- the per-unit purchase/replacement price of this pool's
+    # equipment (e.g. 1899.00). Blank/omitted is a valid, deliberate choice
+    # for orgs that don't track unit cost, same treatment as `category`
+    # above.
+    price: Optional[float] = None
+
+    @field_validator("price")
+    @classmethod
+    def _validate_price(cls, value: Optional[float]) -> Optional[float]:
+        if value is None:
+            return None
+        if value < 0:
+            raise ValueError("Price cannot be negative.")
+        return round(value, 2)
 
 
 class ExceptionCreate(BaseModel):
@@ -98,17 +113,34 @@ class NameUpdateRequest(BaseModel):
         return value
 
 
-class DepartmentUpdateRequest(BaseModel):
+class CategoryUpdateRequest(BaseModel):
     # Unlike NameUpdateRequest.name, this is intentionally Optional/blankable
-    # -- clearing an asset pool's department back to "none set" is a valid,
-    # deliberate action (same reasoning as AssetTypeCreate.department), not
+    # -- clearing an asset pool's category back to "none set" is a valid,
+    # deliberate action (same reasoning as AssetTypeCreate.category), not
     # an error like a blank name would be.
-    department: Optional[str] = Field(None, max_length=255)
+    category: Optional[str] = Field(None, max_length=255)
 
-    @field_validator("department")
+    @field_validator("category")
     @classmethod
-    def _normalize_department(cls, value: Optional[str]) -> Optional[str]:
+    def _normalize_category(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
             return None
         value = value.strip()
         return value or None
+
+
+class PriceUpdateRequest(BaseModel):
+    # Unlike NameUpdateRequest.name, this is intentionally Optional/clearable
+    # -- clearing an asset pool's price back to "none set" is a valid,
+    # deliberate action (same reasoning as CategoryUpdateRequest.category
+    # above), not an error like a blank name would be.
+    price: Optional[float] = None
+
+    @field_validator("price")
+    @classmethod
+    def _validate_price(cls, value: Optional[float]) -> Optional[float]:
+        if value is None:
+            return None
+        if value < 0:
+            raise ValueError("Price cannot be negative.")
+        return round(value, 2)

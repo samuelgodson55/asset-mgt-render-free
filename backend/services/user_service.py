@@ -15,7 +15,7 @@ import models
 from models import utc_now
 from config import settings
 from security import hash_password, verify_password, SUPER_ADMIN_ID, SUPER_ADMIN_ROLE, SUPER_ADMIN_PASSWORD_HASH
-from schemas.users import UserCreateRequest
+from schemas.users import UserCreateRequest, UserUpdateRequest
 import services.export_service as export_service
 from services.search_utils import apply_search_filter
 
@@ -141,6 +141,76 @@ def create_user(db: Session, req: UserCreateRequest, user: dict) -> dict:
     return {"message": f"User {new_user.name} created successfully."}
 
 
+def update_user(db: Session, user_id: int, req: UserUpdateRequest, user: dict) -> dict:
+    """
+    Edits an existing account's identity details (name, username, email).
+    Distinct from create_user() (provisioning a brand-new login) and
+    reset_user_password() (credential recovery) -- this never touches
+    role, department, or password_hash.
+
+    PERMISSIONS:
+      - A Super Admin/Admin (see deps.py's require_privileged_role, which
+        the route sits behind) may edit ANY account, including other
+        Admins and Managers.
+      - A Manager may only edit "staff" or "customer" accounts -- the same
+        MANAGER_PROVISIONABLE_ROLES boundary create_user() already
+        enforces when PROVISIONING a new login applies equally here when
+        EDITING an existing one, so a Manager can never touch a Manager or
+        Admin account's details, even via a raw API call.
+
+    Only the fields actually present on the request are touched (Pydantic
+    `exclude_unset`) -- omitting a field leaves it exactly as it was rather
+    than blanking it out. The hardcoded Super Admin identity has no `users`
+    table row (see security.py), so it's simply unreachable here (the
+    lookup below returns nothing and this raises a 404), exactly like
+    reset_user_password()'s equivalent case.
+    """
+    target = db.query(models.User).filter(models.User.id == user_id, models.User.is_deleted == False).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    if user["role"] == "manager" and target.role not in MANAGER_PROVISIONABLE_ROLES:
+        raise HTTPException(
+            status_code=403,
+            detail="Managers may only edit Staff or Customer accounts.",
+        )
+
+    updates = req.model_dump(exclude_unset=True)
+
+    if "email" in updates and updates["email"] != target.email:
+        clash = db.query(models.User).filter(models.User.email == updates["email"], models.User.id != user_id).first()
+        if clash:
+            raise HTTPException(status_code=400, detail="A user with this email already exists.")
+        target.email = updates["email"]
+
+    if "username" in updates and updates["username"] != target.username:
+        candidate = updates["username"].strip().lower()
+        # Same reserved-username guard as _derive_username() above -- an
+        # edit can't be used to sneak a real account onto the identifier
+        # the hardcoded Super Admin login path checks first.
+        reserved = settings.SUPER_ADMIN_USERNAME.strip().lower()
+        if candidate == reserved:
+            raise HTTPException(status_code=400, detail="That username is reserved.")
+        clash = db.query(models.User).filter(models.User.username == candidate, models.User.id != user_id).first()
+        if clash:
+            raise HTTPException(status_code=400, detail="That username is already taken.")
+        target.username = candidate
+
+    if "name" in updates:
+        target.name = updates["name"]
+
+    db.add(models.AuditLog(
+        operator=user["email"], action="USER_UPDATED", target_type="User", target_id=target.id,
+        details=f"Updated account details for {target.name}.",
+    ))
+    db.commit()
+    db.refresh(target)
+    return {
+        "message": f"User {target.name} updated successfully.",
+        "id": target.id, "name": target.name, "username": target.username, "email": target.email,
+    }
+
+
 def list_users(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offset: int = 0, search: Optional[str] = None) -> dict:
     """
     Managers now see the entire User Directory, same as a Super Admin --
@@ -253,12 +323,15 @@ def get_my_assigned_items(db: Session, user: dict) -> dict:
         models.AssetCheckout.user_id == target.id, models.AssetCheckout.status == "active"
     ).all()
     items = [{
-        "checkout_id": c.id, "asset_name": c.asset.name if c.asset else "Unknown Asset",
-        # Originating department of the EQUIPMENT itself (AssetType.department
-        # -- see models.py), not to be confused with the person's own
-        # department below. Surfaced as a "Department" column on every
-        # properties-assigned export (see _item_export_rows below).
-        "asset_department": c.asset.department if c.asset else None,
+        "checkout_id": c.id,
+        "asset_name": models.checkout_display_name(c),
+        # Category of the EQUIPMENT itself (AssetType.category -- see
+        # models.py), not to be confused with the person's own department
+        # below. Surfaced as a "Category" column on every properties-
+        # assigned export (see _item_export_rows below). OUTSOURCED items
+        # have no AssetType/category at all -- shown as "—" here, same as
+        # any other item that just doesn't have one set.
+        "asset_category": c.asset.category if c.asset else None,
         "quantity": c.quantity, "quantity_returned": c.quantity_returned, "outstanding": c.quantity - c.quantity_returned,
         # TIMEZONE FIX: `checkout_date` used to be pre-formatted here with
         # `.strftime("%Y-%m-%d %H:%M:%S")` -- that prints the raw UTC wall-
@@ -307,8 +380,13 @@ def get_user_assigned_items(db: Session, user_id: int, user: dict) -> dict:
         models.AssetCheckout.user_id == user_id, models.AssetCheckout.status == "active"
     ).all()
     items = [{
-        "checkout_id": c.id, "asset_name": c.asset.name if c.asset else "Unknown Asset",
-        "asset_department": c.asset.department if c.asset else None,
+        "checkout_id": c.id, "asset_name": models.checkout_display_name(c),
+        "asset_category": c.asset.category if c.asset else None,
+        # Manager/Admin-only view -- see models.py's AssetCheckout comment
+        # for why this flag is surfaced here but deliberately withheld
+        # from the self-service get_my_assigned_items() above.
+        "is_outsourced": c.is_outsourced,
+        "outsourced_source": c.outsourced_source,
         "quantity": c.quantity, "quantity_returned": c.quantity_returned, "outstanding": c.quantity - c.quantity_returned,
         # TIMEZONE FIX -- see get_my_assigned_items() above for the full
         # explanation of why this is `.isoformat()` and not a
@@ -342,7 +420,7 @@ def get_user_assigned_items(db: Session, user_id: int, user: dict) -> dict:
 #                                    checkout (not one row per user).
 # Each returns (file_bytes, media_type, filename) so the router
 # (api/users.py) only has to wrap it in a `Response`.
-_ITEM_EXPORT_HEADERS = ["Asset", "Department", "Quantity", "Quantity Returned", "Outstanding", "Checked Out", "Due Date"]
+_ITEM_EXPORT_HEADERS = ["Asset", "Category", "Quantity", "Quantity Returned", "Outstanding", "Checked Out", "Due Date"]
 
 
 def _format_export_datetime(iso_string: Optional[str]) -> str:
@@ -367,7 +445,7 @@ def _item_export_rows(items: list) -> list:
     get_user_assigned_items above) into plain rows for
     export_service.build_csv_bytes()/build_pdf_bytes()."""
     return [
-        [i["asset_name"], i.get("asset_department") or "—", i["quantity"], i["quantity_returned"], i["outstanding"], _format_export_datetime(i["checkout_date"]), i["due_date"]]
+        [i["asset_name"], i.get("asset_category") or "—", i["quantity"], i["quantity_returned"], i["outstanding"], _format_export_datetime(i["checkout_date"]), i["due_date"]]
         for i in items
     ]
 
@@ -416,7 +494,7 @@ def export_all_users_items(db: Session, user: dict, fmt: str = "csv"):
     query = db.query(models.User).filter(models.User.is_deleted == False)
     users = query.order_by(models.User.id).all()
 
-    headers = ["User", "Email", "User Department", "Role", "Asset", "Asset Department", "Quantity", "Outstanding", "Checked Out", "Due Date"]
+    headers = ["User", "Email", "User Department", "Role", "Asset", "Asset Category", "Quantity", "Outstanding", "Checked Out", "Due Date"]
     rows = []
     for u in users:
         for c in u.checkouts:
@@ -424,8 +502,8 @@ def export_all_users_items(db: Session, user: dict, fmt: str = "csv"):
                 continue
             rows.append([
                 u.name, u.email, u.department or "—", u.role,
-                c.asset.name if c.asset else "Unknown Asset",
-                c.asset.department if c.asset and c.asset.department else "—",
+                models.checkout_display_name(c),
+                c.asset.category if c.asset and c.asset.category else "—",
                 c.quantity, c.quantity - c.quantity_returned,
                 export_service.format_export_datetime(c.checkout_date),
                 c.due_date.strftime("%Y-%m-%d") if c.due_date else "No Fixed Due Date",

@@ -22,8 +22,60 @@ from config import settings
 # `.env` file) or falls back to a safe local-dev default.
 DATABASE_URL = settings.DATABASE_URL
 
-# Create the engine instance that handles network traffic to PostgreSQL
-engine = create_engine(DATABASE_URL)
+# -----------------------------------------------------------------------
+# BUG FIX ("couldn't access my db" in production, works fine locally):
+#
+# `create_engine(DATABASE_URL)` with no extra arguments was handing out
+# connections from SQLAlchemy's default pool with no health-check and no
+# recycling. That's mostly invisible in local Docker Compose (Postgres runs
+# right next to the app, gets hit constantly, and the container/network
+# never goes away underneath it) -- but it's a real, reproducible failure
+# mode against a managed cloud Postgres like Azure Database for PostgreSQL
+# Flexible Server (see .env.azure.example / infra/main.bicep) or Render's
+# managed Postgres:
+#
+#   - Managed Postgres providers silently close idle server-side
+#     connections after some minutes (and Azure Flexible Server's default
+#     `idle_session_timeout`/firewall/load-balancer layers can drop a TCP
+#     connection outright without either side sending a clean FIN). A
+#     production deployment naturally has longer idle gaps between requests
+#     per pooled connection than a dev box you're actively hammering, so
+#     it hits this far more often.
+#   - SQLAlchemy's pool doesn't know the connection died until it actually
+#     tries to use it -- the NEXT request to reuse that dead connection
+#     fails with something like `OperationalError: SSL connection has been
+#     closed unexpectedly` or `server closed the connection unexpectedly`.
+#     From the app's point of view (and from the outside, e.g. the frontend
+#     showing a failed API call) that looks exactly like "the app can't
+#     reach the database" even though the database itself is perfectly
+#     healthy and reachable.
+#   - There was also no connect timeout at all: a genuinely unreachable
+#     DB (wrong host, firewall blocking the container's IP, etc. -- see
+#     infra/main.bicep's postgresFirewallAzure rule) would hang the
+#     connection attempt for whatever the OS-level TCP timeout happens to
+#     be (often 60s+) instead of failing fast with a clear error.
+#
+# Fix, all standard SQLAlchemy pooling knobs:
+#   pool_pre_ping=True   -- runs a cheap `SELECT 1` before handing a pooled
+#                           connection to the app; a dead connection is
+#                           transparently discarded and replaced instead of
+#                           surfacing as a request failure.
+#   pool_recycle=1800    -- proactively recycle any connection older than
+#                           30 minutes, well under typical managed-Postgres
+#                           idle-close windows, so pre_ping rarely even has
+#                           to catch a dead one.
+#   connect_args:
+#     connect_timeout=10 -- fail fast (10s) with a clear psycopg2 error
+#                           instead of hanging when the DB is genuinely
+#                           unreachable (bad host/port, firewall rule not
+#                           yet applied, etc.).
+# -----------------------------------------------------------------------
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,
+    pool_recycle=1800,
+    connect_args={"connect_timeout": 10},
+)
 
 # Create a session factory for generating isolated database transactions
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -122,13 +174,15 @@ def seed_db():
         db.commit()
 
         # --- Demo asset pools ----------------------------------------------------
-        # Every pool now gets a department (previously only used in ad-hoc
-        # testing) so "Asset Inventory Export by department" and the
-        # Properties Hub's department field have real demo data to show
-        # instead of an empty "No department set" state on first boot.
-        laptop_pool = models.AssetType(name='MacBook Pro 14" M3 Pool', total_quantity=15, available_quantity=14, department="Engineering")
-        monitor_pool = models.AssetType(name="Dell UltraSharp U2723QE Monitor", total_quantity=40, available_quantity=39, department="Engineering")
-        mouse_pool = models.AssetType(name="Logitech MX Master 3S", total_quantity=60, available_quantity=59, department="Operations")
+        # Every pool now gets a category (previously only used in ad-hoc
+        # testing) so "Asset Inventory Export by category" and the
+        # Properties Hub's category field have real demo data to show
+        # instead of an empty "No category set" state on first boot. Same
+        # reasoning for `price` -- every pool gets a realistic per-unit
+        # price so the Properties Hub's price field isn't blank either.
+        laptop_pool = models.AssetType(name='MacBook Pro 14" M3 Pool', total_quantity=15, available_quantity=14, category="Engineering", price=1899.00)
+        monitor_pool = models.AssetType(name="Dell UltraSharp U2723QE Monitor", total_quantity=40, available_quantity=39, category="Engineering", price=629.99)
+        mouse_pool = models.AssetType(name="Logitech MX Master 3S", total_quantity=60, available_quantity=59, category="Operations", price=99.99)
         db.add_all([laptop_pool, monitor_pool, mouse_pool])
         db.commit()
 

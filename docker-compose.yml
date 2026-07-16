@@ -117,6 +117,13 @@ services:
       # in backend/config.py (requirement #5). Defaults to "development" so
       # local `docker compose up` keeps working with the placeholder secret.
       ENVIRONMENT: ${ENVIRONMENT:-development}
+      # How many uvicorn worker processes backend/start.sh launches when
+      # ENVIRONMENT=production (ignored otherwise -- development/local
+      # always run a single worker with --reload instead). Set this to
+      # roughly the number of CPU cores available to the container; more
+      # workers use more memory and take slightly longer to all finish
+      # starting, so don't set it higher than you actually need.
+      UVICORN_WORKERS: ${UVICORN_WORKERS:-2}
       # Must match the postgres credentials above -- built from the SAME
       # .env variables so they can never silently drift apart. The hostname
       # "db" works because Docker Compose puts every service on the same
@@ -143,6 +150,10 @@ services:
       # this backend directly (bypassing nginx) or from a genuinely
       # different origin, so it stays here rather than being removed.
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080,http://localhost,http://127.0.0.1}
+      # Brand name printed on the Quotation/Checkout Receipt PDF letterhead
+      # (see backend/config.py's SITE_NAME docstring). Change this to
+      # rebrand every future PDF export at once.
+      SITE_NAME: ${SITE_NAME:-Snipe-IT Lite}
       # Operations & Observability requirement #1: gate the startup
       # init_db()/seed_db() calls instead of always running them. Leave
       # both "true" for local docker-compose demo use; set both "false" in
@@ -284,6 +295,18 @@ services:
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in your .env file -- see .env.example}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_FORMAT: ${LOG_FORMAT:-json}
+      # The worker never logs anyone in with the Super Admin account, but
+      # it shares config.py's Settings() with `backend`, and that class's
+      # startup validator (requirement #5) runs unconditionally the moment
+      # Settings() is constructed -- regardless of whether THIS process
+      # ever reads the value. Without this passthrough, SUPER_ADMIN_PASSWORD
+      # falls back to Settings' own empty-string default here, which is
+      # itself in the insecure-placeholder list, so ENVIRONMENT=production
+      # makes the worker refuse to boot even with a real password set in
+      # .env. Must stay identical to the backend service's block above.
+      SUPER_ADMIN_USERNAME: ${SUPER_ADMIN_USERNAME:-superadmin}
+      SUPER_ADMIN_NAME: ${SUPER_ADMIN_NAME:-Super Admin}
+      SUPER_ADMIN_PASSWORD: ${SUPER_ADMIN_PASSWORD:-change-this-super-admin-password}
       # The worker never runs its own DB migrations/seeding -- `backend`
       # already owns that on its startup hook -- so these stay disabled
       # here regardless of the .env values used for `backend`.
@@ -333,6 +356,14 @@ services:
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in your .env file -- see .env.example}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_FORMAT: ${LOG_FORMAT:-json}
+      # Same reasoning as the `worker` service above: config.py's Settings()
+      # startup validator runs the instant Settings() is constructed, no
+      # matter whether `beat` itself ever logs anyone in. Without this,
+      # SUPER_ADMIN_PASSWORD falls back to the empty-string default here,
+      # which fails the production check even with a real password in .env.
+      SUPER_ADMIN_USERNAME: ${SUPER_ADMIN_USERNAME:-superadmin}
+      SUPER_ADMIN_NAME: ${SUPER_ADMIN_NAME:-Super Admin}
+      SUPER_ADMIN_PASSWORD: ${SUPER_ADMIN_PASSWORD:-change-this-super-admin-password}
       AUTO_INIT_DB: "false"
       AUTO_SEED_DEMO_DATA: "false"
       NOTIFICATIONS_ENABLED: ${NOTIFICATIONS_ENABLED:-false}
@@ -372,6 +403,26 @@ services:
     build:
       context: .
       dockerfile: nginx/Dockerfile
+      # BUILD-TIME (not runtime) arg -- this is what actually changes what
+      # ends up inside the image, since frontend/js gets transformed once,
+      # during `docker compose build`, not on every container start. Reads
+      # the SAME ENVIRONMENT value from .env as the backend/worker services
+      # below, so there's still exactly one setting to change: local (raw
+      # source), development (minified), or production (minified +
+      # obfuscated) -- see nginx/Dockerfile's frontend-build stage and
+      # build-frontend/build.js for what each mode does.
+      #
+      # IMPORTANT: unlike the `environment:` blocks below, editing .env
+      # alone does NOT change a running container -- you must rebuild the
+      # image for a new ENVIRONMENT value to take effect:
+      #   docker compose build frontend && docker compose up -d frontend
+      # or simply:
+      #   docker compose up -d --build frontend
+      # Watch the build output when you do -- build-frontend/build.js
+      # prints a per-file size report (and total) for whichever mode just
+      # ran, so you can see exactly what changed.
+      args:
+        BUILD_ENV: ${ENVIRONMENT:-development}
     container_name: snipeit_lite_frontend
     restart: unless-stopped
     environment:

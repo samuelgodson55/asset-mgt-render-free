@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from deps import get_current_user, require_super_admin, require_privileged_role
-from schemas.users import UserCreateRequest, UserPasswordResetRequest
+from schemas.users import UserCreateRequest, UserUpdateRequest, UserPasswordResetRequest
 import services.user_service as user_service
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -114,6 +114,17 @@ def export_user_assigned_items(
     fmt = _validate_export_format(format)
     content, media_type, filename = user_service.export_user_assigned_items(db, user_id, user, fmt)
     return _file_response(content, media_type, filename)
+
+
+@router.patch("/{user_id}")
+def update_user(user_id: int, req: UserUpdateRequest, db: Session = Depends(get_db), user: dict = Depends(require_privileged_role)):
+    """
+    Edits an existing account's name/username/email. Both a Super
+    Admin/Admin and a Manager may call this route -- services/user_service.py
+    -> update_user() enforces the narrower Manager boundary (Staff/Customer
+    accounts only) server-side.
+    """
+    return user_service.update_user(db, user_id, req, user)
 
 
 @router.delete("/{user_id}")

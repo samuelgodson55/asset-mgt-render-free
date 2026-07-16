@@ -43,7 +43,7 @@
           <svg class="h-5 w-5 text-blue-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M3 9h18"/><path d="M8 4v5"/></svg>
         </div>
         <div class="leading-tight">
-          <p class="text-[15px] font-bold tracking-tight text-slate-50">Snipe-IT <span class="font-medium text-slate-400">Lite</span></p>
+          <p id="siteBrandName" class="text-[15px] font-bold tracking-tight text-slate-50">Snipe-IT <span class="font-medium text-slate-400">Lite</span></p>
           <p class="hidden text-[11px] text-slate-500 tag-mono sm:block">asset-registry.internal.corp</p>
         </div>
       </div>
@@ -194,6 +194,9 @@
       <button id="tabAdhoc" data-action="switch-tab" data-tab="adhoc" class="relative border-b-2 border-transparent px-3 py-3 text-[13px] font-medium text-slate-500 transition hover:text-slate-300 sm:px-4">
         <span class="sm:hidden">Ad-Hoc</span><span class="hidden sm:inline">Ad-Hoc Directory</span>
       </button>
+      <button id="tabQuotes" data-action="switch-tab" data-tab="quotes" class="relative border-b-2 border-transparent px-3 py-3 text-[13px] font-medium text-slate-500 transition hover:text-slate-300 sm:px-4">
+        <span class="sm:hidden">Quotes</span><span class="hidden sm:inline">Quotes</span>
+      </button>
       <button id="tabLogs" data-action="switch-tab" data-tab="logs" class="relative border-b-2 border-transparent px-3 py-3 text-[13px] font-medium text-slate-500 transition hover:text-slate-300 sm:px-4">
         <span class="sm:hidden">Logs</span><span class="hidden sm:inline">Audit &amp; Backups</span>
       </button>
@@ -206,10 +209,10 @@
   <!-- Swipe hint dots (mobile only) -- see js/ui.js's updateSwipeDots(). -->
   <div id="swipeDots" class="mb-4 flex items-center justify-center gap-1.5 sm:hidden"></div>
 
-  <!-- #swipeArea wraps all four tab sections below so js/ui.js's
+  <!-- #swipeArea wraps all five tab sections below so js/ui.js's
        initSwipeNav() can attach a single touchstart/touchend pair here and
        let a phone visitor move between Asset Inventory / User Directory /
-       Ad-Hoc Directory / Audit & Backups by swiping left or right, in
+       Ad-Hoc Directory / Quotes / Audit & Backups by swiping left or right, in
        addition to tapping the tabs in the navbar above. Desktop is
        unaffected -- touch events simply never fire from a mouse. -->
   <div id="swipeArea">
@@ -239,7 +242,7 @@
             <option value="50">50</option>
           </select>
         </div>
-        <!-- Opens #assetExportModal (department picker + CSV/PDF) -- see
+        <!-- Opens #assetExportModal (category picker + CSV/PDF) -- see
              js/components/assets.js's openAssetExportModal(). -->
         <button data-action="open-asset-export" title="Export the Asset Inventory table"
           class="flex items-center gap-1.5 rounded-md border border-border bg-card2 px-3 py-2 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
@@ -299,10 +302,16 @@
               class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
           </div>
           <div>
-            <label class="mb-1 block text-[12px] font-medium text-slate-400">Department <span class="text-slate-600">(optional)</span></label>
-            <input type="text" id="newPoolDepartment" placeholder="e.g. Engineering"
+            <label class="mb-1 block text-[12px] font-medium text-slate-400">Category <span class="text-slate-600">(optional)</span></label>
+            <input type="text" id="newPoolCategory" placeholder="e.g. Engineering"
               class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
-            <p class="mt-1 text-[11px] text-slate-500">Which internal department this equipment originates from.</p>
+            <p class="mt-1 text-[11px] text-slate-500">Which internal category this equipment belongs to.</p>
+          </div>
+          <div>
+            <label class="mb-1 block text-[12px] font-medium text-slate-400">Price <span class="text-slate-600">(optional)</span></label>
+            <input type="number" id="newPoolPrice" min="0" step="0.01" placeholder="e.g. 1899.00"
+              class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
+            <p class="mt-1 text-[11px] text-slate-500">Per-unit purchase/replacement price for this equipment.</p>
           </div>
           <button type="submit" class="mt-1 w-full rounded-lg bg-blue-600 py-2 text-[13px] font-semibold text-white transition hover:bg-blue-500 active:bg-blue-700">
             Create Stock Pool
@@ -328,7 +337,7 @@
             Sample CSV
           </button>
         </div>
-        <p class="mb-4 text-[12px] text-slate-500">Bulk-load asset pools from a formatted CSV export (columns: name, total_quantity, department [optional]). Not sure of the format? Download the sample CSV above, fill it in to match your inventory sheet, then drop it below.</p>
+        <p class="mb-4 text-[12px] text-slate-500">Bulk-load asset pools from a formatted CSV export (columns: name, total_quantity, category [optional], price [optional]). Not sure of the format? Download the sample CSV above, fill it in to match your inventory sheet, then drop it below.</p>
         <form id="csvImportForm">
           <!-- id="csvDropZone" is what js/main.js's wireCsvDragAndDrop()
                attaches dragover/dragleave/drop listeners to -- see that
@@ -577,6 +586,101 @@
           <button id="outsidersNextBtn" data-action="change-page" data-key="outsiders" data-delta="1" class="rounded-md border border-border px-2.5 py-1 font-medium text-slate-300 transition hover:border-slate-500 disabled:opacity-40 disabled:cursor-not-allowed">Next</button>
         </div>
       </div>
+    </div>
+  </section>
+
+  <!-- ================= QUOTES (Admin/Manager) =================
+       Every submitted Equipment Quotation -- look one up by its ID
+       (reference number) or requester, then open it to adjust line
+       items, leave notes, and assign it to a user. See
+       js/components/quotation.js and backend/api/quotations.py. -->
+  <section id="quotesSection" class="hidden">
+    <div class="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <div>
+        <h1 class="text-xl font-bold tracking-tight text-slate-50">Quotes</h1>
+        <p class="text-[13px] text-slate-500"><span class="quote-count">0</span> quotation(s) in the master queue · search or recall by Quotation ID, name, or email</p>
+      </div>
+      <div class="flex flex-wrap items-center gap-3">
+        <div class="relative w-full sm:w-72">
+          <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+          <input type="text" id="quotesSearchInput" placeholder="Search or recall by Quotation ID, name, or email…"
+            class="w-full rounded-lg border border-border bg-card2 py-2 pl-9 pr-3 text-[13px] text-slate-200 placeholder-slate-500 outline-none transition focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
+        </div>
+        <div class="flex items-center gap-2 text-[13px] text-slate-400">
+          <span>Rows per page</span>
+          <select id="quotesPerPageSelect" class="rounded-lg border border-border bg-card2 px-2.5 py-2 text-slate-200 outline-none focus:border-blue-500/60">
+            <option value="5" selected>5</option>
+            <option value="10">10</option>
+            <option value="25">25</option>
+            <option value="50">50</option>
+          </select>
+        </div>
+        <button type="button" data-action="open-fulfillment-drawer"
+          class="flex items-center gap-1.5 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-[13px] font-semibold text-emerald-400 transition hover:bg-emerald-500/20">
+          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 12V8H6a2 2 0 010-4h12v4"/><path d="M4 6v12a2 2 0 002 2h14v-4"/><path d="M18 12a2 2 0 000 4h4v-4Z"/></svg>
+          Fulfillment Drawer
+        </button>
+        <button type="button" data-action="open-create-quote-modal"
+          class="flex items-center gap-1.5 rounded-md bg-blue-600 px-3 py-2 text-[13px] font-semibold text-white transition hover:bg-blue-500">
+          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+          Create Quote
+        </button>
+      </div>
+    </div>
+
+    <div class="overflow-hidden rounded-xl border border-border bg-card">
+      <table class="w-full text-left text-[13px]">
+        <thead>
+          <tr class="border-b border-border bg-card2/60 text-[11px] uppercase tracking-wide text-slate-500">
+            <th class="px-3 py-3 font-semibold">Quotation ID</th>
+            <th class="px-3 py-3 font-semibold">Status</th>
+            <th class="hidden px-3 py-3 font-semibold sm:table-cell">Requester</th>
+            <th class="hidden px-3 py-3 font-semibold sm:table-cell">Submitted</th>
+            <th class="px-3 py-3 font-semibold">Items</th>
+            <th class="hidden px-3 py-3 font-semibold sm:table-cell">Assigned To</th>
+            <th class="px-3 py-3 text-right font-semibold">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="quotesTableBody" class="divide-y divide-border">
+          <tr><td colspan="7" class="px-5 py-6 text-center text-slate-500">Loading quotes…</td></tr>
+        </tbody>
+      </table>
+      <div class="flex items-center justify-between border-t border-border bg-card2/40 px-5 py-3 text-[12px] text-slate-400">
+        <span id="quotesPageInfo">Loading…</span>
+        <div class="flex items-center gap-2">
+          <button id="quotesPrevBtn" data-action="change-page" data-key="quotes" data-delta="-1" class="rounded-md border border-border px-2.5 py-1 font-medium text-slate-300 transition hover:border-slate-500 disabled:opacity-40 disabled:cursor-not-allowed">Prev</button>
+          <button id="quotesNextBtn" data-action="change-page" data-key="quotes" data-delta="1" class="rounded-md border border-border px-2.5 py-1 font-medium text-slate-300 transition hover:border-slate-500 disabled:opacity-40 disabled:cursor-not-allowed">Next</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ================= QUOTATION SETTINGS (VAT) =================
+         The only value tied to the self-service Equipment Quotation
+         feature that's edited HERE rather than per-asset: the global VAT
+         percentage applied to every saved order's total (see
+         js/components/quotation.js on staff.html/customer.html and
+         backend/services/quotation_service.py). Per-asset day-rate price
+         is still edited from each pool's own Properties Hub, in the
+         Inventory tab -- see "Price" in the Register New Inventory Pool
+         form there and js/components/assets.js's savePrice() -- and
+         already applies globally to every quotation immediately, the
+         same way this does. Lives here, under Quotes, rather than
+         Inventory, since VAT is a quotation-wide setting, not a
+         per-asset one. -->
+    <div class="mt-6 rounded-xl border border-border bg-card p-5">
+      <h2 class="mb-1 text-[14px] font-semibold text-slate-100">Quotation Settings</h2>
+      <p class="mb-4 text-[12px] text-slate-500">Global VAT applied to every staff/customer's saved Equipment Quotation. Changes take effect immediately -- editable here only.</p>
+      <form id="vatSettingsForm" class="flex flex-wrap items-end gap-3">
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">VAT (%)</label>
+          <input type="number" id="vatPercentInput" min="0" max="100" step="0.01" placeholder="e.g. 7.5"
+            class="w-32 rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
+        </div>
+        <button type="submit" class="rounded-lg bg-blue-600 px-4 py-2 text-[13px] font-semibold text-white transition hover:bg-blue-500 active:bg-blue-700">
+          Save VAT
+        </button>
+        <span id="vatSettingsMessage" class="hidden text-[12px] font-medium"></span>
+      </form>
     </div>
   </section>
 
@@ -1035,6 +1139,92 @@
   </div>
 </div>
 
+<!-- ============= EDIT USER DETAILS (Super Admin/Admin: all accounts; ============
+     Manager: Staff/Customer only -- see js/components/users.js's
+     openEditUserModal()/submitEditUserForm() and
+     services/user_service.py -> update_user() for the enforcement). -->
+<div id="editUserModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative w-full max-w-sm overflow-y-auto sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl shadow-2xl">
+    <div class="flex items-start justify-between border-b border-border px-6 py-5">
+      <div>
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">User Directory</p>
+        <h3 class="text-[16px] font-bold text-slate-50">Edit User Details</h3>
+        <p id="editUserTargetName" class="text-[12px] text-slate-500">—</p>
+      </div>
+      <button data-action="close-modal" data-modal="editUserModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <form id="editUserForm" class="space-y-4 px-6 py-5">
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Full Name</label>
+        <input type="text" id="editUserName" required
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+      </div>
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Username</label>
+        <input type="text" id="editUserUsername" required
+          class="tag-mono w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+      </div>
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Email</label>
+        <input type="email" id="editUserEmail" required
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+      </div>
+      <p id="editUserMessage" class="hidden text-[12px]"></p>
+      <div class="flex gap-3 pt-1">
+        <button type="button" data-action="close-modal" data-modal="editUserModal" class="flex-1 rounded-lg border border-border py-2.5 text-[13px] font-semibold text-slate-300 transition hover:border-slate-500">Cancel</button>
+        <button type="submit" class="flex-1 rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500">Save Changes</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ============= EDIT AD-HOC INDIVIDUAL (Super Admin/Admin and Manager) ============
+     See js/components/outsiders.js's openEditOutsiderModal()/
+     submitEditOutsiderForm() and services/outsider_service.py ->
+     update_outsider(). -->
+<div id="editOutsiderModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative w-full max-w-sm overflow-y-auto sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl shadow-2xl">
+    <div class="flex items-start justify-between border-b border-border px-6 py-5">
+      <div>
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Ad-Hoc (Unlinked) Directory</p>
+        <h3 class="text-[16px] font-bold text-slate-50">Edit Individual</h3>
+        <p id="editOutsiderTargetName" class="text-[12px] text-slate-500">—</p>
+      </div>
+      <button data-action="close-modal" data-modal="editOutsiderModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <form id="editOutsiderForm" class="space-y-4 px-6 py-5">
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Full Name</label>
+        <input type="text" id="editOutsiderName" required
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+      </div>
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Contact Details</label>
+        <input type="text" id="editOutsiderContact" required placeholder="Phone or email"
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+      </div>
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Company <span class="text-slate-600">(optional)</span></label>
+        <input type="text" id="editOutsiderCompany"
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+      </div>
+      <p id="editOutsiderMessage" class="hidden text-[12px]"></p>
+      <div class="flex gap-3 pt-1">
+        <button type="button" data-action="close-modal" data-modal="editOutsiderModal" class="flex-1 rounded-lg border border-border py-2.5 text-[13px] font-semibold text-slate-300 transition hover:border-slate-500">Cancel</button>
+        <button type="submit" class="flex-1 rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500">Save Changes</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <!-- ================= ASSET PROPERTIES MULTI-TAB VIEW HUB ================= -->
 <div id="propsModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
   <div class="absolute inset-0 bg-black/70 backdrop"></div>
@@ -1050,26 +1240,44 @@
             <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
           </button>
         </div>
-        <!-- Originating department (optional -- see models.py's AssetType
+        <!-- Category (optional -- see models.py's AssetType
              docstring). Editable here (unlike manager.html's read-only
              version of this modal): always shown, with a placeholder text
-             when unset, so a Super Admin can backfill a department onto
+             when unset, so a Super Admin can backfill a category onto
              pools that don't have one yet, same rename-in-place pattern as
              nameDisplay/nameEdit above. -->
-        <div id="deptDisplay" class="mt-0.5 flex items-center gap-1.5 text-[12px] text-slate-500">
-          <span>Department: <span id="propsDepartment" class="font-medium text-slate-300">—</span></span>
-          <button data-action="toggle-department-edit" class="shrink-0 rounded-md p-1 text-slate-500 transition hover:bg-card2 hover:text-blue-400" title="Edit department">
+        <div id="categoryDisplay" class="mt-0.5 flex items-center gap-1.5 text-[12px] text-slate-500">
+          <span>Category: <span id="propsCategory" class="font-medium text-slate-300">—</span></span>
+          <button data-action="toggle-category-edit" class="shrink-0 rounded-md p-1 text-slate-500 transition hover:bg-card2 hover:text-blue-400" title="Edit category">
             <svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
           </button>
         </div>
         <!-- Same stack-below-`sm` layout as nameEdit above, for the same
              reason (a fixed-width input plus two buttons doesn't fit one
              row on a phone-width modal). -->
-        <div id="deptEdit" class="hidden mt-2 flex-col items-stretch gap-2 sm:mt-1.5 sm:flex-row sm:items-center">
-          <input type="text" id="deptInput" placeholder="e.g. Engineering" class="w-full rounded-md border border-border bg-card2 px-2 py-1.5 text-[13px] text-slate-200 outline-none focus:border-blue-500/60 sm:w-56" />
+        <div id="categoryEdit" class="hidden mt-2 flex-col items-stretch gap-2 sm:mt-1.5 sm:flex-row sm:items-center">
+          <input type="text" id="categoryInput" placeholder="e.g. Engineering" class="w-full rounded-md border border-border bg-card2 px-2 py-1.5 text-[13px] text-slate-200 outline-none focus:border-blue-500/60 sm:w-56" />
           <div class="flex gap-2">
-            <button data-action="save-department" class="rounded-md bg-emerald-600 px-2.5 py-1.5 text-[11px] font-semibold text-white transition hover:bg-emerald-500">Save</button>
-            <button data-action="toggle-department-edit" class="rounded-md border border-border px-2.5 py-1.5 text-[11px] font-medium text-slate-300 transition hover:border-slate-500">Cancel</button>
+            <button data-action="save-category" class="rounded-md bg-emerald-600 px-2.5 py-1.5 text-[11px] font-semibold text-white transition hover:bg-emerald-500">Save</button>
+            <button data-action="toggle-category-edit" class="rounded-md border border-border px-2.5 py-1.5 text-[11px] font-medium text-slate-300 transition hover:border-slate-500">Cancel</button>
+          </div>
+        </div>
+        <!-- Per-unit price (optional -- see models.py's AssetType
+             docstring). Same editable-in-place pattern as categoryDisplay/
+             categoryEdit above: always shown, with a placeholder text when
+             unset, so a Super Admin can backfill a price onto pools that
+             don't have one yet. -->
+        <div id="priceDisplay" class="mt-0.5 flex items-center gap-1.5 text-[12px] text-slate-500">
+          <span>Price: <span id="propsPrice" class="font-medium text-slate-300">—</span></span>
+          <button data-action="toggle-price-edit" class="shrink-0 rounded-md p-1 text-slate-500 transition hover:bg-card2 hover:text-blue-400" title="Edit price">
+            <svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+          </button>
+        </div>
+        <div id="priceEdit" class="hidden mt-2 flex-col items-stretch gap-2 sm:mt-1.5 sm:flex-row sm:items-center">
+          <input type="number" id="priceInput" min="0" step="0.01" placeholder="e.g. 1899.00" class="w-full rounded-md border border-border bg-card2 px-2 py-1.5 text-[13px] text-slate-200 outline-none focus:border-blue-500/60 sm:w-56" />
+          <div class="flex gap-2">
+            <button data-action="save-price" class="rounded-md bg-emerald-600 px-2.5 py-1.5 text-[11px] font-semibold text-white transition hover:bg-emerald-500">Save</button>
+            <button data-action="toggle-price-edit" class="rounded-md border border-border px-2.5 py-1.5 text-[11px] font-medium text-slate-300 transition hover:border-slate-500">Cancel</button>
           </div>
         </div>
         <!-- Stacks (input full-width, Save/Cancel side-by-side beneath it)
@@ -1247,8 +1455,8 @@
 <!-- ================= ASSET INVENTORY EXPORT (MODAL) =================
      Opened by the Asset Inventory tab's "Export" button (data-action=
      "open-asset-export" -- see js/components/assets.js's
-     openAssetExportModal(), which populates #assetExportDepartment with
-     "Download All" plus one option per distinct department on file
+     openAssetExportModal(), which populates #assetExportCategory with
+     "Download All" plus one option per distinct category on file
      before showing this). Downloads the INVENTORY TABLE itself (one row
      per pool) -- not a properties-assigned/custody export -- via
      GET /assets/export, see js/components/exports.js's
@@ -1268,10 +1476,10 @@
     <div class="space-y-4 px-6 py-5">
       <div>
         <label class="mb-1 block text-[12px] font-medium text-slate-400">Category</label>
-        <select id="assetExportDepartment" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60">
+        <select id="assetExportCategory" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60">
           <option value="all">Download All</option>
         </select>
-        <p class="mt-1 text-[11px] text-slate-500">Pick a department to export just its pools, or download everything.</p>
+        <p class="mt-1 text-[11px] text-slate-500">Pick a category to export just its pools, or download everything.</p>
       </div>
       <div class="flex gap-3 pt-1">
         <button data-action="export-assets-inventory" data-format="csv"
@@ -1285,6 +1493,325 @@
           .PDF
         </button>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============= QUOTE DETAIL MODAL (Admin/Manager "Quotes" tab) =============
+     View/adjust a submitted Quotation's line items, leave notes, and
+     assign it to a user. Opened by components/quotation.js's
+     openQuoteDetail(); see backend/api/quotations.py for the endpoints
+     this drives. -->
+<div id="quoteDetailModal" class="fixed inset-0 z-40 hidden items-center justify-center bg-black/70 p-4">
+  <div class="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-border bg-[#141922] shadow-2xl">
+    <div class="flex items-start justify-between gap-3 border-b border-border px-5 py-4">
+      <div class="min-w-0">
+        <div class="flex flex-wrap items-center gap-2">
+          <h3 id="quoteDetailRef" class="text-[15px] font-bold tag-mono text-slate-50">—</h3>
+          <span id="quoteDetailStatusBadge"></span>
+        </div>
+        <p id="quoteDetailMeta" class="mt-0.5 truncate text-[12px] text-slate-500">—</p>
+      </div>
+      <div class="flex shrink-0 items-center gap-2">
+        <button type="button" id="quoteDetailApproveBtn" data-action="approve-quote-detail"
+          class="hidden items-center gap-1.5 rounded-md bg-emerald-600/90 px-2.5 py-1.5 text-[12px] font-semibold text-white transition hover:bg-emerald-500 sm:inline-flex">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 13l4 4L19 7"/></svg>
+          Approve
+        </button>
+        <button type="button" data-action="export-quote-detail"
+          class="flex items-center gap-1.5 rounded-md border border-border bg-card2 px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+          <span class="hidden sm:inline">Export PDF</span>
+        </button>
+        <button data-action="close-modal" data-modal="quoteDetailModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <div class="space-y-5 px-5 py-4">
+      <!-- Shown once the quote is Approved/Fulfilled -- items/notes/
+           assignment are locked past this point (see
+           components/quotation.js's renderQuoteDetail()). -->
+      <p id="quoteDetailLockedNotice" class="hidden rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-[12px] font-medium text-emerald-300"></p>
+      <!-- Line items -->
+      <!-- Desktop/tablet table (sm and up) -->
+      <div class="hidden overflow-hidden rounded-lg border border-border sm:block">
+        <table class="w-full text-left text-[13px]">
+          <thead>
+            <tr class="border-b border-border bg-card2/60 text-[11px] uppercase tracking-wide text-slate-500">
+              <th class="px-3 py-2.5 font-semibold">Asset</th>
+              <th class="px-3 py-2.5 font-semibold">Qty</th>
+              <th class="px-3 py-2.5 font-semibold">Start</th>
+              <th class="px-3 py-2.5 font-semibold">Due</th>
+              <th class="px-3 py-2.5 font-semibold">Days</th>
+              <th class="px-3 py-2.5 font-semibold">Line Total</th>
+              <th class="px-3 py-2.5 text-right font-semibold">Remove</th>
+            </tr>
+          </thead>
+          <tbody id="quoteDetailItemsBody" class="divide-y divide-border"></tbody>
+        </table>
+      </div>
+
+      <!-- Mobile cards (below sm) -- a table with Asset/Qty/Line Total/
+           Remove crammed into a phone-width modal either clips the Remove
+           button off-screen or forces horizontal scroll. Each line item
+           gets the full modal width instead, same pattern as
+           #quotationCatalogCards/#myOrderCards on staff.html/customer.html. -->
+      <div id="quoteDetailItemsCards" class="divide-y divide-border rounded-lg border border-border sm:hidden"></div>
+
+      <!-- Add another asset -- search box instead of a long dropdown, and
+           each control (Qty/Start/Due/Add) gets its own fixed, compact
+           width so the quantity box never stretches to fill the row.
+           Hidden entirely once the quote is locked (Approved/Fulfilled). -->
+      <div id="quoteDetailAddItemForm" class="space-y-2 rounded-lg border border-dashed border-border p-3">
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Add another asset</p>
+        <div class="relative">
+          <svg class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+          <input type="text" id="quoteDetailAssetSearchInput" placeholder="Search assets by name or category…" autocomplete="off"
+            class="w-full rounded-md border border-border bg-card2 py-2 pl-8 pr-3 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          <div id="quoteDetailAssetResults" class="absolute z-10 mt-1 hidden max-h-48 w-full overflow-y-auto rounded-md border border-border bg-[#141922] py-1 shadow-xl"></div>
+        </div>
+        <div id="quoteDetailSelectedAsset" class="hidden items-center justify-between gap-2 rounded-md bg-card2 px-3 py-2 text-[12px]">
+          <span id="quoteDetailSelectedAssetLabel" class="min-w-0 truncate text-slate-200"></span>
+          <button type="button" data-action="clear-quote-detail-asset" class="shrink-0 text-[11px] font-medium text-slate-500 transition hover:text-rose-400">Clear</button>
+        </div>
+        <div class="flex flex-wrap items-end gap-2">
+          <div>
+            <label class="mb-1 block text-[10px] font-medium uppercase tracking-wide text-slate-500">Qty</label>
+            <input type="number" id="quoteDetailAddQty" min="1" value="1"
+              class="w-16 rounded-md border border-border bg-card2 px-2.5 py-1.5 text-[12px] text-slate-200 outline-none focus:border-blue-500/60" />
+          </div>
+          <div>
+            <label class="mb-1 block text-[10px] font-medium uppercase tracking-wide text-slate-500">Start</label>
+            <input type="date" id="quoteDetailAddStart" class="w-[8.5rem] rounded-md border border-border bg-card2 px-2.5 py-1.5 text-[12px] text-slate-200 outline-none focus:border-blue-500/60" />
+          </div>
+          <div>
+            <label class="mb-1 block text-[10px] font-medium uppercase tracking-wide text-slate-500">Due</label>
+            <input type="date" id="quoteDetailAddDue" class="w-[8.5rem] rounded-md border border-border bg-card2 px-2.5 py-1.5 text-[12px] text-slate-200 outline-none focus:border-blue-500/60" />
+          </div>
+          <button type="button" data-action="add-quote-detail-item"
+            class="rounded-md bg-blue-600 px-3 py-1.5 text-[12px] font-semibold text-white transition hover:bg-blue-500">
+            Add Item
+          </button>
+        </div>
+      </div>
+
+      <!-- Add outsourced item -- for equipment NOT currently in the Asset
+           Inventory catalog (e.g. a one-off specialty rental). Manager/Admin
+           only: the requester can see this line once added (merged into the
+           same items list, flagged "Not in Inventory") but has no control
+           that can edit or remove it -- see models.py's
+           QuotationOutsourcedItem docstring. Hidden entirely once the quote
+           is locked (Approved/Fulfilled), same as "Add another asset" above. -->
+      <div id="quoteDetailAddOutsourcedItemForm" class="space-y-2 rounded-lg border border-dashed border-amber-500/30 bg-amber-500/5 p-3">
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-amber-400">Add item not currently in inventory</p>
+        <div class="flex flex-wrap items-end gap-2">
+          <div class="min-w-[10rem] flex-1">
+            <label class="mb-1 block text-[10px] font-medium uppercase tracking-wide text-slate-500">Item name</label>
+            <input type="text" id="quoteDetailOutsourcedName" placeholder="e.g. Steadicam"
+              class="w-full rounded-md border border-border bg-card2 px-2.5 py-1.5 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          </div>
+          <div class="min-w-[10rem] flex-1">
+            <!-- Internal tracking only -- never shown to the requester (see
+                 models.py's QuotationOutsourcedItem.sourced_from and
+                 _serialize_quotation()'s `reveal_sourcing` param). -->
+            <label class="mb-1 block text-[10px] font-medium uppercase tracking-wide text-slate-500">Sourced from (vendor)</label>
+            <input type="text" id="quoteDetailOutsourcedSourcedFrom" placeholder="e.g. Fountain Rentals"
+              class="w-full rounded-md border border-border bg-card2 px-2.5 py-1.5 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          </div>
+        </div>
+        <div class="flex flex-wrap items-end gap-2">
+          <div class="min-w-[10rem] flex-1">
+            <label class="mb-1 block text-[10px] font-medium uppercase tracking-wide text-slate-500">Description (optional)</label>
+            <input type="text" id="quoteDetailOutsourcedDescription" placeholder="Notes for internal reference"
+              class="w-full rounded-md border border-border bg-card2 px-2.5 py-1.5 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          </div>
+        </div>
+        <div class="flex flex-wrap items-end gap-2">
+          <div>
+            <label class="mb-1 block text-[10px] font-medium uppercase tracking-wide text-slate-500">Price/day</label>
+            <input type="number" id="quoteDetailOutsourcedPrice" min="0" step="0.01" placeholder="0.00"
+              class="w-24 rounded-md border border-border bg-card2 px-2.5 py-1.5 text-[12px] text-slate-200 outline-none focus:border-blue-500/60" />
+          </div>
+          <div>
+            <label class="mb-1 block text-[10px] font-medium uppercase tracking-wide text-slate-500">Qty</label>
+            <input type="number" id="quoteDetailOutsourcedQty" min="1" value="1"
+              class="w-16 rounded-md border border-border bg-card2 px-2.5 py-1.5 text-[12px] text-slate-200 outline-none focus:border-blue-500/60" />
+          </div>
+          <div>
+            <label class="mb-1 block text-[10px] font-medium uppercase tracking-wide text-slate-500">Start</label>
+            <input type="date" id="quoteDetailOutsourcedStart" class="w-[8.5rem] rounded-md border border-border bg-card2 px-2.5 py-1.5 text-[12px] text-slate-200 outline-none focus:border-blue-500/60" />
+          </div>
+          <div>
+            <label class="mb-1 block text-[10px] font-medium uppercase tracking-wide text-slate-500">Due</label>
+            <input type="date" id="quoteDetailOutsourcedDue" class="w-[8.5rem] rounded-md border border-border bg-card2 px-2.5 py-1.5 text-[12px] text-slate-200 outline-none focus:border-blue-500/60" />
+          </div>
+          <button type="button" data-action="add-quote-outsourced-item"
+            class="rounded-md bg-amber-600 px-3 py-1.5 text-[12px] font-semibold text-white transition hover:bg-amber-500">
+            Add Outsourced Item
+          </button>
+        </div>
+      </div>
+
+      <!-- Discount -- Admin/Manager-only, editable right up until the
+           quote is fulfilled (same lock as Notes/items below -- see
+           components/quotation.js's renderQuoteDetail()). -->
+      <div class="rounded-lg border border-border p-3">
+        <label class="mb-1.5 block text-[12px] font-semibold uppercase tracking-wide text-slate-500" for="quoteDetailDiscountInput">Discount (%)</label>
+        <div class="flex items-center gap-2">
+          <input type="number" id="quoteDetailDiscountInput" min="0" max="100" step="0.01" placeholder="0"
+            class="w-28 rounded-md border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          <button type="button" id="quoteDetailSaveDiscountBtn" data-action="save-quote-discount"
+            class="rounded-md border border-border bg-card2 px-3 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
+            Save Discount
+          </button>
+        </div>
+      </div>
+
+      <!-- Totals -->
+      <div class="flex justify-end text-[13px] text-slate-400">
+        <div class="space-y-1 text-right">
+          <p>Subtotal: <span id="quoteDetailSubtotal" class="tag-mono text-slate-200">—</span></p>
+          <p id="quoteDetailVat" class="tag-mono">VAT: —</p>
+          <p id="quoteDetailDiscountAmount" class="hidden tag-mono text-emerald-400">Discount: —</p>
+          <p class="text-[14px] font-semibold text-slate-100">Total: <span id="quoteDetailTotal" class="tag-mono">—</span></p>
+        </div>
+      </div>
+
+      <!-- Assign to user -->
+      <div class="rounded-lg border border-border p-3">
+        <p class="mb-2 text-[12px] font-semibold uppercase tracking-wide text-slate-500">Assigned To</p>
+        <p id="quoteDetailAssignedTo" class="mb-3 text-[13px]"></p>
+        <div id="quoteDetailAssignForm" class="relative">
+          <input type="text" id="quoteAssignSearchInput" placeholder="Search users by name or email to assign…" autocomplete="off"
+            class="w-full rounded-md border border-border bg-card2 px-3 py-2 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          <div id="quoteAssignResults" class="absolute z-10 mt-1 hidden w-full rounded-md border border-border bg-[#141922] py-1 shadow-xl"></div>
+        </div>
+        <button type="button" data-action="toggle-quote-assign-adhoc" class="mt-2 text-[11px] font-medium text-slate-500 underline-offset-2 transition hover:text-blue-400 hover:underline">
+          Assign to an Ad-Hoc Individual instead
+        </button>
+        <!-- Ad-Hoc assignment mini-form -- hidden until the link above is clicked. Creates a
+             new Outsider row on submit, exactly like the Issue/Dispatch drawer's own Ad-Hoc
+             route. See components/quotation.js's submitQuoteAssignAdhoc(). -->
+        <div id="quoteAssignAdhocForm" class="hidden mt-2 space-y-2 rounded-lg border border-border bg-card2/50 p-3">
+          <input type="text" id="quoteAssignAdhocName" placeholder="Full name" class="w-full rounded-md border border-border bg-card2 px-3 py-2 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          <input type="text" id="quoteAssignAdhocCompany" placeholder="Company" class="w-full rounded-md border border-border bg-card2 px-3 py-2 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          <input type="text" id="quoteAssignAdhocContact" placeholder="Contact (email or phone)" class="w-full rounded-md border border-border bg-card2 px-3 py-2 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          <button type="button" data-action="submit-quote-assign-adhoc" class="w-full rounded-md bg-blue-600 px-3 py-1.5 text-[12px] font-semibold text-white transition hover:bg-blue-500">
+            Assign to Ad-Hoc Individual
+          </button>
+        </div>
+      </div>
+
+      <!-- Notes -->
+      <div>
+        <label class="mb-1.5 block text-[12px] font-semibold uppercase tracking-wide text-slate-500" for="quoteDetailNotes">Notes</label>
+        <textarea id="quoteDetailNotes" rows="3" placeholder="Internal notes about this quotation…"
+          class="w-full rounded-md border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60"></textarea>
+        <button type="button" id="quoteDetailSaveNotesBtn" data-action="save-quote-notes"
+          class="mt-2 rounded-md border border-border bg-card2 px-3 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
+          Save Notes
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= CREATE QUOTE (MODAL) =================
+     Admin/Manager starts a brand new Quotation directly -- e.g. building
+     one on a user's behalf over the phone -- instead of waiting for that
+     person to build and submit their own cart. Assignment uses the same
+     Staff Member / Linked Customer Account / Ad-Hoc Individual route
+     select as the Issue/Dispatch drawer (plus an Unassigned option, since
+     unlike a checkout a Quotation can be created without a recipient yet).
+     Created empty, then handed straight off to the Quote Detail modal
+     above to add line items. See components/quotation.js's
+     openCreateQuoteModal()/toggleQuoteRoute()/submitCreateQuote() and
+     POST /quotations. -->
+<div id="createQuoteModal" class="fixed inset-0 z-40 hidden items-center justify-center bg-black/70 p-4">
+  <div class="w-full max-w-md rounded-xl border border-border bg-[#141922] p-5 shadow-2xl">
+    <div class="mb-4 flex items-start justify-between gap-3">
+      <div>
+        <h3 class="text-[15px] font-bold text-slate-100">Create Quote</h3>
+        <p class="text-[12px] text-slate-500">Starts empty -- you'll add assets on the next screen.</p>
+      </div>
+      <button data-action="close-modal" data-modal="createQuoteModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <form id="createQuoteForm" class="space-y-4">
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Assign To</label>
+        <select id="quoteRouteSelect" data-action="toggle-quote-route" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60">
+          <option value="unassigned" selected>Unassigned (decide later)</option>
+          <option value="staff">Staff Member</option>
+          <option value="customer">Linked Customer Account</option>
+          <option value="adhoc">Ad-Hoc Individual (Unlinked)</option>
+        </select>
+      </div>
+
+      <div id="quoteStaffField" class="hidden">
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Staff Member</label>
+        <select id="quoteStaffSelect" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60"></select>
+      </div>
+
+      <div id="quoteCustomerField" class="hidden">
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Linked Customer Account</label>
+        <select id="quoteCustomerSelect" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60"></select>
+      </div>
+
+      <div id="quoteAdhocField" class="hidden space-y-3 rounded-lg border border-border bg-card2/50 p-3">
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Unlinked Profile Details</p>
+        <input type="text" id="quoteAdhocName" placeholder="Full name" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+        <input type="text" id="quoteAdhocCompany" placeholder="Company" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+        <input type="text" id="quoteAdhocContact" placeholder="Contact (email or phone)" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+      </div>
+
+      <p id="createQuoteUnassignedHint" class="text-[11px] text-slate-500">Leave unassigned to decide later -- you can assign it anytime from the Quote Detail screen.</p>
+
+      <button type="button" data-action="submit-create-quote"
+        class="w-full rounded-md bg-blue-600 px-3 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500">
+        Create Quote
+      </button>
+    </form>
+  </div>
+</div>
+
+<!-- ============= FULFILLMENT DRAWER (Quote-to-Checkout bulk physical checkout) =============
+     Lists every "approved" Quotation (oldest first), checkbox-selectable
+     exactly like components/custody.js's bulk-return selection. Stock is
+     evaluated/deducted ONLY when "Check Out Selected" actually runs --
+     never at draft/submit/approve time. See components/quotation.js's
+     openFulfillmentDrawer()/processFulfillmentSelected(). -->
+<div id="fulfillmentDrawerModal" class="fixed inset-0 z-40 hidden items-center justify-center bg-black/70 p-4">
+  <div class="flex max-h-[85vh] w-full max-w-lg flex-col rounded-xl border border-border bg-[#141922] shadow-2xl">
+    <div class="flex items-start justify-between gap-3 border-b border-border px-5 py-4">
+      <div>
+        <h3 class="text-[15px] font-bold text-slate-100">Fulfillment Drawer</h3>
+        <p class="text-[12px] text-slate-500"><span id="fulfillmentQueueCount">0</span> quote(s) Approved / Ready for Pickup</p>
+      </div>
+      <button data-action="close-modal" data-modal="fulfillmentDrawerModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <div class="flex items-center gap-2 border-b border-border px-5 py-2.5">
+      <input type="checkbox" id="fulfillmentSelectAll" data-action="toggle-select-all-fulfillment" class="h-4 w-4 rounded border-border bg-card2" />
+      <label for="fulfillmentSelectAll" class="text-[12px] font-medium text-slate-400">Select all</label>
+    </div>
+
+    <div id="fulfillmentQueueBody" class="flex-1 overflow-y-auto">
+      <p class="px-4 py-6 text-center text-[13px] text-slate-500">Loading approved quotes…</p>
+    </div>
+
+    <div class="flex items-center justify-between gap-3 border-t border-border px-5 py-3.5">
+      <p class="text-[12px] text-slate-500"><span id="fulfillmentSelectedCount">0</span> selected</p>
+      <button type="button" id="processFulfillmentBtn" data-action="process-fulfillment-selected" disabled
+        class="rounded-md bg-emerald-600/90 px-4 py-2 text-[13px] font-semibold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40">
+        Check Out Selected
+      </button>
     </div>
   </div>
 </div>

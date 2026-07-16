@@ -1,12 +1,53 @@
-# Use an official, lightweight Python base image
+# =============================================================================
+# backend/Dockerfile
+# -----------------------------------------------------------------------------
+# Multi-stage build:
+#   1. "builder" installs Python deps into a venv (has network access, no
+#      need to be lean -- it's discarded and never shipped).
+#   2. The final stage only copies that venv + the app code into a fresh,
+#      minimal base -- no pip download cache, no build metadata, no
+#      requirements.txt-induced layer churn ever reaches the image that
+#      actually gets deployed/pulled/started.
+# See start.sh for the other half of this change (ENVIRONMENT-aware CMD,
+# replacing an unconditional --reload that was slowing down every startup,
+# including production's).
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Stage 1/2: builder
+# ---------------------------------------------------------------------------
+FROM python:3.11-slim AS builder
+
+WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# A venv (rather than installing into the system site-packages) is what
+# makes "just copy this one directory into the final stage" possible below
+# -- system site-packages would be entangled with the base image's own
+# Python install.
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Copy requirements and install dependencies first so Docker can cache this
+# layer and skip re-installing packages every time only the app code changes.
+COPY requirements.txt /app/
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir --default-timeout=100 -r requirements.txt
+
+# ---------------------------------------------------------------------------
+# Stage 2/2: runtime -- this is the image that actually ships.
+# ---------------------------------------------------------------------------
 FROM python:3.11-slim
 
-# Set the working directory inside the container
 WORKDIR /app
 
-# Prevent Python from writing .pyc files to disk and buffering stdout/stderr
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+# Prevent Python from writing .pyc files to disk on every future import,
+# and don't buffer stdout/stderr (so logs show up immediately, not only
+# once a buffer fills or the process exits).
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:$PATH"
 
 # postgresql-client provides pg_dump/psql -- required by
 # services/backup_service.py (database backup/restore). psycopg2-binary
@@ -16,16 +57,22 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends postgresql-client && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install dependencies first so Docker can cache this
-# layer and skip re-installing packages every time only the app code changes
-COPY requirements.txt /app/
+# The installed dependencies -- and ONLY the installed dependencies, none
+# of pip's own cache/build metadata -- copied over from the builder stage.
+COPY --from=builder /opt/venv /opt/venv
 
-# Upgrade pip and increase the download timeout limit to handle slow network drops
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir --default-timeout=100 -r requirements.txt
-
-# Copy the rest of our application code
+# The application code.
 COPY . /app/
+
+# Precompile every .py file to .pyc now, at build time, instead of paying
+# that cost on the container's first request/import at startup. This is
+# what actually makes cold starts faster -- PYTHONDONTWRITEBYTECODE above
+# only stops the interpreter from writing NEW .pyc files at runtime, it
+# doesn't stop it reading ones that already exist, so these still get used.
+# Covers both the app code (/app) and every installed dependency
+# (/opt/venv) -- fastapi/sqlalchemy/pydantic etc. are the bulk of what's
+# actually imported at startup.
+RUN python -m compileall -q /app /opt/venv
 
 # SECURITY: run the app as a dedicated, unprivileged user instead of root.
 # By default Docker containers run as root, which means anyone who manages
@@ -43,16 +90,12 @@ COPY . /app/
 # to appuser for the actual app process.
 RUN useradd --create-home --shell /bin/bash appuser && chown -R appuser:appuser /app
 COPY docker-entrypoint.sh /docker-entrypoint.sh
-RUN chmod +x /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh /app/start.sh
 ENTRYPOINT ["/docker-entrypoint.sh"]
 
-# Run the FastAPI server with live-reload enabled for development.
-# For a PRODUCTION deploy: drop "--reload" (it re-imports your whole app on
-# every file change -- pure overhead once you're not actively editing code
-# and, on some platforms, can even trigger from filesystem noise other than
-# your own edits), and run behind multiple workers instead, e.g.:
-#   CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
-# See README.md's "Running in Production" section for the full checklist
-# (ENVIRONMENT=production, a real JWT_SECRET_KEY, AUTO_INIT_DB/
-# AUTO_SEED_DEMO_DATA=false, a reverse proxy terminating HTTPS, etc.)
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+# start.sh picks the right uvicorn invocation for ENVIRONMENT at container
+# start (no --reload + multiple workers for production, --reload for
+# development/local) -- see that script's own header comment for the full
+# reasoning, including why the OLD unconditional --reload here was pure
+# overhead in production.
+CMD ["/app/start.sh"]
