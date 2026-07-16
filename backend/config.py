@@ -73,6 +73,36 @@ class Settings(BaseSettings):
     later mid-request.
     """
 
+    @model_validator(mode="before")
+    @classmethod
+    def apply_environment_defaults(cls, data):
+        if not isinstance(data, dict):
+            return data
+
+        environment_name = str(data.get("ENVIRONMENT", "development")).strip().lower()
+        is_production = environment_name in {"production", "prod"}
+
+        raw_lean_mode = data.get("LEAN_MODE")
+        lean_mode = None
+        if raw_lean_mode is None:
+            lean_mode = is_production
+        else:
+            lean_mode = str(raw_lean_mode).strip().lower() in {"1", "true", "yes", "on"}
+
+        if "LEAN_MODE" not in data:
+            data["LEAN_MODE"] = lean_mode
+        if "ENABLE_API_DOCS" not in data:
+            data["ENABLE_API_DOCS"] = False if lean_mode else True
+        if "AUTO_INIT_DB" not in data:
+            data["AUTO_INIT_DB"] = False if lean_mode else True
+        if "AUTO_SEED_DEMO_DATA" not in data:
+            data["AUTO_SEED_DEMO_DATA"] = False if lean_mode else True
+        if "ENABLE_AUTO_BACKUP" not in data:
+            data["ENABLE_AUTO_BACKUP"] = False if lean_mode else True
+        if "LOG_LEVEL" not in data:
+            data["LOG_LEVEL"] = "WARNING" if lean_mode else "INFO"
+        return data
+
     # --- Environment ----------------------------------------------------
     # "local", "development" (default, safe for local docker compose), or
     # "production". As far as THIS backend process is concerned, only
@@ -87,6 +117,7 @@ class Settings(BaseSettings):
     # build-frontend/build.js: local = untouched, development = minified,
     # production = minified + obfuscated.
     ENVIRONMENT: str = "development"
+    LEAN_MODE: bool = False
 
     # --- Database -----------------------------------------------------
     # Full SQLAlchemy connection string. In Docker Compose, "db" is the

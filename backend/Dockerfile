@@ -16,7 +16,7 @@
 # ---------------------------------------------------------------------------
 # Stage 1/2: builder
 # ---------------------------------------------------------------------------
-FROM python:3.11-slim AS builder
+FROM python:3.12-slim AS builder
 
 WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -27,18 +27,25 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # -- system site-packages would be entangled with the base image's own
 # Python install.
 RUN python -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
+ENV PATH="/opt/venv/bin:$PATH" \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # Copy requirements and install dependencies first so Docker can cache this
 # layer and skip re-installing packages every time only the app code changes.
 COPY requirements.txt /app/
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir --default-timeout=100 -r requirements.txt
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends build-essential libpq-dev && \
+    pip install --upgrade pip && \
+    pip install --default-timeout=100 -r requirements.txt && \
+    apt-get remove -y build-essential libpq-dev && \
+    apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
 
 # ---------------------------------------------------------------------------
 # Stage 2/2: runtime -- this is the image that actually ships.
 # ---------------------------------------------------------------------------
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 WORKDIR /app
 
@@ -47,14 +54,16 @@ WORKDIR /app
 # once a buffer fills or the process exits).
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PATH="/opt/venv/bin:$PATH"
+    PATH="/opt/venv/bin:$PATH" \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # postgresql-client provides pg_dump/psql -- required by
 # services/backup_service.py (database backup/restore). psycopg2-binary
 # (in requirements.txt) is a Python DB driver and does NOT include these
 # command-line binaries.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends postgresql-client && \
+    apt-get install -y --no-install-recommends postgresql-client ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 # The installed dependencies -- and ONLY the installed dependencies, none

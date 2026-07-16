@@ -36,7 +36,7 @@ Thumbs.db
 
 # --- Logs / misc ---------------------------------------------------------------
 *.log
-node_modules/
+**/node_modules/
 
 # --- Docs not needed inside the image ------------------------------------------
 README.md

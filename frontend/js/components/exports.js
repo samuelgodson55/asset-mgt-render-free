@@ -41,7 +41,7 @@ export async function downloadExport(path, fallbackName, button) {
   try {
     const session = getSession();
     const response = await fetch(`${API_URL}${path}`, {
-      headers: { 'Authorization': `Bearer ${session.token}` },
+      credentials: 'include',
     });
     if (!response.ok) throw new Error('Export failed. Please try again.');
 

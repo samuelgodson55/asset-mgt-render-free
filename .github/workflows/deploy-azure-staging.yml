@@ -1,0 +1,117 @@
+# .github/workflows/deploy-azure-staging.yml
+# -----------------------------------------------------------------------------
+# Mirrors deploy-azure-production.yml but triggers on `develop` and targets
+# the staging resource group/environment. The one real difference: the
+# frontend image is built with BUILD_ENV=development (bundled + minified,
+# NOT obfuscated) so stack traces and variable names stay readable for QA --
+# see DEPLOYMENT.md's "The pipeline, branch by branch" section and
+# nginx/Dockerfile's BUILD_ENV build-arg.
+# -----------------------------------------------------------------------------
+name: Deploy to Azure (Staging)
+
+on:
+  push:
+    branches: [develop]
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  RESOURCE_GROUP: ${{ secrets.STAGING_RESOURCE_GROUP }}
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  build-push:
+    name: Build + push images
+    needs: [ci]
+    runs-on: ubuntu-latest
+    outputs:
+      acr-login-server: ${{ steps.acr.outputs.login_server }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Resolve ACR login server
+        id: acr
+        run: |
+          SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
+          echo "login_server=$SERVER" >> "$GITHUB_OUTPUT"
+
+      - name: ACR login
+        run: az acr login --name "$(echo ${{ steps.acr.outputs.login_server }} | cut -d. -f1)"
+
+      - name: Build + push backend image
+        run: |
+          docker build -t ${{ steps.acr.outputs.login_server }}/snipeit-backend:$IMAGE_TAG ./backend
+          docker push ${{ steps.acr.outputs.login_server }}/snipeit-backend:$IMAGE_TAG
+
+      - name: Build + push frontend image (bundled + minified, not obfuscated)
+        run: |
+          docker build -f nginx/Dockerfile --build-arg BUILD_ENV=development \
+                       -t ${{ steps.acr.outputs.login_server }}/snipeit-frontend:$IMAGE_TAG .
+          docker push ${{ steps.acr.outputs.login_server }}/snipeit-frontend:$IMAGE_TAG
+
+  migrate:
+    needs: [build-push]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Run alembic upgrade head
+        run: |
+          az containerapp job update --name migrate --resource-group "$RESOURCE_GROUP" \
+            --image "${{ needs.build-push.outputs.acr-login-server }}/snipeit-backend:$IMAGE_TAG"
+          az containerapp job start --name migrate --resource-group "$RESOURCE_GROUP"
+
+      - name: Wait for migration
+        run: |
+          for i in $(seq 1 30); do
+            STATUS=$(az containerapp job execution list --name migrate --resource-group "$RESOURCE_GROUP" \
+                       --query "[0].properties.status" -o tsv)
+            [ "$STATUS" = "Succeeded" ] && exit 0
+            [ "$STATUS" = "Failed" ] && exit 1
+            sleep 10
+          done
+          exit 1
+
+  deploy:
+    needs: [build-push, migrate]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Update backend / worker / beat / frontend
+        run: |
+          for APP in backend worker beat; do
+            az containerapp update --name "$APP" --resource-group "$RESOURCE_GROUP" \
+              --image "${{ needs.build-push.outputs.acr-login-server }}/snipeit-backend:$IMAGE_TAG"
+          done
+          az containerapp update --name frontend --resource-group "$RESOURCE_GROUP" \
+            --image "${{ needs.build-push.outputs.acr-login-server }}/snipeit-frontend:$IMAGE_TAG"
+
+      - name: Smoke test
+        run: |
+          FQDN=$(az containerapp show --name frontend --resource-group "$RESOURCE_GROUP" \
+                   --query "properties.configuration.ingress.fqdn" -o tsv)
+          curl -f "https://$FQDN/healthz"

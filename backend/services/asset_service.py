@@ -9,6 +9,7 @@ advanced checkout flow, and CSV batch import. Used by api/assets.py.
 import csv
 import io
 import datetime
+from decimal import Decimal, InvalidOperation
 from typing import Optional
 from fastapi import HTTPException, UploadFile
 from sqlalchemy.orm import Session
@@ -37,11 +38,35 @@ MAX_LIMIT = 1000
 MAX_CSV_UPLOAD_BYTES = 5 * 1024 * 1024
 
 
+def _coerce_asset_price(raw_price) -> tuple[Optional[Decimal], Optional[str]]:
+    """Validate and normalize per-unit prices for the Numeric(10, 2) DB column."""
+    if raw_price is None:
+        return None, None
+    if isinstance(raw_price, bool):
+        return None, "price must be a valid number."
+
+    try:
+        price = Decimal(str(raw_price))
+    except (InvalidOperation, ValueError):
+        return None, "price must be a valid number."
+
+    price = price.quantize(Decimal("0.01"))
+    if price < 0:
+        return None, "price cannot be negative."
+    if price > Decimal("99999999.99"):
+        return None, "price exceeds the supported maximum of 99,999,999.99."
+    return price, None
+
+
 def create_asset_type(db: Session, asset: AssetTypeCreate, user: dict) -> dict:
     # Only Super Admins may create brand new stock pools.
     existing = db.query(models.AssetType).filter(models.AssetType.name == asset.name).first()
     if existing:
         raise HTTPException(status_code=400, detail="Asset type name already exists")
+
+    price_value, price_error = _coerce_asset_price(asset.price)
+    if price_error:
+        raise HTTPException(status_code=400, detail=price_error)
 
     new_asset_type = models.AssetType(
         name=asset.name,
@@ -49,14 +74,14 @@ def create_asset_type(db: Session, asset: AssetTypeCreate, user: dict) -> dict:
         available_quantity=asset.total_quantity,  # no checkouts/isolations yet, so Available == Total
         custom_fields=asset.custom_fields,
         category=asset.category,
-        price=asset.price,
+        price=price_value,
     )
     db.add(new_asset_type)
     db.commit()
     db.refresh(new_asset_type)
 
     dept_log_text = f" (Category: {asset.category})" if asset.category else ""
-    price_log_text = f" (Price: {export_service.format_money(asset.price)})" if asset.price is not None else ""
+    price_log_text = f" (Price: {export_service.format_money(price_value)})" if price_value is not None else ""
     db.add(models.AuditLog(
         operator=user["email"], action="POOL_CREATED", target_type="AssetType", target_id=new_asset_type.id,
         details=f"Created asset category '{asset.name}' with initial quantity of {asset.total_quantity}{dept_log_text}{price_log_text}",
@@ -267,8 +292,11 @@ def update_asset_price(db: Session, asset_id: int, payload: PriceUpdateRequest, 
     if not asset:
         raise HTTPException(status_code=404, detail="Asset type not found")
 
-    old_price = float(asset.price) if asset.price is not None else None
-    new_price = payload.price
+    old_price = asset.price
+    new_price, price_error = _coerce_asset_price(payload.price)
+    if price_error:
+        raise HTTPException(status_code=400, detail=price_error)
+
     if old_price == new_price:
         return {"message": "Price unchanged."}
 
@@ -645,16 +673,12 @@ def import_assets_from_csv(db: Session, file: UploadFile, user: dict) -> dict:
             raw_price = (row.get("price") or "").strip()
             price = None
             if raw_price:
-                try:
-                    price = round(float(raw_price), 2)
-                except ValueError:
+                price, price_error = _coerce_asset_price(raw_price)
+                if price_error:
                     errors.append({
                         "row": line_number, "name": name,
-                        "reason": f"'{raw_price}' is not a valid number for price.",
+                        "reason": price_error,
                     })
-                    continue
-                if price < 0:
-                    errors.append({"row": line_number, "name": name, "reason": "price cannot be negative."})
                     continue
 
             if not name:

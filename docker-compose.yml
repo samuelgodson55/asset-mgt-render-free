@@ -158,10 +158,8 @@ services:
       # init_db()/seed_db() calls instead of always running them. Leave
       # both "true" for local docker-compose demo use; set both "false" in
       # a real production .env and run `alembic upgrade head` separately.
-      AUTO_INIT_DB: ${AUTO_INIT_DB:-true}
-      AUTO_SEED_DEMO_DATA: ${AUTO_SEED_DEMO_DATA:-true}
+      LEAN_MODE: ${LEAN_MODE:-}
       # Operations & Observability requirement #2: structured logging.
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_FORMAT: ${LOG_FORMAT:-json}
       # Operations & Observability requirement #3: login rate limiting.
       LOGIN_RATE_LIMIT_MAX: ${LOGIN_RATE_LIMIT_MAX:-5}
@@ -178,7 +176,7 @@ services:
       # kept in sync with the frontend service's own ENABLE_API_DOCS below
       # (same .env key drives both, so this happens automatically as long
       # as you don't override just one of the two services individually).
-      ENABLE_API_DOCS: ${ENABLE_API_DOCS:-true}
+      ENABLE_API_DOCS: ${ENABLE_API_DOCS:-}
       # Hardcoded Super Admin (root account) -- see .env.example and
       # backend/config.py's SUPER_ADMIN_* docstring. Defaults keep local
       # Docker Compose working out of the box; generate a real password
@@ -204,7 +202,7 @@ services:
       DUE_SOON_REMINDER_DAYS: ${DUE_SOON_REMINDER_DAYS:-2}
       DUE_SOON_NOTIFICATION_INTERVAL_HOURS: ${DUE_SOON_NOTIFICATION_INTERVAL_HOURS:-24}
       # Database backups -- see backend/config.py's BACKUP_* docstring.
-      ENABLE_AUTO_BACKUP: ${ENABLE_AUTO_BACKUP:-true}
+      ENABLE_AUTO_BACKUP: ${ENABLE_AUTO_BACKUP:-}
       BACKUP_HOURS_UTC: ${BACKUP_HOURS_UTC:-3}
       # Deprecated single-value override -- see config.py's docstring. Left
       # unset by default so BACKUP_HOURS_UTC above is what actually applies.
@@ -442,7 +440,7 @@ services:
       # above -- see that line's comment and config.py's ENABLE_API_DOCS
       # docstring. Reading from the SAME .env key here means the two
       # services can't silently drift out of sync with each other.
-      ENABLE_API_DOCS: ${ENABLE_API_DOCS:-true}
+      ENABLE_API_DOCS: ${ENABLE_API_DOCS:-}
     ports:
       - "8080:80"
     depends_on:

@@ -599,31 +599,98 @@ export function downloadCsvImportTemplate() {
 export async function submitCsvImportForm(event) {
   event.preventDefault();
   const fileInput = document.getElementById('csvFileInput');
+  const resultContainer = document.getElementById('csvImportResult');
+  const bannerEl = document.getElementById('csvImportBanner');
+  const actionsEl = document.getElementById('csvImportActions');
+  const errorsEl = document.getElementById('csvImportErrors');
   if (!fileInput.files.length) return;
+  const file = fileInput.files[0];
+
+  // Read file text locally so we can offer a targeted failed-rows download
+  let fileText = '';
+  try {
+    fileText = await new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onload = () => resolve(fr.result);
+      fr.onerror = () => reject(new Error('Failed to read file'));
+      fr.readAsText(file);
+    });
+  } catch (readErr) {
+    // Fallback: proceed without the original text (download button will be unavailable)
+    fileText = '';
+  }
+
   const formData = new FormData();
-  formData.append('file', fileInput.files[0]);
+  formData.append('file', file);
   try {
     const result = await apiRequest('/assets/import', { method: 'POST', body: formData });
 
-    // Data Quality & Usability requirement #5: the backend no longer
-    // silently skips bad rows -- it returns a full diagnostic report
-    // (`result.errors`) of exactly which rows were rejected and why. We
-    // surface that here instead of only showing the success message, so a
-    // Super Admin can immediately go fix the specific rows rather than
-    // wondering why the imported count came in lower than the file's row
-    // count.
-    if (result.errors && result.errors.length) {
-      const preview = result.errors
-        .slice(0, 10)
-        .map(e => `Row ${e.row}${e.name ? ` (${e.name})` : ''}: ${e.reason}`)
-        .join('\n');
-      const more = result.errors.length > 10
-        ? `\n…and ${result.errors.length - 10} more rejected row(s).`
-        : '';
-      alert(`${result.message}\n\nRejected rows:\n${preview}${more}`);
+    const imported = result.imported_count || 0;
+    const errors = result.errors || [];
+    const total = imported + errors.length;
+
+    // Banner (immediate summary)
+    if (errors.length) {
+      bannerEl.className = 'rounded-md px-4 py-3 text-[13px] font-medium bg-amber-500/10 border border-amber-400/30 text-amber-300';
     } else {
-      alert(result.message);
+      bannerEl.className = 'rounded-md px-4 py-3 text-[13px] font-medium bg-emerald-600/10 border border-emerald-500/30 text-emerald-300';
     }
+    bannerEl.textContent = `Import Complete: ${imported} of ${total} records saved (${errors.length} failed)`;
+
+    // Actions (download failed rows)
+    actionsEl.innerHTML = '';
+    if (errors.length) {
+      const dlBtn = document.createElement('button');
+      dlBtn.type = 'button';
+      dlBtn.className = 'rounded-md bg-blue-600 px-3 py-1.5 text-[13px] font-medium text-white hover:bg-blue-500';
+      dlBtn.textContent = 'Download Failed Rows (.CSV)';
+      dlBtn.addEventListener('click', () => {
+        if (!fileText) {
+          alert('Original file content unavailable for download.');
+          return;
+        }
+        const lines = fileText.split(/\r\n|\n|\r/);
+        const header = lines[0] || '';
+        const failedLines = errors.map(e => (lines[e.row - 1] || '')).filter(Boolean);
+        const csvText = [header, ...failedLines].join('\r\n');
+        const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `failed_import_rows_${new Date().toISOString().slice(0,10)}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      });
+      actionsEl.appendChild(dlBtn);
+    }
+
+    // Error list table
+    if (errors.length) {
+      errorsEl.classList.remove('hidden');
+      const rowsHtml = errors.map(e => `
+        <tr class="border-t border-border">
+          <td class="px-2 py-1 align-top">${escapeHtml(String(e.row))}</td>
+          <td class="px-2 py-1 align-top">${escapeHtml(e.name || '')}</td>
+          <td class="px-2 py-1 text-rose-300 align-top">${escapeHtml(e.reason)}</td>
+        </tr>
+      `).join('');
+      errorsEl.innerHTML = `
+        <table class="w-full text-left text-sm">
+          <thead>
+            <tr class="text-slate-400 text-[12px]"><th class="px-2 py-1">Row</th><th class="px-2 py-1">Value</th><th class="px-2 py-1">Reason</th></tr>
+          </thead>
+          <tbody>${rowsHtml}</tbody>
+        </table>
+      `;
+    } else {
+      errorsEl.classList.add('hidden');
+      errorsEl.innerHTML = '';
+    }
+
+    if (resultContainer) resultContainer.classList.remove('hidden');
+
     fileInput.value = '';
     refreshDashboard();
   } catch (err) {

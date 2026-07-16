@@ -180,9 +180,8 @@ export async function exportAuditLogs(format = 'csv') {
 // export always was) because the response body here is a raw file blob,
 // not JSON.
 async function downloadFinishedExport(taskId, format) {
-  const session = getSession();
   const response = await fetch(`${API_URL}/audit-logs/export/${taskId}/download`, {
-    headers: { 'Authorization': `Bearer ${session.token}` },
+    credentials: 'include',
   });
   if (!response.ok) throw new Error('The finished export could not be downloaded. Please try exporting again.');
 

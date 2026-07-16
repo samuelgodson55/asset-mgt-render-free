@@ -32,11 +32,19 @@ set -e
 
 ENV_LOWER=$(echo "${ENVIRONMENT:-development}" | tr '[:upper:]' '[:lower:]')
 
+LEAN_MODE_VALUE="${LEAN_MODE:-}"
+IS_LEAN_MODE=false
 if [ "$ENV_LOWER" = "production" ] || [ "$ENV_LOWER" = "prod" ]; then
-    WORKERS="${UVICORN_WORKERS:-2}"
-    echo "start.sh: ENVIRONMENT=${ENVIRONMENT} -- starting uvicorn with ${WORKERS} worker(s), no --reload"
-    exec uvicorn main:app --host 0.0.0.0 --port 8000 --workers "$WORKERS"
+    IS_LEAN_MODE=true
+elif [ "$LEAN_MODE_VALUE" = "1" ] || [ "$LEAN_MODE_VALUE" = "true" ] || [ "$LEAN_MODE_VALUE" = "True" ]; then
+    IS_LEAN_MODE=true
+fi
+
+if [ "$IS_LEAN_MODE" = true ]; then
+    WORKERS="${UVICORN_WORKERS:-1}"
+    echo "start.sh: lean mode enabled (ENVIRONMENT=${ENVIRONMENT}, LEAN_MODE=${LEAN_MODE_VALUE:-false}) -- starting uvicorn with ${WORKERS} worker(s), no --reload"
+    exec uvicorn main:app --host 0.0.0.0 --port 8000 --workers "$WORKERS" --log-level warning
 else
     echo "start.sh: ENVIRONMENT=${ENVIRONMENT} -- starting uvicorn with --reload (single worker) for local development"
-    exec uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    exec uvicorn main:app --host 0.0.0.0 --port 8000 --reload --log-level info
 fi

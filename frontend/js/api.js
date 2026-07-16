@@ -30,14 +30,14 @@ export const API_URL = '/api';
 export async function apiRequest(path, options = {}) {
   const session = getSession();
   const headers = Object.assign({}, options.headers || {});
-  if (session) headers['Authorization'] = `Bearer ${session.token}`;
+  if (session && session.token) headers['Authorization'] = `Bearer ${session.token}`;
   // Don't force a JSON content-type when sending FormData (CSV upload) --
   // the browser needs to set its own multipart boundary header for that.
   if (!(options.body instanceof FormData) && options.body) {
     headers['Content-Type'] = 'application/json';
   }
 
-  const response = await fetch(`${API_URL}${path}`, { ...options, headers });
+  const response = await fetch(`${API_URL}${path}`, { ...options, headers, credentials: 'include' });
 
   if (response.status === 401) {
     // Session expired or invalid -- force a clean re-login.

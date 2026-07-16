@@ -38,6 +38,21 @@ logger = logging.getLogger(__name__)
 _DUMMY_PASSWORD_HASH = hash_password("this-is-not-a-real-account-timing-safety-only")
 
 
+def _build_login_result(user_payload: dict, token: str, needs_password_reset: bool) -> dict:
+    expires_at = int((datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=settings.JWT_EXPIRY_HOURS)).timestamp())
+    return {
+        "message": "Authentication successful.",
+        "user_id": user_payload["user_id"],
+        "name": user_payload["name"],
+        "username": user_payload["username"],
+        "role": user_payload["role"],
+        "department": user_payload["department"],
+        "token": token,
+        "expires_at": expires_at,
+        "needs_password_reset": needs_password_reset,
+    }
+
+
 def login(db: Session, req: LoginRequest) -> dict:
     """
     Verify credentials and, on success, issue a signed JWT session token.
@@ -79,16 +94,17 @@ def login(db: Session, req: LoginRequest) -> dict:
         principal = super_admin_principal()
         token = create_access_token(principal)
         logger.info("Login succeeded", extra={"user": principal.email, "role": SUPER_ADMIN_ROLE, "user_id": SUPER_ADMIN_ID})
-        return {
-            "message": "Authentication successful.",
-            "user_id": SUPER_ADMIN_ID,
-            "name": principal.name,
-            "username": principal.username,
-            "role": SUPER_ADMIN_ROLE,
-            "department": None,
-            "token": token,
-            "needs_password_reset": False,
-        }
+        return _build_login_result(
+            {
+                "user_id": SUPER_ADMIN_ID,
+                "name": principal.name,
+                "username": principal.username,
+                "role": SUPER_ADMIN_ROLE,
+                "department": None,
+            },
+            token,
+            False,
+        )
 
     user = db.query(models.User).filter(
         or_(models.User.email == identifier, models.User.username == identifier),
@@ -156,16 +172,17 @@ def login(db: Session, req: LoginRequest) -> dict:
 
     token = create_access_token(user)
     logger.info("Login succeeded", extra={"user": user.email, "role": user.role, "user_id": user.id})
-    return {
-        "message": "Authentication successful.",
-        "user_id": user.id,
-        "name": user.name,
-        "username": user.username,
-        "role": user.role,
-        "department": user.department,
-        "token": token,
-        "needs_password_reset": not user.is_verified,
-    }
+    return _build_login_result(
+        {
+            "user_id": user.id,
+            "name": user.name,
+            "username": user.username,
+            "role": user.role,
+            "department": user.department,
+        },
+        token,
+        not user.is_verified,
+    )
 
 
 def get_profile(db: Session, current_user: dict) -> dict:
