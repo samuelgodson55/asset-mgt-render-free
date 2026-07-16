@@ -158,6 +158,7 @@ def get_outsider_assigned_items(db: Session, outsider_id: int) -> dict:
         "overdue": models.is_overdue(c.due_date),
         "pending_extension": any(er.status == "pending" for er in c.extension_requests),
         **_pending_extension_fields(c),
+        "vendor_sources": [c.outsourced_source] if c.is_outsourced and c.outsourced_source else [],
     } for c in active_checkouts]
 
     return {
@@ -176,7 +177,7 @@ def get_outsider_assigned_items(db: Session, outsider_id: int) -> dict:
 # aren't tied to a department at all), so "ad-hoc individuals under a
 # Manager's purview" means the same thing here as it does everywhere else
 # in this codebase: every ad-hoc profile in the system.
-_ITEM_EXPORT_HEADERS = ["Asset", "Category", "Quantity", "Quantity Returned", "Outstanding", "Checked Out", "Due Date"]
+_ITEM_EXPORT_HEADERS = ["Asset", "Category", "Vendor / Source", "Quantity", "Quantity Returned", "Outstanding", "Checked Out", "Due Date"]
 
 
 def _format_export_datetime(iso_string: Optional[str]) -> str:
@@ -194,7 +195,16 @@ def _item_export_rows(items: list) -> list:
     """Turns the `assigned_items` list shape (see get_outsider_assigned_items
     above) into plain rows for export_service.build_csv_bytes()/build_pdf_bytes()."""
     return [
-        [i["asset_name"], i.get("asset_category") or "—", i["quantity"], i["quantity_returned"], i["outstanding"], _format_export_datetime(i["checkout_date"]), i["due_date"]]
+        [
+            i["asset_name"],
+            i.get("asset_category") or "—",
+            ", ".join(i.get("vendor_sources") or []) if i.get("vendor_sources") else "—",
+            i["quantity"],
+            i["quantity_returned"],
+            i["outstanding"],
+            _format_export_datetime(i["checkout_date"]),
+            i["due_date"],
+        ]
         for i in items
     ]
 
@@ -225,7 +235,7 @@ def export_all_outsiders_items(db: Session, user: dict, fmt: str = "csv"):
     """
     outsiders = db.query(models.Outsider).order_by(models.Outsider.id).all()
 
-    headers = ["Individual", "Contact", "Company", "Asset", "Category", "Quantity", "Outstanding", "Checked Out", "Due Date"]
+    headers = ["Individual", "Contact", "Company", "Asset", "Category", "Vendor / Source", "Quantity", "Outstanding", "Checked Out", "Due Date"]
     rows = []
     for o in outsiders:
         for c in o.checkouts:

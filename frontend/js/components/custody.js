@@ -91,8 +91,8 @@ export async function openCustodyModal(entityId, entityType = 'user') {
         : `<button data-action="open-direct-extend" data-checkout-id="${item.checkout_id}" data-asset-name="${escapeHtml(item.asset_name)}" data-due-date="${escapeHtml(item.due_date)}"
             class="rounded-md border border-border px-2.5 py-1.5 text-[11px] font-semibold text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">Extend</button>`;
       return `
-    <div class="flex flex-col gap-3 rounded-lg border border-border bg-card2/50 p-3 sm:flex-row sm:items-center sm:gap-3">
-      <div class="flex items-start gap-3 sm:flex-1 sm:items-center">
+    <div class="flex flex-col gap-3 rounded-lg border border-border bg-card2/50 p-3 sm:flex-row sm:items-start sm:gap-3">
+      <div class="flex w-full items-start gap-3 sm:flex-1 sm:items-center">
         <input type="checkbox" data-checkout-id="${item.checkout_id}" data-outstanding="${item.outstanding}" data-action="update-custody-selection"
           class="custody-item-checkbox mt-0.5 h-4 w-4 shrink-0 rounded border-border bg-card2 text-blue-600 focus:ring-0 focus:ring-offset-0 sm:mt-0" />
         <div class="min-w-0">
@@ -103,7 +103,19 @@ export async function openCustodyModal(entityId, entityType = 'user') {
           ${extensionReasonLine}
         </div>
       </div>
-      <div class="flex flex-wrap items-center gap-2 pl-7 sm:shrink-0 sm:justify-end sm:pl-0">
+      <div class="flex min-w-0 flex-wrap items-center gap-2 pl-7 w-full sm:ml-auto sm:w-auto sm:justify-end sm:pl-0">
+        <!-- BUGFIX: this used to also carry 'sm:shrink-0', which pinned
+             the container to its full natural content width and never
+             let it shrink -- so its own 'flex-wrap' never had a reason to
+             kick in on desktop, and a row with 4 controls (qty input +
+             Approve + Deny + Process Return, for an item with a pending
+             extension request) just overflowed rightward past the
+             drawer's edge instead of wrapping. Below 'sm:', this
+             container is 'w-full' so it was always bounded and wrapped
+             fine -- that's why only desktop showed the clipped buttons.
+             Dropping 'shrink-0' lets flexbox narrow this container to
+             whatever space is actually left next to the item info block,
+             which is what lets flex-wrap do anything at all. -->
         <!-- 'relative' here (not on the row itself) so showFieldError()'s
              inserted <p data-error> can be positioned absolutely under
              JUST the input -- otherwise, as a sibling in this

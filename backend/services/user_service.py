@@ -6,7 +6,6 @@ api/users.py.
 """
 
 from typing import Optional
-import datetime
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -165,7 +164,7 @@ def update_user(db: Session, user_id: int, req: UserUpdateRequest, user: dict) -
     lookup below returns nothing and this raises a 404), exactly like
     reset_user_password()'s equivalent case.
     """
-    target = db.query(models.User).filter(models.User.id == user_id, models.User.is_deleted == False).first()
+    target = db.query(models.User).filter(models.User.id == user_id, ~models.User.is_deleted).first()
     if not target:
         raise HTTPException(status_code=404, detail="User not found.")
 
@@ -243,7 +242,7 @@ def list_users(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offset: int 
     # Managers get the same unscoped view as a Super Admin here -- no
     # department filter is applied for either role. (See list_users()'s
     # docstring above.)
-    query = db.query(models.User).filter(models.User.is_deleted == False)
+    query = db.query(models.User).filter(~models.User.is_deleted)
     query = apply_search_filter(query, search, [
         models.User.name, models.User.email, models.User.role,
         models.User.department, models.User.department_role,
@@ -308,6 +307,68 @@ def _pending_extension_fields(checkout: "models.AssetCheckout") -> dict:
     }
 
 
+def _group_assigned_items(checkouts: list["models.AssetCheckout"], include_outsourced_details: bool) -> list[dict]:
+    """Collapse quote-based checkout splits into one row per quote item for self-service, but split outsourced shortfalls by vendor for Manager/Admin custody views."""
+    grouped_items = []
+    grouped_lookup = {}
+
+    def make_payload(checkout: "models.AssetCheckout") -> dict:
+        payload = {
+            "checkout_id": checkout.id,
+            "asset_name": models.checkout_display_name(checkout),
+            "asset_category": checkout.asset.category if checkout.asset else None,
+            "quantity": checkout.quantity,
+            "quantity_returned": checkout.quantity_returned,
+            "outstanding": checkout.quantity - checkout.quantity_returned,
+            "checkout_date": checkout.checkout_date.isoformat() if checkout.checkout_date else None,
+            "due_date": checkout.due_date.strftime("%Y-%m-%d") if checkout.due_date else "No Fixed Due Date",
+            "due_soon": models.is_due_soon(checkout.due_date),
+            "overdue": models.is_overdue(checkout.due_date),
+            "pending_extension": any(er.status == "pending" for er in checkout.extension_requests),
+            **_pending_extension_fields(checkout),
+            "checkout_ids": [checkout.id],
+            "vendor_sources": [],
+        }
+        if include_outsourced_details:
+            payload.update({
+                "is_outsourced": checkout.is_outsourced,
+                "outsourced_source": checkout.outsourced_source,
+            })
+        if include_outsourced_details and checkout.is_outsourced and checkout.outsourced_source:
+            payload["vendor_sources"] = [checkout.outsourced_source]
+        return payload
+
+    for checkout in checkouts:
+        if checkout.quotation_id is None:
+            grouped_items.append(make_payload(checkout))
+            continue
+
+        if include_outsourced_details and checkout.is_outsourced and checkout.outsourced_source:
+            group_source = checkout.outsourced_source
+        else:
+            group_source = None
+
+        key = (checkout.quotation_id, models.checkout_display_name(checkout), checkout.due_date, group_source)
+        if key not in grouped_lookup:
+            payload = make_payload(checkout)
+            grouped_lookup[key] = payload
+            grouped_items.append(payload)
+            continue
+
+        payload = grouped_lookup[key]
+        payload["quantity"] += checkout.quantity
+        payload["quantity_returned"] += checkout.quantity_returned
+        payload["outstanding"] += checkout.quantity - checkout.quantity_returned
+        payload["checkout_ids"].append(checkout.id)
+        if include_outsourced_details and checkout.is_outsourced and checkout.outsourced_source:
+            existing_sources = payload.get("vendor_sources", [])
+            if checkout.outsourced_source not in existing_sources:
+                existing_sources.append(checkout.outsourced_source)
+                payload["vendor_sources"] = existing_sources
+
+    return grouped_items
+
+
 def get_my_assigned_items(db: Session, user: dict) -> dict:
     """
     Self-service version of get_user_assigned_items: lets ANY logged-in
@@ -322,44 +383,7 @@ def get_my_assigned_items(db: Session, user: dict) -> dict:
     active_checkouts = db.query(models.AssetCheckout).filter(
         models.AssetCheckout.user_id == target.id, models.AssetCheckout.status == "active"
     ).all()
-    items = [{
-        "checkout_id": c.id,
-        "asset_name": models.checkout_display_name(c),
-        # Category of the EQUIPMENT itself (AssetType.category -- see
-        # models.py), not to be confused with the person's own department
-        # below. Surfaced as a "Category" column on every properties-
-        # assigned export (see _item_export_rows below). OUTSOURCED items
-        # have no AssetType/category at all -- shown as "—" here, same as
-        # any other item that just doesn't have one set.
-        "asset_category": c.asset.category if c.asset else None,
-        "quantity": c.quantity, "quantity_returned": c.quantity_returned, "outstanding": c.quantity - c.quantity_returned,
-        # TIMEZONE FIX: `checkout_date` used to be pre-formatted here with
-        # `.strftime("%Y-%m-%d %H:%M:%S")` -- that prints the raw UTC wall-
-        # clock numbers with no timezone marker at all, and the frontend
-        # (js/components/myitems.js's "My Checked-Out Items" table) just
-        # displayed that string verbatim. Anyone outside UTC saw a
-        # checkout hour that was wrong by their UTC offset (e.g. an hour
-        # behind for Lagos/WAT, UTC+1) with no indication it was even a
-        # UTC value in the first place.
-        #
-        # `.isoformat()` instead keeps the UTC offset on the wire (e.g.
-        # "2026-07-10T14:23:01.123456+00:00"), exactly like AuditLog rows
-        # already do (services/audit_service.py's get_audit_logs() returns
-        # the ORM objects directly, which FastAPI's default JSON encoder
-        # serializes to this same ISO-with-offset shape) -- and the
-        # frontend's `formatTimestamp()` (js/ui.js), which the Audit Trail
-        # table already relies on, does the actual UTC -> browser-local
-        # conversion via `new Date(...).toLocaleString()`. Applying that
-        # same helper to `checkout_date` in myitems.js is what actually
-        # fixes the displayed hour -- this ISO change is what makes that
-        # possible.
-        "checkout_date": c.checkout_date.isoformat() if c.checkout_date else None,
-        "due_date": c.due_date.strftime("%Y-%m-%d") if c.due_date else "No Fixed Due Date",
-        "due_soon": models.is_due_soon(c.due_date),
-        "overdue": models.is_overdue(c.due_date),
-        "pending_extension": any(er.status == "pending" for er in c.extension_requests),
-        **_pending_extension_fields(c),
-    } for c in active_checkouts]
+    items = _group_assigned_items(active_checkouts, include_outsourced_details=False)
 
     return {
         "user_id": target.id, "name": target.name, "email": target.email, "role": target.role,
@@ -368,7 +392,7 @@ def get_my_assigned_items(db: Session, user: dict) -> dict:
 
 
 def get_user_assigned_items(db: Session, user_id: int, user: dict) -> dict:
-    target = db.query(models.User).filter(models.User.id == user_id, models.User.is_deleted == False).first()
+    target = db.query(models.User).filter(models.User.id == user_id, ~models.User.is_deleted).first()
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -379,25 +403,7 @@ def get_user_assigned_items(db: Session, user_id: int, user: dict) -> dict:
     active_checkouts = db.query(models.AssetCheckout).filter(
         models.AssetCheckout.user_id == user_id, models.AssetCheckout.status == "active"
     ).all()
-    items = [{
-        "checkout_id": c.id, "asset_name": models.checkout_display_name(c),
-        "asset_category": c.asset.category if c.asset else None,
-        # Manager/Admin-only view -- see models.py's AssetCheckout comment
-        # for why this flag is surfaced here but deliberately withheld
-        # from the self-service get_my_assigned_items() above.
-        "is_outsourced": c.is_outsourced,
-        "outsourced_source": c.outsourced_source,
-        "quantity": c.quantity, "quantity_returned": c.quantity_returned, "outstanding": c.quantity - c.quantity_returned,
-        # TIMEZONE FIX -- see get_my_assigned_items() above for the full
-        # explanation of why this is `.isoformat()` and not a
-        # pre-formatted `.strftime(...)` string.
-        "checkout_date": c.checkout_date.isoformat() if c.checkout_date else None,
-        "due_date": c.due_date.strftime("%Y-%m-%d") if c.due_date else "No Fixed Due Date",
-        "due_soon": models.is_due_soon(c.due_date),
-        "overdue": models.is_overdue(c.due_date),
-        "pending_extension": any(er.status == "pending" for er in c.extension_requests),
-        **_pending_extension_fields(c),
-    } for c in active_checkouts]
+    items = _group_assigned_items(active_checkouts, include_outsourced_details=True)
 
     return {
         "user_id": target.id, "name": target.name, "email": target.email, "role": target.role,
@@ -420,7 +426,7 @@ def get_user_assigned_items(db: Session, user_id: int, user: dict) -> dict:
 #                                    checkout (not one row per user).
 # Each returns (file_bytes, media_type, filename) so the router
 # (api/users.py) only has to wrap it in a `Response`.
-_ITEM_EXPORT_HEADERS = ["Asset", "Category", "Quantity", "Quantity Returned", "Outstanding", "Checked Out", "Due Date"]
+_ITEM_EXPORT_HEADERS = ["Asset", "Category", "Vendor / Source", "Quantity", "Quantity Returned", "Outstanding", "Checked Out", "Due Date"]
 
 
 def _format_export_datetime(iso_string: Optional[str]) -> str:
@@ -445,7 +451,16 @@ def _item_export_rows(items: list) -> list:
     get_user_assigned_items above) into plain rows for
     export_service.build_csv_bytes()/build_pdf_bytes()."""
     return [
-        [i["asset_name"], i.get("asset_category") or "—", i["quantity"], i["quantity_returned"], i["outstanding"], _format_export_datetime(i["checkout_date"]), i["due_date"]]
+        [
+            i["asset_name"],
+            i.get("asset_category") or "—",
+            ", ".join(i.get("vendor_sources") or []) if i.get("vendor_sources") else "—",
+            i["quantity"],
+            i["quantity_returned"],
+            i["outstanding"],
+            _format_export_datetime(i["checkout_date"]),
+            i["due_date"],
+        ]
         for i in items
     ]
 
@@ -491,10 +506,10 @@ def export_all_users_items(db: Session, user: dict, fmt: str = "csv"):
     combined row). Scope mirrors list_users() exactly: both a Super Admin
     and a Manager get the entire directory.
     """
-    query = db.query(models.User).filter(models.User.is_deleted == False)
+    query = db.query(models.User).filter(~models.User.is_deleted)
     users = query.order_by(models.User.id).all()
 
-    headers = ["User", "Email", "User Department", "Role", "Asset", "Asset Category", "Quantity", "Outstanding", "Checked Out", "Due Date"]
+    headers = ["User", "Email", "User Department", "Role", "Asset", "Asset Category", "Vendor / Source", "Quantity", "Outstanding", "Checked Out", "Due Date"]
     rows = []
     for u in users:
         for c in u.checkouts:
@@ -504,6 +519,7 @@ def export_all_users_items(db: Session, user: dict, fmt: str = "csv"):
                 u.name, u.email, u.department or "—", u.role,
                 models.checkout_display_name(c),
                 c.asset.category if c.asset and c.asset.category else "—",
+                c.outsourced_source or "—",
                 c.quantity, c.quantity - c.quantity_returned,
                 export_service.format_export_datetime(c.checkout_date),
                 c.due_date.strftime("%Y-%m-%d") if c.due_date else "No Fixed Due Date",
@@ -549,7 +565,7 @@ def delete_user(db: Session, user_id: int, user: dict) -> dict:
     if user_id == SUPER_ADMIN_ID:
         raise HTTPException(status_code=400, detail="The Super Admin account cannot be deleted.")
 
-    target = db.query(models.User).filter(models.User.id == user_id, models.User.is_deleted == False).first()
+    target = db.query(models.User).filter(models.User.id == user_id, ~models.User.is_deleted).first()
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -636,7 +652,7 @@ def reset_user_password(db: Session, user_id: int, new_password: str, admin_pass
     # password to reset until a Super Admin restores it first (see
     # restore_user() below). Trying to reset a deleted account's password
     # would just be confusing: the account still couldn't log in afterward.
-    target = db.query(models.User).filter(models.User.id == user_id, models.User.is_deleted == False).first()
+    target = db.query(models.User).filter(models.User.id == user_id, ~models.User.is_deleted).first()
     if not target:
         raise HTTPException(status_code=404, detail="User not found.")
 
@@ -671,7 +687,7 @@ def list_deleted_users(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offs
     js/ui.js's renderServerPaginationBar()) against a second, independent
     table state.
     """
-    query = db.query(models.User).filter(models.User.is_deleted == True)
+    query = db.query(models.User).filter(models.User.is_deleted)
     query = apply_search_filter(query, search, [
         models.User.name, models.User.email, models.User.role,
         models.User.department, models.User.department_role,
@@ -714,7 +730,7 @@ def restore_user(db: Session, user_id: int, admin_user: dict) -> dict:
     if user_id == SUPER_ADMIN_ID:
         raise HTTPException(status_code=400, detail="The Super Admin account cannot be deleted, so it never needs restoring.")
 
-    target = db.query(models.User).filter(models.User.id == user_id, models.User.is_deleted == True).first()
+    target = db.query(models.User).filter(models.User.id == user_id, models.User.is_deleted).first()
     if not target:
         raise HTTPException(status_code=404, detail="Deleted user not found.")
 

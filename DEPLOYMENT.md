@@ -731,27 +731,6 @@ replica needs the identical secret" rule called out earlier in this doc.
   parameter, which Azure Resource Manager deliberately omits from
   deployment history/activity logs.
 
-
-
-- **OIDC federated login** instead of a stored Azure service principal
-  secret in GitHub — nothing to rotate, nothing to leak.
-- **Key Vault + managed identity** for `JWT_SECRET_KEY`/`SUPER_ADMIN_PASSWORD`/
-  `SMTP_PASSWORD` instead of plain Container Apps secrets — same
-  `secretRef` ergonomics in the app config, but the actual values live in
-  one auditable, access-controlled place.
-- **`worker` autoscaling on Celery queue depth (KEDA Redis scaler)** instead
-  of a fixed replica count — the manual "scale up before the semester rush"
-  step in the Compose deployment happens automatically here.
-- **Separate `infra-deploy.yml` from the app-deploy workflows**, with
-  automatic current-image-tag preservation, so an infrastructure change
-  (e.g. bumping the Postgres SKU) can never accidentally roll production
-  back to a placeholder image.
-- **Blocking Trivy scan on CRITICAL findings in the production pipeline**
-  (report-only in CI/staging) — a known-critical CVE can't reach
-  production even if someone merges anyway.
-- **Automatic rollback** on a failed post-deploy smoke test, not just a
-  documented manual procedure.
-
 ## Troubleshooting
 
 - **"Backup failed: Permission denied" after adding the `export_data`

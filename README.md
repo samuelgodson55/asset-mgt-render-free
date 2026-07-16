@@ -472,16 +472,33 @@ one CSS file — see that folder's README for the one-line command.
 snipe-it-lite/
 ├── .github/
 │   └── workflows/
-│       ├── ci.yml                     # Lint/syntax sanity checks on every
-│       │                                # push + PR (no full test suite yet --
-│       │                                # see "Suggested Future Features")
-│       ├── deploy-docker-compose.yml   # Push-to-deploy over SSH for a
-│       │                                # self-hosted VPS -- see "Safely
-│       │                                # Updating An Existing Production
-│       │                                # Deployment" section above
-│       └── deploy-render.yml            # Migrate-then-deploy for the Render
-│                                          # Free-plan target (works around
-│                                          # Free's lack of preDeployCommand)
+│       ├── ci.yml                     # Lint/syntax/dependency-audit checks on
+│       │                                # every push + PR (no full test suite
+│       │                                # yet -- see "Suggested Future
+│       │                                # Features"); also gates the two
+│       │                                # deploy workflows below
+│       ├── deploy-azure-staging.yml    # Push-to-deploy on `develop` --
+│       │                                # builds, scans, migrates, then rolls
+│       │                                # out to the staging Container Apps
+│       ├── deploy-azure-production.yml # Same shape on `main`, with a
+│       │                                # blocking Trivy scan and automatic
+│       │                                # rollback on a failed smoke test
+│       └── infra-deploy.yml            # One-time/occasional: provisions or
+│                                          # updates infra/main.bicep itself
+│                                          # (separate from the two workflows
+│                                          # above, which only ship new images)
+│
+├── DEPLOYMENT.md              # Companion to this file: production safety
+│                                # checklist, scaling, backups, and the full
+│                                # Azure Container Apps walkthrough
+├── infra/
+│   └── main.bicep              # Azure Container Apps infra (backend/worker/
+│                                  # beat/frontend + migrate job, ACR, Key
+│                                  # Vault, managed Postgres/Redis) -- see
+│                                  # DEPLOYMENT.md
+├── .env.azure.example         # Env var reference for the Azure deployment
+│                                # shape (managed Postgres/Redis connection
+│                                # strings, Key Vault-backed secrets)
 │
 ├── docker-compose.yml        # 6 services: db, redis, backend, worker, beat,
 │                                # frontend -- worker/beat are split apart
@@ -503,7 +520,10 @@ snipe-it-lite/
 ├── .dockerignore               # Keeps .env (and other junk) out of the build context too
 │
 ├── nginx/
-│   ├── Dockerfile                  # Builds the frontend/reverse-proxy image
+│   ├── Dockerfile                  # Builds the frontend/reverse-proxy image --
+│   │                                  # also runs build-frontend/ (below)
+│   │                                  # against frontend/js before this
+│   │                                  # image's final stage copies it in
 │   ├── default.conf.template        # nginx config template -- see "Deploying
 │   │                                  # Across Environments" section above
 │   └── docker-entrypoint.d/
@@ -511,6 +531,17 @@ snipe-it-lite/
 │                                       # /etc/resolv.conf if it isn't set
 │                                       # (must stay non-executable -- see
 │                                       # its own header comment for why)
+│
+├── build-frontend/              # Build tooling ONLY -- runs inside
+│   │                              # nginx/Dockerfile's build stage, never
+│   │                              # directly in Docker Compose. Minifies
+│   │                              # frontend/js and frontend/*.html (and,
+│   │                              # in production, obfuscates the JS) --
+│   │                              # see build.js's own header comment for
+│   │                              # the three modes.
+│   ├── build.js                    # BUILD_ENV=local|development|production
+│   └── package.json                 # terser + javascript-obfuscator +
+│                                     # html-minifier-terser deps
 │
 ├── backend/
 │   ├── main.py                    # FastAPI app: middleware, startup, routers
@@ -968,6 +999,15 @@ confirmed a specific value your platform needs — it's auto-detected from
 `/etc/resolv.conf` at boot otherwise (see
 [`nginx/docker-entrypoint.d/15-detect-resolver-ip.sh`](nginx/docker-entrypoint.d/15-detect-resolver-ip.sh)).
 
+**Deploying to Azure specifically?** This project ships a complete,
+fully-automated version of this pattern already — [`infra/main.bicep`](infra/main.bicep)
+(Azure Container Apps, managed Postgres/Redis, Key Vault) plus
+`.github/workflows/deploy-azure-staging.yml` /
+`deploy-azure-production.yml` / `infra-deploy.yml` — instead of the generic
+mechanics above. See [`DEPLOYMENT.md`](DEPLOYMENT.md)'s **Azure Container
+Apps Production Deployment** section for the full one-time setup and how
+the pipeline runs day to day.
+
 ### Why the backend is no longer exposed directly
 `docker-compose.yml`'s `backend` service no longer publishes port `8000` to
 the host. nginx is now the **only** public entry point; it's the sole thing
@@ -1418,12 +1458,16 @@ once the backend is running. This table is the high-level map:
 | Method & Path | Who | Purpose |
 |---|---|---|
 | `POST /auth/login` | anyone | Exchange email/username + password for a JWT. Rate-limited by IP; also enforces per-account lockout after repeated failures. |
+| `POST /auth/logout` | logged in | Clears the `HttpOnly` session cookie set at login (see [Security Model](#security-model)). |
 | `GET /auth/me` | logged in | "Who am I?" — fresh profile data for the "My Profile" window. |
 | `POST /auth/update-password` | self or Super Admin/Admin | Change a password (self-service requires the current password; a Super Admin resetting someone else's does not). |
 | `GET /assets` | logged in | List asset pools. TRUE server-side pagination + search — `?limit=&offset=&search=` (searches pool name). |
 | `POST /assets` | Super Admin / Admin | Create a new pool. |
 | `GET /assets/{id}/details` | logged in | Full pool detail: stock breakdown, active checkouts, isolated units. |
 | `PUT /assets/{id}/quantity` | Super Admin / Admin | Adjust total capacity. |
+| `PUT /assets/{id}/name` | Super Admin / Admin | Rename a pool. |
+| `PUT /assets/{id}/category` | Super Admin / Admin | Change a pool's category. |
+| `PUT /assets/{id}/price` | Super Admin / Admin | Change a pool's per-unit price (see `CURRENCY_CODE`). |
 | `DELETE /assets/{id}` | Super Admin / Admin | Soft-delete a pool. |
 | `POST /assets/{id}/exception` | Super Admin / Admin | Flag a serial as under repair/stolen. |
 | `POST /assets/{id}/exception/{eid}/recall` | Super Admin / Admin | Return an isolated unit to service. |
@@ -1438,6 +1482,7 @@ once the backend is running. This table is the high-level map:
 | `GET /users/me/items/export` | logged in | Self-service download of the above as `?format=csv` or `?format=pdf`. |
 | `GET /users/{id}/items` | Super Admin / Admin / Manager | Someone else's custody ledger (unrestricted for Managers too). |
 | `GET /users/{id}/items/export` | Super Admin / Admin / Manager | Download one specific user's custody ledger (CSV/PDF). |
+| `PATCH /users/{id}` | Super Admin / Admin / Manager | Edit an account's name/username/email (a Manager may only target Staff/Customer accounts — enforced server-side). |
 | `GET /users/export` | Super Admin / Admin / Manager | Bulk download of every active checkout across every user, system-wide, for both roles (CSV/PDF). |
 | `DELETE /users/{id}` | Super Admin / Admin | Soft-delete an account. |
 | `POST /users/{id}/reset-password` | Super Admin / Admin | "Forgot password" recovery: set a brand-new password for another user's account, no current password required. |
@@ -1445,6 +1490,7 @@ once the backend is running. This table is the high-level map:
 | `POST /users/{id}/restore` | Super Admin / Admin | Undo a soft-delete: re-enables login and returns the account to the User Directory. |
 | `GET /outsiders` | Super Admin / Admin / Manager | Ad-Hoc directory listing. TRUE server-side pagination + search — `?limit=&offset=&search=` (searches name, contact details, company). |
 | `GET /outsiders/{id}/items` | Super Admin / Admin / Manager | An outsider's custody ledger. |
+| `PATCH /outsiders/{id}` | Super Admin / Admin / Manager | Edit an ad-hoc individual's name/contact details/company. |
 | `GET /outsiders/{id}/items/export` | Super Admin / Admin / Manager | Download one specific outsider's custody ledger (CSV/PDF). |
 | `GET /outsiders/export` | Super Admin / Admin / Manager | Bulk download of every active checkout across every ad-hoc individual (CSV/PDF). |
 | `POST /checkouts/{id}/return` | Super Admin / Admin / Manager | Process a (partial or full) return. |
@@ -1455,6 +1501,7 @@ once the backend is running. This table is the high-level map:
 | `GET /checkouts/my-extension-decisions` | logged in | Self-service: the caller's own extension requests decided (approved/denied) in the last 14 days — powers the in-app "extension request update(s)" banner on every dashboard. |
 | `POST /checkouts/extension-requests/{id}/decision` | Super Admin / Admin / Manager | Approve or deny a pending request — `{approve, override_due_date?, note?}`. Approving is what actually updates the checkout's due date. |
 | `POST /checkouts/{id}/extend` | Super Admin / Admin / Manager | Grant more time **directly** — `{new_due_date, reason?}` — no request/decision round trip. Used by the Custody Ledger drawer's "Extend" button. |
+| `POST /checkouts/bulk-extend` | Super Admin / Admin / Manager | Apply one new due date to many active checkouts at once — the Custody Ledger drawer's "Bulk Extend Selected" action, reusing the same checkbox selection as Bulk Process Returns. |
 | `GET /audit-logs` | Super Admin / Admin / Manager | TRUE server-side paginated audit ledger — `?limit=&offset=` (no search param; see [Feature Tour](#feature-tour)). |
 | `POST /audit-logs/export` | Super Admin / Admin / Manager | Enqueue a background export job — `?format=csv` (default) or `?format=pdf`, plus optional `?start_date=&end_date=`. Returns `{task_id, status}` immediately; does not return the file. |
 | `GET /audit-logs/export/{task_id}/status` | Super Admin / Admin / Manager | Poll a job's progress — `{state, ready, error?}`. |
@@ -1471,8 +1518,10 @@ once the backend is running. This table is the high-level map:
 | `GET /quotations/me` | logged in | The caller's own open draft order, with live-computed totals. |
 | `GET /quotations/me/history` | logged in | Every Quotation the caller has formally submitted. |
 | `GET /quotations/me/{id}` | logged in | Full detail for one of the caller's own submitted Quotations. |
+| `GET /quotations/me/{id}/export` | logged in | Self-service PDF export of one of the caller's own submitted (or assigned-to-them) Quotations by ID — the "My Quotes" history equivalent of `GET /quotations/{id}/export` below. |
 | `PUT /quotations/me/{id}/items/{item_id}` | logged in | Requester adjusts a quantity on their own quotation while still "submitted". |
 | `DELETE /quotations/me/{id}/items/{item_id}` | logged in | Requester removes a line from their own quotation while still "submitted". |
+| `POST /quotations/me/{id}/items` | logged in | Requester/assignee adds another catalog asset to their own quotation while still "submitted" — nested under `/quotations/me/...` so it never collides with the Admin/Manager-only `POST /quotations/{id}/items` below. |
 | `POST /quotations/items` | logged in | Add (or update) an item on the caller's own draft cart. |
 | `PUT /quotations/items/{id}` | logged in | Update a quantity on the caller's own draft cart. |
 | `DELETE /quotations/items/{id}` | logged in | Remove an item from the caller's own draft cart. |
@@ -2324,19 +2373,20 @@ A checklist before you deploy this anywhere real:
 
 ## Safely Updating An Existing Production Deployment (CI/CD)
 
-**This repo ships three GitHub Actions workflows** in
-`.github/workflows/`: [`ci.yml`](.github/workflows/ci.yml) (lint/syntax
-sanity checks on every push and PR — there's no full test suite yet, see
+**This repo ships four GitHub Actions workflows** in `.github/workflows/`:
+[`ci.yml`](.github/workflows/ci.yml) (lint, dependency audit, image build +
+Trivy scan, `infra/main.bicep` validation — runs on every push/PR and gates
+the two deploy workflows below; there's no full pytest suite yet, see
 [Suggested Future Features](#suggested-future-features)),
-[`deploy-docker-compose.yml`](.github/workflows/deploy-docker-compose.yml)
-(push-to-deploy for a self-hosted VPS), and
-[`deploy-render.yml`](.github/workflows/deploy-render.yml) (migrate-then-deploy
-for the Render Free-plan target this project ships with). **You almost
-certainly only want one of the two `deploy-*.yml` files active** — delete
-whichever doesn't match the platform you actually deployed to, so pushes
-don't try to deploy the same code to two places. Both are already wired to
-follow the same rule, which is what makes any of this genuinely *safe* to
-automate rather than just fast:
+[`deploy-azure-staging.yml`](.github/workflows/deploy-azure-staging.yml)
+(push-to-deploy on `develop`), and
+[`deploy-azure-production.yml`](.github/workflows/deploy-azure-production.yml)
+(push-to-deploy on `main`, with a blocking Trivy scan and automatic rollback
+on a failed smoke test) — plus
+[`infra-deploy.yml`](.github/workflows/infra-deploy.yml), run separately and
+occasionally, for provisioning/updating `infra/main.bicep` itself. All four
+already follow the same rule, which is what makes any of this genuinely
+*safe* to automate rather than just fast:
 
 > **Migrate first, deploy second, and only ever ADD to the schema —
 > never rename or drop a column in the same release that also removes the
@@ -2349,112 +2399,41 @@ automate rather than just fast:
 > requests fail — see [Database & Migrations](#database--migrations-alembic)
 > for how this project's Alembic setup fits in.
 
-### Self-hosted Docker Compose (VPS / bare cloud VM)
+### Azure Container Apps (the primary production target)
 
-[`deploy-docker-compose.yml`](.github/workflows/deploy-docker-compose.yml)
-runs on every push to `main` (or on demand via **Actions → Deploy (Docker
-Compose / VPS) → Run workflow**) and, over SSH, does exactly this — in
-order, with `set -e` so a failed step stops the whole deploy instead of
-limping forward:
-
-```bash
-git pull                                       # 1. get the new code
-docker compose build backend worker frontend   # 2. build new images
-                                                #    (doesn't touch running containers yet)
-docker compose exec -T backend alembic upgrade head  # 3. migrate FIRST, while the
-                                                       #    OLD containers are still
-                                                       #    serving traffic -- safe as
-                                                       #    long as the migration is
-                                                       #    additive (see the rule above)
-docker compose up -d --no-deps backend worker frontend  # 4. swap in the new
-                                                          #    images one service at
-                                                          #    a time; --no-deps stops
-                                                          #    Compose from also
-                                                          #    restarting db/redis
-```
-
-It then verifies the deploy (the backend answers `/healthz` from inside
-the Compose network, and nginx is serving the login page) before the
-workflow reports success.
-
-**Required repository secrets** (Settings → Secrets and variables →
-Actions): `PROD_HOST`, `PROD_SSH_USER`, `PROD_SSH_KEY` (the private half of
-a key pair whose public half is already in that user's
-`~/.ssh/authorized_keys` on the server), and `PROD_PROJECT_DIR` (the
-absolute path to this repo's checkout on the server).
-
-- **Rollback:** `git checkout <previous-commit>` on the server, then
-  re-run steps 2 and 4 by hand (skip step 3 — you never roll a migration
-  *back* just to roll code back; only run `alembic downgrade -1` if the
-  migration itself is the thing you need to undo, and only if you're
-  certain no code depending on the new column/table has shipped anywhere
-  else).
-- **Zero-downtime-ish, not true zero-downtime:** `docker compose up -d`
-  stops and starts each named container in place, so there's a brief gap
-  (seconds) per service. For true zero-downtime you'd need two backend
-  containers behind nginx and a rolling `--scale`, which is a bigger
-  change than this project's single-replica Compose file supports out of
-  the box — see [Suggested Future Features](#suggested-future-features).
-- **This workflow has no manual-approval gate** — every push to `main`
-  deploys immediately once CI-equivalent checks pass. Add an `environment:
-  production` block with required reviewers (GitHub's built-in deployment
-  protection rules) to the job in `deploy-docker-compose.yml` if you want
-  a human to approve every deploy first.
+The full walkthrough — one-time setup, what each workflow does stage by
+stage, rollback, scaling, monitoring, and cost — lives in
+[`DEPLOYMENT.md`](DEPLOYMENT.md)'s **Azure Container Apps Production
+Deployment** section rather than being duplicated here. Short version: push
+to `develop` and staging updates itself; merge to `main` and production
+updates itself; nothing manual after the one-time setup.
 
 ### Render
 
 The free-plan shape this project ships with (see [Render](#render) above)
-makes Render's own automated pre-deploy migrations **genuinely
-unavailable**, for two concrete reasons:
+needs no separate CI/CD workflow at all: `AUTO_INIT_DB=true` in
+`render.yaml` means the web service brings its own schema up to date via
+`create_all()` on every boot, so pushing to your connected branch and
+letting Render's own Blueprint auto-deploy rebuild `snipeit-lite-web` is
+the entire "deploy" step.
 
-- Render's `preDeployCommand` (its supported mechanism for "run migrations
-  before the new version goes live") is **only available on paid instance
-  types** — it does not exist as an option on the Free plan at all.
-- The Shell tab and SSH access into a running instance are **also
-  paid-plan-only** — so there's no way to `exec` into the Free web service
-  and run `alembic upgrade head` by hand against it either, the way
-  `docker compose exec backend ...` works locally.
+One gotcha worth knowing: Render's auto-deploy on push only rebuilds and
+restarts the service from the code that changed — it does **not** re-parse
+`render.yaml` itself. If you edit `render.yaml` (e.g. add an env var or
+change a plan), that change only takes effect after you trigger **Manual
+Sync** from the Blueprint's page in the Render Dashboard; a plain `git push`
+silently leaves the old resource/env-var shape in place.
 
-[`deploy-render.yml`](.github/workflows/deploy-render.yml) works around
-both limits by running the migration from CI, against the database's
-*external* connection string, and only calling Render's Deploy Hook
-afterward — so the migration always finishes before the new code goes
-live, without needing `preDeployCommand` or Shell access at all:
-
-- [ ] **In the Render Dashboard, set `snipeit-lite-web`'s auto-deploy to
-      "Off"** (Settings → Build & Deploy → Auto-Deploy) — otherwise Render
-      still auto-deploys on every push on its own, racing this workflow's
-      migration step, which defeats the whole point.
-- [ ] Get `snipeit-lite-db`'s **External Database URL** (Render Dashboard
-      → `snipeit-lite-db` → Info — Free Postgres instances still expose
-      one; only Key Value/Redis is private-network-only on Free, per
-      `render.yaml`'s comments) and save it as the `RENDER_DATABASE_URL`
-      repository secret.
-- [ ] Get `snipeit-lite-web`'s **Deploy Hook URL** (Render Dashboard →
-      `snipeit-lite-web` → Settings → Deploy Hook) and save it as the
-      `RENDER_DEPLOY_HOOK_URL` repository secret.
-- [ ] Push to `main` (or run **Actions → Deploy (Render) → Run workflow**
-      on demand). The workflow runs `alembic upgrade head` against the
-      external URL first; the deploy-hook `curl` only fires if that step
-      succeeds.
-- [ ] Confirm the new deploy is live and a login still succeeds (expect
-      the usual free-plan cold start — see [Render](#render) above).
-
-If you've since upgraded `snipeit-lite-web` to a paid instance type, the
-simpler long-term fix is to delete `deploy-render.yml` entirely and add
-`preDeployCommand: cd backend && alembic upgrade head` directly to
-`render.yaml` instead — Render then handles the ordering for you natively,
-with no external CI step required.
-
-### Generic cloud (AWS/GCP/Azure/Kubernetes/etc.)
+### Generic cloud (AWS/GCP/Kubernetes/etc.)
 
 Same "migrate first, deploy second" rule applies; the mechanics depend on
 your platform's own release-step feature (ECS's task definition + a
 one-off migration task before the service update, a Kubernetes `Job` +
 `initContainer` pattern ahead of a rolling `Deployment` update, etc.) —
-outside this project's scope to ship a ready-made workflow for, but the
-same sequencing constraint from the top of this section governs all of
-them; `deploy-docker-compose.yml` is a reasonable template to adapt.
+outside this project's scope to ship a ready-made workflow for every
+platform, but `deploy-azure-production.yml` (build → scan → migrate →
+roll out → smoke test → rollback) is a reasonable template to adapt if
+your platform doesn't have a closer native equivalent.
 
 ---
 
@@ -2462,27 +2441,18 @@ them; `deploy-docker-compose.yml` is a reasonable template to adapt.
 
 Small, well-scoped follow-ups if you want to keep extending this project:
 
-- **A manual-approval / staging gate on the CI/CD pipeline** —
-  `.github/workflows/deploy-docker-compose.yml` and `deploy-render.yml`
-  (see [Safely Updating An Existing Production
-  Deployment](#safely-updating-an-existing-production-deployment-cicd))
-  deploy straight to production on every push to `main`, with no staging
-  environment and no human approval step in between. Adding a GitHub
-  `environment: production` block with required reviewers (or a separate
-  staging deploy target that has to pass smoke tests first) would close
-  that gap. Gating deploys on `ci.yml` passing first (`on: workflow_run`
-  instead of a parallel `on: push`) is a smaller, complementary version of
-  the same idea.
 - **An automated test suite** (`pytest` + `TestClient` + a throwaway
   SQLite or test-Postgres database) — see
   [Testing Your Changes](#testing-your-changes) for the manual pattern
-  this would formalize.
+  this would formalize. `ci.yml` already has a `pytest backend/tests` step
+  wired up (non-fatal via `|| true` until `backend/tests/` actually
+  exists) so this starts reporting the moment tests land.
 - **A `deleted_by` column** recording which admin performed a given
   soft-delete (good first Alembic migration exercise) — `restore_user()`
   itself (undoing a soft-delete) already shipped; see [Directories](#directories-super-admin--manager).
-- **Case-insensitive login** (`func.lower()` comparison + a matching
-  unique index) so `T.Okafor@corp.io` and `t.okafor@corp.io` are treated
-  as the same account.
+- **Case-sensitive login** (the auth layer now uses exact-match lookup for
+  usernames/emails rather than normalizing casing) so `T.Okafor@corp.io`
+  and `t.okafor@corp.io` are treated as distinct identifiers.
 - **`Strict-Transport-Security` (HSTS)**, set at your TLS-terminating
   reverse proxy once deployed with HTTPS. (A real `Content-Security-Policy`
   is no longer on this list — see `nginx/default.conf.template`, which now
@@ -2492,17 +2462,10 @@ Small, well-scoped follow-ups if you want to keep extending this project:
   Notifications](#due-date-extensions--notifications)); a `users` table
   column for "email me my own overdue/due-soon reminders: yes/no" would
   be a small, well-scoped follow-up.
-- **`httpOnly` cookie sessions + CSRF tokens**, replacing the current
-  `localStorage`-based JWT storage (see the trade-off noted in
-  [Security Model](#security-model)).
 - **OpenTelemetry tracing** — the request-ID/structured-logging
   foundation (`middleware/request_context.py`, `logging_config.py`) is a
   natural stepping stone toward full distributed tracing if this app ever
   calls out to other services.
-- **Scheduled/async large exports** — today's exports are built
-  synchronously in one request; if directories grow very large, a
-  background-job + "email me the file when it's ready" pattern would
-  scale better than holding the request open.
 
 ## Troubleshooting
 

@@ -15,12 +15,10 @@ import { API_URL } from './api.js';
 // ---------------------------------------------------------------------------
 // SESSION HELPERS
 // ---------------------------------------------------------------------------
-// We store the real JWT the backend issues at login under localStorage key
-// 'token'. The JWT payload (name/email/role/department) is NOT secret info a
-// user shouldn't see -- it's their own identity -- so we decode it client
-// side purely to decide which UI to show. The backend independently verifies
-// the token's cryptographic signature on every request, so a user editing
-// their own localStorage cannot actually grant themselves extra permissions.
+// We keep a lightweight, non-secret session object in localStorage after
+// login so the UI can decide which dashboard to show without ever needing
+// to read the actual JWT from JavaScript. The real auth state now lives in
+// the HttpOnly cookie the backend sets on login.
 
 // Simple Base64URL decoder to read JWT payload without external libraries
 export function parseJwt(token) {
@@ -36,21 +34,57 @@ export function parseJwt(token) {
   }
 }
 
-export function getSession() {
-  const token = localStorage.getItem('token');
-  if (!token) return null;
-  const payload = parseJwt(token);
-  if (!payload) return null;
-  // exp is in seconds since epoch; Date.now() is in milliseconds.
-  if (payload.exp && payload.exp * 1000 < Date.now()) {
-    localStorage.removeItem('token');
-    return null;
-  }
-  return { token, ...payload };
+function clearSessionStorage() {
+  localStorage.removeItem('session');
+  localStorage.removeItem('token');
 }
 
-export function logout() {
-  localStorage.removeItem('token');
+function persistSession(sessionData) {
+  localStorage.setItem('session', JSON.stringify(sessionData));
+}
+
+export function getSession() {
+  const sessionData = localStorage.getItem('session');
+  const legacyToken = localStorage.getItem('token');
+
+  if (!sessionData && !legacyToken) return null;
+
+  if (sessionData) {
+    try {
+      const session = JSON.parse(sessionData);
+      if (session.expires_at && session.expires_at * 1000 < Date.now()) {
+        clearSessionStorage();
+        return null;
+      }
+      return session;
+    } catch (e) {
+      clearSessionStorage();
+      return null;
+    }
+  }
+
+  const payload = parseJwt(legacyToken);
+  if (!payload) {
+    clearSessionStorage();
+    return null;
+  }
+  if (payload.exp && payload.exp * 1000 < Date.now()) {
+    clearSessionStorage();
+    return null;
+  }
+  return { token: legacyToken, ...payload };
+}
+
+export async function logout() {
+  clearSessionStorage();
+  try {
+    await fetch(`${API_URL}/auth/logout`, {
+      method: 'POST',
+      credentials: 'include',
+    });
+  } catch (e) {
+    // Ignore logout failures; the page redirect below still completes.
+  }
   window.location.href = 'index.html';
 }
 
@@ -66,10 +100,20 @@ export async function login(identifier, password) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ identifier, password }),
+    credentials: 'include',
   });
   const data = await response.json();
   if (!response.ok) throw new Error(data.detail || 'Invalid email/username or password');
-  localStorage.setItem('token', data.token);
+
+  persistSession({
+    user_id: data.user_id,
+    name: data.name,
+    username: data.username,
+    role: data.role,
+    department: data.department,
+    expires_at: data.expires_at,
+    needs_password_reset: data.needs_password_reset,
+  });
   return data;
 }
 
@@ -98,13 +142,42 @@ export function currentPageName() {
   return parts[parts.length - 1] || 'index.html';
 }
 
-export function checkAccess() {
+export async function checkAccess() {
   const session = getSession();
   const page = currentPageName();
   const onLoginPage = page === 'index.html' || page === '';
 
   if (onLoginPage) {
-    if (session) redirectByUserRole(session.role);
+    if (!session) return;
+    // BUGFIX: this used to redirect straight into the dashboard on the
+    // strength of the localStorage 'session' flag alone. That flag is
+    // just a UI convenience written at login time -- it has no idea
+    // whether the real HttpOnly auth cookie is still valid server-side
+    // (expired, cleared, rejected by the browser due to a cookie
+    // domain/SameSite mismatch after a deploy, backend restart, etc.).
+    // Trusting it here caused a redirect LOOP: index.html sends the user
+    // to e.g. admin.html on the stale flag -> admin.html's auth-guard.js
+    // makes the same /api/auth/me check we do below, finds no valid
+    // cookie, clears the flag, and bounces back to index.html -> which
+    // (before this fix) still saw a session on the very first render and
+    // sent them straight back to admin.html. The two pages ping-ponged
+    // forever and the login form never got a chance to run.
+    //
+    // Verifying against the server FIRST, here, breaks the loop: an
+    // invalid cookie now just clears the stale flag and leaves the user
+    // on the login form instead of bouncing them anywhere.
+    try {
+      const response = await fetch(`${API_URL}/auth/me`, { credentials: 'include' });
+      if (response.ok) {
+        redirectByUserRole(session.role);
+      } else {
+        clearSessionStorage();
+      }
+    } catch (e) {
+      // Network error / API unreachable -- don't strand the user on a
+      // half-authenticated state, but also don't wipe a possibly-good
+      // session just because the request failed to even complete.
+    }
     return;
   }
 
@@ -149,13 +222,12 @@ export function startIdleWatchdog() {
     const onLoginPage = page === 'index.html' || page === '';
     if (onLoginPage) return; // nothing to expire on the login screen itself
 
-    const token = localStorage.getItem('token');
-    if (!token) return; // already logged out, nothing to watch
+    const session = getSession();
+    if (!session) return; // already logged out, nothing to watch
 
-    const payload = parseJwt(token);
-    const expired = !payload || !payload.exp || payload.exp * 1000 < Date.now();
+    const expired = session.expires_at && session.expires_at * 1000 < Date.now();
     if (expired) {
-      localStorage.removeItem('token');
+      clearSessionStorage();
       window.location.href = 'index.html';
     }
   }, IDLE_CHECK_INTERVAL_MS);

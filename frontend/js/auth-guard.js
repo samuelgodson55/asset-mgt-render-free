@@ -57,17 +57,47 @@
     }
   }
 
-  var token = localStorage.getItem('token');
-  var payload = token ? parseJwt(token) : null;
-  var expired = !payload || !payload.exp || payload.exp * 1000 < Date.now();
+  function clearSessionFlag() {
+    localStorage.removeItem('session');
+    localStorage.removeItem('token');
+  }
 
-  if (!ALLOWED_ROLES.length || !payload || expired || ALLOWED_ROLES.indexOf(payload.role) === -1) {
-    if (expired && token) localStorage.removeItem('token');
+  function getSessionFromStorage() {
+    var storedSession = localStorage.getItem('session');
+    if (!storedSession) return null;
+    try {
+      var session = JSON.parse(storedSession);
+      var expired = session.expires_at && session.expires_at * 1000 < Date.now();
+      if (expired) {
+        clearSessionFlag();
+        return null;
+      }
+      return session;
+    } catch (e) {
+      clearSessionFlag();
+      return null;
+    }
+  }
+
+  var session = getSessionFromStorage();
+  var payload = session || null;
+
+  if (!ALLOWED_ROLES.length || !payload || ALLOWED_ROLES.indexOf(payload.role) === -1) {
     // location.replace (not .href) so this doesn't leave the blocked
     // dashboard page in browser history for a "back button" flash.
     window.location.replace('index.html');
   } else {
-    // Only NOW do we allow <body> to become visible (see css/auth-guard.css).
-    document.documentElement.classList.add('authorized');
+    fetch('/api/auth/me', { credentials: 'include' }).then(function (response) {
+      if (!response.ok) {
+        clearSessionFlag();
+        window.location.replace('index.html');
+        return;
+      }
+      // Only NOW do we allow <body> to become visible (see css/auth-guard.css).
+      document.documentElement.classList.add('authorized');
+    }).catch(function () {
+      clearSessionFlag();
+      window.location.replace('index.html');
+    });
   }
 })();

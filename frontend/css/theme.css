@@ -251,6 +251,7 @@ input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(0.7); cur
   }
   .drawer-panel { animation: drawer-slide-in .22s cubic-bezier(.32,.72,0,1); }
 }
+.drawer-panel { overflow-x: hidden; }
 @keyframes sheet-slide-up { from { transform: translateY(24px); opacity: .4; } to { transform: translateY(0); opacity: 1; } }
 @keyframes drawer-slide-in { from { transform: translateX(24px); opacity: .4; } to { transform: translateX(0); opacity: 1; } }
 

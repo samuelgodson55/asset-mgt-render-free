@@ -2,11 +2,12 @@
 /**
  * build-frontend/build.js
  * -----------------------------------------------------------------------
- * Processes every frontend/js/**\/*.js file differently depending on the
- * BUILD_ENV it's run with. This is what nginx/Dockerfile's builder stage
- * runs before the plain nginx stage copies the result into the image --
- * see that file for how BUILD_ENV gets wired in from .env's ENVIRONMENT
- * value via docker-compose.yml's `build.args`.
+ * Processes every frontend/js/**\/*.js AND every frontend/*.html file
+ * differently depending on the BUILD_ENV it's run with. This is what
+ * nginx/Dockerfile's builder stage runs before the plain nginx stage
+ * copies the result into the image -- see that file for how BUILD_ENV
+ * gets wired in from .env's ENVIRONMENT value via docker-compose.yml's
+ * `build.args`.
  *
  * Three modes, matching the project's three ENVIRONMENT values:
  *
@@ -15,26 +16,31 @@
  *                    what's on disk, so browser DevTools line numbers match
  *                    your editor and you can breakpoint real source.
  *
- *   development  -- minified only (Terser: whitespace/comments stripped,
- *                    dead code folded, identifiers shortened). Smaller
- *                    payloads for a shared dev/staging deploy, but still
- *                    straightforward to read in DevTools if you need to.
+ *   development  -- JS minified (Terser: whitespace/comments stripped,
+ *                    dead code folded, identifiers shortened); HTML
+ *                    minified (html-minifier-terser: whitespace collapsed,
+ *                    comments stripped). Smaller payloads for a shared
+ *                    dev/staging deploy, but still straightforward to
+ *                    read in DevTools if you need to.
  *
- *   production   -- minified AND obfuscated. Terser runs first (same as
- *                    development), then javascript-obfuscator runs on the
- *                    result (string-array encoding, control-flow
- *                    flattening, dead-code injection, self-defending
- *                    output) so the shipped bundle is deliberately hard to
- *                    read or tamper with, not just small.
+ *   production   -- everything development does, PLUS the minified JS is
+ *                    run through javascript-obfuscator (string-array
+ *                    encoding, control-flow flattening, dead-code
+ *                    injection, self-defending output) so the shipped
+ *                    bundle is deliberately hard to read or tamper with,
+ *                    not just small. HTML minification is the same as
+ *                    development -- HTML isn't obfuscated, just minified,
+ *                    since every <script> tag here loads an external .js
+ *                    file (no inline JS to protect) and there's nothing
+ *                    equivalent to "obfuscation" for markup.
  *
  * USAGE
  *   BUILD_ENV=local|development|production node build.js <srcDir> <outDir>
  *
- * Everything under <srcDir> that ISN'T a .js file (html, css, images,
- * fonts, ...) is copied through unchanged in every mode -- only .js files
- * are ever transformed. Prints a per-file + total size report to stdout
- * either way, so `docker compose build` output shows exactly what
- * happened for the mode you just built.
+ * Everything under <srcDir> that ISN'T a .js or .html file (css, images,
+ * fonts, ...) is copied through unchanged in every mode. Prints a
+ * per-file + total size report to stdout either way, so `docker compose
+ * build` output shows exactly what happened for the mode you just built.
  * -----------------------------------------------------------------------
  */
 
@@ -42,6 +48,7 @@ const fs = require("fs");
 const path = require("path");
 const { minify } = require("terser");
 const JavaScriptObfuscator = require("javascript-obfuscator");
+const { minify: minifyHtml } = require("html-minifier-terser");
 
 const VALID_MODES = new Set(["local", "development", "production"]);
 
@@ -71,8 +78,8 @@ const outDir = path.resolve(outDirArg);
 
 const MODE_LABEL = {
   local: "none (raw source, copied as-is -- personal PC)",
-  development: "minify",
-  production: "minify + obfuscate",
+  development: "minify JS + minify HTML",
+  production: "minify JS + obfuscate JS + minify HTML",
 };
 
 function fmtKB(bytes) {
@@ -134,6 +141,35 @@ async function processJs(code, relPath) {
   return output;
 }
 
+// Deliberately conservative options: every <script> in this app's HTML
+// loads an external .js file (verified -- no inline <script> blocks
+// exist anywhere in frontend/*.html), so minifyJS is left off rather than
+// risk html-minifier-terser trying to parse markup as script. Same
+// reasoning for minifyCSS -- there are no inline <style> blocks either;
+// real CSS lives in frontend/css/*.css and passes through untouched like
+// any other non-JS/non-HTML asset. collapseWhitespace is safe here since
+// none of these pages use <pre> (whitespace-significant) and every
+// <textarea> in them is empty (no default text to preserve).
+async function processHtml(code, relPath) {
+  if (mode === "local") {
+    return code;
+  }
+
+  try {
+    return await minifyHtml(code, {
+      collapseWhitespace: true,
+      conservativeCollapse: false,
+      removeComments: true,
+      removeRedundantAttributes: false,
+      removeAttributeQuotes: false,
+      minifyJS: false,
+      minifyCSS: false,
+    });
+  } catch (err) {
+    throw new Error(`html-minifier-terser failed on ${relPath}: ${err.message}`);
+  }
+}
+
 async function main() {
   if (!fs.existsSync(srcDir)) {
     fail(`source dir does not exist: ${srcDir}`);
@@ -142,7 +178,10 @@ async function main() {
 
   const files = walk(srcDir);
   const jsFiles = files.filter((f) => f.endsWith(".js"));
-  const otherFiles = files.filter((f) => !f.endsWith(".js"));
+  const htmlFiles = files.filter((f) => f.endsWith(".html"));
+  const otherFiles = files.filter(
+    (f) => !f.endsWith(".js") && !f.endsWith(".html")
+  );
 
   console.log("=".repeat(72));
   console.log(`Snipe-IT Lite frontend build -- BUILD_ENV=${mode}`);
@@ -151,7 +190,8 @@ async function main() {
   console.log(`Output: ${outDir}`);
   console.log("=".repeat(72));
 
-  // Non-JS assets: copy through untouched in every mode.
+  // Everything that isn't JS or HTML (css, images, fonts, ...): copy
+  // through untouched in every mode.
   for (const file of otherFiles) {
     const rel = path.relative(srcDir, file);
     const dest = path.join(outDir, rel);
@@ -163,20 +203,27 @@ async function main() {
   let totalAfter = 0;
   const rows = [];
 
-  for (const file of jsFiles) {
-    const rel = path.relative(srcDir, file);
-    const dest = path.join(outDir, rel);
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
+  const processors = [
+    { files: jsFiles, run: processJs },
+    { files: htmlFiles, run: processHtml },
+  ];
 
-    const before = fs.readFileSync(file, "utf8");
-    const after = await processJs(before, rel);
-    fs.writeFileSync(dest, after, "utf8");
+  for (const { files: group, run } of processors) {
+    for (const file of group) {
+      const rel = path.relative(srcDir, file);
+      const dest = path.join(outDir, rel);
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
 
-    const beforeBytes = Buffer.byteLength(before, "utf8");
-    const afterBytes = Buffer.byteLength(after, "utf8");
-    totalBefore += beforeBytes;
-    totalAfter += afterBytes;
-    rows.push({ rel, beforeBytes, afterBytes });
+      const before = fs.readFileSync(file, "utf8");
+      const after = await run(before, rel);
+      fs.writeFileSync(dest, after, "utf8");
+
+      const beforeBytes = Buffer.byteLength(before, "utf8");
+      const afterBytes = Buffer.byteLength(after, "utf8");
+      totalBefore += beforeBytes;
+      totalAfter += afterBytes;
+      rows.push({ rel, beforeBytes, afterBytes });
+    }
   }
 
   rows.sort((a, b) => b.beforeBytes - a.beforeBytes);
@@ -194,7 +241,8 @@ async function main() {
       `${fmtKB(totalAfter).padStart(9)}  (${fmtPct(totalBefore, totalAfter)})`
   );
   console.log(
-    `  ${jsFiles.length} JS file(s) processed, ${otherFiles.length} other asset(s) copied as-is.`
+    `  ${jsFiles.length} JS file(s) + ${htmlFiles.length} HTML file(s) processed, ` +
+      `${otherFiles.length} other asset(s) copied as-is.`
   );
   console.log("=".repeat(72));
 }

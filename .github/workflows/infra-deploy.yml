@@ -1,0 +1,100 @@
+# .github/workflows/infra-deploy.yml
+# -----------------------------------------------------------------------------
+# Provisions/updates the Azure infrastructure in infra/main.bicep (Container
+# Apps Environment, Postgres, Redis, Key Vault, ACR, storage). This is
+# DELIBERATELY separate from deploy-azure-production.yml / -staging.yml,
+# which only ever push new application images -- infra changes (new env var,
+# a scaling rule tweak, a bigger Postgres SKU, ...) are infrequent and
+# reviewed, not something you want re-running on every `git push`.
+#
+# Run this:
+#   - once, to create a brand-new environment (staging or prod)
+#   - again, any time infra/main.bicep itself changes and you want that
+#     change applied
+#
+# SAFE TO RE-RUN: it reads whatever image tag is CURRENTLY deployed on each
+# container app first and passes that back in as `initialImageTag`, so
+# re-applying infra changes never rolls a running environment back to a
+# placeholder image -- see the "resolve current image tag" step below.
+# -----------------------------------------------------------------------------
+name: Deploy Azure Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Which environment to provision/update'
+        required: true
+        type: choice
+        options: [staging, production]
+
+permissions:
+  id-token: write # required for OIDC federated login (azure/login) -- no client secret stored anywhere
+  contents: read
+
+jobs:
+  deploy-infra:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.target }}
+    env:
+      RESOURCE_GROUP: ${{ github.event.inputs.target == 'production' && secrets.PROD_RESOURCE_GROUP || secrets.STAGING_RESOURCE_GROUP }}
+      ENV_NAME: ${{ github.event.inputs.target == 'production' && 'prod' || 'staging' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC, no secret)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Ensure resource group exists
+        run: |
+          az group show --name "$RESOURCE_GROUP" 2>/dev/null || \
+          az group create --name "$RESOURCE_GROUP" --location "${{ secrets.AZURE_LOCATION }}"
+
+      # First deploy ever: these `az containerapp show` calls fail (app
+      # doesn't exist yet) -- fall back to "initial", which is fine, since
+      # deploy-azure-production.yml/-staging.yml will push a real image
+      # immediately after this workflow finishes anyway.
+      - name: Resolve currently-deployed image tag (so infra updates don't clobber it)
+        id: current
+        run: |
+          TAG=$(az containerapp show --name backend --resource-group "$RESOURCE_GROUP" \
+                  --query "properties.template.containers[0].image" -o tsv 2>/dev/null | awk -F: '{print $NF}') || true
+          echo "tag=${TAG:-initial}" >> "$GITHUB_OUTPUT"
+
+      # COST LEVER: staging has no real users waiting on it, so it scales to
+      # zero when idle (min replicas 0 -- pure cold-start-on-first-request
+      # tradeoff, ~$0 idle compute). Production stays warm (min 1) so the
+      # first real visitor of the day never eats a cold start. See
+      # DEPLOYMENT.md's Monitoring/Cost section for the full breakdown.
+      - name: Resolve replica floor for this environment
+        id: replicas
+        run: |
+          if [ "$ENV_NAME" = "prod" ]; then
+            echo "min=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "min=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Deploy Bicep
+        run: |
+          az deployment group create \
+            --resource-group "$RESOURCE_GROUP" \
+            --template-file infra/main.bicep \
+            --parameters \
+              environmentName="$ENV_NAME" \
+              initialImageTag="${{ steps.current.outputs.tag }}" \
+              backendMinReplicas=${{ steps.replicas.outputs.min }} \
+              workerMinReplicas=${{ steps.replicas.outputs.min }} \
+              postgresAdminPassword="${{ secrets.POSTGRES_ADMIN_PASSWORD }}" \
+              jwtSecretKey="${{ secrets.JWT_SECRET_KEY }}" \
+              superAdminPassword="${{ secrets.SUPER_ADMIN_PASSWORD }}" \
+              customDomain="${{ secrets.CUSTOM_DOMAIN }}"
+
+      - name: Show outputs
+        run: |
+          az deployment group show --resource-group "$RESOURCE_GROUP" --name main \
+            --query properties.outputs -o json

@@ -10,7 +10,9 @@ any single router) specifically so every `api/*.py` file can import from
 here without creating a dependency on main.py itself.
 """
 
-from fastapi import Depends, HTTPException
+from typing import Optional
+
+from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 import jwt
@@ -19,7 +21,7 @@ import models
 from database import get_db
 from security import decode_access_token, SUPER_ADMIN_ID
 
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
 # Roles that carry full Super-Admin-equivalent privileges. `admin` is a
 # normal, DB-backed, deletable account (see database.py's seed_db() and
@@ -32,15 +34,24 @@ _FULL_ADMIN_ROLES = ("super_admin", "admin")
 
 
 def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
     db: Session = Depends(get_db),
 ) -> dict:
     """
-    Decodes and validates the bearer JWT. Returns a small dict describing
-    who's logged in: {sub, name, email, role, department}. Any route that
-    depends on this simply requires "you must be logged in".
+    Decodes and validates the bearer JWT from either the Authorization header
+    or an HttpOnly session cookie. Returns a small dict describing who's
+    logged in: {sub, name, email, role, department}. Any route that depends
+    on this simply requires "you must be logged in".
     """
-    token = credentials.credentials
+    token = None
+    if credentials is not None:
+        token = credentials.credentials
+    if not token:
+        token = request.cookies.get("access_token")
+    if not token:
+        raise HTTPException(status_code=401, detail="Invalid authentication token.")
+
     try:
         payload = decode_access_token(token)
     except jwt.ExpiredSignatureError:

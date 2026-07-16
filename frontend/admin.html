@@ -351,6 +351,13 @@
             <input type="file" id="csvFileInput" accept=".csv" class="hidden"  />
           </label>
         </form>
+
+        <!-- CSV Import Result Summary (populated dynamically by JS) -->
+        <div id="csvImportResult" class="mt-3 hidden">
+          <div id="csvImportBanner" class="rounded-md px-4 py-3 text-[13px] font-medium"></div>
+          <div id="csvImportActions" class="mt-3 flex items-center gap-3"></div>
+          <div id="csvImportErrors" class="mt-3 overflow-auto max-h-64 rounded-md border border-border bg-card2/60 p-3 text-sm text-slate-200 hidden"></div>
+        </div>
       </div>
     </div>
   </section>

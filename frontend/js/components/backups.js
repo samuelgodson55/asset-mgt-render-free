@@ -173,9 +173,8 @@ export async function createBackupNow(button) {
 export async function downloadBackup(el) {
   const filename = el.dataset.filename;
   try {
-    const session = getSession();
     const response = await fetch(`${API_URL}/backup/download/${encodeURIComponent(filename)}`, {
-      headers: { 'Authorization': `Bearer ${session.token}` },
+      credentials: 'include',
     });
     if (!response.ok) throw new Error('Download failed.');
     const blob = await response.blob();
@@ -255,13 +254,12 @@ export async function confirmRestore() {
         if (confirmBtn) { confirmBtn.disabled = false; confirmBtn.textContent = originalText; }
         return;
       }
-      const session = getSession();
       const formData = new FormData();
       formData.append('file', file);
       const response = await fetch(`${API_URL}/backup/restore-upload`, {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${session.token}` },
         body: formData,
+        credentials: 'include',
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || 'Restore failed.');
