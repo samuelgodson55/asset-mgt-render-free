@@ -1,0 +1,14 @@
+{
+  "name": "snipe-it-lite-frontend-build",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Processes frontend/js/**/*.js and frontend/*.html differently depending on ENVIRONMENT (local/development/production) before it's baked into the nginx image -- see build.js and nginx/Dockerfile.",
+  "scripts": {
+    "build": "node build.js"
+  },
+  "devDependencies": {
+    "terser": "^5.36.0",
+    "javascript-obfuscator": "^4.1.1",
+    "html-minifier-terser": "^7.2.0"
+  }
+}
