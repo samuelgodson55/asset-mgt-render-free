@@ -12,6 +12,7 @@
 .env
 .env.*
 !.env.example
+!.env.azure.example
 
 # --- Editors / OS -------------------------------------------------------------
 .vscode/
