@@ -90,7 +90,18 @@
       </button>
     </form>
 
-    <!-- Demo credentials helper (safe to delete once you provision your own users) -->
+    <!-- Demo credentials helper (safe to delete once you provision your own users).
+         BUILD-STRIPPED IN PRODUCTION: everything between the two
+         BUILD:PROD-STRIP markers below is removed by
+         build-frontend/build.js when BUILD_ENV=production (wired from
+         .env's ENVIRONMENT value -- see docker-compose.yml's frontend
+         build.args and nginx/Dockerfile). It still renders normally for
+         BUILD_ENV=local and BUILD_ENV=development. Do not rely on this
+         alone to keep the seeded accounts secret -- also set
+         AUTO_SEED_DEMO_DATA=false in production (see backend/main.py /
+         database.py's seed_db()), which is the setting that actually
+         controls whether these accounts exist in the database at all. -->
+    <!-- BUILD:PROD-STRIP:START -->
     <div class="rounded-lg border border-border bg-card2/50 p-3 text-[11px] text-slate-500 space-y-1">
       <p class="font-semibold text-slate-400">Demo accounts (seeded on first boot):</p>
       <p class="tag-mono">Admin — r.adeyemi@corp.io / Admin123!</p>
@@ -98,6 +109,7 @@
       <p class="tag-mono">Staff — t.okafor@corp.io / Staff123!</p>
       <p class="tag-mono">Customer — d.martins@customer.io / Customer123!</p>
     </div>
+    <!-- BUILD:PROD-STRIP:END -->
 
     <!-- Footer Security Notice -->
     <div class="border-t border-border pt-4 text-center">
