@@ -915,6 +915,10 @@ function renderQuotesTable(items) {
   const tbody = document.getElementById('quotesTableBody');
   if (!tbody) return;
   document.querySelectorAll('.quote-count').forEach(el => el.textContent = quotesState.total);
+  // Same admin-vs-manager gate used by components/assets.js and
+  // components/users.js -- admin.html sets data-view="admin",
+  // manager.html sets data-view="manager".
+  const isAdminView = document.body.dataset.view === 'admin';
 
   if (items.length === 0) {
     tbody.innerHTML = `<tr><td colspan="7" class="px-5 py-6 text-center text-slate-500">No submitted quotes yet.</td></tr>`;
@@ -939,6 +943,17 @@ function renderQuotesTable(items) {
           class="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
           ${q.locked ? 'View' : 'View / Adjust'}
         </button>`;
+      // Admin/Super Admin only (element only ever rendered when
+      // data-view="admin" -- see admin.html vs manager.html -- a Manager
+      // can adjust a quote but never delete one, enforced again server-side
+      // by deps.require_super_admin on DELETE /quotations/{id}), and never
+      // for an already-fulfilled quote, same lock as every other edit.
+      const deleteButton = (isAdminView && !q.locked)
+        ? `<button type="button" data-action="delete-quote-row" data-quote-id="${q.id}" data-quote-ref="${escapeHtml(q.reference_number)}" title="Delete quotation"
+            class="rounded-md border border-border p-1.5 text-slate-400 transition hover:border-rose-500/40 hover:text-rose-400">
+            <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0l-1 14a2 2 0 01-2 2H7a2 2 0 01-2-2L4 6"/></svg>
+          </button>`
+        : '';
       return `
       <tr ${rowDetailsTrigger(escapeHtml(q.reference_number), [
         ['Status', quotationStatusBadge(q.status)],
@@ -947,7 +962,7 @@ function renderQuotesTable(items) {
         ['Items', String(q.item_count)],
         ['Total', escapeHtml(formatPrice(q.total))],
         ['Assigned To', q.assigned_to ? escapeHtml(q.assigned_to.name) : (q.assigned_outsider ? `${escapeHtml(q.assigned_outsider.name)} (Ad-Hoc)` : 'Unassigned')],
-        ['', [approveButton, actionButton].filter(Boolean).join(' ')],
+        ['', [approveButton, actionButton, deleteButton].filter(Boolean).join(' ')],
       ])} class="cursor-pointer transition hover:bg-card2/40 active:bg-card2/60 sm:cursor-default">
         <td class="px-3 py-3 tag-mono font-medium text-slate-100">${escapeHtml(q.reference_number)}</td>
         <td class="px-3 py-3">${quotationStatusBadge(q.status)}</td>
@@ -958,7 +973,7 @@ function renderQuotesTable(items) {
         <td class="hidden px-3 py-3 tag-mono text-slate-300 sm:table-cell">${escapeHtml(formatTimestamp(q.submitted_at))}</td>
         <td class="px-3 py-3">${q.item_count}</td>
         <td class="hidden px-3 py-3 sm:table-cell">${assignedLabel}</td>
-        <td class="px-3 py-3 text-right"><span class="hidden items-center justify-end gap-2 sm:inline-flex">${approveButton}${actionButton}</span></td>
+        <td class="px-3 py-3 text-right"><span class="hidden items-center justify-end gap-2 sm:inline-flex">${approveButton}${actionButton}${deleteButton}</span></td>
       </tr>`;
     }).join('');
   }
@@ -1038,6 +1053,13 @@ function renderQuoteDetail(data) {
   // "Approve" only while the quote is still "submitted" -- see
   // quotationStatusBadge()/backend approve_quotation() for the lifecycle.
   if (approveBtn) approveBtn.classList.toggle('hidden', data.status !== 'submitted');
+  // "Delete" -- Admin-only (deleteQuoteBtn only exists on admin.html, see
+  // the `if (!deleteBtn) return` guard nowhere needed here since the
+  // element itself is simply absent on manager.html) and refused once
+  // fulfilled, same `locked` rule as every other edit above -- see
+  // backend's delete_quotation()/_ensure_admin_editable().
+  const deleteBtn = document.getElementById('quoteDetailDeleteBtn');
+  if (deleteBtn) deleteBtn.classList.toggle('hidden', locked);
   if (lockedNotice) {
     lockedNotice.classList.toggle('hidden', !locked);
     if (locked) {
@@ -1184,6 +1206,41 @@ export async function approveQuote(quotationId) {
     showToast(`Quotation ${data.reference_number} approved -- Ready for Pickup.`);
   } catch (err) {
     alert(err.message);
+  }
+}
+
+// Admin-only: permanently deletes a Quotation directly from the Quotes
+// table row (without opening the detail modal first). Same endpoint/rules
+// as deleteQuoteDetail() below.
+export async function deleteQuoteRow(quotationId, referenceLabel) {
+  if (!confirm(`Permanently delete ${referenceLabel || 'this quotation'}? This cannot be undone.`)) return;
+  try {
+    await apiRequest(`/quotations/${quotationId}`, { method: 'DELETE' });
+    loadQuotes();
+    showToast(`${referenceLabel || 'Quotation'} deleted.`);
+  } catch (err) {
+    alert(`Delete failed: ${err.message}`);
+  }
+}
+
+// Admin-only: permanently deletes the Quotation currently open in the
+// detail modal. Gated server-side by deps.require_super_admin (Admin/Super
+// Admin, NOT Manager -- see api/quotations.py's DELETE /quotations/{id})
+// and refused once fulfilled -- the deleteQuoteDetail button itself is
+// already hidden past that point by renderQuoteDetail() above, but the
+// backend is the real enforcement either way.
+export async function deleteQuoteDetail() {
+  if (!currentQuoteId) return;
+  const refEl = document.getElementById('quoteDetailRef');
+  const label = refEl ? refEl.textContent : 'this quotation';
+  if (!confirm(`Permanently delete ${label}? This cannot be undone.`)) return;
+  try {
+    await apiRequest(`/quotations/${currentQuoteId}`, { method: 'DELETE' });
+    closeModal('quoteDetailModal');
+    loadQuotes();
+    showToast(`${label} deleted.`);
+  } catch (err) {
+    alert(`Delete failed: ${err.message}`);
   }
 }
 

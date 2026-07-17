@@ -149,6 +149,14 @@ def create_quotation(payload: QuotationCreateRequest, db: Session = Depends(get_
     return quotation_service.admin_create_quotation(db, user, payload)
 
 
+@router.delete("/quotations/{quotation_id}")
+def delete_quotation(quotation_id: int, db: Session = Depends(get_db), user: dict = Depends(require_super_admin)):
+    """Admin/Super Admin-only (stricter than every other Quotes-tab action above,
+    which only need require_privileged_role) -- permanently deletes a submitted or
+    approved Quotation. Refused once a Quotation is fulfilled, same as any other edit."""
+    return quotation_service.delete_quotation(db, user, quotation_id)
+
+
 @router.get("/quotations/fulfillment-queue")
 def get_fulfillment_queue(db: Session = Depends(get_db), user: dict = Depends(require_privileged_role)):
     """Admin/Manager-only: every Approved / Ready for Pickup Quotation, oldest first --

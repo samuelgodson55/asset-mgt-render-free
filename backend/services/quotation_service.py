@@ -11,13 +11,15 @@ by api/quotations.py.
 PRICING MODEL
 -------------
 A line's total is always `quantity * rental_days * asset.price`, where
-`rental_days = max(1, (due_date - start_date).days)` -- a same-day
-request still bills a full day rather than zero. Nothing here ever
-snapshots a price or VAT rate onto a Quotation/QuotationItem row: every
-read/export recomputes against the LIVE AssetType.price and the LIVE
-`vat_percent` AppSetting, so an Admin's global price or VAT edit is
-reflected immediately in every person's saved order -- exactly the "price
-changes globally through the Admin's edit" behavior requested.
+`rental_days` is an INCLUSIVE count of the calendar days a booking spans:
+`(due_date - start_date).days + 1` (see `_rental_days()` below) -- a
+same-day request (start == due) bills 1 day, start->start+1 bills 2 days,
+start->start+2 bills 3 days, and so on. Nothing here ever snapshots a
+price or VAT rate onto a Quotation/QuotationItem row: every read/export
+recomputes against the LIVE AssetType.price and the LIVE `vat_percent`
+AppSetting, so an Admin's global price or VAT edit is reflected
+immediately in every person's saved order -- exactly the "price changes
+globally through the Admin's edit" behavior requested.
 
 SUBMISSION WORKFLOW
 --------------------
@@ -82,7 +84,13 @@ def _money(value: Decimal) -> float:
 
 
 def _rental_days(start_date: datetime.date, due_date: datetime.date) -> int:
-    return max(1, (due_date - start_date).days)
+    # Inclusive calendar-day count: a same-day booking (start == due) is 1
+    # day, start->start+1 is 2 days, start->start+2 is 3 days, etc. -- i.e.
+    # the number of calendar days the booking SPANS, not the raw delta
+    # between the two dates. `max(1, ...)` stays as a safety net in case
+    # due_date < start_date ever slips through (should already be blocked
+    # by validation elsewhere).
+    return max(1, (due_date - start_date).days + 1)
 
 
 def _inventory_status_label(available_quantity: int) -> str:
@@ -620,6 +628,33 @@ def _ensure_admin_editable(quotation: models.Quotation) -> None:
         # and aren't surfaced in the Quotes tab), but guard anyway rather
         # than letting an admin edit somebody's still-in-progress cart.
         raise HTTPException(status_code=400, detail="This Quotation hasn't been submitted yet.")
+
+
+def delete_quotation(db: Session, actor: dict, quotation_id: int) -> dict:
+    """Admin/Super Admin-only: permanently deletes a submitted or approved
+    Quotation (and, via the model's cascade="all, delete-orphan", its line
+    items and outsourced items with it). Gated by the SAME
+    _ensure_admin_editable() lock as every other Admin/Manager mutation
+    above -- a "fulfilled" quote can never be deleted, since by then it has
+    real AssetCheckout rows pointing back at it via
+    AssetCheckout.quotation_id (no ON DELETE cascade there, deliberately --
+    see that column's docstring in models.py -- so a hard delete would
+    either orphan or corrupt genuine checkout history). A "draft" is
+    likewise refused, same as every other admin mutation, since it hasn't
+    been submitted and isn't reachable from the Quotes tab. Deletion itself
+    is a strictly stronger gate than editing (deps.require_super_admin,
+    NOT deps.require_privileged_role) -- a Manager can adjust a quote but
+    never delete one, only a Super Admin or Admin account can."""
+    quotation = _get_quotation_or_404(db, quotation_id)
+    _ensure_admin_editable(quotation)
+    reference_number = quotation.reference_number
+    db.delete(quotation)
+    db.add(models.AuditLog(
+        operator=actor["email"], action="QUOTATION_DELETED", target_type="Quotation", target_id=quotation_id,
+        details=f"Deleted Quotation {reference_number}.",
+    ))
+    db.commit()
+    return {"detail": f"Quotation {reference_number} deleted."}
 
 
 def list_quotations(

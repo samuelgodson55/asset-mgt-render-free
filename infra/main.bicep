@@ -418,11 +418,13 @@ var sharedEnv = [
   { name: 'SMTP_PORT', value: '587' }
   { name: 'SMTP_USERNAME', value: smtpUsername }
   { name: 'SMTP_USE_TLS', value: 'true' }
+  { name: 'SMTP_USE_SSL', value: 'false' }
   { name: 'SMTP_FROM_EMAIL', value: smtpFromEmail }
   { name: 'ADMIN_NOTIFICATION_EMAILS', value: adminNotificationEmails }
   { name: 'OVERDUE_NOTIFICATION_INTERVAL_HOURS', value: '24' }
   { name: 'DUE_SOON_REMINDER_DAYS', value: '2' }
   { name: 'DUE_SOON_NOTIFICATION_INTERVAL_HOURS', value: '24' }
+  { name: 'SEND_INDIVIDUAL_HOLDER_REMINDERS', value: 'true' }
   { name: 'DISPLAY_TIMEZONE', value: 'Africa/Lagos' }
   { name: 'CURRENCY_CODE', value: 'NGN' }
   { name: 'CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER', value: 'false' }

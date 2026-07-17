@@ -47,6 +47,7 @@ import models
 from models import utc_now
 from schemas.checkouts import ExtensionRequestCreate, ExtensionDecisionRequest, DirectExtensionRequest, BulkExtendRequest
 from tasks.notification_tasks import send_email_task
+from services.notification_service import get_digest_recipient_emails
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -107,19 +108,24 @@ def _notify(to, subject: str, body: str) -> None:
 def _notification_recipients(db) -> list[str]:
     """
     Builds the list of email addresses who should hear about a NEW
-    extension request: every Admin AND every Manager, system-wide (Managers
-    no longer have department-scoping, so any Manager can act on any
-    checkout, same as an Admin), plus any extra addresses configured in
+    extension request: the SAME admin-configured "Digest Recipients" list
+    used by tasks/notification_tasks.py's overdue/due-soon digests (see
+    services/notification_service.py's get_digest_recipient_emails(),
+    editable at runtime via PUT /settings/digest-recipients -- Admin/Super
+    Admin only), plus any extra addresses configured in
     ADMIN_NOTIFICATION_EMAILS.
+
+    This is DELIBERATELY NOT "every Admin/Manager account, system-wide" --
+    that used to be the rule here (Managers have no department-scoping, so
+    any Manager could act on any checkout, same as an Admin), but it meant
+    every Manager/Admin got an email the moment ANY extension was
+    requested, with no way to opt out short of changing someone's role.
+    Being a Manager/Admin no longer implies receiving these notifications;
+    being on the configured list does -- same audience rule as the daily
+    digest, and configured in the same place. If that list (and
+    ADMIN_NOTIFICATION_EMAILS) is empty, no notification is sent at all.
     """
-    admins_and_managers = db.query(models.User).filter(
-        models.User.is_deleted.is_(False),
-        models.User.is_active.is_(True),
-        models.User.role.in_(("admin", "manager")),
-    ).all()
-
-    recipients = [u.email for u in admins_and_managers]
-
+    recipients = get_digest_recipient_emails(db)
     recipients.extend(settings.admin_notification_email_list)
     return list(dict.fromkeys(recipients))  # de-dupe, preserve order
 

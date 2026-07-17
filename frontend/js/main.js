@@ -23,7 +23,7 @@
 // =============================================================================
 
 import { checkAccess, startIdleWatchdog, login, redirectByUserRole, logout, getSession } from './auth.js';
-import { closeModal, switchTab, toggleRoute, toggleCapacityEdit, toggleNameEdit, toggleCategoryEdit, togglePriceEdit, changePage, setSearch, setPerPage, openRowDetailsFromElement, initSwipeNav, initModalBackdropDismiss, switchDashboardTab, initDashSwipeNav } from './ui.js';
+import { closeModal, switchTab, toggleRoute, toggleCapacityEdit, toggleNameEdit, toggleCategoryEdit, togglePriceEdit, changePage, setSearch, setPerPage, openRowDetailsFromElement, initSwipeNav, initModalBackdropDismiss, switchDashboardTab, initDashSwipeNav, initSearchClearButtons } from './ui.js';
 import { toggleTheme, initThemeToggle } from './theme.js';
 import { refreshDashboard } from './dashboard.js';
 import { initNotificationBell, toggleNotificationDropdown, closeNotificationDropdown, refreshNotifications } from './components/notifications.js';
@@ -61,7 +61,7 @@ import {
   searchAssignUsers, assignQuoteToUser, unassignQuote,
   switchQuotationTab, searchQuoteDetailAssets, selectQuoteDetailAsset, clearQuoteDetailAsset,
   openCreateQuoteModal, toggleQuoteRoute, submitCreateQuote,
-  approveQuote, getCurrentQuoteId,
+  approveQuote, getCurrentQuoteId, deleteQuoteDetail, deleteQuoteRow,
   openFulfillmentDrawer, updateFulfillmentSelection, toggleSelectAllFulfillment, processFulfillmentSelected,
   addShortfallAllocationRow, removeShortfallAllocationRow,
   openMyQuoteDetail, updateMyQuoteItemQuantity, removeMyQuoteItem,
@@ -76,6 +76,9 @@ import {
   openRestoreLocalModal,
   openRestoreUploadModal,
   confirmRestore,
+  loadDigestRecipients,
+  submitDigestRecipientAddForm,
+  removeDigestRecipient,
 } from './components/backups.js';
 import { openExtensionRequestModal, submitExtensionRequestForm, decideExtensionRequest, openDirectExtendModal, submitDirectExtendForm, dismissMyExtensionDecisionsAlert, submitDenyReasonForm } from './components/extensions.js';
 
@@ -195,6 +198,8 @@ const CLICK_ACTIONS = {
   // checkout -- see components/quotation.js.
   'approve-quote': (el) => approveQuote(parseInt(el.dataset.quoteId, 10)),
   'approve-quote-detail': () => approveQuote(getCurrentQuoteId()),
+  'delete-quote-detail': () => deleteQuoteDetail(),
+  'delete-quote-row': (el) => deleteQuoteRow(parseInt(el.dataset.quoteId, 10), el.dataset.quoteRef),
   'open-fulfillment-drawer': () => openFulfillmentDrawer(),
   'process-fulfillment-selected': (el) => processFulfillmentSelected(el),
   'add-shortfall-row': (el) => addShortfallAllocationRow(el),
@@ -222,6 +227,9 @@ const CLICK_ACTIONS = {
   'restore-local-backup': (el) => openRestoreLocalModal(el),
   'restore-upload-backup': () => openRestoreUploadModal(),
   'confirm-restore-backup': () => confirmRestore(),
+
+  // Daily Digest Recipients panel -- see components/backups.js.
+  'remove-digest-recipient': (el) => removeDigestRecipient(el.dataset.email),
 };
 
 // -----------------------------------------------------------------------------
@@ -523,6 +531,12 @@ document.addEventListener('DOMContentLoaded', () => {
     loadVatSetting();
   }
 
+  const digestRecipientAddForm = document.getElementById('digestRecipientAddForm');
+  if (digestRecipientAddForm) {
+    digestRecipientAddForm.addEventListener('submit', submitDigestRecipientAddForm);
+    loadDigestRecipients();
+  }
+
   const exportBtn = document.getElementById('exportAuditBtn');
   if (exportBtn) exportBtn.addEventListener('click', () => exportAuditLogs('csv'));
 
@@ -531,6 +545,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // --- Search boxes / rows-per-page selects on whichever tables exist ---
   wireTableControls();
+
+  // --- "x" clear button on every search box (see ui.js's
+  // initSearchClearButtons() docstring) ---
+  initSearchClearButtons();
 
   // --- Notification Center bell (every dashboard page) ---
   initNotificationBell();

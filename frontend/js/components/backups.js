@@ -19,7 +19,7 @@
 
 import { apiRequest, API_URL } from '../api.js';
 import { getSession } from '../auth.js';
-import { escapeHtml, openModal, closeModal, showToast } from '../ui.js';
+import { escapeHtml, openModal, closeModal, showToast, showFieldError, clearFieldError } from '../ui.js';
 
 let pendingRestore = null; // { mode: 'local' | 'upload', filename?: string, file?: File }
 
@@ -276,4 +276,99 @@ export async function confirmRestore() {
       confirmBtn.textContent = originalText;
     }
   }
+}
+
+// =============================================================================
+// ADMIN: DAILY DIGEST RECIPIENTS (admin.html's "Daily Digest Recipients" card,
+// Audit & Backups tab)
+// -----------------------------------------------------------------------------
+// GET/PUT /settings/digest-recipients (backend/api/notifications.py,
+// Super Admin/Admin only). This is the SOLE audience for the once-a-day
+// overdue/due-soon summary email (see backend/tasks/notification_tasks.py) --
+// being an Admin/Manager account no longer implies receiving it. Addresses
+// here don't need to correspond to an app user at all.
+//
+// Edited as a full list, not one-at-a-time on the server: each Remove click
+// re-PUTs the whole array with that address dropped, and Add re-PUTs it with
+// the new one appended (after a client-side de-dupe check) -- mirrors how
+// DigestRecipientsUpdateRequest on the backend is documented as a full
+// replace rather than an add/remove-one endpoint.
+// =============================================================================
+let digestRecipientsCache = [];
+
+export async function loadDigestRecipients() {
+  const list = document.getElementById('digestRecipientsList');
+  if (!list) return;
+  try {
+    const data = await apiRequest('/settings/digest-recipients');
+    digestRecipientsCache = data.emails || [];
+    renderDigestRecipients();
+  } catch (err) {
+    list.innerHTML = `<span class="text-[12px] text-rose-400">${escapeHtml(err.message)}</span>`;
+  }
+}
+
+function renderDigestRecipients() {
+  const list = document.getElementById('digestRecipientsList');
+  if (!list) return;
+  if (digestRecipientsCache.length === 0) {
+    list.innerHTML = '<span class="text-[12px] text-slate-500">No recipients configured -- the daily digest currently has nowhere to send. Add an address below.</span>';
+    return;
+  }
+  list.innerHTML = digestRecipientsCache.map((email) => `
+    <span class="flex items-center gap-2 rounded-full border border-border bg-card2 py-1 pl-3 pr-1.5 text-[12px] text-slate-300">
+      ${escapeHtml(email)}
+      <button type="button" data-action="remove-digest-recipient" data-email="${escapeHtml(email)}"
+        title="Remove" class="rounded-full p-0.5 text-slate-500 transition hover:bg-rose-500/10 hover:text-rose-400">
+        <svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6L6 18"/><path d="M6 6l12 12"/></svg>
+      </button>
+    </span>
+  `).join('');
+}
+
+async function saveDigestRecipients(nextEmails, successMessage) {
+  const messageEl = document.getElementById('digestRecipientsMessage');
+  try {
+    const data = await apiRequest('/settings/digest-recipients', { method: 'PUT', body: JSON.stringify({ emails: nextEmails }) });
+    digestRecipientsCache = data.emails || [];
+    renderDigestRecipients();
+    if (messageEl) {
+      messageEl.textContent = successMessage;
+      messageEl.className = 'text-[12px] font-medium text-emerald-400';
+      messageEl.classList.remove('hidden');
+    }
+    showToast(successMessage);
+  } catch (err) {
+    if (messageEl) {
+      messageEl.textContent = err.message;
+      messageEl.className = 'text-[12px] font-medium text-rose-400';
+      messageEl.classList.remove('hidden');
+    }
+  }
+}
+
+export async function submitDigestRecipientAddForm(event) {
+  event.preventDefault();
+  const input = document.getElementById('digestRecipientInput');
+  if (!input) return;
+  const email = input.value.trim().toLowerCase();
+  const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+  if (!EMAIL_RE.test(email)) {
+    showFieldError('digestRecipientInput', 'Enter a valid email address.');
+    return;
+  }
+  clearFieldError('digestRecipientInput');
+  if (digestRecipientsCache.includes(email)) {
+    showFieldError('digestRecipientInput', 'That address is already on the list.');
+    return;
+  }
+  await saveDigestRecipients([...digestRecipientsCache, email], `${email} will now receive the daily digest.`);
+  input.value = '';
+}
+
+export async function removeDigestRecipient(email) {
+  await saveDigestRecipients(
+    digestRecipientsCache.filter((existing) => existing !== email),
+    `${email} removed from the daily digest.`,
+  );
 }
