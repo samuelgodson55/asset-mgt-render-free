@@ -342,17 +342,32 @@ class Settings(BaseSettings):
     # connection (only ever appropriate for a mail relay on localhost/the
     # same private network -- never over the public internet).
     SMTP_USE_TLS: bool = True
+    # Implicit SSL (the standard for port 465) -- the connection is
+    # encrypted from the first byte, instead of starting plain and
+    # upgrading via STARTTLS. Useful as a fallback when an ISP/network
+    # blocks outbound 587 but allows 465 (common on residential/some
+    # corporate networks). Takes priority over SMTP_USE_TLS when both are
+    # set -- see send_email() in services/notification_service.py.
+    SMTP_USE_SSL: bool = False
     # What shows up in the "From:" header. Many providers (SendGrid,
     # Mailgun, SES) reject sends where this doesn't match a verified
     # domain/sender, so this intentionally has no made-up default.
     SMTP_FROM_EMAIL: str = ""
 
-    # Extra recipients who should get EVERY overdue-checkout digest and
-    # EVERY new-extension-request alert, regardless of role/department --
+    # Extra recipients who should get EVERY new-extension-request alert
+    # (see services/extension_service.py) regardless of role/department --
     # e.g. an IT-operations distribution list that isn't itself a `users`
     # row. Comma-separated, same pattern as CORS_ORIGINS above. Optional --
-    # Admins/Managers/the Super Admin are already covered automatically
-    # (see tasks/notification_tasks.py and services/extension_service.py).
+    # Admins/Managers/the Super Admin are already covered automatically for
+    # THAT alert. This is env-level/restart-required config, distinct from
+    # the DAILY DIGEST'S recipient list, which is its own runtime-editable
+    # setting (PUT /settings/digest-recipients, Admin/Super Admin only --
+    # see services/notification_service.py's get_digest_recipient_emails())
+    # that is the digest's SOLE audience; being an Admin/Manager no longer
+    # implies receiving the daily digest. Addresses here are still also
+    # added on top of that list for the digest specifically (see
+    # tasks/notification_tasks.py), for anyone who wants one ops address
+    # wired into both without duplicating it in two places.
     ADMIN_NOTIFICATION_EMAILS: str = ""
 
     # How often the background worker checks for overdue checkouts and
@@ -360,7 +375,7 @@ class Settings(BaseSettings):
     # `beat_schedule` for where this is wired up. 24 hours is a sane
     # default for a "your item is overdue" reminder -- lower it for
     # testing (e.g. to a few minutes) if you want to see it fire sooner.
-    OVERDUE_NOTIFICATION_INTERVAL_HOURS: int = 24
+    OVERDUE_NOTIFICATION_INTERVAL_HOURS: float = 24
 
     # --- "Due Soon" reminder (a nudge BEFORE something goes overdue) ------
     # DUE_SOON_REMINDER_DAYS is the single source of truth for what counts
@@ -378,7 +393,16 @@ class Settings(BaseSettings):
     # overdue and sends the reminder email described above. Same
     # timedelta-since-boot reasoning as OVERDUE_NOTIFICATION_INTERVAL_HOURS
     # just above -- see celery_app.py's `beat_schedule` comment.
-    DUE_SOON_NOTIFICATION_INTERVAL_HOURS: int = 24
+    DUE_SOON_NOTIFICATION_INTERVAL_HOURS: float = 24
+
+    # Whether the individual "your item is overdue/due soon" reminder is
+    # sent to the checkout's own holder (a logged-in User with an email
+    # address), IN ADDITION TO the admin/manager digest above. Default
+    # true (original behavior). Set to false to send ONLY the digest --
+    # e.g. while still testing SMTP delivery/content and not ready for
+    # end users to receive anything yet. Flip back to true any time with
+    # no code changes -- see tasks/notification_tasks.py.
+    SEND_INDIVIDUAL_HOLDER_REMINDERS: bool = True
 
     # --- Equipment Quotation self-service (staff/customer asset catalog) --
     # ISO 4217 currency code applied to every price shown/exported anywhere

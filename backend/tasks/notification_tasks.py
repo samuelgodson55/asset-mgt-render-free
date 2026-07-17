@@ -20,10 +20,16 @@ Both send the same two kinds of email each run:
      this app knows how to reach -- their `contact_details` field isn't
      necessarily an email at all, so this deliberately does not try to
      guess-parse it).
-  2. One combined system-wide summary digest to every Manager AND every
-     Admin/Super Admin + any extra addresses in ADMIN_NOTIFICATION_EMAILS
-     (Managers no longer have department-scoping anywhere in this app, so
-     they see the exact same full list Admins do).
+  2. One combined system-wide summary digest to the admin-configured
+     "Digest Recipients" list (see services/notification_service.py's
+     get_digest_recipient_emails(), editable at runtime via PUT
+     /settings/digest-recipients -- Admin/Super Admin only) PLUS any extra
+     addresses in the env-configured ADMIN_NOTIFICATION_EMAILS. This is
+     DELIBERATELY NOT "every Manager/Admin account" any more -- being a
+     Manager/Admin no longer implies receiving the daily digest; being on
+     the configured list does. If that list (and
+     ADMIN_NOTIFICATION_EMAILS) is empty, no digest is sent at all, same
+     as if there were nothing overdue/due-soon to report.
 
 Runs in the `worker` container/process (see celery_app.py's module
 docstring for the split between the API's producer role and this
@@ -40,6 +46,7 @@ from celery_app import celery_app
 from database import SessionLocal
 from models import utc_now
 import services.notification_service as notification_service
+from services.notification_service import get_digest_recipient_emails
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -120,31 +127,31 @@ def send_overdue_notifications(self) -> dict:
             return {"overdue_count": 0, "individual_emails_sent": 0, "digest_emails_sent": 0}
 
         # --- 1. Individual reminders to each overdue item's own holder ---
-        for c in overdue:
-            if c.user and c.user.email and c.user.is_active and not c.user.is_deleted:
-                asset_name = c.asset.name if c.asset else "Unknown Asset"
-                days_overdue = (utc_now() - c.due_date).days
-                ok = notification_service.send_email(
-                    to=c.user.email,
-                    subject=f"[Snipe-IT Lite] Overdue: {asset_name}",
-                    body=(
-                        f"'{asset_name}' was due back on {c.due_date.strftime('%Y-%m-%d')} "
-                        f"({days_overdue} day{'s' if days_overdue != 1 else ''} overdue).\n\n"
-                        "Please return it, or request an extension from your dashboard if you need more time."
-                    ),
-                )
-                if ok:
-                    sent_individual += 1
+        #        Gated by SEND_INDIVIDUAL_HOLDER_REMINDERS -- see that
+        #        setting's docstring in config.py.
+        if settings.SEND_INDIVIDUAL_HOLDER_REMINDERS:
+            for c in overdue:
+                if c.user and c.user.email and c.user.is_active and not c.user.is_deleted:
+                    asset_name = c.asset.name if c.asset else "Unknown Asset"
+                    days_overdue = (utc_now() - c.due_date).days
+                    ok = notification_service.send_email(
+                        to=c.user.email,
+                        subject=f"[Snipe-IT Lite] Overdue: {asset_name}",
+                        body=(
+                            f"'{asset_name}' was due back on {c.due_date.strftime('%Y-%m-%d')} "
+                            f"({days_overdue} day{'s' if days_overdue != 1 else ''} overdue).\n\n"
+                            "Please return it, or request an extension from your dashboard if you need more time."
+                        ),
+                    )
+                    if ok:
+                        sent_individual += 1
 
-        # --- 2. Manager + Admin system-wide digest (Managers no longer have
-        #        department-scoping, so they get the exact same full list as
-        #        Admins) + any extra configured addresses ---
-        digest_emails = [
-            u.email for u in db.query(models.User).filter(
-                models.User.role.in_(("admin", "manager")),
-                models.User.is_active.is_(True), models.User.is_deleted.is_(False),
-            ).all()
-        ]
+        # --- 2. System-wide digest -- ONLY the admin-configured "Digest
+        #        Recipients" list (PUT /settings/digest-recipients) + any
+        #        extra env-configured ADMIN_NOTIFICATION_EMAILS. No longer
+        #        auto-includes every Manager/Admin account -- see this
+        #        module's docstring. ---
+        digest_emails = get_digest_recipient_emails(db)
         digest_emails.extend(settings.admin_notification_email_list)
         digest_emails = list(dict.fromkeys(digest_emails))
         if digest_emails:
@@ -189,30 +196,30 @@ def send_due_soon_reminders(self) -> dict:
             return {"due_soon_count": 0, "individual_emails_sent": 0, "digest_emails_sent": 0}
 
         # --- 1. Individual reminders to each due-soon item's own holder ---
-        for c in due_soon:
-            if c.user and c.user.email and c.user.is_active and not c.user.is_deleted:
-                asset_name = c.asset.name if c.asset else "Unknown Asset"
-                days_until_due = max(1, math.ceil((c.due_date - utc_now()).total_seconds() / 86400))
-                ok = notification_service.send_email(
-                    to=c.user.email,
-                    subject=f"[Snipe-IT Lite] Due soon: {asset_name}",
-                    body=(
-                        f"'{asset_name}' is due back on {c.due_date.strftime('%Y-%m-%d')} "
-                        f"(in {days_until_due} day{'s' if days_until_due != 1 else ''}).\n\n"
-                        "Please return it on time, or request an extension from your dashboard if you need more time."
-                    ),
-                )
-                if ok:
-                    sent_individual += 1
+        #        Gated by SEND_INDIVIDUAL_HOLDER_REMINDERS -- see that
+        #        setting's docstring in config.py.
+        if settings.SEND_INDIVIDUAL_HOLDER_REMINDERS:
+            for c in due_soon:
+                if c.user and c.user.email and c.user.is_active and not c.user.is_deleted:
+                    asset_name = c.asset.name if c.asset else "Unknown Asset"
+                    days_until_due = max(1, math.ceil((c.due_date - utc_now()).total_seconds() / 86400))
+                    ok = notification_service.send_email(
+                        to=c.user.email,
+                        subject=f"[Snipe-IT Lite] Due soon: {asset_name}",
+                        body=(
+                            f"'{asset_name}' is due back on {c.due_date.strftime('%Y-%m-%d')} "
+                            f"(in {days_until_due} day{'s' if days_until_due != 1 else ''}).\n\n"
+                            "Please return it on time, or request an extension from your dashboard if you need more time."
+                        ),
+                    )
+                    if ok:
+                        sent_individual += 1
 
-        # --- 2. Manager + Admin system-wide digest -- identical audience
-        #        rule as send_overdue_notifications() above ---
-        digest_emails = [
-            u.email for u in db.query(models.User).filter(
-                models.User.role.in_(("admin", "manager")),
-                models.User.is_active.is_(True), models.User.is_deleted.is_(False),
-            ).all()
-        ]
+        # --- 2. System-wide digest -- identical audience rule as
+        #        send_overdue_notifications() above: ONLY the admin-
+        #        configured "Digest Recipients" list + any extra env-
+        #        configured ADMIN_NOTIFICATION_EMAILS. ---
+        digest_emails = get_digest_recipient_emails(db)
         digest_emails.extend(settings.admin_notification_email_list)
         digest_emails = list(dict.fromkeys(digest_emails))
         if digest_emails:

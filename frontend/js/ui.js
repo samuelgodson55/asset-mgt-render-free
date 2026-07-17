@@ -950,3 +950,52 @@ export function statusBadge(available) {
   }
   return `<span class="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-400 ring-1 ring-emerald-500/30"><span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span> In Stock</span>`;
 }
+
+// -----------------------------------------------------------------------------
+// Search box clear ("x") buttons -- every search input across all four
+// dashboards (Asset Inventory, User Directory, Deleted Users, Outsiders,
+// Quotes tab, Quote Detail's "Add item"/"Assign to user" boxes, My Items,
+// Quotation Catalog) shares the exact same markup shape: a text <input>
+// carrying the `search-clearable` marker class, sitting as the sole/first
+// child of a `position: relative` wrapper `<div>` (already required for
+// each one's search icon, positioned via `absolute left-3`). That
+// consistent shape means one generic pass at startup can inject a
+// matching `absolute right-*` clear button for every one of them, rather
+// than hand-duplicating a button element in 19 places across admin.html/
+// manager.html/staff.html/customer.html. Called once from main.js's
+// DOMContentLoaded handler, same as wireTableControls() -- every one of
+// these inputs already exists in the static HTML at that point (some
+// just sit inside an initially-hidden modal), so no re-init is needed
+// later when a modal opens or a table re-renders.
+export function initSearchClearButtons() {
+  document.querySelectorAll('input.search-clearable').forEach((input) => {
+    const wrapper = input.parentElement;
+    // Guard against double-injection (e.g. if this were ever called
+    // twice) -- look for a button this function already added.
+    if (!wrapper || wrapper.querySelector('.search-clear-btn')) return;
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'search-clear-btn hidden absolute right-2.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-slate-500 transition hover:text-slate-200';
+    btn.setAttribute('aria-label', 'Clear search');
+    btn.innerHTML = '<svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" d="M18 6L6 18M6 6l12 12"/></svg>';
+    wrapper.appendChild(btn);
+
+    const toggle = () => btn.classList.toggle('hidden', input.value.length === 0);
+    toggle();
+    input.addEventListener('input', toggle);
+
+    btn.addEventListener('click', () => {
+      input.value = '';
+      // Fire a real 'input' event rather than calling each page's own
+      // setSearch()/search function directly -- every search box here is
+      // already wired to one via addEventListener('input', ...) in
+      // main.js's wireTableControls(), so dispatching this re-uses that
+      // exact same listener (debounced server search, client-side
+      // filterAndPaginate, or a typeahead) with zero extra wiring here.
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.focus();
+      toggle();
+    });
+  });
+}

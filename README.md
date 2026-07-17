@@ -206,24 +206,41 @@ Everyone gets a piece of this, scoped by role. Four related pieces:
 default (`NOTIFICATIONS_ENABLED=false` — see [Environment Variables
 Reference](#environment-variables-reference)). Three kinds go out once
 enabled and configured:
-1. **Extension-request lifecycle** — every Manager/Admin (system-wide) is
-   emailed the moment a new request comes in; the checkout's holder is
-   emailed back once their request is approved or denied, or once a
-   Manager/Admin/Super Admin grants an extension directly (no request
-   needed for that email to go out).
+1. **Extension-request lifecycle** — the **Digest Recipients** list (the
+   same admin-configured list described in #2 below, plus anything in
+   `ADMIN_NOTIFICATION_EMAILS`) is emailed the moment a new request comes
+   in; the checkout's holder is emailed back once their request is
+   approved or denied, or once a Manager/Admin/Super Admin grants an
+   extension directly (no request needed for that email to go out). Being
+   a Manager/Admin account does not by itself get you this notification —
+   only addresses on the configured list do, same rule as the digests. If
+   the list is empty, no new-request notification is sent (the holder's
+   approved/denied email still goes out either way, since that's addressed
+   to them directly, not to the general list).
 2. **Daily overdue digest** — a scheduled Celery Beat job
    (`send_overdue_notifications`, every `OVERDUE_NOTIFICATION_INTERVAL_HOURS`
    — 24 by default) emails each overdue checkout's own holder a reminder,
-   plus one combined system-wide summary digest to every Manager and
-   Admin/Super Admin (Managers have no department-scoping, so they get
-   the exact same full list Admins do).
+   plus one combined system-wide summary digest to the **Digest
+   Recipients** list — a runtime-editable list of email addresses
+   configured by a Super Admin/Admin (see the "Daily Digest Recipients"
+   panel on `admin.html`'s Audit & Backups tab, backed by
+   `GET`/`PUT /settings/digest-recipients`,
+   `backend/services/notification_service.py`'s
+   `get_digest_recipient_emails()`/`set_digest_recipient_emails()`).
+   **Being a Manager/Admin account does not by itself get you this
+   digest** — only addresses on this list (plus anything in the
+   env-configured `ADMIN_NOTIFICATION_EMAILS`) receive it, and an address
+   here doesn't need to correspond to a `users` row at all (an ops
+   distribution list works fine). If the list is empty, no digest is sent.
+   The extension-request alert in #1 above draws on this exact same list.
 3. **Daily due-soon reminder digest** — the proactive counterpart to #2:
    a second scheduled Celery Beat job (`send_due_soon_reminders`, every
    `DUE_SOON_NOTIFICATION_INTERVAL_HOURS` — 24 by default) sends the
-   *same shape* of individual-holder-reminder + Manager/Admin-digest
-   email, just for checkouts due within `DUE_SOON_REMINDER_DAYS` instead
-   of ones that have already passed their due date — "a reminder before
-   something goes overdue," by email as well as on the dashboard.
+   *same shape* of individual-holder-reminder + Digest-Recipients-audience
+   summary email described in #2, just for checkouts due within
+   `DUE_SOON_REMINDER_DAYS` instead of ones that have already passed their
+   due date — "a reminder before something goes overdue," by email as
+   well as on the dashboard.
 
 Every one of these emails is **enqueued on the background `worker`
 container** (`tasks.send_email_task`, `backend/celery_app.py`) rather than
@@ -327,6 +344,15 @@ workflow behind it. See `backend/services/quotation_service.py` and
   fulfilled.
 - **Export as PDF** — the same branded PDF export, available for any
   Quotation by ID.
+- **Delete (Admin/Super Admin only)** — permanently deletes a submitted
+  or approved Quotation, from either the Quotes table row or the Quote
+  Detail modal. A Manager can do everything else above but cannot delete
+  (`DELETE /quotations/{id}` is gated by `deps.require_super_admin`, a
+  strictly stronger check than every other Quotes-tab action, which only
+  needs `deps.require_privileged_role`). Refused once a Quotation is
+  **fulfilled** — by that point it has real `AssetCheckout` history
+  pointing back at it, so it's locked against deletion the same way it's
+  already locked against every other edit.
 
 **Global settings (Admin/Super Admin only):**
 - **VAT percentage** — one editable value applied to every Quotation's
@@ -1103,7 +1129,7 @@ see `.gitignore`) and are read by `backend/config.py` into a single typed
 | `SMTP_USERNAME` / `SMTP_PASSWORD` | *(empty)* | SMTP auth credentials, if your provider requires them. |
 | `SMTP_USE_TLS` | `true` | STARTTLS vs. a plain/unencrypted connection (only appropriate for a local/private relay). |
 | `SMTP_FROM_EMAIL` | *(empty)* | The `From:` address. Required if `NOTIFICATIONS_ENABLED=true` — most providers reject sends where this doesn't match a verified domain/sender. |
-| `ADMIN_NOTIFICATION_EMAILS` | *(empty)* | Comma-separated extra recipients who get every overdue digest, every due-soon reminder digest, and every new-extension-request alert, in addition to Admins/Managers/the Super Admin. |
+| `ADMIN_NOTIFICATION_EMAILS` | *(empty)* | Comma-separated extra recipients who get every new-extension-request alert, plus every daily digest (overdue + due-soon) on top of the runtime-editable **Digest Recipients** list (`GET`/`PUT /settings/digest-recipients`, Super Admin/Admin only). Being an Admin/Manager account no longer implies receiving the daily digests by itself — see [Due-Date Extensions & Notifications](#due-date-extensions--notifications). |
 | `OVERDUE_NOTIFICATION_INTERVAL_HOURS` | `24` | How often the Celery Beat job checks for overdue checkouts and sends the digest. Lower it (e.g. to a few minutes) while testing locally if you want to see it fire sooner. |
 | `DUE_SOON_REMINDER_DAYS` | `2` | "A reminder before something goes overdue" — how many days ahead of its `due_date` an active checkout counts as "due soon". Drives the "Due Soon" dashboard banner, the "Due Soon" badge on My Items, AND the due-soon reminder email below, all from this one setting. |
 | `DUE_SOON_NOTIFICATION_INTERVAL_HOURS` | `24` | How often the Celery Beat job checks for checkouts about to go overdue and sends the due-soon reminder digest. Same "lower it for local testing" idea as `OVERDUE_NOTIFICATION_INTERVAL_HOURS` above. |
@@ -1457,7 +1483,7 @@ once the backend is running. This table is the high-level map:
 
 | Method & Path | Who | Purpose |
 |---|---|---|
-| `POST /auth/login` | anyone | Exchange email/username + password for a JWT. Rate-limited by IP; also enforces per-account lockout after repeated failures. |
+| `POST /auth/login` | anyone | Exchange email/username + password for a JWT. Matches the submitted identifier against EITHER field, case-insensitively (`"T.Okafor@corp.io"` and `"t.okafor@corp.io"` both work — see `services/auth_service.py`'s `login()`). Rate-limited by IP; also enforces per-account lockout after repeated failures. |
 | `POST /auth/logout` | logged in | Clears the `HttpOnly` session cookie set at login (see [Security Model](#security-model)). |
 | `GET /auth/me` | logged in | "Who am I?" — fresh profile data for the "My Profile" window. |
 | `POST /auth/update-password` | self or Super Admin/Admin | Change a password (self-service requires the current password; a Super Admin resetting someone else's does not). |
@@ -1531,6 +1557,7 @@ once the backend is running. This table is the high-level map:
 | `POST /quotations` | Super Admin / Admin / Manager | Start a brand-new Quotation on someone's behalf (starts empty). |
 | `GET /quotations/fulfillment-queue` | Super Admin / Admin / Manager | Every Approved / Ready for Pickup Quotation, oldest first — the Fulfillment Drawer's data. |
 | `GET /quotations/{id}` | Super Admin / Admin / Manager | Full detail for one Quotation by numeric ID. |
+| `DELETE /quotations/{id}` | Super Admin / Admin only | Permanently delete a submitted or approved Quotation (and its lines). Refused once fulfilled — stricter gate than every other row on this table, which a Manager can also perform. |
 | `PUT /quotations/{id}` | Super Admin / Admin / Manager | Update a Quotation's internal notes. |
 | `PUT /quotations/{id}/discount` | Super Admin / Admin / Manager | Set the discount percentage (0-100) applied to this Quotation's subtotal, before VAT. Editable right up until the quote is fulfilled, same as its line items. |
 | `POST /quotations/{id}/items` | Super Admin / Admin / Manager | Add/update a line on someone else's submitted Quotation. |
@@ -1544,6 +1571,8 @@ once the backend is running. This table is the high-level map:
 | `GET /quotations/{id}/export` | Super Admin / Admin / Manager | PDF export of any Quotation by ID. |
 | `GET /settings/vat` | logged in | The current global VAT percentage. |
 | `PUT /settings/vat` | Super Admin / Admin | Change the global VAT percentage applied to every Quotation immediately. |
+| `GET /settings/digest-recipients` | Super Admin / Admin | The current list of email addresses that receive the daily overdue/due-soon digest (see [Due-Date Extensions & Notifications](#due-date-extensions--notifications)). |
+| `PUT /settings/digest-recipients` | Super Admin / Admin | Replace the entire digest recipients list. Takes effect on the next scheduled digest run — no restart needed. |
 | `GET /healthz` | anyone | Trivial liveness check for Docker/orchestrators. |
 
 **Every export endpoint** accepts `?format=csv` or `?format=pdf` and
@@ -1730,6 +1759,9 @@ the actual logic lives. Use this section as a map when you need to find
   `export_quotation_admin`); and the global `get_vat_setting`/
   `update_vat_setting`. See [Equipment
   Quotations](#equipment-quotations-quote-to-checkout).
+- **`api/notifications.py`** — `get_digest_recipients`/
+  `update_digest_recipients` (the daily digest's admin-editable recipient
+  list, Super Admin/Admin only).
 
 ### Backend — Services (`backend/services/`) — the business logic layer
 
@@ -1867,15 +1899,16 @@ them, completely out-of-band from any HTTP request.
   Notifications](#due-date-extensions--notifications)).
   `send_overdue_notifications()` is the scheduled Celery Beat job:
   reminds each overdue checkout's own holder, plus one combined
-  system-wide digest for every Manager and Admin/Super Admin +
-  `ADMIN_NOTIFICATION_EMAILS` (Managers have no department-scoping, so
-  they get the exact same full list Admins do).
+  system-wide digest for the admin-configured **Digest Recipients** list
+  (`GET`/`PUT /settings/digest-recipients`) + `ADMIN_NOTIFICATION_EMAILS`
+  — no longer every Manager/Admin account automatically (see [Due-Date
+  Extensions & Notifications](#due-date-extensions--notifications)).
   `send_due_soon_reminders()` — "a reminder before something goes
   overdue" — is its proactive counterpart: the identical shape of
-  individual-holder-reminder + Manager/Admin digest, just for checkouts
-  due within `DUE_SOON_REMINDER_DAYS` instead of ones already overdue
-  (`_due_soon_query()`/`_format_line()` are shared helpers used by both
-  jobs).
+  individual-holder-reminder + Digest Recipients-audience digest, just
+  for checkouts due within `DUE_SOON_REMINDER_DAYS` instead of ones
+  already overdue (`_due_soon_query()`/`_format_line()` are shared
+  helpers used by both jobs).
 
 ### Backend — Schemas (`backend/schemas/`)
 
@@ -1899,6 +1932,10 @@ Pure Pydantic request/response models, no logic:
   `QuotationOutsourcedItemCreate` (Admin/Manager not-in-inventory line);
   `QuotationCreateRequest`/`QuotationMetaUpdate`/`QuotationAssignRequest`
   (the "Quotes" tab); `VatUpdateRequest` (the global VAT setting).
+- **`schemas/notifications.py`** — `DigestRecipientsUpdateRequest` (the
+  daily digest's admin-editable recipient list; validates/normalizes each
+  address without an `email-validator` dependency — see the file's own
+  comments).
 
 ### Backend — Scripts (`backend/scripts/`)
 
@@ -2154,11 +2191,51 @@ navbar/modal/tab structure. To add a new tab:
 
 ## Testing Your Changes
 
-There's no bundled automated test suite in this project yet (see
-[Suggested Future Features](#suggested-future-features) for adding one) —
-here's how to verify a change works in the meantime.
+### Automated test suite (`backend/tests/`)
 
-### Fastest option: Swagger UI (`/docs`)
+The primary way to verify a backend change: `pytest`, `TestClient`, and a
+fresh throwaway SQLite database created and torn down automatically for
+every single test function (see `backend/tests/conftest.py`'s module
+docstring for exactly how — same idea as the manual pattern further down,
+minus the manual bookkeeping and safe against the SQLite/Postgres
+`connect_args` mismatch that pattern has to work around by hand).
+
+```bash
+cd backend
+pip install -r requirements.txt --break-system-packages
+pip install pytest httpx --break-system-packages   # only needed to run tests
+
+pytest tests -v
+```
+
+Runs in CI on every push/PR too (`.github/workflows/ci.yml`'s `Pytest`
+step) — a failing test now fails the build, not just gets logged.
+
+What's covered today:
+- `test_auth.py` — login for every seeded role (including the hardcoded
+  Super Admin) plus username-vs-email login, bad credentials, and
+  self-service password changes.
+- `test_asset_pools.py` — pool CRUD permission gating, capacity updates,
+  and the "can't delete a pool with outstanding checkouts" guard.
+- `test_checkouts_and_extensions.py` — dispatch → partial/full return and
+  the Available/Outbound recalculation, plus the full extension-request
+  lifecycle (self-service request → Manager approve/deny, and the direct
+  "extend" shortcut).
+- `test_notification_recipients.py` — regression coverage confirming
+  extension-request email notifications go to the admin-configured
+  **Digest Recipients** list, never a raw "every Admin/Manager" role query
+  (see [Due-Date Extensions & Notifications](#due-date-extensions--notifications)).
+- `test_permissions.py` — spot-checks of `deps.py`'s role gates across
+  several routers.
+
+This is intentionally not exhaustive (no coverage yet of CSV import,
+exports, backups, quotations, or Outsiders, for instance) — extend it the
+same way: add a new `test_*.py` file under `backend/tests/`, reuse the
+`client`/`db_session`/`as_admin`/`as_manager`/`as_staff`/`as_customer`/
+`as_super_admin` fixtures from `conftest.py` rather than hand-rolling a
+new database/login setup per file.
+
+### Fastest option for one-off manual checks: Swagger UI (`/docs`)
 
 With the full stack running via `docker compose up`, open
 `http://localhost:8080/docs` (proxied through nginx — see
@@ -2172,41 +2249,50 @@ works without touching the frontend at all.
 
 ### Manual functional testing with a throwaway SQLite database
 
-If you want to test a chain of API calls end-to-end without touching your
-real Postgres data, you can point the app at a temporary SQLite file
-instead — no Docker, no Postgres needed:
+For a quick one-off script instead of a real test (the automated suite
+above is almost always the better choice for anything you intend to keep):
 
 ```bash
 cd backend
 pip install httpx --break-system-packages   # only needed for this test client
 
-DATABASE_URL="sqlite:////tmp/test.db" python3 << 'EOF'
+python3 << 'EOF'
 import os
-os.environ["DATABASE_URL"] = "sqlite:////tmp/test.db"
+os.environ["JWT_SECRET_KEY"] = "local-manual-test-secret"
+
+# NOTE: database.py's real `engine` is built with a `connect_args={"connect_timeout": 10}`
+# that's psycopg2/Postgres-only -- sqlite3.connect() doesn't accept that
+# keyword, so just pointing DATABASE_URL at a sqlite file isn't enough.
+# Swap the engine/SessionLocal directly instead, exactly like
+# backend/tests/conftest.py's `db_engine` fixture does.
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 import database
+test_engine = create_engine("sqlite:////tmp/test.db", connect_args={"check_same_thread": False})
+database.engine = test_engine
+database.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
 database.init_db()
 database.seed_db()
 
 from fastapi.testclient import TestClient
-from main import app
-client = TestClient(app)
+import main
+main.app.dependency_overrides[database.get_db] = lambda: database.SessionLocal()
+client = TestClient(main.app)
 
-# Log in as the demo Super Admin
+# Log in as the demo Super Admin -- POST /auth/login sets the JWT as an
+# HttpOnly cookie (see api/auth.py), not a "token" field in the response
+# body, so `client` (which keeps its own cookie jar) is already
+# authenticated for every request after this one; no headers= needed.
 r = client.post("/api/auth/login", json={"identifier": "r.adeyemi@corp.io", "password": "Admin123!"})
-token = r.json()["token"]
-headers = {"Authorization": f"Bearer {token}"}
+print(r.status_code, r.json())
 
 # Try whatever you just built, e.g.:
-r = client.get("/api/assets", headers=headers)
+r = client.get("/api/assets")
 print(r.status_code, r.json())
 EOF
 
 rm -f /tmp/test.db   # clean up when you're done
 ```
-
-This is exactly the pattern used to verify the exports, audit trail, and
-account-lockout features described in this README while they were built —
-copy/adapt the snippet above for whatever endpoint you're changing.
 
 **Why this is safe against any endpoint:** SQLite has no native
 timezone-aware datetime type, so a `DateTime(timezone=True)` column (e.g.
@@ -2441,12 +2527,13 @@ your platform doesn't have a closer native equivalent.
 
 Small, well-scoped follow-ups if you want to keep extending this project:
 
-- **An automated test suite** (`pytest` + `TestClient` + a throwaway
-  SQLite or test-Postgres database) — see
-  [Testing Your Changes](#testing-your-changes) for the manual pattern
-  this would formalize. `ci.yml` already has a `pytest backend/tests` step
-  wired up (non-fatal via `|| true` until `backend/tests/` actually
-  exists) so this starts reporting the moment tests land.
+- **Broader automated test coverage** — `backend/tests/` now covers auth,
+  asset pools, checkouts/extensions, notification-recipient audience, and
+  role permission gates (see [Testing Your
+  Changes](#testing-your-changes)), but CSV import, exports, backups,
+  quotations, and Outsiders don't have test files yet — a good first PR
+  for getting familiar with the `client`/`db_session`/`as_*` fixtures in
+  `backend/tests/conftest.py`.
 - **A `deleted_by` column** recording which admin performed a given
   soft-delete (good first Alembic migration exercise) — `restore_user()`
   itself (undoing a soft-delete) already shipped; see [Directories](#directories-super-admin--manager).

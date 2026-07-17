@@ -230,7 +230,7 @@
                setSearch('assets', ...), which re-filters the cached asset
                list client-side and re-renders (no extra API call). -->
           <input type="text" id="assetSearchInput" placeholder="Search by asset name…"
-            class="w-full rounded-lg border border-border bg-card2 py-2 pl-9 pr-3 text-[13px] text-slate-200 placeholder-slate-500 outline-none transition focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
+            class="w-full rounded-lg border border-border bg-card2 py-2 pl-9 pr-8 text-[13px] text-slate-200 placeholder-slate-500 outline-none transition focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40 search-clearable" />
         </div>
         <div class="flex items-center gap-2 text-[13px] text-slate-400">
           <span>Rows per page</span>
@@ -373,7 +373,7 @@
         <div class="relative w-full sm:w-72">
           <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
           <input type="text" id="userSearchInput" placeholder="Search by name, email, or role…"
-            class="w-full rounded-lg border border-border bg-card2 py-2 pl-9 pr-3 text-[13px] text-slate-200 placeholder-slate-500 outline-none transition focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
+            class="w-full rounded-lg border border-border bg-card2 py-2 pl-9 pr-8 text-[13px] text-slate-200 placeholder-slate-500 outline-none transition focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40 search-clearable" />
         </div>
         <div class="flex items-center gap-2 text-[13px] text-slate-400">
           <span>Rows per page</span>
@@ -494,7 +494,7 @@
           <div class="relative w-full sm:w-64">
             <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
             <input type="text" id="deletedUserSearchInput" placeholder="Search by name, email, or role…"
-              class="w-full rounded-lg border border-border bg-card2 py-2 pl-9 pr-3 text-[13px] text-slate-200 placeholder-slate-500 outline-none transition focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
+              class="w-full rounded-lg border border-border bg-card2 py-2 pl-9 pr-8 text-[13px] text-slate-200 placeholder-slate-500 outline-none transition focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40 search-clearable" />
           </div>
           <div class="flex items-center gap-2 text-[13px] text-slate-400">
             <span>Rows per page</span>
@@ -546,7 +546,7 @@
         <div class="relative w-full sm:w-72">
           <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
           <input type="text" id="outsiderSearchInput" placeholder="Search by name, contact, or company…"
-            class="w-full rounded-lg border border-border bg-card2 py-2 pl-9 pr-3 text-[13px] text-slate-200 placeholder-slate-500 outline-none transition focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
+            class="w-full rounded-lg border border-border bg-card2 py-2 pl-9 pr-8 text-[13px] text-slate-200 placeholder-slate-500 outline-none transition focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40 search-clearable" />
         </div>
         <div class="flex items-center gap-2 text-[13px] text-slate-400">
           <span>Rows per page</span>
@@ -611,7 +611,7 @@
         <div class="relative w-full sm:w-72">
           <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
           <input type="text" id="quotesSearchInput" placeholder="Search or recall by Quotation ID, name, or email…"
-            class="w-full rounded-lg border border-border bg-card2 py-2 pl-9 pr-3 text-[13px] text-slate-200 placeholder-slate-500 outline-none transition focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
+            class="w-full rounded-lg border border-border bg-card2 py-2 pl-9 pr-8 text-[13px] text-slate-200 placeholder-slate-500 outline-none transition focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40 search-clearable" />
         </div>
         <div class="flex items-center gap-2 text-[13px] text-slate-400">
           <span>Rows per page</span>
@@ -809,6 +809,42 @@
       </tbody>
     </table>
   </section>
+
+  <!-- ================= DAILY DIGEST RECIPIENTS =================
+       Super Admin/Admin only (backend: deps.require_super_admin, see
+       backend/api/notifications.py). Controls who receives the ONE
+       daily overdue/due-soon summary email sent by the background
+       scheduler (backend/tasks/notification_tasks.py) -- being an
+       Admin/Manager account no longer means you automatically get it;
+       only the addresses listed here (and any configured via the
+       server-level ADMIN_NOTIFICATION_EMAILS env var, added on top of
+       whatever's here) do. Recipients don't need to be users of this
+       app at all -- an ops distribution list or an on-call inbox works
+       just as well as a person's own address. This does NOT affect the
+       separate, immediate "new extension request" alert emails, which
+       still go to every Admin/Manager as before. -->
+  <div class="mt-6 overflow-hidden rounded-xl border border-border bg-card">
+    <div class="border-b border-border px-5 py-4">
+      <h2 class="text-[14px] font-bold text-slate-100">Daily Digest Recipients</h2>
+      <p class="text-[12px] text-slate-500">Only these addresses receive the daily overdue / due-soon summary email. Adding or removing an address here does not affect anyone's account, role, or access.</p>
+    </div>
+    <div class="px-5 py-4">
+      <div id="digestRecipientsList" class="mb-3 flex flex-wrap gap-2">
+        <span class="text-[12px] text-slate-500">Loading…</span>
+      </div>
+      <form id="digestRecipientAddForm" class="flex flex-wrap items-end gap-3">
+        <div class="flex-1 min-w-[220px]">
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">Add email address</label>
+          <input type="email" id="digestRecipientInput" placeholder="ops@yourcompany.com"
+            class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
+        </div>
+        <button type="submit" class="rounded-lg bg-blue-600 px-4 py-2 text-[13px] font-semibold text-white transition hover:bg-blue-500 active:bg-blue-700">
+          Add
+        </button>
+        <span id="digestRecipientsMessage" class="hidden text-[12px] font-medium"></span>
+      </form>
+    </div>
+  </div>
 
   </section><!-- /#auditBackupsSection -->
   </div><!-- /#swipeArea -->
@@ -1509,8 +1545,9 @@
      assign it to a user. Opened by components/quotation.js's
      openQuoteDetail(); see backend/api/quotations.py for the endpoints
      this drives. -->
-<div id="quoteDetailModal" class="fixed inset-0 z-40 hidden items-center justify-center bg-black/70 p-4">
-  <div class="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-border bg-[#141922] shadow-2xl">
+<div id="quoteDetailModal" class="fixed inset-0 z-40 hidden items-center justify-center p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-border bg-[#141922] shadow-2xl">
     <div class="flex items-start justify-between gap-3 border-b border-border px-5 py-4">
       <div class="min-w-0">
         <div class="flex flex-wrap items-center gap-2">
@@ -1529,6 +1566,16 @@
           class="flex items-center gap-1.5 rounded-md border border-border bg-card2 px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
           <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
           <span class="hidden sm:inline">Export PDF</span>
+        </button>
+        <!-- Admin/Super Admin only -- deleting a Quotation is a stronger
+             gate (deps.require_super_admin) than every other action on this
+             modal, which a Manager can also perform. This element only
+             exists on admin.html (not manager.html), same pattern as the
+             VAT settings form below in the Quotes tab. -->
+        <button type="button" id="quoteDetailDeleteBtn" data-action="delete-quote-detail" title="Delete quotation"
+          class="flex items-center gap-1.5 rounded-md border border-border bg-card2 px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-rose-500/50 hover:text-rose-400">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0l-1 14a2 2 0 01-2 2H7a2 2 0 01-2-2L4 6"/></svg>
+          <span class="hidden sm:inline">Delete</span>
         </button>
         <button data-action="close-modal" data-modal="quoteDetailModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
           <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
@@ -1576,7 +1623,7 @@
         <div class="relative">
           <svg class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
           <input type="text" id="quoteDetailAssetSearchInput" placeholder="Search assets by name or category…" autocomplete="off"
-            class="w-full rounded-md border border-border bg-card2 py-2 pl-8 pr-3 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+            class="w-full rounded-md border border-border bg-card2 py-2 pl-8 pr-8 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60 search-clearable" />
           <div id="quoteDetailAssetResults" class="absolute z-10 mt-1 hidden max-h-48 w-full overflow-y-auto rounded-md border border-border bg-[#141922] py-1 shadow-xl"></div>
         </div>
         <div id="quoteDetailSelectedAsset" class="hidden items-center justify-between gap-2 rounded-md bg-card2 px-3 py-2 text-[12px]">
@@ -1692,7 +1739,7 @@
         <p id="quoteDetailAssignedTo" class="mb-3 text-[13px]"></p>
         <div id="quoteDetailAssignForm" class="relative">
           <input type="text" id="quoteAssignSearchInput" placeholder="Search users by name or email to assign…" autocomplete="off"
-            class="w-full rounded-md border border-border bg-card2 px-3 py-2 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+            class="w-full rounded-md border border-border bg-card2 pl-3 pr-8 py-2 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60 search-clearable" />
           <div id="quoteAssignResults" class="absolute z-10 mt-1 hidden w-full rounded-md border border-border bg-[#141922] py-1 shadow-xl"></div>
         </div>
         <button type="button" data-action="toggle-quote-assign-adhoc" class="mt-2 text-[11px] font-medium text-slate-500 underline-offset-2 transition hover:text-blue-400 hover:underline">
@@ -1736,8 +1783,9 @@
      above to add line items. See components/quotation.js's
      openCreateQuoteModal()/toggleQuoteRoute()/submitCreateQuote() and
      POST /quotations. -->
-<div id="createQuoteModal" class="fixed inset-0 z-40 hidden items-center justify-center bg-black/70 p-4">
-  <div class="w-full max-w-md rounded-xl border border-border bg-[#141922] p-5 shadow-2xl">
+<div id="createQuoteModal" class="fixed inset-0 z-40 hidden items-center justify-center p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative w-full max-w-md rounded-xl border border-border bg-[#141922] p-5 shadow-2xl">
     <div class="mb-4 flex items-start justify-between gap-3">
       <div>
         <h3 class="text-[15px] font-bold text-slate-100">Create Quote</h3>
@@ -1792,8 +1840,9 @@
      evaluated/deducted ONLY when "Check Out Selected" actually runs --
      never at draft/submit/approve time. See components/quotation.js's
      openFulfillmentDrawer()/processFulfillmentSelected(). -->
-<div id="fulfillmentDrawerModal" class="fixed inset-0 z-40 hidden items-center justify-center bg-black/70 p-4">
-  <div class="flex max-h-[85vh] w-full max-w-lg flex-col rounded-xl border border-border bg-[#141922] shadow-2xl">
+<div id="fulfillmentDrawerModal" class="fixed inset-0 z-40 hidden items-center justify-center p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative flex max-h-[85vh] w-full max-w-lg flex-col rounded-xl border border-border bg-[#141922] shadow-2xl">
     <div class="flex items-start justify-between gap-3 border-b border-border px-5 py-4">
       <div>
         <h3 class="text-[15px] font-bold text-slate-100">Fulfillment Drawer</h3>

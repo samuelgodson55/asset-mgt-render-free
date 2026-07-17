@@ -9,7 +9,7 @@ import logging
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import or_
+from sqlalchemy import or_, func
 
 import models
 from models import utc_now
@@ -60,11 +60,17 @@ def login(db: Session, req: LoginRequest) -> dict:
     Data Quality & Usability requirement #6: `req.identifier` is matched
     against EITHER `email` OR `username` (whichever one the person actually
     typed) via a single `OR` clause -- we don't ask them to specify which
-    kind of value it is. Matching is exact/case-sensitive on purpose, same
-    as before this change; if you want case-INsensitive login (e.g. so
-    "T.Okafor@corp.io" and "t.okafor@corp.io" are treated the same), that
-    would need a case-insensitive column index and is a good candidate for
-    a future Alembic migration + `func.lower()` comparison.
+    kind of value it is. Matching is CASE-INSENSITIVE on both `email` and
+    `username` (so "T.Okafor@corp.io" and "t.okafor@corp.io" are treated
+    the same at login) via `func.lower()` on both sides of the comparison.
+    This deliberately doesn't need a DB migration or a case-insensitive
+    index -- `func.lower(column)` works against the existing schema as-is;
+    it just can't use a plain b-tree index on `email`/`username` for the
+    lookup, which is a non-issue at this app's scale. Account-creation/
+    -update paths (see user_service.py's create_user()/update_user()) now
+    also check case-insensitively for clashes, so two accounts differing
+    only by case can no longer be created going forward, keeping this
+    lookup unambiguous.
     """
     # Rate limiting for repeated failed attempts is handled one layer up,
     # in ASGI middleware -- see backend/middleware/rate_limit.py, wired
@@ -86,7 +92,7 @@ def login(db: Session, req: LoginRequest) -> dict:
     # SUPER_ADMIN_PASSWORD_HASH is None and this path is fully disabled --
     # `identifier == settings.SUPER_ADMIN_USERNAME` alone is never enough
     # to authenticate.
-    if SUPER_ADMIN_PASSWORD_HASH and identifier == settings.SUPER_ADMIN_USERNAME:
+    if SUPER_ADMIN_PASSWORD_HASH and identifier.lower() == settings.SUPER_ADMIN_USERNAME.strip().lower():
         if not verify_password(req.password, SUPER_ADMIN_PASSWORD_HASH):
             logger.warning("Login failed: Super Admin, wrong password")
             raise HTTPException(status_code=401, detail="Invalid email/username or password.")
@@ -106,8 +112,9 @@ def login(db: Session, req: LoginRequest) -> dict:
             False,
         )
 
+    identifier_lower = identifier.lower()
     user = db.query(models.User).filter(
-        or_(models.User.email == identifier, models.User.username == identifier),
+        or_(func.lower(models.User.email) == identifier_lower, func.lower(models.User.username) == identifier_lower),
         models.User.is_active,
         ~models.User.is_deleted,
     ).first()

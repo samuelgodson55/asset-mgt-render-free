@@ -72,6 +72,7 @@ from api.checkouts import router as checkouts_router
 from api.audit import router as audit_router
 from api.backup import router as backup_router
 from api.quotations import router as quotations_router
+from api.notifications import router as notifications_router
 
 # ---------------------------------------------------------------------------
 # STRUCTURED LOGGING -- configure this FIRST, before anything else in the
@@ -303,6 +304,7 @@ app.include_router(checkouts_router, prefix="/api")
 app.include_router(audit_router, prefix="/api")
 app.include_router(backup_router, prefix="/api")
 app.include_router(quotations_router, prefix="/api")
+app.include_router(notifications_router, prefix="/api")
 
 # ---------------------------------------------------------------------------
 # STATIC FRONTEND (free-tier single-service deployment only)

@@ -109,7 +109,11 @@ def create_user(db: Session, req: UserCreateRequest, user: dict) -> dict:
             detail="Managers may only provision Staff or Customer accounts.",
         )
 
-    existing = db.query(models.User).filter(models.User.email == req.email).first()
+    # Case-insensitive on purpose: login (see auth_service.py) matches
+    # email/username case-insensitively, so allowing e.g. "T.Okafor@corp.io"
+    # and "t.okafor@corp.io" to exist as two separate accounts would make
+    # that lookup ambiguous. Blocking the clash here keeps it impossible.
+    existing = db.query(models.User).filter(func.lower(models.User.email) == req.email.strip().lower()).first()
     if existing:
         raise HTTPException(status_code=400, detail="A user with this email already exists.")
 
@@ -176,8 +180,13 @@ def update_user(db: Session, user_id: int, req: UserUpdateRequest, user: dict) -
 
     updates = req.model_dump(exclude_unset=True)
 
-    if "email" in updates and updates["email"] != target.email:
-        clash = db.query(models.User).filter(models.User.email == updates["email"], models.User.id != user_id).first()
+    if "email" in updates and updates["email"].strip().lower() != target.email.strip().lower():
+        # Case-insensitive clash check -- same rationale as create_user()
+        # above: login matches email/username case-insensitively, so two
+        # accounts differing only by case must never both exist.
+        clash = db.query(models.User).filter(
+            func.lower(models.User.email) == updates["email"].strip().lower(), models.User.id != user_id
+        ).first()
         if clash:
             raise HTTPException(status_code=400, detail="A user with this email already exists.")
         target.email = updates["email"]

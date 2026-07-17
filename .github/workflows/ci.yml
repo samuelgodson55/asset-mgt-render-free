@@ -39,12 +39,13 @@ jobs:
       - name: Ruff lint
         run: ruff check backend/
 
-      # backend/tests/ doesn't exist in this repo yet -- this step is
-      # deliberately non-fatal (|| true) until a real suite is added, so it
-      # doesn't block deploys today but starts reporting the moment tests
-      # land. Remove the `|| true` once backend/tests/ has real coverage.
+      # backend/tests/ now has real coverage (auth, asset pools, checkouts,
+      # extension requests, notification-recipient audience, and role
+      # permission gates -- see backend/tests/conftest.py's module
+      # docstring for how it spins up an isolated throwaway SQLite database
+      # per test). No longer `|| true`: a real test failure now fails CI.
       - name: Pytest
-        run: pytest backend/tests -v || true
+        run: pytest backend/tests -v
 
       - name: pip-audit (dependency vulnerability scan)
         run: pip-audit -r backend/requirements.txt --desc || true
