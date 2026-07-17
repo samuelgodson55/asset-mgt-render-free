@@ -1114,7 +1114,7 @@ see `.gitignore`) and are read by `backend/config.py` into a single typed
 | `DISPLAY_TIMEZONE` | `Africa/Lagos` | IANA timezone every CSV/PDF export (audit ledger, properties-assigned reports) renders its timestamps in, and the zone an export date-range filter's "from"/"to" boundaries are interpreted in. Data is always stored/queried as UTC either way — this only controls the DISPLAY layer, so exported hours match what the Audit Trail already shows on screen (which converts UTC → browser-local automatically). The backend refuses to start if this isn't a real IANA zone name. |
 | `CORS_ORIGINS` | localhost variants | Comma-separated list of origins allowed to call the API. |
 | `AUTO_INIT_DB` | `true` | If true, runs `create_all()` on startup (creates missing tables). Set `false` in production and use Alembic instead. |
-| `AUTO_SEED_DEMO_DATA` | `true` | If true, seeds demo accounts/data on an empty DB at startup. Set `false` in production. |
+| `AUTO_SEED_DEMO_DATA` | `true` | If true, seeds demo accounts/data on an empty DB at startup. Set `false` in production. Independently of this flag, the login page's "Demo accounts" credentials hint box (`frontend/index.html`) is physically removed from the shipped HTML whenever the frontend image is built with `BUILD_ENV=production` — see `build-frontend/build.js`'s `BUILD:PROD-STRIP` markers and the "Frontend build modes" section below. |
 | `LOG_LEVEL` | `INFO` | `DEBUG` \| `INFO` \| `WARNING` \| `ERROR` \| `CRITICAL`. |
 | `LOG_FORMAT` | `json` | `json` (production/log aggregators) or `text` (readable local dev). |
 | `LOGIN_RATE_LIMIT_MAX` | `5` | Max `/auth/login` attempts per IP per window before HTTP 429. |

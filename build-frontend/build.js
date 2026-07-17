@@ -32,7 +32,15 @@
  *                    development -- HTML isn't obfuscated, just minified,
  *                    since every <script> tag here loads an external .js
  *                    file (no inline JS to protect) and there's nothing
- *                    equivalent to "obfuscation" for markup.
+ *                    equivalent to "obfuscation" for markup. PLUS: any
+ *                    HTML block wrapped in
+ *                      <!-- BUILD:PROD-STRIP:START -->
+ *                      ...
+ *                      <!-- BUILD:PROD-STRIP:END -->
+ *                    is deleted outright (e.g. frontend/index.html's demo
+ *                    account credentials box) -- see stripProdOnlyBlocks()
+ *                    below. Still present, unmodified, in local and
+ *                    development builds.
  *
  * USAGE
  *   BUILD_ENV=local|development|production node build.js <srcDir> <outDir>
@@ -141,7 +149,34 @@ async function processJs(code, relPath) {
   return output;
 }
 
-// Deliberately conservative options: every <script> in this app's HTML
+// Removes any <!-- BUILD:PROD-STRIP:START --> ... <!-- BUILD:PROD-STRIP:END -->
+// block from an HTML source string. Only called for mode === "production"
+// (see processHtml below) -- local/development builds keep these blocks
+// untouched so things like frontend/index.html's demo-account credentials
+// box are still visible while developing/staging, and only disappear from
+// the page in a real production build. Matching is non-greedy and global
+// so multiple independent blocks in the same file are all removed; a
+// missing/unbalanced marker is treated as a hard build failure rather than
+// silently left in place or silently deleting too much, since that almost
+// certainly means a marker was typo'd or only one of the pair was pasted.
+const PROD_STRIP_START = "<!-- BUILD:PROD-STRIP:START -->";
+const PROD_STRIP_END = "<!-- BUILD:PROD-STRIP:END -->";
+const PROD_STRIP_RE = /<!--\s*BUILD:PROD-STRIP:START\s*-->[\s\S]*?<!--\s*BUILD:PROD-STRIP:END\s*-->/g;
+
+function stripProdOnlyBlocks(code, relPath) {
+  const starts = (code.match(/<!--\s*BUILD:PROD-STRIP:START\s*-->/g) || []).length;
+  const ends = (code.match(/<!--\s*BUILD:PROD-STRIP:END\s*-->/g) || []).length;
+  if (starts !== ends) {
+    throw new Error(
+      `${relPath}: found ${starts} "${PROD_STRIP_START}" marker(s) but ` +
+        `${ends} "${PROD_STRIP_END}" marker(s) -- these must come in matched ` +
+        `pairs. Fix the markers before building.`
+    );
+  }
+  return code.replace(PROD_STRIP_RE, "");
+}
+
+
 // loads an external .js file (verified -- no inline <script> blocks
 // exist anywhere in frontend/*.html), so minifyJS is left off rather than
 // risk html-minifier-terser trying to parse markup as script. Same
@@ -155,8 +190,13 @@ async function processHtml(code, relPath) {
     return code;
   }
 
+  let source = code;
+  if (mode === "production") {
+    source = stripProdOnlyBlocks(source, relPath);
+  }
+
   try {
-    return await minifyHtml(code, {
+    return await minifyHtml(source, {
       collapseWhitespace: true,
       conservativeCollapse: false,
       removeComments: true,
