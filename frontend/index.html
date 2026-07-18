@@ -95,7 +95,7 @@
          BUILD:PROD-STRIP markers below is removed by
          build-frontend/build.js when BUILD_ENV=production (wired from
          .env's ENVIRONMENT value -- see docker-compose.yml's frontend
-         build.args and nginx/Dockerfile). It still renders normally for
+         build.args and frontend/Dockerfile). It still renders normally for
          BUILD_ENV=local and BUILD_ENV=development. Do not rely on this
          alone to keep the seeded accounts secret -- also set
          AUTO_SEED_DEMO_DATA=false in production (see backend/main.py /

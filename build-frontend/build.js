@@ -4,7 +4,7 @@
  * -----------------------------------------------------------------------
  * Processes every frontend/js/**\/*.js AND every frontend/*.html file
  * differently depending on the BUILD_ENV it's run with. This is what
- * nginx/Dockerfile's builder stage runs before the plain nginx stage
+ * frontend/Dockerfile's builder stage runs before the plain nginx stage
  * copies the result into the image -- see that file for how BUILD_ENV
  * gets wired in from .env's ENVIRONMENT value via docker-compose.yml's
  * `build.args`.

@@ -12,7 +12,7 @@
 // time), which ES modules handle safely.
 // =============================================================================
 
-import { loadAssets } from './components/assets.js';
+import { loadAssets, loadDeletedAssets } from './components/assets.js';
 import { loadUsers, loadDeletedUsers } from './components/users.js';
 import { loadOutsiders } from './components/outsiders.js';
 import { loadAuditLogs } from './components/audit.js';
@@ -20,6 +20,10 @@ import { refreshNotifications } from './components/notifications.js';
 
 export function refreshDashboard() {
   loadAssets();
+  // No-ops on any page without a #deletedAssetTableBody (e.g. manager.html,
+  // which has no Restore Deleted Assets panel) -- see loadDeletedAssets()'s
+  // own guard in components/assets.js.
+  loadDeletedAssets();
   loadUsers();
   // No-ops on any page without a #deletedUserTableBody (e.g. manager.html,
   // which has no Restore Deleted Users panel) -- see loadDeletedUsers()'s

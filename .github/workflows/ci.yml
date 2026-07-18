@@ -2,8 +2,16 @@
 # -----------------------------------------------------------------------------
 # Runs on every push and PR, to every branch -- the fast, no-deploy gate that
 # has to pass before anything is even eligible for the Azure deploy workflows
-# (deploy-azure-staging.yml on `develop`, deploy-azure-production.yml on
-# `main`). Nothing here talks to Azure or requires any Azure secrets.
+# (deploy-azure-staging.yml on `develop`, release.yml on `git tag v*.*.*`).
+# Nothing here talks to Azure or requires any Azure secrets.
+#
+# `workflow_call` is what makes this reusable: deploy-azure-staging.yml and
+# release.yml both invoke it with `uses: ./.github/workflows/ci.yml` as their
+# own `ci` job, rather than copy-pasting these steps. Without `workflow_call`
+# declared here, every one of those `uses:` references fails at trigger time
+# ("workflow was not reusable, as it is missing a `workflow_call` trigger") --
+# that was a pre-existing bug in this file that would have silently broken
+# every deploy the first time either caller workflow actually ran.
 # -----------------------------------------------------------------------------
 name: CI
 
@@ -11,7 +19,8 @@ on:
   push:
     branches: ['**']
   pull_request:
-    branches: [main, development]
+    branches: [main, develop]
+  workflow_call:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -74,7 +83,7 @@ jobs:
 
       - name: Build frontend image (staging profile -- bundled+minified, not obfuscated)
         run: |
-          docker build -f nginx/Dockerfile --build-arg BUILD_ENV=development \
+          docker build -f frontend/Dockerfile --build-arg BUILD_ENV=development \
             -t snipeit-frontend:ci .
 
       - name: Trivy scan -- backend

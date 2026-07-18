@@ -79,3 +79,68 @@ def test_cannot_delete_pool_with_outstanding_checkout(as_admin, as_manager):
 
     delete = admin_client.delete(f"/api/assets/{asset_id}", headers=admin_headers)
     assert delete.status_code == 400
+
+
+def test_deleted_pool_is_restorable(as_admin):
+    """Soft-deleting a pool (DELETE /assets/{id}) removes it from the
+    active Asset Inventory and from GET /assets, but it's not gone for
+    good: it shows up in GET /assets/deleted and POST
+    /assets/{id}/restore brings it back exactly as it was (same id,
+    quantities, category, price) -- same "oops, wrong one" recovery
+    contract as users' delete/restore."""
+    client, headers = as_admin
+    create = client.post(
+        "/api/assets", headers=headers,
+        json={"name": "Restorable Pool", "total_quantity": 8, "category": "Facilities", "price": 250.0},
+    )
+    assert create.status_code == 200, create.text
+    asset_id = create.json()["id"]
+
+    delete = client.delete(f"/api/assets/{asset_id}", headers=headers)
+    assert delete.status_code == 200, delete.text
+
+    # Gone from the active list and from its own details lookup.
+    active = client.get("/api/assets", headers=headers).json()["items"]
+    assert all(a["id"] != asset_id for a in active)
+    assert client.get(f"/api/assets/{asset_id}/details", headers=headers).status_code == 404
+
+    # Shows up in the deleted list.
+    deleted = client.get("/api/assets/deleted", headers=headers).json()["items"]
+    deleted_entry = next((a for a in deleted if a["id"] == asset_id), None)
+    assert deleted_entry is not None
+    assert deleted_entry["name"] == "Restorable Pool"
+    assert deleted_entry["deleted_at"] is not None
+
+    restore = client.post(f"/api/assets/{asset_id}/restore", headers=headers)
+    assert restore.status_code == 200, restore.text
+
+    # Back in the active list with everything intact.
+    details = client.get(f"/api/assets/{asset_id}/details", headers=headers)
+    assert details.status_code == 200
+    body = details.json()
+    assert body["name"] == "Restorable Pool"
+    assert body["total_quantity"] == 8
+    assert body["available_quantity"] == 8
+    assert body["category"] == "Facilities"
+    assert body["price"] == 250.0
+
+    # No longer in the deleted list.
+    deleted_after = client.get("/api/assets/deleted", headers=headers).json()["items"]
+    assert all(a["id"] != asset_id for a in deleted_after)
+
+
+def test_restore_requires_super_admin(as_admin, as_manager):
+    admin_client, admin_headers = as_admin
+    create = admin_client.post("/api/assets", headers=admin_headers, json={"name": "Manager Cannot Restore This", "total_quantity": 1})
+    asset_id = create.json()["id"]
+    admin_client.delete(f"/api/assets/{asset_id}", headers=admin_headers)
+
+    manager_client, manager_headers = as_manager
+    response = manager_client.post(f"/api/assets/{asset_id}/restore", headers=manager_headers)
+    assert response.status_code == 403
+
+
+def test_restore_nonexistent_deleted_asset_404s(as_admin):
+    client, headers = as_admin
+    response = client.post("/api/assets/999999/restore", headers=headers)
+    assert response.status_code == 404

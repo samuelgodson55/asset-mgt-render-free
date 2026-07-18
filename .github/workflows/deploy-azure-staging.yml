@@ -1,11 +1,12 @@
 # .github/workflows/deploy-azure-staging.yml
 # -----------------------------------------------------------------------------
 # Mirrors deploy-azure-production.yml but triggers on `develop` and targets
-# the staging resource group/environment. The one real difference: the
-# frontend image is built with BUILD_ENV=development (bundled + minified,
-# NOT obfuscated) so stack traces and variable names stay readable for QA --
-# see DEPLOYMENT.md's "The pipeline, branch by branch" section and
-# nginx/Dockerfile's BUILD_ENV build-arg.
+# the staging resource group/environment. Same cost-optimized 4-app shape
+# (frontend/backend/db/redis, two Docker Hub images) -- see
+# infra/main.bicep's top-of-file comment. Staging's `backend` AND `frontend`
+# are both provisioned with min replicas 0 (see infra-deploy.yml) -- pure
+# scale-to-zero, a cold start on the first request after idle, effectively
+# free compute the rest of the time.
 # -----------------------------------------------------------------------------
 name: Deploy to Azure (Staging)
 
@@ -24,47 +25,59 @@ permissions:
 env:
   RESOURCE_GROUP: ${{ secrets.STAGING_RESOURCE_GROUP }}
   IMAGE_TAG: ${{ github.sha }}
+  BACKEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend-staging
+  FRONTEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-frontend-staging
 
 jobs:
   ci:
     uses: ./.github/workflows/ci.yml
 
   build-push:
-    name: Build + push images
+    name: Build + push both images
     needs: [ci]
     runs-on: ubuntu-latest
-    outputs:
-      acr-login-server: ${{ steps.acr.outputs.login_server }}
+    strategy:
+      matrix:
+        include:
+          - service: backend
+            dockerfile: backend/Dockerfile
+            context: backend
+            image_env: BACKEND_IMAGE
+          - service: frontend
+            dockerfile: frontend/Dockerfile
+            context: .
+            image_env: FRONTEND_IMAGE
     steps:
       - uses: actions/checkout@v4
 
-      - uses: azure/login@v2
+      - name: Docker Hub login
+        uses: docker/login-action@v3
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Resolve ACR login server
-        id: acr
+      - name: Resolve image name
+        id: img
+        run: echo "name=${{ matrix.image_env == 'BACKEND_IMAGE' && env.BACKEND_IMAGE || env.FRONTEND_IMAGE }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build + push ${{ matrix.service }} image
         run: |
-          SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
-          echo "login_server=$SERVER" >> "$GITHUB_OUTPUT"
+          docker build -f ${{ matrix.dockerfile }} \
+                       -t ${{ steps.img.outputs.name }}:$IMAGE_TAG \
+                       -t ${{ steps.img.outputs.name }}:latest \
+                       ${{ matrix.context }}
+          docker push ${{ steps.img.outputs.name }}:$IMAGE_TAG
+          docker push ${{ steps.img.outputs.name }}:latest
 
-      - name: ACR login
-        run: az acr login --name "$(echo ${{ steps.acr.outputs.login_server }} | cut -d. -f1)"
-
-      - name: Build + push backend image
-        run: |
-          docker build -t ${{ steps.acr.outputs.login_server }}/snipeit-backend:$IMAGE_TAG ./backend
-          docker push ${{ steps.acr.outputs.login_server }}/snipeit-backend:$IMAGE_TAG
-
-      - name: Build + push frontend image (bundled + minified, not obfuscated)
-        run: |
-          docker build -f nginx/Dockerfile --build-arg BUILD_ENV=development \
-                       -t ${{ steps.acr.outputs.login_server }}/snipeit-frontend:$IMAGE_TAG .
-          docker push ${{ steps.acr.outputs.login_server }}/snipeit-frontend:$IMAGE_TAG
+      - name: Trivy scan (report-only -- staging doesn't block on findings)
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: ${{ steps.img.outputs.name }}:${{ env.IMAGE_TAG }}
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
 
   migrate:
+    name: Run database migrations
     needs: [build-push]
     runs-on: ubuntu-latest
     steps:
@@ -74,24 +87,34 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      - name: Point the migrate job at the new backend image
+        run: |
+          az containerapp job update \
+            --name migrate --resource-group "$RESOURCE_GROUP" \
+            --image "$BACKEND_IMAGE:$IMAGE_TAG"
+
       - name: Run alembic upgrade head
         run: |
-          az containerapp job update --name migrate --resource-group "$RESOURCE_GROUP" \
-            --image "${{ needs.build-push.outputs.acr-login-server }}/snipeit-backend:$IMAGE_TAG"
-          az containerapp job start --name migrate --resource-group "$RESOURCE_GROUP"
+          az containerapp job start --name migrate --resource-group "$RESOURCE_GROUP" --output json > job-run.json
+          EXECUTION_NAME=$(jq -r '.name' job-run.json)
+          echo "Started migration execution: $EXECUTION_NAME"
 
-      - name: Wait for migration
+      - name: Wait for migration to complete
         run: |
           for i in $(seq 1 30); do
-            STATUS=$(az containerapp job execution list --name migrate --resource-group "$RESOURCE_GROUP" \
-                       --query "[0].properties.status" -o tsv)
-            [ "$STATUS" = "Succeeded" ] && exit 0
-            [ "$STATUS" = "Failed" ] && exit 1
+            STATUS=$(az containerapp job execution list \
+              --name migrate --resource-group "$RESOURCE_GROUP" \
+              --query "[0].properties.status" -o tsv)
+            echo "Migration status: $STATUS"
+            if [ "$STATUS" = "Succeeded" ]; then exit 0; fi
+            if [ "$STATUS" = "Failed" ]; then echo "::error::Migration failed"; exit 1; fi
             sleep 10
           done
+          echo "::error::Migration timed out after 5 minutes"
           exit 1
 
   deploy:
+    name: Roll out new revisions
     needs: [build-push, migrate]
     runs-on: ubuntu-latest
     steps:
@@ -101,17 +124,19 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Update backend / worker / beat / frontend
+      - name: Update backend
         run: |
-          for APP in backend worker beat; do
-            az containerapp update --name "$APP" --resource-group "$RESOURCE_GROUP" \
-              --image "${{ needs.build-push.outputs.acr-login-server }}/snipeit-backend:$IMAGE_TAG"
-          done
+          az containerapp update --name backend --resource-group "$RESOURCE_GROUP" \
+            --image "$BACKEND_IMAGE:$IMAGE_TAG"
+
+      - name: Update frontend
+        run: |
           az containerapp update --name frontend --resource-group "$RESOURCE_GROUP" \
-            --image "${{ needs.build-push.outputs.acr-login-server }}/snipeit-frontend:$IMAGE_TAG"
+            --image "$FRONTEND_IMAGE:$IMAGE_TAG"
 
       - name: Smoke test
         run: |
           FQDN=$(az containerapp show --name frontend --resource-group "$RESOURCE_GROUP" \
                    --query "properties.configuration.ingress.fqdn" -o tsv)
-          curl -f "https://$FQDN/healthz"
+          echo "Testing https://$FQDN (cold start possible -- both apps scale from zero)"
+          curl -f --retry 5 --retry-delay 5 --retry-connrefused "https://$FQDN/" || exit 1

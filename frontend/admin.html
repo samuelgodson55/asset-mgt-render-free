@@ -360,6 +360,60 @@
         </div>
       </div>
     </div>
+
+    <!-- Restore Deleted Assets -->
+    <!-- Super Admin only -- "oops, wrong pool" recovery for a pool
+         soft-deleted via the "Delete" button in the table above. Lives
+         below the two forms (rarest action on this page, same placement
+         reasoning as Restore Deleted Users below) and powers itself off
+         GET /assets/deleted + POST /assets/{id}/restore -- see
+         js/components/assets.js's loadDeletedAssets()/restoreAssetPool(). -->
+    <div class="mt-6 rounded-xl border border-border bg-card p-5">
+      <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h2 class="text-[14px] font-semibold text-slate-100">Restore Deleted Assets</h2>
+          <p class="text-[12px] text-slate-500"><span class="deleted-asset-count">0</span> soft-deleted pool(s) · checkout/exception history is preserved</p>
+        </div>
+        <div class="flex flex-wrap items-center gap-3">
+          <div class="relative w-full sm:w-64">
+            <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+            <input type="text" id="deletedAssetSearchInput" placeholder="Search by asset name…"
+              class="w-full rounded-lg border border-border bg-card2 py-2 pl-9 pr-8 text-[13px] text-slate-200 placeholder-slate-500 outline-none transition focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40 search-clearable" />
+          </div>
+          <div class="flex items-center gap-2 text-[13px] text-slate-400">
+            <span>Rows per page</span>
+            <select id="deletedAssetPerPageSelect" class="rounded-lg border border-border bg-card2 px-2.5 py-2 text-slate-200 outline-none focus:border-blue-500/60">
+              <option value="5" selected>5</option>
+              <option value="10">10</option>
+              <option value="25">25</option>
+              <option value="50">50</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div class="overflow-hidden rounded-xl border border-border bg-card2/20">
+        <table class="w-full text-left text-[13px]">
+          <thead>
+            <tr class="border-b border-border bg-card2/60 text-[11px] uppercase tracking-wide text-slate-500">
+              <th class="px-5 py-3 font-semibold">Asset Pool</th>
+              <th class="hidden px-5 py-3 font-semibold sm:table-cell">Total Quantity</th>
+              <th class="hidden px-5 py-3 font-semibold sm:table-cell">Deleted On</th>
+              <th class="hidden px-5 py-3 font-semibold text-right sm:table-cell">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="deletedAssetTableBody" class="divide-y divide-border">
+            <tr><td colspan="4" class="px-5 py-6 text-center text-slate-500">Loading…</td></tr>
+          </tbody>
+        </table>
+        <div class="flex items-center justify-between border-t border-border bg-card2/40 px-5 py-3 text-[12px] text-slate-400">
+          <span id="deletedAssetsPageInfo">Loading…</span>
+          <div class="flex items-center gap-2">
+            <button id="deletedAssetsPrevBtn" data-action="change-page" data-key="deletedAssets" data-delta="-1" class="rounded-md border border-border px-2.5 py-1 font-medium text-slate-300 transition hover:border-slate-500 disabled:opacity-40 disabled:cursor-not-allowed">Prev</button>
+            <button id="deletedAssetsNextBtn" data-action="change-page" data-key="deletedAssets" data-delta="1" class="rounded-md border border-border px-2.5 py-1 font-medium text-slate-300 transition hover:border-slate-500 disabled:opacity-40 disabled:cursor-not-allowed">Next</button>
+          </div>
+        </div>
+      </div>
+    </div>
   </section>
 
   <!-- ================= USER DIRECTORY INTERFACE ================= -->

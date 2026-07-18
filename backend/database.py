@@ -9,6 +9,7 @@ instead of an empty one.
 """
 
 import datetime
+import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from models import Base, utc_now
@@ -107,6 +108,99 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def get_schema_status() -> dict:
+    """
+    Compares the database's ACTUAL current migration revision (whatever
+    `alembic upgrade head` last left behind in its `alembic_version` table)
+    against the revision THIS CODE was built to run against (the head of
+    backend/alembic/versions/ baked into this image at build time). Powers
+    GET /readyz in main.py -- see that endpoint's docstring for why this
+    check lives there and deliberately NOT in GET /healthz.
+
+    This is the check that was missing before: the deploy pipelines
+    (.github/workflows/deploy-azure-*.yml) already run `alembic upgrade
+    head` as a separate, blocking step before rolling out a new image --
+    but nothing verified that a given RUNNING container's schema still
+    actually matches what its own code expects. If that migrate step were
+    ever skipped or bypassed (e.g. a manual `az containerapp update`
+    straight to an image tag, no pipeline involved), the old /healthz --
+    a static "yes I'm up" with no DB awareness at all -- would happily
+    report healthy against a schema the new code doesn't actually match,
+    and the first real symptom would be a request failing on a missing
+    column instead of the deploy failing up front.
+
+    Returns a dict; "ready" is False for any of:
+      - the database can't be reached at all (same causes as init_db()'s
+        startup check: wrong DATABASE_URL, missing sslmode, firewall, DB
+        not up yet)
+      - the `alembic_version` table doesn't exist yet -- `alembic upgrade
+        head` has never been run against this database
+      - `alembic_version` exists but is empty -- same as above
+      - `alembic_version`'s revision(s) don't match this build's expected
+        head(s) -- the exact "new image, old/wrong schema" scenario
+    "ready" is True only when the database's current revision(s) exactly
+    equal this code's expected head(s).
+    """
+    from sqlalchemy import inspect, text
+    from alembic.config import Config as AlembicConfig
+    from alembic.script import ScriptDirectory
+
+    # Resolve the migration(s) THIS CODE expects to be current -- reads
+    # straight from backend/alembic/versions/ as shipped in this image,
+    # completely independent of whatever the database actually contains.
+    backend_dir = os.path.dirname(os.path.abspath(__file__))
+    alembic_cfg = AlembicConfig(os.path.join(backend_dir, "alembic.ini"))
+    alembic_cfg.set_main_option("script_location", os.path.join(backend_dir, "alembic"))
+    expected_heads = set(ScriptDirectory.from_config(alembic_cfg).get_heads())
+
+    try:
+        with engine.connect() as conn:
+            if not inspect(conn).has_table("alembic_version"):
+                return {
+                    "ready": False,
+                    "reason": "Database has no 'alembic_version' table -- "
+                              "'alembic upgrade head' has never been run against it.",
+                    "expected_heads": sorted(expected_heads),
+                    "current_heads": [],
+                }
+            current_heads = {row[0] for row in conn.execute(text("SELECT version_num FROM alembic_version"))}
+    except Exception as exc:
+        # Same "fail legibly, not with a raw traceback" reasoning as
+        # main.py's on_startup() -- an unreachable database at readiness-
+        # check time should read as "not ready yet", not crash the probe.
+        return {
+            "ready": False,
+            "reason": f"Could not reach the database to check its migration state: {exc}",
+            "expected_heads": sorted(expected_heads),
+            "current_heads": [],
+        }
+
+    if not current_heads:
+        return {
+            "ready": False,
+            "reason": "Database's 'alembic_version' table is empty -- "
+                      "no migration has ever been recorded as applied.",
+            "expected_heads": sorted(expected_heads),
+            "current_heads": [],
+        }
+
+    if current_heads != expected_heads:
+        return {
+            "ready": False,
+            "reason": "Database schema version does not match what this build of the code "
+                      "expects -- run 'alembic upgrade head' before routing traffic to this image.",
+            "expected_heads": sorted(expected_heads),
+            "current_heads": sorted(current_heads),
+        }
+
+    return {
+        "ready": True,
+        "reason": "Database schema matches this build's expected migration head.",
+        "expected_heads": sorted(expected_heads),
+        "current_heads": sorted(current_heads),
+    }
 
 
 def seed_db():

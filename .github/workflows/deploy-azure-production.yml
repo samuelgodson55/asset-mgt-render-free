@@ -1,29 +1,59 @@
 # .github/workflows/deploy-azure-production.yml
 # -----------------------------------------------------------------------------
-# THE "push to main -> it's live" pipeline. Triggered on every push/merge to
-# `main` -- no manual steps once this is set up, matching docker-compose.yml's
-# original DEPLOYMENT.md promotion pipeline, just re-targeted at Azure
-# Container Apps instead of SSH + `docker compose up -d`.
+# THE production rollout pipeline -- migrate, then roll out both already-built
+# images, then smoke test, with automatic rollback on failure.
 #
-# Stages (mirrors DEPLOYMENT.md's "The pipeline, branch by branch" section):
-#   1. Build backend + frontend images (frontend built bundled+minified+
-#      OBFUSCATED -- BUILD_ENV=production, see nginx/Dockerfile's build-arg)
-#   2. Push both to Azure Container Registry, tagged with the commit SHA
-#   3. Trivy scan both images (blocking on CRITICAL findings in prod, unlike CI's report-only scan)
-#   4. Run `alembic upgrade head` as a Container Apps Job -- BEFORE the new
-#      image rolls out, against the OLD containers, exactly like
-#      docker-compose.yml's original "migrate before you swap" rule
-#   5. Roll the new image out to backend, worker, beat, frontend
-#      (Container Apps' Single revision mode does this as a health-probed
-#      rolling replacement automatically -- see infra/main.bicep's `probes`)
-#   6. Smoke test against the live frontend FQDN
-#   7. Roll back automatically if the smoke test fails
+# TRIGGER CHANGE: this workflow is NO LONGER triggered by `push: branches:
+# [main]`. Production releases are now cut by pushing a `git tag v1.x.x`
+# (see release.yml), which builds + Trivy-scans + pushes both images tagged
+# with that VERSION (not just a commit SHA), updates CHANGELOG.md, cuts a
+# GitHub Release, and only then calls this workflow (`uses:
+# ./.github/workflows/deploy-azure-production.yml`) to actually deploy the
+# already-pushed `image_tag` to Azure. That's why this file only declares
+# `workflow_call` / `workflow_dispatch` triggers below -- it doesn't build or
+# push anything itself anymore, it just migrates + deploys whatever version
+# tag it's told to (see DEPLOYMENT.md's "Rollback" section for how
+# `workflow_dispatch` + an older `image_tag` doubles as the recommended
+# rollback path, reusing this same migrate -> deploy -> smoke-test ->
+# auto-rollback machinery instead of raw `az containerapp update` commands).
+#
+# COST-OPTIMIZED, 4-SERVICE SHAPE: `frontend`, `backend`, `db`, `redis` --
+# see infra/main.bicep's top-of-file comment. TWO custom images:
+# `backend` (backend/Dockerfile) and `frontend` (frontend/Dockerfile,
+# unmodified from local Docker Compose). `db`/`redis` run official
+# postgres/redis images pulled straight from Docker Hub and are never
+# rebuilt here.
+#
+# Stages (given an `image_tag` that release.yml has already built & pushed):
+#   1. Run `alembic upgrade head` as a Container Apps Job, using the NEW
+#      backend image -- BEFORE either new image rolls out, against the OLD
+#      still-live `backend`/`frontend`
+#   2. Roll BOTH new images out (Container Apps' Single revision mode does
+#      the health-probed rolling replacement automatically for each --
+#      see infra/main.bicep's `probes` blocks)
+#   3. Smoke test against the live `frontend` FQDN (which also proves
+#      `backend` is reachable through it -- see the /api/auth/me check)
+#   4. Roll back automatically if the smoke test fails
+#
+# `db` and `redis` are NOT touched by this pipeline -- they run fixed
+# official images and only change when infra/main.bicep itself changes
+# (see infra-deploy.yml).
 # -----------------------------------------------------------------------------
 name: Deploy to Azure (Production)
 
 on:
-  push:
-    branches: [main]
+  workflow_call:
+    inputs:
+      image_tag:
+        description: 'Docker image tag to deploy, e.g. v1.4.2 (must already exist on Docker Hub -- see release.yml)'
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Docker image tag to deploy, e.g. v1.4.2 (must already exist on Docker Hub) -- use this for a manual redeploy or a rollback to an older version; see DEPLOYMENT.md "Rollback"'
+        required: true
+        type: string
 
 concurrency:
   group: deploy-production
@@ -35,85 +65,34 @@ permissions:
 
 env:
   RESOURCE_GROUP: ${{ secrets.PROD_RESOURCE_GROUP }}
-  IMAGE_TAG: ${{ github.sha }}
+  IMAGE_TAG: ${{ inputs.image_tag }}
+  BACKEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend
+  FRONTEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-frontend
 
 jobs:
-  ci:
-    uses: ./.github/workflows/ci.yml
-
-  build-push-scan:
-    name: Build, push, scan images
-    needs: [ci]
-    runs-on: ubuntu-latest
-    outputs:
-      acr-login-server: ${{ steps.acr.outputs.login_server }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Azure login (OIDC, no secret)
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Resolve ACR login server
-        id: acr
-        run: |
-          SERVER=$(az acr list --resource-group "$RESOURCE_GROUP" --query "[0].loginServer" -o tsv)
-          echo "login_server=$SERVER" >> "$GITHUB_OUTPUT"
-
-      - name: ACR login
-        run: az acr login --name "$(echo ${{ steps.acr.outputs.login_server }} | cut -d. -f1)"
-
-      - name: Build + push backend image
-        run: |
-          docker build -t ${{ steps.acr.outputs.login_server }}/snipeit-backend:$IMAGE_TAG \
-                       -t ${{ steps.acr.outputs.login_server }}/snipeit-backend:latest \
-                       ./backend
-          docker push ${{ steps.acr.outputs.login_server }}/snipeit-backend:$IMAGE_TAG
-          docker push ${{ steps.acr.outputs.login_server }}/snipeit-backend:latest
-
-      - name: Build + push frontend image (bundled + minified + OBFUSCATED)
-        run: |
-          docker build -f nginx/Dockerfile --build-arg BUILD_ENV=production \
-                       -t ${{ steps.acr.outputs.login_server }}/snipeit-frontend:$IMAGE_TAG \
-                       -t ${{ steps.acr.outputs.login_server }}/snipeit-frontend:latest .
-          docker push ${{ steps.acr.outputs.login_server }}/snipeit-frontend:$IMAGE_TAG
-          docker push ${{ steps.acr.outputs.login_server }}/snipeit-frontend:latest
-
-      - name: Trivy scan -- backend (blocking on CRITICAL)
-        uses: aquasecurity/trivy-action@0.24.0
-        with:
-          image-ref: ${{ steps.acr.outputs.login_server }}/snipeit-backend:${{ env.IMAGE_TAG }}
-          severity: 'CRITICAL'
-          exit-code: '1'
-
-      - name: Trivy scan -- frontend (blocking on CRITICAL)
-        uses: aquasecurity/trivy-action@0.24.0
-        with:
-          image-ref: ${{ steps.acr.outputs.login_server }}/snipeit-frontend:${{ env.IMAGE_TAG }}
-          severity: 'CRITICAL'
-          exit-code: '1'
-
   migrate:
     name: Run database migrations
-    needs: [build-push-scan]
     runs-on: ubuntu-latest
     steps:
+      - name: Validate image_tag looks like a version tag
+        run: |
+          if [[ ! "$IMAGE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "::warning::image_tag '$IMAGE_TAG' doesn't look like a v*.*.* version tag -- continuing anyway (useful for hotfix/manual tags), but double check this is intentional."
+          fi
+
       - uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Point the migrate job at the new image
+      - name: Point the migrate job at the new backend image
         run: |
           az containerapp job update \
             --name migrate --resource-group "$RESOURCE_GROUP" \
-            --image "${{ needs.build-push-scan.outputs.acr-login-server }}/snipeit-backend:$IMAGE_TAG"
+            --image "$BACKEND_IMAGE:$IMAGE_TAG"
 
-      - name: Run alembic upgrade head (against the OLD, still-live containers)
+      - name: Run alembic upgrade head (against the OLD, still-live `backend`)
         run: |
           az containerapp job start --name migrate --resource-group "$RESOURCE_GROUP" --output json > job-run.json
           EXECUTION_NAME=$(jq -r '.name' job-run.json)
@@ -134,8 +113,8 @@ jobs:
           exit 1
 
   deploy:
-    name: Roll out new revision
-    needs: [build-push-scan, migrate]
+    name: Roll out new revisions
+    needs: [migrate]
     runs-on: ubuntu-latest
     steps:
       - uses: azure/login@v2
@@ -144,66 +123,82 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Snapshot currently-live image (for rollback)
+      - name: Snapshot currently-live images (for rollback)
         id: previous
         run: |
-          PREV=$(az containerapp show --name backend --resource-group "$RESOURCE_GROUP" \
+          PREV_BACKEND=$(az containerapp show --name backend --resource-group "$RESOURCE_GROUP" \
                    --query "properties.template.containers[0].image" -o tsv)
-          echo "backend_image=$PREV" >> "$GITHUB_OUTPUT"
+          PREV_FRONTEND=$(az containerapp show --name frontend --resource-group "$RESOURCE_GROUP" \
+                   --query "properties.template.containers[0].image" -o tsv)
+          echo "backend_image=$PREV_BACKEND" >> "$GITHUB_OUTPUT"
+          echo "frontend_image=$PREV_FRONTEND" >> "$GITHUB_OUTPUT"
+          echo "Currently-live before this deploy: backend=$PREV_BACKEND frontend=$PREV_FRONTEND"
 
       # Container Apps' Single revision mode replaces replicas gradually and
       # only routes traffic to new replicas once their readiness probe
-      # (see infra/main.bicep's `probes` block, GET /healthz) passes -- this
-      # IS the rolling update; no extra orchestration needed here.
+      # passes (see infra/main.bicep's `probes` blocks) -- this IS the
+      # rolling update for each app; no extra orchestration needed. `db`
+      # and `redis` are never touched by this step. `backend` is updated
+      # first so `frontend`'s proxy target is already correct by the time
+      # `frontend` itself rolls out.
       - name: Update backend
         run: |
           az containerapp update --name backend --resource-group "$RESOURCE_GROUP" \
-            --image "${{ needs.build-push-scan.outputs.acr-login-server }}/snipeit-backend:$IMAGE_TAG"
-
-      - name: Update worker
-        run: |
-          az containerapp update --name worker --resource-group "$RESOURCE_GROUP" \
-            --image "${{ needs.build-push-scan.outputs.acr-login-server }}/snipeit-backend:$IMAGE_TAG"
-
-      - name: Update beat
-        run: |
-          az containerapp update --name beat --resource-group "$RESOURCE_GROUP" \
-            --image "${{ needs.build-push-scan.outputs.acr-login-server }}/snipeit-backend:$IMAGE_TAG"
-
-      - name: Update frontend
-        run: |
-          az containerapp update --name frontend --resource-group "$RESOURCE_GROUP" \
-            --image "${{ needs.build-push-scan.outputs.acr-login-server }}/snipeit-frontend:$IMAGE_TAG"
+            --image "$BACKEND_IMAGE:$IMAGE_TAG"
 
       - name: Wait for backend readiness
         run: |
           for i in $(seq 1 30); do
             READY=$(az containerapp revision list --name backend --resource-group "$RESOURCE_GROUP" \
                       --query "[?properties.active].properties.healthState | [0]" -o tsv)
-            echo "Backend health state: $READY"
+            echo "backend health state: $READY"
+            [ "$READY" = "Healthy" ] && break
+            sleep 10
+          done
+
+      - name: Update frontend
+        run: |
+          az containerapp update --name frontend --resource-group "$RESOURCE_GROUP" \
+            --image "$FRONTEND_IMAGE:$IMAGE_TAG"
+
+      - name: Wait for frontend readiness
+        run: |
+          for i in $(seq 1 30); do
+            READY=$(az containerapp revision list --name frontend --resource-group "$RESOURCE_GROUP" \
+                      --query "[?properties.active].properties.healthState | [0]" -o tsv)
+            echo "frontend health state: $READY"
             [ "$READY" = "Healthy" ] && exit 0
             sleep 10
           done
-          echo "::error::backend did not become healthy in time"
+          echo "::error::frontend did not become healthy in time"
           exit 1
 
-      - name: Smoke test
+      - name: Smoke test (through `frontend`'s public origin, proving the whole chain works)
         id: smoke
         run: |
           FQDN=$(az containerapp show --name frontend --resource-group "$RESOURCE_GROUP" \
                    --query "properties.configuration.ingress.fqdn" -o tsv)
           echo "Testing https://$FQDN"
-          curl -f "https://$FQDN/healthz" || exit 1
           curl -f -o /dev/null -w "%{http_code}" "https://$FQDN/" | grep -q 200 || exit 1
+          # Hits backend THROUGH frontend's reverse proxy -- proves nginx's
+          # /api/ location block is actually reaching `backend` internally,
+          # not just that frontend serves static files.
+          curl -f "https://$FQDN/api/auth/me" -o /dev/null -w "%{http_code}" | grep -qE "200|401" || exit 1
 
-      - name: Roll back backend on smoke test failure
+      - name: Roll back on smoke test failure
         if: failure() && steps.smoke.outcome == 'failure'
         run: |
-          echo "::warning::Smoke test failed -- rolling back to ${{ steps.previous.outputs.backend_image }}"
+          echo "::warning::Smoke test failed -- rolling back both apps to what was live before this run ($IMAGE_TAG)"
           az containerapp update --name backend --resource-group "$RESOURCE_GROUP" \
             --image "${{ steps.previous.outputs.backend_image }}"
-          az containerapp update --name worker --resource-group "$RESOURCE_GROUP" \
-            --image "${{ steps.previous.outputs.backend_image }}"
-          az containerapp update --name beat --resource-group "$RESOURCE_GROUP" \
-            --image "${{ steps.previous.outputs.backend_image }}"
+          az containerapp update --name frontend --resource-group "$RESOURCE_GROUP" \
+            --image "${{ steps.previous.outputs.frontend_image }}"
           exit 1
+
+      - name: Record deployed version
+        if: success()
+        run: |
+          echo "Deployed $IMAGE_TAG to $RESOURCE_GROUP (backend + frontend)."
+          echo "### Deployed to production :rocket:" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Version:** \`$IMAGE_TAG\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Previously live:** \`${{ steps.previous.outputs.backend_image }}\` / \`${{ steps.previous.outputs.frontend_image }}\`" >> "$GITHUB_STEP_SUMMARY"

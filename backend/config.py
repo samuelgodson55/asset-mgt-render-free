@@ -113,7 +113,7 @@ class Settings(BaseSettings):
     #
     # This same value is also read by docker-compose.yml at *image build*
     # time (not by this backend process) to decide how frontend/js gets
-    # processed -- see nginx/Dockerfile's frontend-build stage and
+    # processed -- see frontend/Dockerfile's frontend-build stage and
     # build-frontend/build.js: local = untouched, development = minified,
     # production = minified + obfuscated.
     ENVIRONMENT: str = "development"
@@ -456,7 +456,7 @@ class Settings(BaseSettings):
     # a separate nginx container to do both of those jobs.
     #
     # SERVE_FRONTEND=false (the default) preserves the original docker-
-    # compose.yml behavior, where nginx (built from nginx/Dockerfile) serves
+    # compose.yml behavior, where nginx (built from frontend/Dockerfile) serves
     # frontend/*.html/js/css itself and this backend container only ever
     # answers API requests. render-start.sh sets SERVE_FRONTEND=true for the
     # combined single-service Render image built from Dockerfile.render,

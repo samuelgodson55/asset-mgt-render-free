@@ -17,7 +17,7 @@
 #   backend  - FastAPI app (main.py) talking to the db (not published to the
 #              host anymore -- see the "frontend" service below)
 #   frontend - the static site (index.html/admin.html/js/*) PLUS an nginx
-#              reverse proxy in front of it, built from nginx/Dockerfile.
+#              reverse proxy in front of it, built from frontend/Dockerfile.
 #              nginx serves the frontend directly and transparently forwards
 #              every /api/* request to the backend container over Docker's
 #              internal network -- see nginx/default.conf.template for the
@@ -391,11 +391,13 @@ services:
   # frontend / nginx reverse proxy (requirement: multi-tier deployment)
   # ---------------------------------------------------------------------
   # This is no longer a bare `nginx:alpine` + bind-mounted static files --
-  # it's now built from nginx/Dockerfile, which produces ONE self-contained
-  # image bundling both the static site AND an environment-templated nginx
-  # config (see nginx/default.conf.template). That image is what gets
-  # deployed unmodified to Render and your cloud environment too; only the
-  # environment variables below change between tiers.
+  # it's now built from frontend/Dockerfile, which produces ONE
+  # self-contained image bundling both the static site AND an
+  # environment-templated nginx config (see nginx/default.conf.template).
+  # That image is what gets deployed unmodified to Render and your cloud
+  # environment too; only the environment variables below change between
+  # tiers. (backend/ owns backend/Dockerfile the same way -- each service
+  # has its own Dockerfile.)
   #
   # SECURITY: this is now the ONLY container with a host-published port.
   # The browser talks exclusively to nginx; nginx is the sole thing that
@@ -406,14 +408,14 @@ services:
   frontend:
     build:
       context: .
-      dockerfile: nginx/Dockerfile
+      dockerfile: frontend/Dockerfile
       # BUILD-TIME (not runtime) arg -- this is what actually changes what
       # ends up inside the image, since frontend/js gets transformed once,
       # during `docker compose build`, not on every container start. Reads
       # the SAME ENVIRONMENT value from .env as the backend/worker services
       # below, so there's still exactly one setting to change: local (raw
       # source), development (minified), or production (minified +
-      # obfuscated) -- see nginx/Dockerfile's frontend-build stage and
+      # obfuscated) -- see frontend/Dockerfile's frontend-build stage and
       # build-frontend/build.js for what each mode does.
       #
       # IMPORTANT: unlike the `environment:` blocks below, editing .env

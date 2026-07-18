@@ -53,11 +53,11 @@ Role model:
 
 import logging
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 
-from database import init_db, seed_db
+from database import init_db, seed_db, get_schema_status
 from config import settings
 from logging_config import configure_logging
 from middleware.request_context import RequestContextMiddleware
@@ -275,7 +275,55 @@ app.openapi = custom_openapi
 
 @app.get("/healthz")
 def health_check():
+    """
+    LIVENESS probe (infra/main.bicep's Liveness probe points here) --
+    deliberately just "is the process up and able to answer HTTP at all",
+    with NO database dependency. A liveness failure makes the platform
+    KILL and restart the container, which is the right response to "the
+    process is hung/deadlocked" but the WRONG response to "the database
+    had a brief network blip" or "migrations haven't finished yet on a
+    fresh deploy" -- neither of those is fixed by restarting this
+    container, and restarting it wouldn't help either one. See GET
+    /readyz below for the check that DOES look at the database and the
+    schema.
+    """
     return {"status": "healthy", "message": "Asset Management API is live"}
+
+
+@app.get("/readyz")
+def readiness_check(response: Response):
+    """
+    READINESS probe (infra/main.bicep's Readiness probe points here, NOT
+    at /healthz) -- unlike /healthz, this queries the database and
+    compares its current Alembic migration revision against what THIS
+    BUILD of the code expects. See database.py's get_schema_status() for
+    the full reasoning and the exact "not ready" cases it covers.
+
+    Why this is a separate endpoint instead of adding the check to
+    /healthz: a READINESS failure just stops traffic from being routed to
+    this replica while it keeps running and gets another chance next
+    poll -- correct for "database temporarily unreachable" and "this
+    replica came up before `alembic upgrade head` finished" alike, unlike
+    a liveness failure's kill-and-restart (see health_check() above).
+    It's also what closes the actual gap that motivated this endpoint:
+    the deploy-azure-*.yml pipelines already run `alembic upgrade head`
+    as its own blocking step before rolling out a new image, but nothing
+    previously verified that a given RUNNING container's schema still
+    matched its own code -- if that migrate step were ever bypassed (e.g.
+    a manual image update outside the pipeline), the old /healthz would
+    have reported healthy regardless, and the first symptom would've been
+    a request failing on a missing column instead of the rollout itself
+    failing.
+
+    Returns 200 + {"ready": true, ...} once the schema matches, or 503 +
+    {"ready": false, "reason": "..."} otherwise. 503 -- not 500 -- is
+    what tells Container Apps' readiness probe (and any load balancer or
+    external health checker) "not ready yet, try again", rather than
+    reading as an application error worth alerting on by itself.
+    """
+    status = get_schema_status()
+    response.status_code = 200 if status["ready"] else 503
+    return status
 
 
 # ---------------------------------------------------------------------------
