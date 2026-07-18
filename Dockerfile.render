@@ -28,7 +28,7 @@
 # section for the full picture, including this approach's tradeoffs
 # (everything spins down and restarts together, no horizontal scaling).
 #
-# Three stages, same reasoning as nginx/Dockerfile and backend/Dockerfile:
+# Three stages, same reasoning as frontend/Dockerfile and backend/Dockerfile:
 #   1. "frontend-build" -- processes frontend/js per BUILD_ARG (defaults to
 #      "production" here, since Render is a production deploy target: JS
 #      ships minified + obfuscated, same as the nginx-fronted deployment

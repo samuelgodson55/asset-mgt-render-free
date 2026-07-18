@@ -33,6 +33,7 @@ import {
   saveCapacity, saveName, saveCategory, savePrice, submitExceptionForm, submitCreatePoolForm, submitCsvImportForm,
   deleteAssetPool, setAssetsSearch, setAssetsPerPage, changeAssetsPage, openAssetExportModal,
   downloadCsvImportTemplate,
+  setDeletedAssetsSearch, setDeletedAssetsPerPage, changeDeletedAssetsPage, restoreAssetPool,
 } from './components/assets.js';
 import {
   deleteProfile, submitCreateUserForm, setUsersSearch, setUsersPerPage, changeUsersPage,
@@ -100,6 +101,7 @@ const SERVER_PAGE_CHANGERS = {
   users: changeUsersPage,
   outsiders: changeOutsidersPage,
   deletedUsers: changeDeletedUsersPage,
+  deletedAssets: changeDeletedAssetsPage,
   quotes: changeQuotesPage,
 };
 
@@ -133,6 +135,7 @@ const CLICK_ACTIONS = {
   'edit-user': (el) => openEditUserModal(parseInt(el.dataset.userId, 10)),
   'edit-outsider': (el) => openEditOutsiderModal(parseInt(el.dataset.outsiderId, 10)),
   'delete-asset-pool': (el) => deleteAssetPool(parseInt(el.dataset.assetId, 10), el.dataset.assetName),
+  'restore-asset-pool': (el) => restoreAssetPool(parseInt(el.dataset.assetId, 10), el.dataset.assetName),
   'open-asset-export': () => openAssetExportModal(),
   'download-csv-template': () => downloadCsvImportTemplate(),
   'change-page': (el) => {
@@ -293,6 +296,7 @@ function wireTableControls() {
     { searchId: 'userSearchInput', perPageId: 'userPerPageSelect', setSearch: setUsersSearch, setPerPage: setUsersPerPage },
     { searchId: 'outsiderSearchInput', perPageId: 'outsiderPerPageSelect', setSearch: setOutsidersSearch, setPerPage: setOutsidersPerPage },
     { searchId: 'deletedUserSearchInput', perPageId: 'deletedUserPerPageSelect', setSearch: setDeletedUsersSearch, setPerPage: setDeletedUsersPerPage },
+    { searchId: 'deletedAssetSearchInput', perPageId: 'deletedAssetPerPageSelect', setSearch: setDeletedAssetsSearch, setPerPage: setDeletedAssetsPerPage },
     { searchId: 'quotesSearchInput', perPageId: 'quotesPerPageSelect', setSearch: setQuotesSearch, setPerPage: setQuotesPerPage },
   ];
   serverDrivenControls.forEach(({ searchId, perPageId, setSearch: setServerSearch, setPerPage: setServerPerPage }) => {

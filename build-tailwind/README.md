@@ -72,7 +72,7 @@ and every page picks up the change consistently.
 
 ## Nothing to configure in Docker
 
-`nginx/Dockerfile` already just does `COPY frontend/ /usr/share/nginx/html/`
+`frontend/Dockerfile` already just does `COPY frontend/ /usr/share/nginx/html/`
 -- since `frontend/css/tailwind.css` is a plain committed file (not
 generated inside the Docker build), it gets copied in like any other
 static asset with zero changes needed to the Dockerfile or docker-compose

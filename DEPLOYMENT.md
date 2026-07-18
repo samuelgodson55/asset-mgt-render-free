@@ -25,7 +25,7 @@ your own VM/server, a cloud provider's container service, Kubernetes, etc.
 **Deploying to Azure Container Apps?** Everything below still applies
 conceptually (safety checklist, migration ordering, scaling shape, backup
 strategy) — jump straight to
-[Azure Container Apps Production Deployment](#azure-container-apps-production-deployment)
+[Azure Container Apps Production Deployment (Cost-Optimized)](#azure-container-apps-production-deployment-cost-optimized)
 for the fully automated, Azure-native version of this same pipeline
 (`infra/main.bicep` + `.github/workflows/deploy-azure-*.yml`).
 
@@ -40,7 +40,9 @@ for the fully automated, Azure-native version of this same pipeline
 - [Health Checks & Monitoring](#health-checks--monitoring)
 - [Backups & Disaster Recovery](#backups--disaster-recovery)
 - [Rolling Out Updates Without Downtime](#rolling-out-updates-without-downtime)
-- [Azure Container Apps Production Deployment](#azure-container-apps-production-deployment)
+- [Azure Container Apps Production Deployment (Cost-Optimized)](#azure-container-apps-production-deployment-cost-optimized)
+  - [Versioning & Cutting a Release](#versioning--cutting-a-release)
+  - [Rollback](#rollback)
 - [Troubleshooting](#troubleshooting)
 
 ---
@@ -362,374 +364,494 @@ its own explicit step (not on container boot — see the safety checklist)
 BEFORE rolling out backend code that depends on a new column/table, same
 as in a single-instance deployment.
 
-## Azure Container Apps Production Deployment
+## Azure Container Apps Production Deployment (Cost-Optimized)
 
 This is the **primary production target**: Azure Container Apps (ACA), fully
-automated end to end. Push to `develop` and Staging updates itself; merge to
-`main` and Production updates itself — nothing manual after the one-time
-setup below. The pipeline lives in `.github/workflows/`
-(`ci.yml`, `infra-deploy.yml`, `deploy-azure-staging.yml`,
-`deploy-azure-production.yml`) and the infrastructure lives in
-`infra/main.bicep`.
+automated end to end, and deliberately built to be the **cheapest realistic
+way to run this app on Azure** while keeping full functionality, real
+autoscaling, and a fast, zero-downtime deploy pipeline. Push to `develop`
+and Staging updates itself. Production works differently: **a pushed
+`git tag v1.x.x` is what triggers a production release** — merging to
+`main` alone does *not* deploy anything by itself anymore (see
+[Versioning & Cutting a Release](#versioning--cutting-a-release) below for
+the full walkthrough). Nothing manual after the one-time setup below either
+way. The pipeline lives in `.github/workflows/` (`ci.yml`, `infra-deploy.yml`,
+`deploy-azure-staging.yml`, `release.yml`, `deploy-azure-production.yml`)
+and the infrastructure lives in `infra/main.bicep`.
 
-### Why Container Apps, and what changes vs. Docker Compose
+> **If you deployed an earlier version of this architecture** — either the
+> original managed-services design (Flexible Server + Azure Cache + ACR +
+> Key Vault + 4 Container Apps) or the interim single-`app` cost-optimized
+> version (one combined container + `db` + `redis`) — this section
+> describes the current shape, not an incremental change from either. See
+> `infra/main.bicep`'s top-of-file comment for what changed and why each
+> change is safe at this scale.
 
-Every app-shaped piece of `docker-compose.yml` maps 1:1 onto its own Azure
-Container App, same names, same images, same `command:` overrides:
+### The shape: `frontend`, `backend`, `db`, `redis`
 
-| Compose service | Azure Container App | Notes |
-|---|---|---|
-| `backend` | Container App `backend` | Internal ingress only — never public |
-| `worker` | Container App `worker` | No ingress at all — scales on Celery queue depth, not HTTP |
-| `beat` | Container App `beat` | Pinned to exactly 1 replica, always — same rule as Compose |
-| `frontend` | Container App `frontend` | External ingress — the ONLY public entry point |
+`infra/main.bicep` provisions **four** Container Apps, split so `frontend`
+and `backend` can scale independently instead of being coupled to the same
+replica count:
 
-**`db` and `redis` are the one deliberate departure** from a literal
-container-per-container port: they become **Azure Database for PostgreSQL
-Flexible Server** and **Azure Cache for Redis** instead of containers. A
-stateful container in Container Apps still gets recreated/rescheduled like
-any other revision, and Container Apps' own storage isn't a substitute for a
-real database engine's backup/point-in-time-restore/failover story. The
-managed services are drop-in over the wire — `DATABASE_URL` and `REDIS_URL`
-keep the exact env var names `config.py`/`celery_app.py` already read, only
-the values change (TLS-required Postgres connection string, TLS-only
-`rediss://` Redis connection string — see `.env.azure.example` for both).
-**Zero application code changes were needed for this.**
+| Service | What it is | Public? | Scaling |
+|---|---|---|---|
+| `frontend` | `frontend/Dockerfile`, UNCHANGED from local Docker Compose — serves the static build, reverse-proxies `/api/*` to `backend` | Yes — the only public entry point | 0-N, independent of `backend` |
+| `backend` | FastAPI + embedded Celery worker/beat (`backend/Dockerfile`) | No — internal-only | 0-N, independent of `frontend` |
+| `db` | `postgres:16-alpine`, official Docker Hub image | No — internal-only | Pinned to 1 |
+| `redis` | `redis:7-alpine`, official Docker Hub image | No — internal-only | Pinned to 1 |
 
-`backup_data` and `export_data` (Compose's named volumes) become **Azure
-Files shares**, mounted into `backend`/`worker` at the exact same paths
-(`/app/backups`, `/app/export_results`) — `backend/services/backup_service.py`
-and `backend/tasks/export_tasks.py`'s shared-disk assumptions (multiple
-replicas reading/writing the same files) keep working unmodified.
+Plus one **Container Apps Job** (`migrate`) that runs `alembic upgrade head`
+against `backend`'s own image, on demand — not a fifth standing service.
+
+**Why `frontend` and `backend` are split, not combined:** a burst of pure
+asset-browsing traffic used to scale up the same container that also ran
+the embedded Celery worker, even with zero real API calls happening — and
+vice versa. Splitting them means each scales to its *own* actual load.
+
+**Why `frontend` reuses `frontend/Dockerfile` completely unmodified, rather
+than becoming a fully separate origin:** `frontend/js/api.js` hardcodes
+`API_URL = '/api'` as a relative path, and every request sends
+`credentials:'include'` (cookie-based auth) — both only work same-origin.
+nginx is the traffic cop that keeps that true: the browser only ever talks
+to `frontend`'s one public origin; nginx quietly reverse-proxies `/api/*`
+to `backend` over the Container Apps environment's internal DNS
+(`nginx/default.conf.template`'s `BACKEND_HOST`/`BACKEND_PORT` env vars —
+resolver auto-detected at boot, see
+`nginx/docker-entrypoint.d/15-detect-resolver-ip.sh`). Zero frontend code
+changes were needed for any of this.
+
+> **Considered and deliberately not used: Azure Static Web Apps for
+> `frontend`.** SWA's Free tier is genuinely free and would be a natural
+> fit for a static frontend — except linking a Container Apps backend
+> through SWA's reverse proxy (what would keep `/api/*` same-origin) is a
+> **Standard-plan-only** feature (~US$9/month), not available on Free. The
+> Free tier alone would mean the browser calling `backend` on a different
+> origin, which breaks the cookie-based auth this app uses today (would
+> require moving to Bearer tokens, a real security-relevant code change).
+> `frontend` staying a Container App gets equivalent real-world cost
+> (scale-to-zero + the Consumption plan's free monthly grant typically
+> lands this under a few dollars a month) with zero code risk. Revisit this
+> only if you're prepared to also do the Bearer-token auth migration.
+
+**Why `redis` is still here, not just three services:** once `backend`
+scales past 1 replica, it needs a *shared* Celery broker (all replicas'
+embedded workers pull from the same queue, not N independent ones), a
+shared cross-replica login rate limiter, and a shared backup-job leader
+lock (so N replicas don't all run pg_dump at 3am simultaneously) — all
+three already built into this codebase, all three requiring Redis. Cutting
+Redis would mean pinning `backend` to exactly 1 replica forever (no real
+autoscaling) or silently breaking all three the first time it scales past
+1. It's a small container (0.25 vCPU/0.5 GiB, no persistent volume, same
+"resets on restart" trade as before) — cheap insurance for correctness.
+
+**Zero application code changes were needed for the backend/db/redis
+split** — `db` and `redis` communicate with `backend`/`migrate` over the
+exact same `DATABASE_URL`/`REDIS_URL` env vars `config.py`/`celery_app.py`
+already read; only the values differ (see `.env.azure.example`).
+
+`backup_data` and `export_data` (Compose's named volumes) are Azure Files
+shares, mounted into `backend` at the exact same paths (`/app/backups`,
+`/app/export_results`). Postgres's own data directory is ALSO an Azure
+Files share, mounted into `db` — this is what makes it safe to
+restart/redeploy `db` without losing data.
+
+### Docker Hub instead of Azure Container Registry
+
+TWO custom images now — `<you>/snipeit-lite-backend` (from
+`backend/Dockerfile`) and `<you>/snipeit-lite-frontend` (from
+`frontend/Dockerfile`) — both pushed to **Docker Hub**, not Azure Container
+Registry (ACR's cheapest tier still has a fixed monthly floor whether or
+not you ever push an image).
+
+- **Default: both public repositories.** Zero registry credentials
+  anywhere in this deployment. Neither image contains secrets (JWT key, DB
+  passwords, etc. are all injected as Container Apps secrets at runtime,
+  never baked into either image).
+- **Optional: private repositories.** Docker Hub's free plan includes
+  exactly **one** private repo — if you want both `backend` and `frontend`
+  private, you'll need a paid Docker Hub plan, or keep one of the two
+  public. Set `dockerHubUsername`/`dockerHubToken` (a Docker Hub Personal
+  Access Token) when deploying `infra/main.bicep` either way — the same
+  credentials authenticate pulls for both images (one Docker Hub account),
+  and also help you avoid Docker Hub's anonymous per-IP pull rate limit
+  even on public repos.
 
 ### One-time setup
 
-1. **Create an Azure AD App Registration with federated credentials** (OIDC
-   — GitHub Actions authenticates to Azure with zero stored secrets):
-   ```bash
-   az ad app create --display-name snipeit-lite-github-actions
-   # note the appId (AZURE_CLIENT_ID) and your tenant/subscription IDs
-   az ad app federated-credential create --id <appId> --parameters '{
-     "name": "github-main",
-     "issuer": "https://token.actions.githubusercontent.com",
-     "subject": "repo:<org>/<repo>:ref:refs/heads/main",
-     "audiences": ["api://AzureADTokenExchange"]
-   }'
-   # repeat with "subject": "repo:<org>/<repo>:ref:refs/heads/develop" for staging,
-   # and "repo:<org>/<repo>:environment:<name>" if you use GitHub Environments
-   ```
-   Grant that app **Contributor** on the two resource groups you create next
-   (`az role assignment create ...`).
+1. **Create a Docker Hub account and access token** (Docker Hub → Account
+   Settings → Security → New Access Token, "Read & Write" scope).
 
-2. **Create the resource groups** (one per environment, so staging and
-   production can never accidentally touch each other's resources):
+2. **Register the Azure resource providers `infra/main.bicep` needs** (one
+   time, per subscription):
+   ```bash
+   az provider register --namespace Microsoft.App
+   az provider register --namespace Microsoft.OperationalInsights
+   az provider register --namespace Microsoft.Storage
+   ```
+   (No `Microsoft.ContainerRegistry`, `Microsoft.DBforPostgreSQL`,
+   `Microsoft.Cache`, or `Microsoft.KeyVault` registration needed.)
+
+3. **Create the two resource groups** (or let `infra-deploy.yml` create them
+   on first run):
    ```bash
    az group create --name rg-snipeit-lite-staging --location eastus
    az group create --name rg-snipeit-lite-prod --location eastus
    ```
 
-3. **Add GitHub repo secrets** (Settings → Secrets and variables → Actions):
+4. **Set up OIDC federated login** for GitHub Actions: an Azure AD App
+   Registration, Contributor on both resource groups, a federated
+   credential per environment. Full steps:
+   [Azure docs: Connect GitHub Actions to Azure](https://learn.microsoft.com/azure/developer/github/connect-from-azure).
 
-   | Secret | Value |
-   |---|---|
-   | `AZURE_CLIENT_ID` | App Registration's Application (client) ID |
-   | `AZURE_TENANT_ID` | Your Azure AD tenant ID |
-   | `AZURE_SUBSCRIPTION_ID` | Target subscription ID |
-   | `AZURE_LOCATION` | e.g. `eastus` |
-   | `PROD_RESOURCE_GROUP` | `rg-snipeit-lite-prod` |
-   | `STAGING_RESOURCE_GROUP` | `rg-snipeit-lite-staging` |
-   | `POSTGRES_ADMIN_PASSWORD` | Generate: `openssl rand -base64 24` |
-   | `JWT_SECRET_KEY` | Generate: `python3 -c "import secrets; print(secrets.token_hex(32))"` |
-   | `SUPER_ADMIN_PASSWORD` | Generate: `python3 -c "import secrets; print(secrets.token_urlsafe(18))"` |
-   | `CUSTOM_DOMAIN` | Optional — leave empty to use the generated `*.azurecontainerapps.io` domain |
+5. **Add GitHub repository secrets** (Settings → Secrets and variables →
+   Actions), split across two GitHub **Environments** (`staging`,
+   `production`) where the value differs, repo-level where it doesn't:
 
-   Use **different** values for staging vs. production where it matters
-   (`POSTGRES_ADMIN_PASSWORD`, `JWT_SECRET_KEY`, `SUPER_ADMIN_PASSWORD`) —
-   easiest via two GitHub **Environments** (`staging`, `production`) each
-   with their own copy of those three secrets, referenced by
-   `infra-deploy.yml`'s `environment:` key.
+   | Secret | Scope | Notes |
+   |---|---|---|
+   | `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` | per-environment | From the App Registration in step 4 |
+   | `AZURE_LOCATION` | repo | e.g. `eastus` |
+   | `STAGING_RESOURCE_GROUP` / `PROD_RESOURCE_GROUP` | repo | The two resource group names from step 3 |
+   | `DOCKERHUB_USERNAME` | repo | From step 1 |
+   | `DOCKERHUB_TOKEN` | repo | From step 1 |
+   | `POSTGRES_PASSWORD` | per-environment | Generate with `openssl rand -hex 16`, different per environment |
+   | `REDIS_PASSWORD` | per-environment | Same, different per environment |
+   | `JWT_SECRET_KEY` | per-environment | Generate with `openssl rand -hex 32` |
+   | `SUPER_ADMIN_PASSWORD` | per-environment | The initial Super Admin login |
+   | `CUSTOM_DOMAIN` | per-environment | Optional — leave unset to use the generated `*.azurecontainerapps.io` FQDN |
 
-4. **Provision the infrastructure** — run the *Deploy Azure Infrastructure*
-   workflow (Actions tab → `infra-deploy.yml` → Run workflow → pick
-   `staging`, then run it again and pick `production`). This creates
-   everything in the table above via `infra/main.bicep` and takes ~10–15
-   minutes (Postgres Flexible Server is the slow part).
+6. **Run `infra-deploy.yml` manually once per environment** (Actions tab →
+   "Deploy Azure Infrastructure" → Run workflow → choose `staging`, then run
+   it again for `production`). This provisions everything: Log Analytics,
+   Storage + Azure Files shares, the Container Apps Environment, and all
+   four Container Apps (`backend`/`frontend` start on a placeholder
+   `latest` tag — the next step gives them real images).
 
-5. **First app deploy** — push to `develop` (staging) or merge to `main`
-   (production). The pipeline builds real images and replaces the
-   placeholder ones the infra deploy created.
+7. **Allow Actions to open pull requests** (Settings → Actions → General →
+   Workflow permissions → check **"Allow GitHub Actions to create and
+   approve pull requests"**, then Save). This is **off by default** on
+   every repo and easy to miss — without it, `release.yml`'s `changelog`
+   job (which opens the `CHANGELOG.md` PR against `main` using the default
+   `GITHUB_TOKEN`) fails with a 403 the first time you push a tag. Nothing
+   else in this pipeline needs this setting — only that one PR-creation
+   step.
+
+8. **(Recommended) Turn on squash merging, off everything else**
+   (Settings → General → Pull Requests → uncheck "Allow merge commits" and
+   "Allow rebase merging", check "Allow squash merging", and check "Default
+   to pull request title for squash merge commits"). Not required for
+   anything to function, but it means each PR you merge into `develop`/
+   `main` becomes exactly one commit — which keeps the changelog entries
+   `release.yml` generates from `git log <prev-tag>..<tag>` (one bullet per
+   commit) one bullet per feature/fix instead of one bullet per intermediate
+   commit inside the branch.
+
+9. **Push to `develop`** for Staging, or **push a `git tag v1.x.x`** off
+   `main` for Production — either builds real images, pushes them to Docker
+   Hub, runs migrations, and rolls them out (`deploy-azure-staging.yml` for
+   the former; `release.yml` → `deploy-azure-production.yml` for the
+   latter — see [Versioning & Cutting a Release](#versioning--cutting-a-release)
+   below for the full tagging walkthrough). From here on, deploys are just
+   `git push`/`git push --tags`.
+
+### Versioning & Cutting a Release
+
+This project uses plain [semantic versioning](https://semver.org/) tags —
+`vMAJOR.MINOR.PATCH` — as the trigger for a production release. Nothing
+else about a tag's format is special-cased anywhere in the pipeline; `v1`,
+`1.4.2` (no `v`), or `v1.4.2-rc1` will NOT match `release.yml`'s
+`push: tags: ['v*.*.*']` trigger (or will match in ways you don't want —
+`v1.4.2-rc1` does match `v*.*.*` and WILL cut a real production release, so
+don't use pre-release-looking tags unless you mean it).
+
+**Your day-to-day workflow, feature branch to production:**
+
+1. Branch off `develop`, do the work, open a PR into `develop`. Only
+   `ci.yml` runs on the feature branch itself — no deploy, no versioning.
+2. Merge that PR into `develop` → `deploy-azure-staging.yml` builds and
+   rolls out a SHA-tagged image to staging automatically. Verify it there.
+   **Nothing here touches `CHANGELOG.md` or any version number** — staging
+   deploys stay SHA-based on every merge, same as before this pipeline had
+   tags at all.
+3. When you're ready to promote what's on `develop`, open a PR from
+   `develop` into `main` and merge it. This is also just a merge — still no
+   deploy, no version bump, no changelog entry. `main` can sit any number
+   of merges ahead of what's actually live in production; that's expected,
+   not a problem to fix.
+4. **Decide it's time to release, and only then tag:**
+   ```bash
+   git checkout main && git pull
+   git tag v1.5.0                # bump MAJOR.MINOR.PATCH -- see below for which
+   git push origin v1.5.0
+   ```
+   This is the one command that actually changes production. Everything
+   from here on is automatic — see
+   [The pipeline, branch by branch](#the-pipeline-branch-by-branch) for the
+   stage-by-stage breakdown of what `release.yml` does with that tag
+   (build + tag both images with `v1.5.0`, open the `CHANGELOG.md` PR, cut
+   a GitHub Release, and deploy).
+
+**Which part of `MAJOR.MINOR.PATCH` to bump** — a quick rule of thumb for a
+project at this stage (pre-1.0 conventions can be looser, but pick one and
+stay consistent):
+- **PATCH** (`v1.4.2` → `v1.4.3`): bug fixes, no schema change, no API
+  contract change a client of `/api/*` would notice.
+- **MINOR** (`v1.4.2` → `v1.5.0`): new features, additive Alembic
+  migrations (new nullable columns/tables — see the "migrate first, only
+  ever ADD" rule in `README.md`'s CI/CD section), anything backward
+  compatible.
+- **MAJOR** (`v1.4.2` → `v2.0.0`): breaking changes — a migration that
+  renames/drops something old code depends on, a `/api/*` contract change,
+  the Bearer-token auth migration mentioned earlier in this doc, etc.
+
+**What tagging does NOT require:** you do not need to be on a clean `main`
+with nothing else in flight, and you do not need to wait for a previous
+release's `CHANGELOG.md` PR to be merged first — `release.yml`'s `deploy`
+job only needs the images it just built, never the changelog PR (see
+[The pipeline, branch by branch](#the-pipeline-branch-by-branch)).
+
+**Fully automating the version number too:** everything above still has you
+typing the version number by hand. If you'd rather have it computed for you
+from [Conventional Commits](https://www.conventionalcommits.org/)
+(`feat:`/`fix:`/`feat!:` PR titles) — via a tool like
+[release-please](https://github.com/googleapis/release-please-action),
+which maintains a standing "Release PR" with the next version + changelog
+pre-computed, and creates the tag the moment you merge it — that's a
+separate, optional layer on top of this pipeline, not a requirement of it;
+ask if you want it wired in.
+
+
+
+If you're moving off the original managed-services design (Azure Database
+for PostgreSQL Flexible Server):
+
+```bash
+# 1. Dump from the old Flexible Server
+pg_dump "postgresql://<user>:<pass>@<old-server>.postgres.database.azure.com/asset_db?sslmode=require" \
+  --format=custom --file=migration.dump
+
+# 2. Get a temporary shell into the new `db` container app (internal-only by design)
+az containerapp exec --name db --resource-group rg-snipeit-lite-prod --command /bin/sh
+
+# 3. Restore through that session (or copy the dump in and run pg_restore inside `db` directly)
+pg_restore --no-owner --no-privileges -d asset_db migration.dump
+```
+
+If you're moving off the interim single-`app` version of this
+cost-optimized design (one combined container instead of separate
+`backend`/`frontend`): no database migration needed — `db`/`redis` are
+unchanged. Just run `infra-deploy.yml` against the new `infra/main.bicep`
+(it will remove the old `app` Container App and create `backend`/
+`frontend` in its place), then push to `main`/`develop` to populate both
+new apps' images.
 
 ### The pipeline, branch by branch
 
-Same branching model as the Compose deployment above, re-targeted at Azure:
-
-| Branch | Workflow | What happens |
-|---|---|---|
-| `feature/*` | `ci.yml` | Lint, test, dependency audit, secret scan, image build + scan. No deploy. |
-| `develop` | `ci.yml` → `deploy-azure-staging.yml` | Builds images (frontend: minified, not obfuscated), pushes to ACR, runs `alembic upgrade head` via the `migrate` Container Apps Job, rolls out to staging, smoke tests. |
-| `main` | `ci.yml` → `deploy-azure-production.yml` | Same, but frontend is bundled + minified + **obfuscated** (`BUILD_ENV=production`), Trivy scan is blocking on CRITICAL, and a failed smoke test triggers an **automatic rollback** to the previously-deployed image. |
-
-```
-push to main
-  -> ci.yml (lint, test, audit, secret scan)
-  -> build backend + frontend images, push to ACR (tag: commit SHA)
-  -> Trivy scan (blocking on CRITICAL in prod)
-  -> migrate job: alembic upgrade head (against the OLD, still-live containers)
-  -> az containerapp update --image ... for backend, worker, beat, frontend
-     (Container Apps' health-probed rolling replacement — see probes below)
-  -> smoke test against the live frontend FQDN
-  -> automatic rollback to the previous image if the smoke test fails
-```
+- **`develop` push → Staging** (`deploy-azure-staging.yml`): build BOTH
+  images (`backend`, `frontend`) in parallel → push each to its own Docker
+  Hub repo, tagged with the commit SHA → Trivy scan (report-only, doesn't
+  block) → run `migrate` job against the new `backend` image → roll out
+  `backend` then `frontend`. Both run with min replicas 0 on staging — pure
+  scale-to-zero.
+- **`git tag v1.x.x` push → Production** (`release.yml` calling
+  `deploy-azure-production.yml`): `release.yml` builds BOTH images and
+  pushes each tagged with the **version itself** (e.g. `:v1.4.2`, not just a
+  SHA — see [Rollback](#rollback) for why that's the point), with Trivy
+  **blocking** on CRITICAL findings for either image; opens a pull request
+  against `main` with the new `CHANGELOG.md` section (never a direct commit
+  — see [Cutting a production release](#azure-container-apps-production-deployment-cost-optimized)
+  above) and cuts a GitHub Release; and, **in parallel, not sequentially**,
+  calls `deploy-azure-production.yml`, which runs `migrate` against the new
+  `backend` image, rolls out `backend` then `frontend`, and smoke tests
+  `frontend`'s `/` AND `/api/auth/me` (proving the whole chain — nginx's
+  reverse proxy actually reaching `backend` — works, not just that
+  `frontend` serves static files) — a failure triggers automatic rollback
+  of both apps to their previously-deployed images. `backend` runs with min
+  replicas 1 in production by default; `frontend` still scales to zero even
+  in production (a cold start on static/proxy responses is much shorter
+  than on `backend`'s Python process). `deploy-azure-production.yml` itself
+  has no `push` trigger of its own anymore — it only runs when `release.yml`
+  calls it, or via manual `workflow_dispatch` (see [Rollback](#rollback)).
+- **`db` and `redis` are never touched by either pipeline** — fixed
+  official images, only change when `infra/main.bicep` itself changes
+  (re-run `infra-deploy.yml` manually).
 
 ### Zero-downtime rollout mechanics
 
-Every container app runs in **Single revision mode** with `Liveness`/
-`Readiness` HTTP probes against `GET /healthz` (`backend`) and `GET /`
-(`frontend`) — see `infra/main.bicep`'s `probes` blocks. When
-`az containerapp update --image ...` runs, Container Apps starts new
-replicas on the new image, waits for them to pass their readiness probe,
-shifts traffic over, and only then tears down the old replicas — the same
-guarantee `docker compose up -d --no-deps --scale backend=N backend` gives
-you manually in the Compose deployment, done automatically by the platform
-here. `migrate` always runs **before** this step, against the still-live old
-containers, for the exact same "never a mid-flight schema mismatch" reason
-called out in the Compose section above.
+Container Apps' Single revision mode creates new replicas of `backend` (and
+separately, `frontend`) alongside the old ones, waits for each app's
+readiness probe to pass, then shifts traffic and removes the old replicas —
+no separate load balancer step needed. `backend` is always updated before
+`frontend` in the pipeline, so `frontend`'s proxy target is already correct
+by the time `frontend` itself rolls out. `db`/`redis` are pinned to exactly
+1 replica always and are never part of a rolling update.
 
 ### Rollback
 
-The production workflow rolls back **automatically** on a failed smoke
-test. To roll back manually at any time (e.g. a bug shipped that passed the
-smoke test):
-```bash
-# Find the previous working image tag (recent commit SHAs, or check ACR):
-az acr repository show-tags --name <acr-name> --repository snipeit-backend --orderby time_desc -o table
+`deploy-azure-production.yml`'s `deploy` job snapshots both currently-live
+image tags before updating (its "Snapshot currently-live images" step), and
+automatically re-points both `backend` and `frontend` at them if the
+post-deploy smoke test fails — most bad releases never need a manual
+rollback at all. The runbook below is for the cases that do: a regression
+that passes the smoke test but is caught later, or a rollback requested
+well after the deploy finished.
 
-az containerapp update --name backend --resource-group rg-snipeit-lite-prod --image <acr>/snipeit-backend:<previous-sha>
-az containerapp update --name worker  --resource-group rg-snipeit-lite-prod --image <acr>/snipeit-backend:<previous-sha>
-az containerapp update --name beat    --resource-group rg-snipeit-lite-prod --image <acr>/snipeit-backend:<previous-sha>
+**Step 1 — find out what's actually running right now.** Don't assume the
+tag you *think* is live is the one that's live — ask Azure directly:
+```bash
+az containerapp show --name backend --resource-group rg-snipeit-lite-prod \
+  --query "properties.template.containers[0].image" -o tsv
+# -> e.g. <you>/snipeit-lite-backend:v1.4.2
 ```
-As with the Compose rollback rule above: **never** roll back a migration
-just to roll back code — only run `alembic downgrade -1` via the `migrate`
-job if the migration itself needs undoing, and only if nothing depending on
-the new schema has shipped anywhere else.
+(This is the same command `deploy-azure-production.yml`'s own snapshot step
+runs — see its `GITHUB_STEP_SUMMARY` on the most recent successful run of
+that workflow in the Actions tab for a ready-made record of "what was live
+right before" and "what got deployed," without running anything yourself.)
+
+**Step 2 — name the actual previous version**, not an abstract placeholder.
+Tags sort by creation date, so the previous release is whichever one comes
+right after the currently-live tag from step 1 in this list:
+```bash
+git fetch --tags
+git tag --sort=-creatordate | head -n 5
+```
+```
+v1.4.2   <- currently live (confirmed in step 1)
+v1.4.1   <- this is PREV_TAG -- the one to roll back to
+v1.4.0
+v1.3.0
+v1.2.4
+```
+(This is the exact same `git tag --sort=-creatordate` lookup
+`release.yml`'s `changelog` job uses to build each `CHANGELOG.md` section —
+so `CHANGELOG.md`'s `## [v1.4.2]` entry and this rollback are always talking
+about the same "previous version.") You can also skim `CHANGELOG.md` on
+`main`, or `gh release list --limit 5`, to confirm what changed in the
+version you're rolling back past before you commit to it — note
+`CHANGELOG.md` on `main` may briefly lag a version or two behind if its
+automated PR (`changelog/vX.Y.Z`) hasn't been merged yet; the GitHub
+Release always has the same notes immediately, with no merge required, if
+you need them sooner.
+
+**Step 3 — roll back.** Two equivalent ways to do it, in order of
+preference:
+
+- **Preferred: re-run the pipeline against the older tag**, so the rollback
+  gets the same migrate-first-and-wait-for-healthy discipline (and
+  automatic smoke test) as a forward deploy, rather than a raw image swap:
+  ```bash
+  gh workflow run deploy-azure-production.yml -f image_tag=v1.4.1
+  ```
+  (Actions tab → "Deploy to Azure (Production)" → Run workflow →
+  `image_tag: v1.4.1` works identically if you'd rather not use the CLI.)
+  ⚠️ Only safe if `v1.4.1`'s database schema is compatible with what's
+  currently migrated — i.e. the bad release didn't itself introduce a
+  migration that later code depends on. If it did, you need a
+  forward-fixing migration instead of a rollback; see the "migrate first,
+  deploy second" rule in `README.md`'s CI/CD section.
+
+- **Direct, no pipeline**: swap the images by hand, e.g. if the automatic
+  rollback already fired but you want to jump back further than one
+  version:
+  ```bash
+  az containerapp update --name backend --resource-group rg-snipeit-lite-prod \
+    --image <you>/snipeit-lite-backend:v1.4.1
+  az containerapp update --name frontend --resource-group rg-snipeit-lite-prod \
+    --image <you>/snipeit-lite-frontend:v1.4.1
+  ```
+  This skips `migrate` and the smoke test entirely — only use it once
+  you've confirmed step 3's schema-compatibility caveat above yourself.
 
 ### Scaling
 
-`backend` and `frontend` scale on HTTP concurrency (KEDA's built-in HTTP
-scale rule — see `infra/main.bicep`'s `scale.rules`). `worker` is the more
-interesting one: rather than the Compose deployment's manual
-`--scale worker=3` before a known traffic spike, `worker` here autoscales on
-**Celery queue depth** via KEDA's Redis List Length scaler — a replica is
-added for every 5 queued export jobs, up to `workerMaxReplicas`, and scales
-back down automatically once the queue drains. `beat` is hard-pinned to
-`minReplicas: 1, maxReplicas: 1` — never change this (see the duplicate
-notification-email reasoning repeated throughout this doc and
-`celery_app.py`'s `beat_schedule` comment).
+- **`backend`**: scales 0–3 replicas by default (configurable via
+  `backendMinReplicas`/`backendMaxReplicas`) on concurrent HTTP request
+  count. Since `RUN_EMBEDDED_WORKER=true`, every `backend` replica also
+  runs its own Celery worker — see this doc's earlier "Load Balancing &
+  Scaling For Peak Use" section for the multi-replica-safe patterns
+  (Redis-backed rate limiter, Redis leader lock for the scheduled backup)
+  that make this safe.
+- **`frontend`**: scales 0–3 replicas by default (configurable via
+  `frontendMinReplicas`/`frontendMaxReplicas`), independent of `backend`.
+  Static/proxy responses are cheap, so its per-replica concurrency
+  threshold is set higher than `backend`'s (see `infra/main.bicep`).
+- **`db` and `redis`**: pinned to exactly 1 replica, always. Do not raise
+  this — Postgres is single-writer and there's no clustering/failover story
+  here; this is the explicit trade for the cost savings. If you outgrow a
+  single-instance Postgres container, move `db` back to a managed service
+  rather than trying to scale the container itself.
 
 ### Monitoring
 
-Every container app and the `migrate` job log to the **same Log Analytics
-workspace** (`infra/main.bicep`'s `containerAppEnv.appLogsConfiguration`),
-so one place covers the whole stack.
-
-**Quick checks (CLI):**
+All four Container Apps' console and system logs flow into one Log
+Analytics workspace (`infra/main.bicep`'s `logAnalytics` resource, 30-day
+retention). Query it from the Azure Portal (Log Analytics workspace →
+Logs) or the CLI:
 ```bash
-# Live-tail a specific app's logs
-az containerapp logs show --name backend --resource-group rg-snipeit-lite-prod --follow
-
-# Current replica count, CPU/memory, restarts
-az containerapp replica list --name backend --resource-group rg-snipeit-lite-prod -o table
-
-# Revision health + traffic split
-az containerapp revision list --name backend --resource-group rg-snipeit-lite-prod -o table
+az monitor log-analytics query \
+  --workspace <workspace-id> \
+  --analytics-query "ContainerAppConsoleLogs_CL | where ContainerAppName_s == 'backend' | order by TimeGenerated desc | take 100"
 ```
-
-**Log Analytics (KQL)** — Azure Portal → your Log Analytics workspace →
-Logs. Because `LOG_FORMAT=json` (see `.env.azure.example`), the backend's
-structured log fields parse straight into the `Log_s` column and are easy to
-query further:
-```kql
-// Errors across every app in the last hour
-ContainerAppConsoleLogs_CL
-| where TimeGenerated > ago(1h)
-| where Log_s has "ERROR"
-| project TimeGenerated, ContainerAppName_s, Log_s
-| order by TimeGenerated desc
-
-// Correlate one request across nginx + backend using the X-Request-ID
-// that nginx/default.conf.template already injects
-ContainerAppConsoleLogs_CL
-| where Log_s has "<request-id>"
-| order by TimeGenerated asc
-
-// Restart/crash loop detection
-ContainerAppSystemLogs_CL
-| where TimeGenerated > ago(24h)
-| where Log_s has "Restarted" or Log_s has "OOMKilled"
-| summarize count() by ContainerAppName_s
-```
-
-**Application Insights** (already wired via `APPLICATIONINSIGHTS_CONNECTION_STRING`
-in every app's env, see `infra/main.bicep`'s `sharedEnv`) gives you request
-rate/latency/failure-rate charts and dependency tracking out of the box for
-FastAPI once the `opentelemetry-instrumentation-fastapi` package is added to
-`backend/requirements.txt` — a good next step, not yet wired into the
-application code as of this deployment.
-
-**Alerts** — set these up once in the Azure Portal (Monitor → Alerts →
-Create alert rule) against the Log Analytics workspace or the container
-apps directly, with an Action Group emailing/paging your team:
-- `backend`/`frontend` `Replica Restart Count` > 3 in 10 minutes
-- `backend` HTTP 5xx rate > 5% over 5 minutes (from `ContainerAppConsoleLogs_CL` or App Insights)
-- Postgres Flexible Server `cpu_percent` > 80% for 15 minutes
-- Redis `usedmemorypercentage` > 90%
-- `migrate` job execution status = `Failed` (catches a bad migration before it becomes an outage)
-
-**Dashboards** — Azure Portal → Container Apps Environment → Metrics gives
-you built-in charts (requests, replica count, CPU/memory per app) with zero
-setup; pin the ones you check most to a shared Azure Dashboard for the team.
+For live tailing without Log Analytics at all: `az containerapp logs show
+--name backend --resource-group rg-snipeit-lite-prod --follow` (or
+`--name frontend` for nginx's access/error logs). There is no Application
+Insights in this architecture.
 
 ### Cost
 
-Rough East US, pay-as-you-go estimates (your region/traffic will shift these
-— treat as a planning starting point, not a quote; verify with the
-[Azure Pricing Calculator](https://azure.microsoft.com/pricing/calculator/)):
+East US pricing, ballpark — always check the
+[Azure Pricing Calculator](https://azure.microsoft.com/pricing/calculator/)
+before committing:
 
-| Resource | Configuration | ~Monthly |
-|---|---|---|
-| Container Apps (`backend`) | 0.5 vCPU/1 GiB, min 1 replica, light traffic | ~$15–25 |
-| Container Apps (`worker`) | 0.5 vCPU/1 GiB, min 1 replica, light export volume | ~$15 |
-| Container Apps (`beat`) | 0.25 vCPU/0.5 GiB, always 1 replica (can't scale to 0) | ~$7 |
-| Container Apps (`frontend`) | 0.25 vCPU/0.5 GiB, min 1 replica | ~$10–20 |
-| Postgres Flexible Server | Burstable B1ms, 32 GiB storage | ~$16 |
-| Azure Cache for Redis | Basic C0 (250 MB) | ~$16 |
-| Container Registry | Basic | ~$5 |
-| Storage Account + Azure Files | 2×20 GiB shares | ~$2–3 |
-| Log Analytics + App Insights | Small app, low log volume | ~$0–10 |
-| Key Vault | Standard, low operation count | <$1 |
-| **Total, always-warm production** | | **~$90–115/month** |
+| Component | This architecture (4 apps) | Interim single-`app` version | Original managed-services version |
+|---|---|---|---|
+| Database | `db` container, 0.25 vCPU/0.5 GiB, 24/7 | same | Flexible Server, Burstable B1ms |
+| Cache/broker | `redis` container, 0.25 vCPU/0.5 GiB, 24/7 | same | Azure Cache for Redis, Basic C0 |
+| App compute | `backend` (0-N) + `frontend` (0-N), independent scaling | one combined `app` (0-N) | 4 separate always-on Container Apps |
+| Registry | Docker Hub, 2 images (free) | Docker Hub, 1 image (free) | Azure Container Registry, Basic |
+| Secrets | Container Apps secrets (free) | same | Key Vault |
+| Observability | Log Analytics only | same | Log Analytics + Application Insights |
+| **Rough monthly total** | **~US$10-22/mo** | **~US$10-20/mo** | **~US$50-100+/mo** |
 
-The first 180,000 vCPU-seconds, 360,000 GiB-seconds, and 2 million requests
-per subscription per month are free and offset part of the Container Apps
-line items above (idle usage is billed at a reduced rate, roughly a third
-of the active rate, but isn't fully covered by that free grant — see
-[Container Apps billing](https://learn.microsoft.com/azure/container-apps/billing)).
+Splitting `frontend` out adds roughly US$0-2/month over the single-`app`
+version (one more small scale-to-zero container), in exchange for
+`frontend` and `backend` each scaling to their own actual load instead of
+both being sized for whichever is busier — often close to a wash in
+practice, and sometimes a net win if the two workloads' traffic shapes
+differ a lot. The real cost floor either way is `db` + `redis` running 24/7
+at the smallest possible size, since they're stateful and can't scale to
+zero (partially offset by the Container Apps Consumption plan's free
+monthly grant: 180,000 vCPU-seconds + 360,000 GiB-seconds + 2M requests,
+shared across all four apps).
 
-**This is already the cheapest configuration that's still genuinely
-production-shaped** — Burstable Postgres and Basic Redis are the bottom
-tier of each managed service, and every Container App is sized to its
-actual resource need (`beat` and `frontend` at 0.25 vCPU, not the more
-generous defaults many quickstarts ship with). The main lever left is
-**replica count**, and it's already wired up:
-
-- **Staging scales to zero automatically.** `infra-deploy.yml` sets
-  `backendMinReplicas=0`/`workerMinReplicas=0` for staging and `=1` for
-  production (see that workflow's "Resolve replica floor" step) — staging
-  costs close to $0 in Container Apps compute between deploys, and the
-  cold start (a few seconds) is a non-issue for a QA environment nobody's
-  actively waiting on.
-- **Production's `backendMinReplicas`/`workerMinReplicas` are still just
-  Bicep parameters** (`infra/main.bicep`) — if production traffic is also
-  genuinely low/bursty (e.g. a small internal team, not a 24/7 public
-  service), set both to `0` there too and accept the cold start on the
-  first request after idle. That alone removes roughly $30/month.
-- **`beat` can never scale to zero** (it has to keep running to fire the
-  schedule) but is already the cheapest possible size — leave it as is.
-- If cost matters more than the managed-service guarantees described
-  above, the biggest single line items to reconsider are Postgres and
-  Redis — running them as Container Apps instead (closer to the original
-  Compose shape) saves roughly $30/month combined, at the cost of losing
-  automated backups/point-in-time restore and dealing with container
-  storage persistence yourself. I'd only make that trade for a
-  low-stakes staging environment, not production.
-- **Worth knowing:** Microsoft has announced Azure Cache for Redis
-  retiring in 2028, with **Azure Managed Redis** as the migration target.
-  Basic C0 remains fine to deploy today and there's no rush, but if you're
-  optimizing for the multi-year picture rather than this month's bill,
-  provisioning Azure Managed Redis instead from the start is worth a look —
-  say the word and I'll swap `infra/main.bicep`'s `redis` resource over.
+**Levers you can pull for even more savings:**
+- `backendMinReplicas=0` on production too (small extra cold-start latency
+  for occasional visitors, in exchange for `backend`'s compute approaching
+  zero — `frontend` already defaults to 0 even in production).
+- Skip Log Analytics entirely (remove `appLogsConfiguration` from
+  `infra/main.bicep`) if `az containerapp logs show --follow`-only
+  visibility is enough for you.
+- Reduce `postgresVolumeQuotaGb`/backup/export share quotas if your data
+  footprint is small (Azure Files bills by GB actually used, so this mostly
+  just caps a ceiling).
 
 ### Managing Environment Variables & Secrets Safely
 
-Three different categories of "environment variable" exist in this
-pipeline, each handled differently on purpose:
+There is no Key Vault in this architecture. Sensitive values
+(`JWT_SECRET_KEY`, `SUPER_ADMIN_PASSWORD`, `DATABASE_URL`, `REDIS_URL`,
+`SMTP_PASSWORD`, and the Docker Hub token if using a private repo) are
+stored as **Container Apps secrets** on `backend`/`migrate` — encrypted at
+rest, referenced by `secretRef`, never shown in `az containerapp show`'s
+output or GitHub Actions logs. `frontend` carries no secrets at all — it
+never touches the database, Redis, JWTs, or SMTP directly, only
+`BACKEND_HOST`/`BACKEND_PORT`/`ENABLE_API_DOCS` as plain env vars.
 
-1. **Plain config** (`LOG_LEVEL`, `CURRENCY_CODE`, `ENABLE_API_DOCS`, ...) —
-   not sensitive, set directly as Container App env vars in
-   `infra/main.bicep`'s `sharedEnv`. Visible in `az containerapp show` and
-   the Azure Portal — that's fine, nothing here is a secret.
-2. **Real secrets** (`JWT_SECRET_KEY`, `SUPER_ADMIN_PASSWORD`, the Postgres
-   password, `SMTP_PASSWORD`) — these are the ones worth being careful
-   with, and they already flow through **Azure Key Vault**, not plain
-   Container Apps env vars:
-   ```
-   GitHub encrypted secret  ──(OIDC login, no stored secret)──>  Bicep @secure() parameter
-                                                                       │
-                                                                       v
-                                                          Key Vault secret (encrypted at rest,
-                                                          RBAC-controlled, access-logged)
-                                                                       │
-                                                                       v
-                             Container App "secretRef" + managed identity
-                             (the app reads the value at start; it's never
-                              written into the app's own env-var list)
-   ```
-   Nothing secret ever lands in this repo, a committed file, or a
-   Container Apps env var you can read back in plaintext from the Portal.
-3. **Local dev secrets** (`.env`) — unchanged from before: git-ignored,
-   never touches Azure at all.
-
-**How to check what's set, without exposing values:**
-```bash
-# Confirm a secret reference exists (never prints the value)
-az containerapp secret list --name backend --resource-group rg-snipeit-lite-prod -o table
-
-# Confirm Key Vault has the secret (again, no value shown without --query)
-az keyvault secret list --vault-name <kv-name> -o table
-```
-
-**How to rotate a secret safely:**
-```bash
-# 1. Write the new value straight into Key Vault (never through a GitHub
-#    Actions log, never through a plain `az containerapp update --set-env-vars`)
-az keyvault secret set --vault-name <kv-name> --name jwt-secret-key --value "$(openssl rand -hex 32)"
-
-# 2. Container Apps caches secret values per revision -- force every app
-#    that reads it to pick up the new value:
-az containerapp update --name backend --resource-group rg-snipeit-lite-prod
-az containerapp update --name worker  --resource-group rg-snipeit-lite-prod
-az containerapp update --name beat    --resource-group rg-snipeit-lite-prod
-```
-Rotating `JWT_SECRET_KEY` specifically logs out every currently-signed-in
-user at once (every existing token fails verification against the new
-secret) — same caveat as the Compose deployment's own safety checklist,
-just easier to trigger by accident now that it's a one-command rotation.
-Plan it for a quiet period, and roll it out to `backend`/`worker`/`beat`
-together (never rotate on just one) — this is the exact same "every
-replica needs the identical secret" rule called out earlier in this doc.
-
-**Other guardrails already in place:**
-- **OIDC federated login** (`azure/login@v2` in every workflow) — GitHub
-  Actions authenticates to Azure with a short-lived token, not a stored
-  client secret. There's no Azure credential sitting in GitHub at all to
-  leak.
-- **`gitleaks` in `ci.yml`** catches anything that looks like a secret
-  before it's ever committed, independent of the Key Vault setup above.
-- **GitHub Environments** — set `staging`/`production` up as GitHub
-  Environments (Settings → Environments) with their own copy of
-  `POSTGRES_ADMIN_PASSWORD`/`JWT_SECRET_KEY`/`SUPER_ADMIN_PASSWORD`, and
-  add **required reviewers** on the `production` environment specifically
-  — `infra-deploy.yml` already references `environment:
-  ${{ github.event.inputs.target }}`, so this takes effect immediately
-  with no workflow changes, and means a human has to approve before
-  production secrets/infra can be touched.
-- **None of the deploy workflows ever `echo`, log, or pass a secret value
-  as a plain `--set-env-vars` argument** — every secret-bearing step in
-  `deploy-azure-production.yml`/`-staging.yml`/`infra-deploy.yml` either
-  references a `secretRef` already wired up in `infra/main.bicep`, or (for
-  the one-time infra deploy) passes the value as a Bicep `@secure()`
-  parameter, which Azure Resource Manager deliberately omits from
-  deployment history/activity logs.
+To rotate a secret (e.g. `POSTGRES_PASSWORD`): update the corresponding
+GitHub secret, then re-run `infra-deploy.yml` for that environment — Bicep
+deployments are idempotent, so this updates the secret on `db`, `redis`,
+`backend`, and `migrate` consistently in one pass. Don't rotate by
+hand-editing one container app's secrets directly; the others will drift
+out of sync.
 
 ## Troubleshooting
 
@@ -760,34 +882,62 @@ replica needs the identical secret" rule called out earlier in this doc.
   dashboard) to confirm the backup exists, rather than grepping one
   specific replica's logs.
 
-### Azure Container Apps specific
+### Azure Container Apps specific (cost-optimized 4-app architecture)
 
-- **`az containerapp update` succeeds but the app still serves old
-  behavior** — check `az containerapp revision list` for the active
-  revision's `healthState`; if the new replicas never passed their
-  readiness probe (`GET /healthz`), Container Apps never shifted traffic to
-  them and the old revision is still serving. Check
-  `az containerapp logs show` for the new revision's startup errors.
-- **Backend can't reach Postgres: `SSL connection required`** — Azure
-  Database for PostgreSQL Flexible Server requires TLS; make sure
-  `DATABASE_URL` has `?sslmode=require` (see `.env.azure.example` and
-  `infra/main.bicep`'s `databaseUrl` variable).
-- **Celery worker can't connect to Redis** — Azure Cache for Redis is
-  TLS-only on port 6380; the URL scheme must be `rediss://` (two `s`s), not
-  `redis://`. `infra/main.bicep` already builds this correctly — only an
-  issue if you've hand-edited a container app's env vars.
-- **`worker` never scales past 1 replica despite a growing queue** — check the
-  KEDA scaler's `auth` block still points at a valid `redis-conn` secret
-  (an access key rotation on the Redis resource without a matching infra
-  redeploy will break this silently).
-- **`migrate` job "succeeds" instantly with no actual migration applied** —
-  usually means the job is still pointed at an old image tag.
+- **`az containerapp update` succeeds but it still serves old behavior** —
+  check `az containerapp revision list --name backend` (or `--name
+  frontend`) for the active revision's `healthState`; if the new replica
+  never passed its readiness probe, Container Apps never shifted traffic to
+  it and the old revision is still serving. Check `az containerapp logs
+  show --name backend` (or `frontend`) for the new revision's startup
+  errors.
+- **`frontend` loads but every `/api/*` call 502s** — `backend` is
+  internal-ingress-only by design; confirm it's actually `Healthy`
+  (`az containerapp revision list --name backend`) rather than a
+  networking issue. Also confirm `frontend`'s `BACKEND_HOST`/`BACKEND_PORT`
+  env vars are still `backend`/`8000` (see `infra/main.bicep`'s
+  `frontendApp` resource) — there is no public hostname for `backend` at
+  all in this architecture, nginx is the only thing that reaches it.
+- **`backend` can't reach Postgres: connection refused / timeout** — `db`
+  is internal-ingress-only by design; confirm it's actually `Healthy`
+  (`az containerapp revision list --name db`) rather than a networking
+  issue. Also confirm `DATABASE_URL` is hitting the short internal name
+  `db:5432`, not a public hostname.
+- **`backend` starts but every login fails with a Redis error** — same
+  check as above but for `redis:6379`; also confirm the `REDIS_PASSWORD`
+  secret used to build `REDIS_URL` matches what `redis`'s
+  `--requirepass` was actually started with (a password rotation on one
+  side without redeploying the other will break this silently — always
+  change it via `infra/main.bicep`'s `redisPassword` parameter and
+  redeploy both, not by hand-editing one container app's env vars).
+- **Postgres data is gone after a redeploy** — check that the
+  `postgres-data` Azure Files share still has content
+  (`az storage file list --share-name postgres-data ...`) and that `db`'s
+  volume mount didn't get dropped from a hand-edited revision. This should
+  never happen from `infra/main.bicep` alone — if it does, it's a strong
+  signal something bypassed the Bicep template.
+- **`migrate` job succeeds instantly with no actual migration applied** —
+  usually means the job is still pointed at an old `backend` image tag.
   `deploy-azure-production.yml`'s migrate job always runs
   `az containerapp job update --image` immediately before
   `az containerapp job start` for exactly this reason; if you're triggering
   the job manually, do the same.
-- **`frontend` returns 502 for every `/api/*` request** — `backend`'s
-  ingress is internal-only by design (see `infra/main.bicep`); confirm it's
-  actually `Healthy` (`az containerapp revision list --name backend`)
-  rather than a networking issue — an unhealthy backend behind internal
-  ingress looks identical to a networking failure from nginx's side.
+- **First request of the day is slow** — expected on staging (both apps
+  default to min replicas 0) and, for `frontend` specifically, even on
+  production (it defaults to min replicas 0 there too — its cold start is
+  short). If `backend`'s cold start is the slow part on production, confirm
+  `backendMinReplicas` is actually `1` there (small extra cost, see the
+  Cost section above).
+- **`/docs` (Swagger UI) 404s even with `ENABLE_API_DOCS=true`** — this
+  flag has to match on BOTH `backend` (gates FastAPI's own docs routes) and
+  `frontend` (gates nginx's passthrough route in
+  `nginx/default.conf.template`) — `infra/main.bicep`'s `enableApiDocs`
+  parameter sets both from one place; if you've hand-edited either
+  container app's env vars directly, they can drift out of sync.
+- **Image pull failures on a public Docker Hub repo** — Docker Hub
+  anonymous pulls are rate-limited per IP; if you're hitting that limit,
+  either set `dockerHubUsername`/`dockerHubToken` (authenticated pulls get
+  a much higher limit even for a public repo) or make the repo private,
+  which requires the same two parameters anyway (remember: Docker Hub's
+  free plan only includes ONE private repo, so making both `backend` and
+  `frontend` private needs a paid plan).

@@ -466,7 +466,7 @@ Click your name in the navbar on any dashboard to:
   [`build-tailwind/README.md`](build-tailwind/README.md)) instead of being
   pulled from a CDN and recompiled in every visitor's browser at runtime.
   Served by an nginx reverse proxy built from
-  [`nginx/Dockerfile`](nginx/Dockerfile) (see
+  [`frontend/Dockerfile`](frontend/Dockerfile) (see
   [Deploying Across Environments](#deploying-across-environments-nginx-reverse-proxy)).
 - **Infra:** Docker Compose, 6 services: `db` (Postgres), `redis`
   (Celery broker/result backend, and the shared counter store for the
@@ -501,30 +501,48 @@ snipe-it-lite/
 │       ├── ci.yml                     # Lint/syntax/dependency-audit checks on
 │       │                                # every push + PR (no full test suite
 │       │                                # yet -- see "Suggested Future
-│       │                                # Features"); also gates the two
-│       │                                # deploy workflows below
+│       │                                # Features"); reusable (workflow_call)
+│       │                                # -- also gates deploy-azure-staging.yml
+│       │                                # and release.yml below
 │       ├── deploy-azure-staging.yml    # Push-to-deploy on `develop` --
 │       │                                # builds, scans, migrates, then rolls
 │       │                                # out to the staging Container Apps
-│       ├── deploy-azure-production.yml # Same shape on `main`, with a
-│       │                                # blocking Trivy scan and automatic
-│       │                                # rollback on a failed smoke test
+│       ├── release.yml                 # Triggered by `git tag v1.x.x` push --
+│       │                                # builds + tags both images with the
+│       │                                # VERSION (not just a SHA), updates
+│       │                                # CHANGELOG.md, cuts a GitHub Release,
+│       │                                # then calls deploy-azure-production.yml
+│       ├── deploy-azure-production.yml # Reusable -- no push trigger of its
+│       │                                # own; called by release.yml (or
+│       │                                # manually via workflow_dispatch for a
+│       │                                # redeploy/rollback) with an image_tag
+│       │                                # to migrate + roll out, blocking Trivy
+│       │                                # scan already done by release.yml, and
+│       │                                # automatic rollback on a failed smoke
+│       │                                # test
 │       └── infra-deploy.yml            # One-time/occasional: provisions or
 │                                          # updates infra/main.bicep itself
-│                                          # (separate from the two workflows
+│                                          # (separate from the workflows
 │                                          # above, which only ship new images)
 │
+├── CHANGELOG.md                # One dated section per `git tag v*.*.*`
+│                                  # release, generated and inserted
+│                                  # automatically by release.yml
 ├── DEPLOYMENT.md              # Companion to this file: production safety
 │                                # checklist, scaling, backups, and the full
 │                                # Azure Container Apps walkthrough
 ├── infra/
-│   └── main.bicep              # Azure Container Apps infra (backend/worker/
-│                                  # beat/frontend + migrate job, ACR, Key
-│                                  # Vault, managed Postgres/Redis) -- see
+│   └── main.bicep              # Azure Container Apps infra, cost-optimized:
+│                                  # 4 container apps (frontend, backend, db,
+│                                  # redis) + migrate job -- Postgres/Redis
+│                                  # run as containers (not managed
+│                                  # services), 2 images pulled from Docker
+│                                  # Hub (not ACR), no Key Vault -- see
 │                                  # DEPLOYMENT.md
 ├── .env.azure.example         # Env var reference for the Azure deployment
-│                                # shape (managed Postgres/Redis connection
-│                                # strings, Key Vault-backed secrets)
+│                                # shape (db/redis as internal container
+│                                # apps, frontend/backend split, Container-
+│                                # Apps-secret-backed secrets)
 │
 ├── docker-compose.yml        # 6 services: db, redis, backend, worker, beat,
 │                                # frontend -- worker/beat are split apart
@@ -559,7 +577,7 @@ snipe-it-lite/
 │                                       # its own header comment for why)
 │
 ├── build-frontend/              # Build tooling ONLY -- runs inside
-│   │                              # nginx/Dockerfile's build stage, never
+│   │                              # frontend/Dockerfile's build stage, never
 │   │                              # directly in Docker Compose. Minifies
 │   │                              # frontend/js and frontend/*.html (and,
 │   │                              # in production, obfuscates the JS) --
@@ -876,7 +894,7 @@ This app is designed to run, **unmodified**, across three tiers: your local
 Docker Compose setup, a Render staging environment, and a real cloud
 environment (AWS/GCP/Azure/etc.). The piece that makes that possible is the
 `frontend` service — it's no longer a bare static-file server, it's an
-**nginx reverse proxy** built from [`nginx/Dockerfile`](nginx/Dockerfile).
+**nginx reverse proxy** built from [`frontend/Dockerfile`](frontend/Dockerfile).
 
 **The core idea:** the browser never talks to the FastAPI backend directly
 and never needs to know its hostname. `frontend/js/api.js` calls a single
@@ -906,7 +924,7 @@ image works in all three tiers — only these environment variables change:
 | `RESOLVER_IP` | Internal DNS server nginx uses to re-resolve `BACKEND_HOST` on every request (so a backend redeploy never leaves nginx pointed at a stale IP) | `127.0.0.11` (Docker's built-in DNS) | Auto-detected at boot from `/etc/resolv.conf` if left unset — see [`nginx/docker-entrypoint.d/15-detect-resolver-ip.sh`](nginx/docker-entrypoint.d/15-detect-resolver-ip.sh) |
 
 `PORT`, `BACKEND_HOST`, and `BACKEND_PORT` all have sensible defaults baked
-into `nginx/Dockerfile`. `RESOLVER_IP` deliberately does **not** — instead of
+into `frontend/Dockerfile`. `RESOLVER_IP` deliberately does **not** — instead of
 hardcoding a guess that could go stale on some future platform, it's
 auto-detected at container boot (see the table above and
 [`nginx/docker-entrypoint.d/15-detect-resolver-ip.sh`](nginx/docker-entrypoint.d/15-detect-resolver-ip.sh)
@@ -987,7 +1005,7 @@ public nginx frontend) for proper horizontal scaling and no shared-process
 tradeoffs:
 
 - [ ] Create a **Web Service** (`plan: starter` or higher) built from
-      `nginx/Dockerfile` (build context = repo root) for the frontend/
+      `frontend/Dockerfile` (build context = repo root) for the frontend/
       proxy — the only piece that needs a public URL.
 - [ ] Create a **Private Service** (`plan: starter` or higher) built from
       `backend/Dockerfile` for the FastAPI backend, with
@@ -1014,7 +1032,7 @@ tradeoffs:
 
 
 ### Cloud (AWS/GCP/Azure/etc.)
-Same pattern: deploy the `nginx/Dockerfile` image as your public-facing
+Same pattern: deploy the `frontend/Dockerfile` image as your public-facing
 service, deploy `backend/Dockerfile` as an internal-only service (e.g.
 behind a private load balancer or in the same VPC/private subnet with no
 public IP), and set `BACKEND_HOST`/`BACKEND_PORT` to match that
@@ -1026,13 +1044,18 @@ confirmed a specific value your platform needs — it's auto-detected from
 [`nginx/docker-entrypoint.d/15-detect-resolver-ip.sh`](nginx/docker-entrypoint.d/15-detect-resolver-ip.sh)).
 
 **Deploying to Azure specifically?** This project ships a complete,
-fully-automated version of this pattern already — [`infra/main.bicep`](infra/main.bicep)
-(Azure Container Apps, managed Postgres/Redis, Key Vault) plus
+fully-automated, cost-optimized version of this pattern already —
+[`infra/main.bicep`](infra/main.bicep) (four Azure Container Apps —
+`frontend`, `backend`, `db`, `redis` — `frontend`/`backend` split so each
+scales independently, with Postgres/Redis running as containers instead of
+managed services and both images pulled from Docker Hub instead of Azure
+Container Registry, to keep monthly cost as low as realistically possible)
+plus
 `.github/workflows/deploy-azure-staging.yml` /
 `deploy-azure-production.yml` / `infra-deploy.yml` — instead of the generic
 mechanics above. See [`DEPLOYMENT.md`](DEPLOYMENT.md)'s **Azure Container
-Apps Production Deployment** section for the full one-time setup and how
-the pipeline runs day to day.
+Apps Production Deployment (Cost-Optimized)** section for the full
+one-time setup, cost breakdown, and how the pipeline runs day to day.
 
 ### Why the backend is no longer exposed directly
 `docker-compose.yml`'s `backend` service no longer publishes port `8000` to
@@ -2459,18 +2482,27 @@ A checklist before you deploy this anywhere real:
 
 ## Safely Updating An Existing Production Deployment (CI/CD)
 
-**This repo ships four GitHub Actions workflows** in `.github/workflows/`:
+**This repo ships five GitHub Actions workflows** in `.github/workflows/`:
 [`ci.yml`](.github/workflows/ci.yml) (lint, dependency audit, image build +
-Trivy scan, `infra/main.bicep` validation — runs on every push/PR and gates
-the two deploy workflows below; there's no full pytest suite yet, see
+Trivy scan, `infra/main.bicep` validation — runs on every push/PR, and is
+also invoked as a reusable `workflow_call` by the deploy workflows below;
+there's no full pytest suite yet, see
 [Suggested Future Features](#suggested-future-features)),
 [`deploy-azure-staging.yml`](.github/workflows/deploy-azure-staging.yml)
-(push-to-deploy on `develop`), and
+(push-to-deploy on `develop`),
+[`release.yml`](.github/workflows/release.yml) (triggered by pushing a
+`git tag v1.x.x` — builds and pushes both images tagged with that VERSION,
+not just a commit SHA, opens a pull request against `main` with a new
+[`CHANGELOG.md`](CHANGELOG.md) section (never a direct commit — this
+repo's `main` only changes via reviewed PR) and cuts a GitHub Release, and
+in parallel calls the next workflow), and
 [`deploy-azure-production.yml`](.github/workflows/deploy-azure-production.yml)
-(push-to-deploy on `main`, with a blocking Trivy scan and automatic rollback
-on a failed smoke test) — plus
+(no push trigger of its own — reusable, called by `release.yml` with the
+version to deploy, or manually via `workflow_dispatch` for a redeploy/
+rollback; blocking Trivy scan already ran in `release.yml`, and this
+workflow still auto-rolls-back on a failed smoke test) — plus
 [`infra-deploy.yml`](.github/workflows/infra-deploy.yml), run separately and
-occasionally, for provisioning/updating `infra/main.bicep` itself. All four
+occasionally, for provisioning/updating `infra/main.bicep` itself. All five
 already follow the same rule, which is what makes any of this genuinely
 *safe* to automate rather than just fast:
 
@@ -2491,8 +2523,9 @@ The full walkthrough — one-time setup, what each workflow does stage by
 stage, rollback, scaling, monitoring, and cost — lives in
 [`DEPLOYMENT.md`](DEPLOYMENT.md)'s **Azure Container Apps Production
 Deployment** section rather than being duplicated here. Short version: push
-to `develop` and staging updates itself; merge to `main` and production
-updates itself; nothing manual after the one-time setup.
+to `develop` and staging updates itself; push a `git tag v1.x.x` off `main`
+and production updates itself (merging to `main` alone no longer deploys
+anything); nothing manual after the one-time setup.
 
 ### Render
 

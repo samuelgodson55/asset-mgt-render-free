@@ -1,7 +1,7 @@
 # =============================================================================
 # .dockerignore
 # -----------------------------------------------------------------------------
-# nginx/Dockerfile's build context is the PROJECT ROOT (see docker-compose.yml
+# frontend/Dockerfile's build context is the PROJECT ROOT (see docker-compose.yml
 # -- `context: .`) so it can COPY both frontend/ and nginx/. Without this
 # file, `docker build`/`docker compose build` would transmit EVERYTHING in
 # the repo root to the Docker daemon as build context -- including a real

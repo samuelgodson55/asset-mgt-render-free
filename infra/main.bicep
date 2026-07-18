@@ -1,60 +1,150 @@
 // =============================================================================
 // infra/main.bicep
 // -----------------------------------------------------------------------------
-// Azure Container Apps deployment for Snipe-IT Lite -- this is the IaC
-// counterpart to render.yaml (Render Blueprint), but for a real,
-// multi-service, scalable production target instead of a single free-tier
-// container. Deploy it once per environment (staging / production) into its
-// own resource group -- see DEPLOYMENT.md's "Azure Container Apps Production
-// Deployment" section for the full walkthrough and the reasoning behind
-// every choice below.
+// COST-OPTIMIZED Azure Container Apps deployment for Snipe-IT Lite --
+// FOUR Container Apps: `frontend`, `backend`, `db`, `redis`.
+//
+// This is the split-services evolution of an earlier, even leaner version of
+// this file that ran ONE combined `app` container (backend + frontend +
+// embedded Celery worker/beat, via Dockerfile.render -- the same image used
+// for the Render free-tier deploy) alongside `db`/`redis`. That version is
+// still the cheapest possible shape and is a perfectly reasonable choice --
+// see git history / DEPLOYMENT.md for the reasoning -- but it couples
+// frontend and backend to the SAME scaling unit: a burst of pure
+// asset-browsing traffic scales up backend replicas (and their embedded
+// Celery workers) even if no API calls are actually happening, and vice
+// versa. This version decouples them.
+//
+// WHY `redis` IS STILL HERE, NOT JUST `frontend`/`backend`/`db`
+// ---------------------------------------------------------------------------
+// `backend` runs with RUN_EMBEDDED_WORKER=true (same as before) and now
+// genuinely autoscales 0-N on its own, independent of `frontend`. Once
+// `backend` can run more than one replica, Redis stops being optional:
+//   - it's the Celery broker every replica's embedded worker shares (one
+//     task queue, not N independent ones)
+//   - it backs the cross-replica login rate limiter (see this doc's
+//     "Load Balancing & Scaling For Peak Use" section above)
+//   - it backs the scheduled-backup leader lock (so N replicas don't all
+//     run pg_dump at 3am simultaneously)
+// Cutting Redis would mean pinning `backend` to exactly 1 replica forever
+// (no real autoscaling) or silently breaking all three of the above the
+// first time it scales past 1. Keeping Redis as a small 4th container is
+// what makes `backend`'s autoscaling actually SAFE, not just theoretically
+// possible -- and it's cheap (same 0.25 vCPU/0.5 GiB as before, no
+// persistent volume, same acceptable "resets on restart" trade as before).
+//
+// WHY `frontend` IS ITS OWN CONTAINER APP, NOT FOLDED INTO `backend`
+// ---------------------------------------------------------------------------
+// `frontend/js/api.js` hardcodes API_URL = '/api' as a RELATIVE path and
+// every request sends credentials:'include' (cookie auth) -- both only work
+// same-origin. Rather than rewrite that (and every cookie-auth code path)
+// to support a cross-origin split, `frontend` reuses frontend/Dockerfile
+// UNMODIFIED -- the exact same image that already does this for local
+// Docker Compose: it serves the static build itself AND reverse-proxies
+// /api/* to `backend` over the Container Apps environment's internal DNS
+// (nginx/default.conf.template's BACKEND_HOST/BACKEND_PORT env vars, no
+// hardcoded platform assumptions, resolver IP auto-detected at boot -- see
+// nginx/docker-entrypoint.d/15-detect-resolver-ip.sh). Zero frontend code
+// changes; the browser still only ever talks to ONE origin (`frontend`'s),
+// exactly like before. `backend` becomes internal-only ingress now -- only
+// `frontend` and `migrate` ever reach it, a small security improvement over
+// the previous combined `app`, which was directly internet-facing.
+//
+// COST IMPACT OF THE SPLIT (vs. the single-`app` version)
+// ---------------------------------------------------------------------------
+// Roughly a wash, sometimes a net win: `frontend` adds one small
+// scale-to-zero container, but `frontend` and `backend` now each scale to
+// their OWN actual load instead of both being sized for whichever is
+// busier. See DEPLOYMENT.md's Cost section for the full breakdown table.
+//
+// WHAT'S UNCHANGED FROM THE COMBINED-`app` VERSION (see that version's
+// original comment, preserved in git history, for the full reasoning)
+// ---------------------------------------------------------------------------
+//   - No Azure Container Registry -- images pulled from Docker Hub (now
+//     TWO images: <dockerHubUsername>/snipeit-lite-backend and
+//     .../snipeit-lite-frontend; a Docker Hub free account only includes
+//     ONE private repo, so if you want both private you'll need a paid
+//     Docker Hub plan or to keep one of the two public -- default is BOTH
+//     public, zero registry cost/credentials either way)
+//   - No Key Vault -- plain Container Apps secrets
+//   - No managed identity, no Application Insights
+//   - `db`/`redis` unchanged: official Docker Hub images, internal-only,
+//     pinned to exactly 1 replica, `db` on a persistent Azure Files volume
+// =============================================================================
+// This replaces an earlier version of this file that used Azure Database for
+// PostgreSQL Flexible Server + Azure Cache for Redis + Azure Container
+// Registry + Key Vault + a User-Assigned Managed Identity + Application
+// Insights + 4 Container Apps (backend/worker/beat/frontend). That shape is
+// a solid *scaling* story but every one of those managed extras has its own
+// monthly floor, and several of them (Flexible Server, Azure Cache, ACR
+// Basic, Key Vault) never scale to zero -- they bill 24/7 whether or not
+// anyone is using the app. For an early-stage startup that's the wrong
+// trade.
 //
 // WHAT THIS PROVISIONS
 // ---------------------------------------------------------------------------
-//   - Log Analytics workspace + Application Insights   (Monitoring)
-//   - User-assigned managed identity                    (ACR pull + Key Vault read, no passwords anywhere)
-//   - Azure Container Registry                          (holds snipeit-backend / snipeit-frontend images)
-//   - Key Vault                                          (JWT secret, DB password, SMTP password, ...)
-//   - Azure Database for PostgreSQL Flexible Server      (replaces the `db` container -- see reasoning below)
-//   - Azure Cache for Redis                              (replaces the `redis` container -- see reasoning below)
-//   - Storage Account + Azure Files shares               (backup_data / export_data volumes -- replaces the
-//                                                          named Docker volumes of the same name)
-//   - Container Apps Environment                          (the shared network/compute boundary)
-//   - 4 Container Apps: backend, worker, beat, frontend   (maps 1:1 to docker-compose.yml's 4 app services)
-//   - 1 Container Apps Job: migrate                        (runs `alembic upgrade head` as an explicit,
-//                                                          one-shot step -- see docker-compose.yml's own
-//                                                          comment on why this must never run on container boot)
+//   - Log Analytics workspace                    (Container Apps console/system logs)
+//   - Storage Account + 3 Azure Files shares      (Postgres data dir, backup_data, export_data --
+//                                                   billed by GB actually used, not provisioned)
+//   - VNet (3 delegated subnets + NSGs)            (frontend/backend/data isolation -- see SECURITY FIX comment below; no fixed floor)
+//   - 3 Container Apps Environments                (Consumption plan, one per subnet/trust tier -- no fixed floor)
+//   - 4 Container Apps:
+//       `db`       -- postgres:16-alpine, official Docker Hub image, internal-only, 1 replica always
+//       `redis`    -- redis:7-alpine, official Docker Hub image, internal-only, 1 replica always
+//       `backend`  -- FastAPI + embedded Celery worker/beat (backend/Dockerfile),
+//                     internal-only ingress, scales 0-N on its own
+//       `frontend` -- static frontend + reverse proxy to `backend` (frontend/Dockerfile,
+//                     UNMODIFIED from local Docker Compose), the ONLY public-facing app,
+//                     scales 0-N independent of `backend`
+//   - 1 Container Apps Job: `migrate`             (runs `alembic upgrade head` against `backend`'s image, only when triggered)
 //
-// WHY MANAGED POSTGRES/REDIS INSTEAD OF DB/REDIS CONTAINER APPS
+// WHAT WAS REMOVED FROM THE ORIGINAL MANAGED-SERVICES DESIGN, AND WHY IT'S
+// SAFE HERE (unchanged from the combined-`app` version of this file)
 // ---------------------------------------------------------------------------
-// docker-compose.yml runs `db` and `redis` as containers with named Docker
-// volumes. Container Apps' own storage (ephemeral scratch disk, or an Azure
-// Files mount) is not a substitute for a real database's engine, backup/
-// point-in-time-restore, and failover story -- and a stateful container app
-// still gets recreated/rescheduled by the platform like any other revision.
-// Azure Database for PostgreSQL Flexible Server and Azure Cache for Redis
-// are the direct managed equivalents: same protocol, same connection-string
-// shape (`DATABASE_URL` / `REDIS_URL` env vars below are unchanged from
-// docker-compose.yml's names), zero application code changes, and you get
-// automated backups + point-in-time restore (Postgres) and persistence
-// (Redis) for free. `backend`, `worker`, and `beat` keep exactly the env
-// var names they already read from config.py -- only the values change.
+//   - Azure Database for PostgreSQL Flexible Server -> `db` container app.
+//     You lose: automatic point-in-time restore, engine-managed HA/failover.
+//     You keep: the app's own pg_dump-based backup job (ENABLE_AUTO_BACKUP,
+//     already in this codebase) now writing onto a persistent Azure Files
+//     share instead of ephemeral disk, so backups survive a container
+//     restart. Turn on BACKUP_GDRIVE_ENABLED for true off-box backups.
+//   - Azure Cache for Redis -> `redis` container app, no persistent volume.
+//     Still just the Celery broker/result backend + rate-limiter/lock store
+//     (see this file's top comment) -- losing state on a restart is an
+//     acceptable trade for the cost savings.
+//   - Azure Container Registry -> Docker Hub (two images now: backend and
+//     frontend -- see top comment on the free-plan private-repo limit).
+//   - Key Vault -> plain Container Apps secrets.
+//   - User-assigned managed identity -> removed (nothing left to authenticate
+//     once ACR and Key Vault are both gone, assuming public Docker Hub repos).
+//   - Application Insights -> removed (its own ingestion cost on top of Log
+//     Analytics).
+//
+// REALISTIC MONTHLY COST -- see DEPLOYMENT.md's Cost section for the full
+// breakdown table (this split's cost is close to the single-`app` version's
+// ~US$10-20/mo floor, since `db`/`redis` -- the two components that can't
+// scale to zero -- are unchanged; `frontend` adds one more scale-to-zero
+// container, not another always-on one).
 //
 // USAGE
 // ---------------------------------------------------------------------------
 //   az deployment group create \
 //     --resource-group rg-snipeit-lite-prod \
 //     --template-file infra/main.bicep \
-//     --parameters environmentName=prod jwtSecretKey=$(openssl rand -hex 32) \
-//                  postgresAdminPassword=... superAdminPassword=...
+//     --parameters environmentName=prod \
+//                  dockerHubBackendImage=yourdockerhubusername/snipeit-lite-backend \
+//                  dockerHubFrontendImage=yourdockerhubusername/snipeit-lite-frontend \
+//                  postgresPassword=$(openssl rand -hex 16) \
+//                  redisPassword=$(openssl rand -hex 16) \
+//                  jwtSecretKey=$(openssl rand -hex 32) \
+//                  superAdminPassword=...
 //
-// Re-run the same command (same parameters) any time to update the
-// environment idempotently -- this file does NOT set container images
-// (that's the CI/CD pipeline's job, via `az containerapp update --image`,
-// so that deploying new code never requires a full infra re-deploy).
+// Re-run the same command any time to update the environment idempotently --
+// this file does NOT set `backend`/`frontend`/`migrate`'s image tags on
+// every run (that's the CI/CD pipeline's job via `az containerapp update
+// --image`), so deploying new code never requires a full infra re-deploy.
 // =============================================================================
 
-@description('Short environment name: "prod" or "staging". Prefixes/suffixes every resource name.')
+@description('Short environment name: "prod" or "staging". Prefixes every resource name.')
 @allowed(['prod', 'staging'])
 param environmentName string = 'prod'
 
@@ -64,14 +154,34 @@ param location string = resourceGroup().location
 @description('Base name used to derive resource names, e.g. "snipeit-lite".')
 param appBaseName string = 'snipeit-lite'
 
-@description('PostgreSQL Flexible Server administrator password. Pass via --parameters, never commit it.')
+@description('Docker Hub repository for the backend image (FastAPI + embedded Celery worker/beat), e.g. "yourusername/snipeit-lite-backend", built from backend/Dockerfile. Public repo by default -- no registry credentials needed.')
+param dockerHubBackendImage string
+
+@description('Docker Hub repository for the frontend image (static frontend + reverse proxy to `backend`), e.g. "yourusername/snipeit-lite-frontend", built from frontend/Dockerfile UNCHANGED from local Docker Compose. Public repo by default.')
+param dockerHubFrontendImage string
+
+@description('Image tag to deploy on first create, applied to BOTH images. The CI/CD pipeline overwrites this on every push via `az containerapp update --image` (backend and frontend are updated independently -- see deploy-azure-*.yml).')
+param initialImageTag string = 'latest'
+
+@description('Set only if dockerHubBackendImage/dockerHubFrontendImage are PRIVATE Docker Hub repositories (same account for both). Leave empty if both are public (recommended -- zero credential management). NOTE: Docker Hub free plan includes only ONE private repo -- if you need both private, either upgrade your Docker Hub plan or keep one of the two public.')
+param dockerHubUsername string = ''
+
+@description('Docker Hub Personal Access Token, only required if dockerHubUsername is set.')
 @secure()
-param postgresAdminPassword string
+param dockerHubToken string = ''
 
-@description('PostgreSQL Flexible Server administrator username.')
-param postgresAdminUsername string = 'snipeitadmin'
+@description('Postgres password for the `db` container app.')
+@secure()
+param postgresPassword string
 
-@description('JWT signing secret -- shared identically across backend/worker/beat. Generate with: openssl rand -hex 32')
+@description('Postgres username.')
+param postgresUsername string = 'snipeit'
+
+@description('Redis password for the `redis` container app (used with --requirepass).')
+@secure()
+param redisPassword string
+
+@description('JWT signing secret. Generate with: openssl rand -hex 32')
 @secure()
 param jwtSecretKey string
 
@@ -79,35 +189,22 @@ param jwtSecretKey string
 @secure()
 param superAdminPassword string
 
-@description('Container image tag to deploy on first create. The CI/CD pipeline overwrites this on every push to main/develop -- this initial value just needs to exist.')
-param initialImageTag string = 'initial'
+@description('Minimum `backend` replicas. 0 = scale-to-zero (cold start after idle, cheapest). 1 = always warm, small extra cost, no cold start. Independent of `frontend` -- that is the whole point of the split.')
+param backendMinReplicas int = 0
 
-@description('Postgres SKU -- Standard_B1ms (Burstable) is plenty for this app; bump for real concurrent load.')
-param postgresSku string = 'Standard_B1ms'
+@description('Maximum `backend` replicas under load.')
+param backendMaxReplicas int = 3
 
-@description('Postgres storage size in GB.')
-param postgresStorageGb int = 32
+@description('Minimum `frontend` replicas. 0 = scale-to-zero. Usually safe to leave at 0 even in production -- static-file + proxy responses are fast, so a cold start here is much shorter than `backend`''s.')
+param frontendMinReplicas int = 0
 
-@description('Redis SKU name.')
-@allowed(['Basic', 'Standard', 'Premium'])
-param redisSku string = 'Basic'
+@description('Maximum `frontend` replicas under load.')
+param frontendMaxReplicas int = 3
 
-@description('Redis capacity (0 = C0/250MB on Basic/Standard).')
-param redisCapacity int = 0
+@description('Postgres data volume size in GB (billed by GB actually used, this is just the ceiling).')
+param postgresVolumeQuotaGb int = 20
 
-@description('How many backend replicas to run at minimum (0 allows scale-to-zero; use 1+ for production to avoid cold starts).')
-param backendMinReplicas int = 1
-
-@description('Max backend replicas under load.')
-param backendMaxReplicas int = 5
-
-@description('How many worker replicas at minimum.')
-param workerMinReplicas int = 1
-
-@description('Max worker replicas under load -- KEDA scales this on Celery queue depth, see the scale rule below.')
-param workerMaxReplicas int = 5
-
-@description('Custom domain for the frontend (leave empty to use the generated *.azurecontainerapps.io FQDN only).')
+@description('Custom domain for `frontend`, the public entry point (leave empty to use the generated *.azurecontainerapps.io FQDN only).')
 param customDomain string = ''
 
 @description('Notification / SMTP settings -- optional, off by default, matching .env.example.')
@@ -119,194 +216,36 @@ param smtpPassword string = ''
 param smtpFromEmail string = ''
 param adminNotificationEmails string = ''
 
-var suffix = uniqueString(resourceGroup().id, environmentName)
+@description('Gate for FastAPI''s interactive API docs (Swagger/ReDoc) AND nginx''s matching passthrough route -- see nginx/default.conf.template. Keep false in any environment reachable from the public internet unless you specifically need it.')
+param enableApiDocs bool = false
+
 var namePrefix = '${appBaseName}-${environmentName}'
-// Storage/ACR/Key Vault names must be globally unique and constrained in
-// length/characters -- derive short, compliant names from the suffix.
-var acrName = replace('${appBaseName}${environmentName}acr${take(suffix, 6)}', '-', '')
-var kvName = take('${appBaseName}-${environmentName}-kv-${take(suffix, 4)}', 24)
+var suffix = uniqueString(resourceGroup().id, environmentName)
 var storageAccountName = take(replace('${appBaseName}${environmentName}st${take(suffix, 6)}', '-', ''), 24)
-var pgServerName = '${namePrefix}-pg-${take(suffix, 6)}'
-var redisName = '${namePrefix}-redis-${take(suffix, 6)}'
+
+var usePrivateDockerHubRepo = !empty(dockerHubUsername)
+var backendImage = '${dockerHubBackendImage}:${initialImageTag}'
+var frontendImage = '${dockerHubFrontendImage}:${initialImageTag}'
 
 // ---------------------------------------------------------------------------
-// Monitoring foundation -- every container app / job below is wired to this
-// same Log Analytics workspace, so `Container App Console Logs` and
-// `ContainerAppSystemLogs` KQL tables cover the whole stack in one place.
-// See DEPLOYMENT.md's Monitoring section for the queries.
+// Monitoring -- one Log Analytics workspace for every container app's
+// console/system logs. No Application Insights (see top-of-file comment).
 // ---------------------------------------------------------------------------
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
   name: '${namePrefix}-logs'
   location: location
   properties: {
     sku: { name: 'PerGB2018' }
-    retentionInDays: 30
-  }
-}
-
-resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
-  name: '${namePrefix}-appinsights'
-  location: location
-  kind: 'web'
-  properties: {
-    Application_Type: 'web'
-    WorkspaceResourceId: logAnalytics.id
+    retentionInDays: 30 // shortest retention Log Analytics allows -- cheapest option; console logs are also always live-streamable via `az containerapp logs show` regardless of this setting
   }
 }
 
 // ---------------------------------------------------------------------------
-// Managed identity -- ONE identity shared by every container app/job. Pulls
-// images from ACR and reads secrets from Key Vault with zero stored
-// passwords in the Container Apps config itself.
-// ---------------------------------------------------------------------------
-resource identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
-  name: '${namePrefix}-identity'
-  location: location
-}
-
-resource acr 'Microsoft.ContainerRegistry/registries@2023-11-01-preview' = {
-  name: acrName
-  location: location
-  sku: { name: 'Basic' }
-  properties: {
-    adminUserEnabled: false // pull via managed identity, not admin creds
-  }
-}
-
-resource acrPullRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(acr.id, identity.id, 'AcrPull')
-  scope: acr
-  properties: {
-    principalId: identity.properties.principalId
-    principalType: 'ServicePrincipal'
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d') // AcrPull
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Key Vault -- JWT secret, Postgres password, Redis key, SMTP password,
-// Super Admin password. Container Apps reads these directly via
-// `identity`-based secret references (see each container app's `secrets`
-// block below) -- the values never pass through GitHub Actions logs or
-// Container Apps' own (encrypted, but still-visible-to-owners) secret store.
-// ---------------------------------------------------------------------------
-resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
-  name: kvName
-  location: location
-  properties: {
-    sku: { family: 'A', name: 'standard' }
-    tenantId: subscription().tenantId
-    enableRbacAuthorization: true
-    enabledForTemplateDeployment: true
-  }
-}
-
-resource kvSecretsOfficerRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(keyVault.id, identity.id, 'KeyVaultSecretsUser')
-  scope: keyVault
-  properties: {
-    principalId: identity.properties.principalId
-    principalType: 'ServicePrincipal'
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6') // Key Vault Secrets User
-  }
-}
-
-resource secretJwt 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
-  parent: keyVault
-  name: 'jwt-secret-key'
-  properties: { value: jwtSecretKey }
-}
-
-resource secretSuperAdmin 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
-  parent: keyVault
-  name: 'super-admin-password'
-  properties: { value: superAdminPassword }
-}
-
-resource secretPgPassword 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
-  parent: keyVault
-  name: 'postgres-admin-password'
-  properties: { value: postgresAdminPassword }
-}
-
-resource secretSmtpPassword 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
-  parent: keyVault
-  name: 'smtp-password'
-  properties: { value: empty(smtpPassword) ? 'unset' : smtpPassword }
-}
-
-// ---------------------------------------------------------------------------
-// Azure Database for PostgreSQL Flexible Server -- replaces the `db` service.
-// Built-in automated backups (7-35 day retention, point-in-time restore) --
-// this is a strictly stronger guarantee than docker-compose.yml's pgdata
-// named volume, and means the app-level pg_dump job (backend/services/
-// backup_service.py, ENABLE_AUTO_BACKUP) becomes a nice-to-have export
-// rather than your only line of defense. Keep it enabled anyway -- it's
-// cheap and gives you an app-portable .sql.gz you can restore anywhere,
-// not just back into the same Azure server.
-// ---------------------------------------------------------------------------
-resource postgres 'Microsoft.DBforPostgreSQL/flexibleServers@2023-12-01-preview' = {
-  name: pgServerName
-  location: location
-  sku: {
-    name: postgresSku
-    tier: 'Burstable'
-  }
-  properties: {
-    version: '16'
-    administratorLogin: postgresAdminUsername
-    administratorLoginPassword: postgresAdminPassword
-    storage: { storageSizeGB: postgresStorageGb }
-    backup: {
-      backupRetentionDays: 7
-      geoRedundantBackup: 'Disabled'
-    }
-    highAvailability: { mode: 'Disabled' } // flip to 'ZoneRedundant' for prod HA once traffic justifies the cost
-  }
-}
-
-resource postgresDb 'Microsoft.DBforPostgreSQL/flexibleServers/databases@2023-12-01-preview' = {
-  parent: postgres
-  name: 'asset_db'
-}
-
-// Allow Azure services (Container Apps' outbound IPs are dynamic on the
-// Consumption plan) to reach this server. For a hardened setup, replace
-// this with VNet integration + private endpoint -- see DEPLOYMENT.md.
-resource postgresFirewallAzure 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2023-12-01-preview' = {
-  parent: postgres
-  name: 'AllowAzureServices'
-  properties: {
-    startIpAddress: '0.0.0.0'
-    endIpAddress: '0.0.0.0'
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Azure Cache for Redis -- replaces the `redis` service (Celery broker +
-// result backend). TLS-only (port 6380, rediss:// scheme) -- see
-// DEPLOYMENT.md for the exact REDIS_URL format this produces.
-// ---------------------------------------------------------------------------
-resource redis 'Microsoft.Cache/redis@2024-03-01' = {
-  name: redisName
-  location: location
-  properties: {
-    sku: {
-      name: redisSku
-      family: redisSku == 'Premium' ? 'P' : 'C'
-      capacity: redisCapacity
-    }
-    enableNonSslPort: false
-    minimumTlsVersion: '1.2'
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Storage Account + Azure Files -- replaces docker-compose.yml's
-// `backup_data` and `export_data` named volumes. Mounted identically into
-// backend/worker container apps below, so backend/services/backup_service.py
-// and backend/tasks/export_tasks.py's shared-disk assumptions keep working
-// unmodified across replicas, exactly like the Compose named-volume setup.
+// Storage Account + Azure Files -- ONE share for Postgres's data directory
+// (this is what makes `db` safe to restart/redeploy without losing data),
+// plus the app's existing backup_data/export_data shares. Standard_LRS,
+// classic pay-as-you-go share billing: you pay for GB actually stored, the
+// `shareQuota` below is just a ceiling, not a reservation.
 // ---------------------------------------------------------------------------
 resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: storageAccountName
@@ -324,29 +263,282 @@ resource fileServices 'Microsoft.Storage/storageAccounts/fileServices@2023-05-01
   name: 'default'
 }
 
+resource postgresShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023-05-01' = {
+  parent: fileServices
+  name: 'postgres-data'
+  properties: { shareQuota: postgresVolumeQuotaGb }
+}
+
 resource backupShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023-05-01' = {
   parent: fileServices
   name: 'backup-data'
-  properties: { shareQuota: 20 }
+  properties: { shareQuota: 10 }
 }
 
 resource exportShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023-05-01' = {
   parent: fileServices
   name: 'export-data'
-  properties: { shareQuota: 20 }
+  properties: { shareQuota: 10 }
 }
 
 // ---------------------------------------------------------------------------
-// Container Apps Environment -- the shared boundary. backend/worker/beat/
-// frontend all live here and reach each other by short app name
-// (http://<app-name>) over the platform's internal proxy -- see
-// nginx/default.conf.template's BACKEND_HOST/BACKEND_PORT usage, unchanged
-// from docker-compose.yml, just pointed at "backend" (the container app
-// name) instead of "backend" (the Compose service name). Same string,
-// different platform underneath.
+// SECURITY FIX -- Strict VNet isolation (was: no VNet at all)
 // ---------------------------------------------------------------------------
-resource containerAppEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
-  name: '${namePrefix}-env'
+// Before this change, all four container apps (`frontend`, `backend`, `db`,
+// `redis`) shared ONE Container Apps Environment on Azure's auto-generated,
+// unmanaged network. Internal-only ingress on `db`/`backend` stops the
+// PUBLIC internet from reaching them directly, but it does nothing to stop
+// LATERAL movement: any app in that same environment can already resolve
+// and reach any other app's internal DNS name on any port -- there was no
+// NSG, because there was no customer-owned subnet to attach one to. A
+// compromised `frontend` (e.g. via a dependency RCE) could port-scan and
+// query `db:5432` / `redis:6379` directly, completely bypassing `backend`.
+//
+// A single shared environment can't fix this on its own: an NSG applies at
+// the SUBNET boundary, and every app inside one Container Apps Environment
+// shares that environment's one subnet -- Azure does not let you attach
+// per-app network rules within an environment (see
+// https://learn.microsoft.com/azure/container-apps/firewall-integration).
+// The only way to get real network segmentation between these apps is to
+// give each trust tier its OWN environment (own dedicated subnet), and
+// filter the traffic *between* those subnets with NSGs. That's what this
+// section does -- three environments instead of one, still Consumption
+// plan (no extra always-on cost; environments themselves are free, you
+// only pay for app usage), all inside one VNet so internal DNS still
+// resolves environment-to-environment:
+//
+//   frontend-subnet (10.0.0.0/23)  -> `frontendEnv`  (external ingress, public)
+//   backend-subnet  (10.0.2.0/23)  -> `backendEnv`   (internal, + `migrate` job)
+//   data-subnet     (10.0.4.0/23)  -> `dataEnv`      (internal: `db`, `redis`)
+//
+// NSG allow-list (default-deny for everything else moving BETWEEN subnets):
+//   Internet         -> frontend-subnet : 443/80          (public ingress)
+//   frontend-subnet  -> backend-subnet  : 8000            (frontend's nginx -> backend API)
+//   backend-subnet   -> data-subnet     : 5432, 6379      (backend -> db, redis)
+//   (everything else inbound from VirtualNetwork is explicitly denied)
+//
+// Net effect: a compromised `frontend` container can reach `backend:8000`
+// and nothing else -- it can no longer see `db`/`redis` at all, on any
+// port, because they're on a different subnet with an NSG that doesn't
+// allow frontend-subnet traffic in. A compromised `backend` container is
+// similarly capped at 5432/6379 into data-subnet; it cannot be used to
+// pivot into frontend-subnet (nothing allows backend -> frontend inbound).
+// Required Azure platform/management traffic (health probes, image pulls,
+// Log Analytics, Azure Files mounts, DNS, etc.) is left open via the
+// `AzureCloud`/`AzureLoadBalancer`/`Storage` service tags per Microsoft's
+// documented NSG requirements for VNet-injected Consumption environments --
+// double-check that list against the current docs before tightening
+// further, since Azure has occasionally added new required ports there.
+// ---------------------------------------------------------------------------
+
+var frontendSubnetPrefix = '10.0.0.0/23'
+var backendSubnetPrefix = '10.0.2.0/23'
+var dataSubnetPrefix = '10.0.4.0/23'
+
+resource nsgFrontend 'Microsoft.Network/networkSecurityGroups@2023-09-01' = {
+  name: '${namePrefix}-nsg-frontend'
+  location: location
+  properties: {
+    securityRules: [
+      {
+        name: 'Allow-Internet-HTTPS-Inbound'
+        properties: {
+          priority: 100
+          direction: 'Inbound'
+          access: 'Allow'
+          protocol: 'Tcp'
+          sourceAddressPrefix: 'Internet'
+          sourcePortRange: '*'
+          destinationAddressPrefix: '*'
+          destinationPortRanges: ['443', '80']
+        }
+      }
+      {
+        name: 'Allow-AzureLoadBalancer-Inbound'
+        properties: {
+          priority: 110
+          direction: 'Inbound'
+          access: 'Allow'
+          protocol: '*'
+          sourceAddressPrefix: 'AzureLoadBalancer'
+          sourcePortRange: '*'
+          destinationAddressPrefix: '*'
+          destinationPortRange: '*'
+        }
+      }
+      {
+        // Explicit default-deny for lateral movement FROM other subnets in
+        // this VNet into frontend-subnet -- nothing (backend, data, or a
+        // future subnet) should ever need to reach `frontend` directly.
+        name: 'Deny-VirtualNetwork-Inbound'
+        properties: {
+          priority: 4000
+          direction: 'Inbound'
+          access: 'Deny'
+          protocol: '*'
+          sourceAddressPrefix: 'VirtualNetwork'
+          sourcePortRange: '*'
+          destinationAddressPrefix: '*'
+          destinationPortRange: '*'
+        }
+      }
+    ]
+  }
+}
+
+resource nsgBackend 'Microsoft.Network/networkSecurityGroups@2023-09-01' = {
+  name: '${namePrefix}-nsg-backend'
+  location: location
+  properties: {
+    securityRules: [
+      {
+        // Only `frontend`'s nginx reverse proxy may call `backend`'s API port.
+        name: 'Allow-Frontend-To-Backend-Inbound'
+        properties: {
+          priority: 100
+          direction: 'Inbound'
+          access: 'Allow'
+          protocol: 'Tcp'
+          sourceAddressPrefix: frontendSubnetPrefix
+          sourcePortRange: '*'
+          destinationAddressPrefix: '*'
+          destinationPortRange: '8000'
+        }
+      }
+      {
+        name: 'Allow-AzureLoadBalancer-Inbound'
+        properties: {
+          priority: 110
+          direction: 'Inbound'
+          access: 'Allow'
+          protocol: '*'
+          sourceAddressPrefix: 'AzureLoadBalancer'
+          sourcePortRange: '*'
+          destinationAddressPrefix: '*'
+          destinationPortRange: '*'
+        }
+      }
+      {
+        // Blocks port-scanning/lateral movement from a compromised
+        // `frontend` (or anything else in the VNet) against backend-subnet
+        // on anything other than the one allowed port above.
+        name: 'Deny-VirtualNetwork-Inbound'
+        properties: {
+          priority: 4000
+          direction: 'Inbound'
+          access: 'Deny'
+          protocol: '*'
+          sourceAddressPrefix: 'VirtualNetwork'
+          sourcePortRange: '*'
+          destinationAddressPrefix: '*'
+          destinationPortRange: '*'
+        }
+      }
+    ]
+  }
+}
+
+resource nsgData 'Microsoft.Network/networkSecurityGroups@2023-09-01' = {
+  name: '${namePrefix}-nsg-data'
+  location: location
+  properties: {
+    securityRules: [
+      {
+        // Only `backend` (embedded Celery worker/beat included) may reach
+        // `db`/`redis` -- never `frontend`, closing the exact gap described
+        // in the threat model (compromised container port-scanning peers).
+        name: 'Allow-Backend-To-Data-Inbound'
+        properties: {
+          priority: 100
+          direction: 'Inbound'
+          access: 'Allow'
+          protocol: 'Tcp'
+          sourceAddressPrefix: backendSubnetPrefix
+          sourcePortRange: '*'
+          destinationAddressPrefix: '*'
+          destinationPortRanges: ['5432', '6379']
+        }
+      }
+      {
+        name: 'Allow-AzureLoadBalancer-Inbound'
+        properties: {
+          priority: 110
+          direction: 'Inbound'
+          access: 'Allow'
+          protocol: '*'
+          sourceAddressPrefix: 'AzureLoadBalancer'
+          sourcePortRange: '*'
+          destinationAddressPrefix: '*'
+          destinationPortRange: '*'
+        }
+      }
+      {
+        // Default-deny: `frontend` (or anything else) cannot reach `db`/
+        // `redis` at all, on any port -- this is the core of the fix.
+        name: 'Deny-VirtualNetwork-Inbound'
+        properties: {
+          priority: 4000
+          direction: 'Inbound'
+          access: 'Deny'
+          protocol: '*'
+          sourceAddressPrefix: 'VirtualNetwork'
+          sourcePortRange: '*'
+          destinationAddressPrefix: '*'
+          destinationPortRange: '*'
+        }
+      }
+    ]
+  }
+}
+
+resource vnet 'Microsoft.Network/virtualNetworks@2023-09-01' = {
+  name: '${namePrefix}-vnet'
+  location: location
+  properties: {
+    addressSpace: { addressPrefixes: ['10.0.0.0/16'] }
+    subnets: [
+      {
+        name: 'frontend-subnet'
+        properties: {
+          addressPrefix: frontendSubnetPrefix
+          networkSecurityGroup: { id: nsgFrontend.id }
+          delegations: [
+            { name: 'Microsoft.App.environments', properties: { serviceName: 'Microsoft.App/environments' } }
+          ]
+        }
+      }
+      {
+        name: 'backend-subnet'
+        properties: {
+          addressPrefix: backendSubnetPrefix
+          networkSecurityGroup: { id: nsgBackend.id }
+          delegations: [
+            { name: 'Microsoft.App.environments', properties: { serviceName: 'Microsoft.App/environments' } }
+          ]
+        }
+      }
+      {
+        name: 'data-subnet'
+        properties: {
+          addressPrefix: dataSubnetPrefix
+          networkSecurityGroup: { id: nsgData.id }
+          delegations: [
+            { name: 'Microsoft.App.environments', properties: { serviceName: 'Microsoft.App/environments' } }
+          ]
+        }
+      }
+    ]
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Three Container Apps Environments (one per trust tier -- see the VNet
+// comment above for why one shared environment can't be NSG-segmented).
+// Each is still Consumption plan: no fixed monthly floor, same billing
+// model as before.
+// ---------------------------------------------------------------------------
+resource frontendEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
+  name: '${namePrefix}-env-frontend'
   location: location
   properties: {
     appLogsConfiguration: {
@@ -356,11 +548,64 @@ resource containerAppEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
         sharedKey: logAnalytics.listKeys().primarySharedKey
       }
     }
+    vnetConfiguration: {
+      infrastructureSubnetId: vnet.properties.subnets[0].id
+      internal: false // must stay externally reachable -- this is the one public entry point
+    }
+  }
+}
+
+resource backendEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
+  name: '${namePrefix}-env-backend'
+  location: location
+  properties: {
+    appLogsConfiguration: {
+      destination: 'log-analytics'
+      logAnalyticsConfiguration: {
+        customerId: logAnalytics.properties.customerId
+        sharedKey: logAnalytics.listKeys().primarySharedKey
+      }
+    }
+    vnetConfiguration: {
+      infrastructureSubnetId: vnet.properties.subnets[1].id
+      internal: true // no public ingress needed -- only frontend-subnet may reach it (see nsgBackend)
+    }
+  }
+}
+
+resource dataEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
+  name: '${namePrefix}-env-data'
+  location: location
+  properties: {
+    appLogsConfiguration: {
+      destination: 'log-analytics'
+      logAnalyticsConfiguration: {
+        customerId: logAnalytics.properties.customerId
+        sharedKey: logAnalytics.listKeys().primarySharedKey
+      }
+    }
+    vnetConfiguration: {
+      infrastructureSubnetId: vnet.properties.subnets[2].id
+      internal: true // no public ingress -- only backend-subnet may reach it (see nsgData)
+    }
+  }
+}
+
+resource postgresStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' = {
+  parent: dataEnv
+  name: 'postgres-data'
+  properties: {
+    azureFile: {
+      accountName: storage.name
+      accountKey: storage.listKeys().keys[0].value
+      shareName: postgresShare.name
+      accessMode: 'ReadWrite'
+    }
   }
 }
 
 resource backupStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' = {
-  parent: containerAppEnv
+  parent: backendEnv
   name: 'backup-data'
   properties: {
     azureFile: {
@@ -373,7 +618,7 @@ resource backupStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' =
 }
 
 resource exportStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' = {
-  parent: containerAppEnv
+  parent: backendEnv
   name: 'export-data'
   properties: {
     azureFile: {
@@ -386,31 +631,157 @@ resource exportStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' =
 }
 
 // ---------------------------------------------------------------------------
-// Shared env vars -- mirrors the block every service in docker-compose.yml
-// repeats identically today (see that file's own comment on why it's
-// copy-pasted per-service rather than YAML-anchored). Bicep lets us define
-// it once and reuse it.
+// `db` -- Postgres 16, official image straight from Docker Hub (no registry
+// of your own needed for this one). Internal-only TCP ingress, in its own
+// `dataEnv`/data-subnet -- reachable ONLY from `backend`/`migrate` (both in
+// backend-subnet) via `db.${dataEnv...defaultDomain}:5432`, per nsgData's
+// allow-list; never from the public internet, and no longer reachable from
+// `frontend` either (see the VNet isolation comment above). Pinned to
+// EXACTLY 1 replica always: a
+// stateful single-writer database must never be scaled out, and Consumption
+// plan TCP-ingress apps don't support HTTP-style autoscale rules anyway.
 // ---------------------------------------------------------------------------
-var databaseUrl = 'postgresql://${postgresAdminUsername}:${postgresAdminPassword}@${postgres.properties.fullyQualifiedDomainName}:5432/asset_db?sslmode=require'
-var redisUrl = 'rediss://:${redis.listKeys().primaryKey}@${redis.properties.hostName}:6380/0'
+resource dbApp 'Microsoft.App/containerApps@2024-03-01' = {
+  name: 'db'
+  location: location
+  properties: {
+    managedEnvironmentId: dataEnv.id
+    configuration: {
+      activeRevisionsMode: 'Single'
+      secrets: [
+        { name: 'postgres-password', value: postgresPassword }
+      ]
+      ingress: {
+        external: false
+        transport: 'tcp'
+        targetPort: 5432
+        exposedPort: 5432
+      }
+    }
+    template: {
+      containers: [
+        {
+          name: 'db'
+          image: 'postgres:16-alpine'
+          resources: { cpu: json('0.25'), memory: '0.5Gi' }
+          env: [
+            { name: 'POSTGRES_USER', value: postgresUsername }
+            { name: 'POSTGRES_DB', value: 'asset_db' }
+            { name: 'POSTGRES_PASSWORD', secretRef: 'postgres-password' }
+            // Postgres refuses to initdb directly into a non-empty mount
+            // point that also contains the volume's own metadata -- point
+            // PGDATA at a subdirectory of the mounted share instead.
+            { name: 'PGDATA', value: '/var/lib/postgresql/data/pgdata' }
+          ]
+          volumeMounts: [
+            { volumeName: 'postgres-data', mountPath: '/var/lib/postgresql/data' }
+          ]
+          probes: [
+            {
+              type: 'Liveness'
+              tcpSocket: { port: 5432 }
+              initialDelaySeconds: 10
+              periodSeconds: 30
+            }
+          ]
+        }
+      ]
+      volumes: [
+        { name: 'postgres-data', storageType: 'AzureFile', storageName: 'postgres-data' }
+      ]
+      scale: {
+        minReplicas: 1
+        maxReplicas: 1 // NEVER raise this -- single-writer stateful database
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// `redis` -- official image from Docker Hub. Internal-only TCP ingress, in
+// `dataEnv`/data-subnet alongside `db` -- reachable ONLY from `backend` as
+// `redis.${dataEnv...defaultDomain}:6379`, per nsgData's allow-list; never
+// from `frontend` or the public internet. No persistent volume (see top-of-file comment
+// on why that's an acceptable trade for this app's Redis usage) -- an
+// in-memory cache/broker that resets on restart, exactly like Render's free
+// Key Value tier.
+// ---------------------------------------------------------------------------
+resource redisApp 'Microsoft.App/containerApps@2024-03-01' = {
+  name: 'redis'
+  location: location
+  properties: {
+    managedEnvironmentId: dataEnv.id
+    configuration: {
+      activeRevisionsMode: 'Single'
+      secrets: [
+        { name: 'redis-password', value: redisPassword }
+      ]
+      ingress: {
+        external: false
+        transport: 'tcp'
+        targetPort: 6379
+        exposedPort: 6379
+      }
+    }
+    template: {
+      containers: [
+        {
+          name: 'redis'
+          image: 'redis:7-alpine'
+          command: ['sh', '-c']
+          args: ['redis-server --requirepass "$REDIS_PASSWORD" --appendonly no --maxmemory 200mb --maxmemory-policy allkeys-lru']
+          resources: { cpu: json('0.25'), memory: '0.5Gi' }
+          env: [
+            { name: 'REDIS_PASSWORD', secretRef: 'redis-password' }
+          ]
+          probes: [
+            {
+              type: 'Liveness'
+              tcpSocket: { port: 6379 }
+              initialDelaySeconds: 5
+              periodSeconds: 30
+            }
+          ]
+        }
+      ]
+      scale: {
+        minReplicas: 1
+        maxReplicas: 1 // NEVER raise this -- Celery beat schedule assumes one broker instance, and there's no clustering/persistence here anyway
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Shared env vars -- reused by `backend` (the live service) and `migrate`
+// (the one-shot alembic job, same image as `backend`).
+// ---------------------------------------------------------------------------
+// `db`/`redis` now live in `dataEnv`, a DIFFERENT environment than
+// `backend` (`backendEnv`) -- the short in-environment name ("db") only
+// resolves for apps in the SAME environment, so cross-environment calls
+// need the target app's full internal FQDN instead. Both environments'
+// private DNS zones are linked to the same VNet, so this still resolves
+// fine from `backendEnv`.
+var databaseUrl = 'postgresql://${postgresUsername}:${postgresPassword}@db.${dataEnv.properties.defaultDomain}:5432/asset_db'
+var redisUrl = 'redis://:${redisPassword}@redis.${dataEnv.properties.defaultDomain}:6379/0'
+var frontendFqdn = 'frontend.${frontendEnv.properties.defaultDomain}'
+var publicOrigin = empty(customDomain) ? 'https://${frontendFqdn}' : 'https://${customDomain}'
 
 var sharedEnv = [
   { name: 'ENVIRONMENT', value: 'production' }
-  { name: 'DATABASE_URL', value: databaseUrl }
-  { name: 'REDIS_URL', value: redisUrl }
   { name: 'EXPORT_RESULT_DIR', value: '/app/export_results' }
   { name: 'JWT_ALGORITHM', value: 'HS256' }
   { name: 'JWT_EXPIRY_HOURS', value: '12' }
   { name: 'SITE_NAME', value: 'Snipe-IT Lite' }
-  { name: 'AUTO_INIT_DB', value: 'false' } // migrations run via the `migrate` Container Apps Job below, never on boot
+  { name: 'AUTO_INIT_DB', value: 'false' }
   { name: 'AUTO_SEED_DEMO_DATA', value: 'false' }
   { name: 'LOG_LEVEL', value: 'INFO' }
-  { name: 'LOG_FORMAT', value: 'json' } // structured JSON -> parses cleanly in Log Analytics, see DEPLOYMENT.md
+  { name: 'LOG_FORMAT', value: 'json' }
   { name: 'LOGIN_RATE_LIMIT_MAX', value: '5' }
   { name: 'LOGIN_RATE_LIMIT_WINDOW_SECONDS', value: '60' }
   { name: 'ACCOUNT_LOCKOUT_MAX_ATTEMPTS', value: '5' }
   { name: 'ACCOUNT_LOCKOUT_DURATION_MINUTES', value: '15' }
-  { name: 'ENABLE_API_DOCS', value: 'false' }
+  { name: 'ENABLE_API_DOCS', value: string(enableApiDocs) }
   { name: 'SUPER_ADMIN_USERNAME', value: 'superadmin' }
   { name: 'SUPER_ADMIN_NAME', value: 'Super Admin' }
   { name: 'NOTIFICATIONS_ENABLED', value: string(notificationsEnabled) }
@@ -433,212 +804,121 @@ var sharedEnv = [
   { name: 'BACKUP_DIR', value: '/app/backups' }
   { name: 'BACKUP_RETENTION_COUNT', value: '7' }
   { name: 'BACKUP_GDRIVE_ENABLED', value: 'false' }
-  { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appInsights.properties.ConnectionString }
 ]
 
-var sharedSecrets = [
-  { name: 'jwt-secret-key', keyVaultUrl: secretJwt.properties.secretUri, identity: identity.id }
-  { name: 'super-admin-password', keyVaultUrl: secretSuperAdmin.properties.secretUri, identity: identity.id }
-  { name: 'smtp-password', keyVaultUrl: secretSmtpPassword.properties.secretUri, identity: identity.id }
-]
+var sharedSecrets = concat([
+  { name: 'jwt-secret-key', value: jwtSecretKey }
+  { name: 'super-admin-password', value: superAdminPassword }
+  { name: 'database-url', value: databaseUrl }
+  { name: 'redis-url', value: redisUrl }
+  { name: 'smtp-password', value: empty(smtpPassword) ? 'unset' : smtpPassword }
+], usePrivateDockerHubRepo ? [
+  { name: 'dockerhub-token', value: dockerHubToken }
+] : [])
 
 var sharedSecretEnvRefs = [
   { name: 'JWT_SECRET_KEY', secretRef: 'jwt-secret-key' }
   { name: 'SUPER_ADMIN_PASSWORD', secretRef: 'super-admin-password' }
+  { name: 'DATABASE_URL', secretRef: 'database-url' }
+  { name: 'REDIS_URL', secretRef: 'redis-url' }
   { name: 'SMTP_PASSWORD', secretRef: 'smtp-password' }
 ]
 
-var volumeMounts = [
-  { volumeName: 'backup-data', mountPath: '/app/backups' }
-  { volumeName: 'export-data', mountPath: '/app/export_results' }
-]
-
-var volumes = [
-  { name: 'backup-data', storageType: 'AzureFile', storageName: 'backup-data' }
-  { name: 'export-data', storageType: 'AzureFile', storageName: 'export-data' }
-]
+var registries = usePrivateDockerHubRepo ? [
+  { server: 'index.docker.io', username: dockerHubUsername, passwordSecretRef: 'dockerhub-token' }
+] : []
 
 // ---------------------------------------------------------------------------
-// backend -- FastAPI/uvicorn under /api/*. Internal ingress ONLY (not
-// public) -- the browser only ever talks to the `frontend` app, which
-// reverse-proxies /api/* to this one over the environment's internal
-// network, exactly like nginx -> backend:8000 in docker-compose.yml.
+// `backend` -- FastAPI + embedded Celery worker/beat (backend/Dockerfile,
+// RUN_EMBEDDED_WORKER=true). INTERNAL-ONLY ingress, in its own `backendEnv`/
+// backend-subnet -- nsgBackend only allows inbound from frontend-subnet on
+// port 8000, so only `frontend` can ever reach it (the public internet
+// never talks to it directly, and `migrate` runs from this same subnet).
+// It in turn is the only thing nsgData allows into data-subnet, so it's
+// the sole path to `db`/`redis` too. Scales 0-N independent of `frontend` --
+// see top-of-file comment for why Redis is what makes this safe past 1 replica.
 // ---------------------------------------------------------------------------
 resource backendApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: 'backend'
   location: location
-  identity: {
-    type: 'UserAssigned'
-    userAssignedIdentities: { '${identity.id}': {} }
-  }
   properties: {
-    managedEnvironmentId: containerAppEnv.id
+    managedEnvironmentId: backendEnv.id
     configuration: {
-      activeRevisionsMode: 'Single' // one live revision at a time -> ACA does the rolling swap; see DEPLOYMENT.md
-      registries: [
-        { server: acr.properties.loginServer, identity: identity.id }
-      ]
+      activeRevisionsMode: 'Single'
+      registries: registries
       secrets: sharedSecrets
       ingress: {
-        external: false // internal-only: reachable as http://backend from `frontend`/`worker`/`beat`, never from the public internet
+        external: false
         targetPort: 8000
-        transport: 'http'
+        transport: 'auto'
       }
     }
     template: {
       containers: [
         {
           name: 'backend'
-          image: '${acr.properties.loginServer}/snipeit-backend:${initialImageTag}'
+          image: backendImage
           resources: { cpu: json('0.5'), memory: '1Gi' }
           env: concat(sharedEnv, sharedSecretEnvRefs, [
-            { name: 'CORS_ORIGINS', value: empty(customDomain) ? 'https://frontend.${containerAppEnv.properties.defaultDomain}' : 'https://${customDomain}' }
+            { name: 'RUN_EMBEDDED_WORKER', value: 'true' }
+            // No SERVE_FRONTEND here -- `frontend` serves the static build
+            // now, `backend` is API-only. CORS_ORIGINS still set (defense
+            // in depth / anything that ever calls `backend` directly), even
+            // though normal browser traffic never leaves `frontend`'s origin.
+            { name: 'CORS_ORIGINS', value: publicOrigin }
           ])
-          volumeMounts: volumeMounts
+          volumeMounts: [
+            { volumeName: 'backup-data', mountPath: '/app/backups' }
+            { volumeName: 'export-data', mountPath: '/app/export_results' }
+          ]
           probes: [
             { type: 'Liveness', httpGet: { path: '/healthz', port: 8000 }, initialDelaySeconds: 10, periodSeconds: 30 }
-            { type: 'Readiness', httpGet: { path: '/healthz', port: 8000 }, initialDelaySeconds: 5, periodSeconds: 10 }
+            { type: 'Readiness', httpGet: { path: '/readyz', port: 8000 }, initialDelaySeconds: 5, periodSeconds: 10 }
           ]
         }
       ]
-      volumes: volumes
+      volumes: [
+        { name: 'backup-data', storageType: 'AzureFile', storageName: 'backup-data' }
+        { name: 'export-data', storageType: 'AzureFile', storageName: 'export-data' }
+      ]
       scale: {
         minReplicas: backendMinReplicas
         maxReplicas: backendMaxReplicas
         rules: [
           {
             name: 'http-concurrency'
-            http: { metadata: { concurrentRequests: '50' } } // scale out past ~50 in-flight requests per replica
+            http: { metadata: { concurrentRequests: '50' } }
           }
         ]
       }
     }
   }
+  dependsOn: [
+    dbApp
+    redisApp
+  ]
 }
 
 // ---------------------------------------------------------------------------
-// worker -- Celery consumer (audit CSV/PDF export jobs). No ingress at all
-// (nothing calls it over HTTP -- only via the Redis queue), and scales on
-// QUEUE DEPTH via KEDA's Redis List Length scaler, not HTTP traffic -- this
-// is the piece docker-compose.yml's `--scale worker=N` did manually for a
-// known traffic spike; here it's automatic.
-// ---------------------------------------------------------------------------
-resource workerApp 'Microsoft.App/containerApps@2024-03-01' = {
-  name: 'worker'
-  location: location
-  identity: {
-    type: 'UserAssigned'
-    userAssignedIdentities: { '${identity.id}': {} }
-  }
-  properties: {
-    managedEnvironmentId: containerAppEnv.id
-    configuration: {
-      activeRevisionsMode: 'Single'
-      registries: [
-        { server: acr.properties.loginServer, identity: identity.id }
-      ]
-      secrets: concat(sharedSecrets, [
-        { name: 'redis-conn', value: redisUrl }
-      ])
-    }
-    template: {
-      containers: [
-        {
-          name: 'worker'
-          image: '${acr.properties.loginServer}/snipeit-backend:${initialImageTag}'
-          command: ['celery', '-A', 'celery_app', 'worker', '--loglevel=info', '--concurrency=2']
-          resources: { cpu: json('0.5'), memory: '1Gi' }
-          env: concat(sharedEnv, sharedSecretEnvRefs)
-          volumeMounts: volumeMounts
-        }
-      ]
-      volumes: volumes
-      scale: {
-        minReplicas: workerMinReplicas
-        maxReplicas: workerMaxReplicas
-        rules: [
-          {
-            name: 'celery-queue-depth'
-            custom: {
-              type: 'redis'
-              metadata: {
-                address: '${redis.properties.hostName}:6380'
-                listName: 'celery'
-                listLength: '5' // add a replica for every 5 queued export jobs
-                enableTLS: 'true'
-              }
-              auth: [
-                { secretRef: 'redis-conn', triggerParameter: 'password' }
-              ]
-            }
-          }
-        ]
-      }
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// beat -- Celery Beat scheduler. Pinned to EXACTLY 1 replica, always -- see
-// docker-compose.yml's own comment on why this must never scale (duplicate
-// notification emails). No `rules`/no `maxReplicas` above 1 is what
-// enforces that here.
-// ---------------------------------------------------------------------------
-resource beatApp 'Microsoft.App/containerApps@2024-03-01' = {
-  name: 'beat'
-  location: location
-  identity: {
-    type: 'UserAssigned'
-    userAssignedIdentities: { '${identity.id}': {} }
-  }
-  properties: {
-    managedEnvironmentId: containerAppEnv.id
-    configuration: {
-      activeRevisionsMode: 'Single'
-      registries: [
-        { server: acr.properties.loginServer, identity: identity.id }
-      ]
-      secrets: sharedSecrets
-    }
-    template: {
-      containers: [
-        {
-          name: 'beat'
-          image: '${acr.properties.loginServer}/snipeit-backend:${initialImageTag}'
-          command: ['celery', '-A', 'celery_app', 'beat', '--loglevel=info']
-          resources: { cpu: json('0.25'), memory: '0.5Gi' }
-          env: concat(sharedEnv, sharedSecretEnvRefs)
-        }
-      ]
-      scale: {
-        minReplicas: 1
-        maxReplicas: 1 // NEVER raise this -- see comment above
-      }
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// frontend -- nginx, built from nginx/Dockerfile, UNCHANGED image/config.
-// The only thing that differs from docker-compose.yml is which values
-// BACKEND_HOST/BACKEND_PORT/PORT/ENABLE_API_DOCS get -- same variables,
-// same envsubst template, same reverse-proxy logic, different platform.
-// This is the ONE public-facing app in the whole environment.
+// `frontend` -- frontend/Dockerfile, UNMODIFIED from local Docker Compose:
+// serves the static frontend build AND reverse-proxies /api/* to `backend`
+// over the VNet's shared internal DNS, now cross-environment
+// (nginx/default.conf.template's BACKEND_HOST/BACKEND_PORT env vars --
+// resolver auto-detected at boot, see
+// nginx/docker-entrypoint.d/15-detect-resolver-ip.sh). In its own
+// `frontendEnv`/frontend-subnet -- the ONLY externally-reachable app, and
+// nsgFrontend denies any inbound from the rest of the VNet, so nothing
+// (including a compromised `backend`) can reach frontend-subnet either.
+// Scales 0-N independent of `backend`.
 // ---------------------------------------------------------------------------
 resource frontendApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: 'frontend'
   location: location
-  identity: {
-    type: 'UserAssigned'
-    userAssignedIdentities: { '${identity.id}': {} }
-  }
   properties: {
-    managedEnvironmentId: containerAppEnv.id
+    managedEnvironmentId: frontendEnv.id
     configuration: {
       activeRevisionsMode: 'Single'
-      registries: [
-        { server: acr.properties.loginServer, identity: identity.id }
-      ]
+      registries: registries
       ingress: {
         external: true
         targetPort: 80
@@ -653,65 +933,73 @@ resource frontendApp 'Microsoft.App/containerApps@2024-03-01' = {
       containers: [
         {
           name: 'frontend'
-          image: '${acr.properties.loginServer}/snipeit-frontend:${initialImageTag}'
+          image: frontendImage
           resources: { cpu: json('0.25'), memory: '0.5Gi' }
           env: [
             { name: 'PORT', value: '80' }
-            // "backend" = the backend Container App's short name -- resolves
-            // over the environment's internal proxy exactly like Compose's
-            // service-name DNS does for "backend:8000". See
-            // nginx/default.conf.template; zero changes needed there.
-            { name: 'BACKEND_HOST', value: 'backend' }
-            { name: 'BACKEND_PORT', value: '80' }
-            { name: 'ENABLE_API_DOCS', value: 'false' }
+            // `backend` now lives in a DIFFERENT environment (`backendEnv`)
+            // than `frontend` (`frontendEnv`) -- the short name "backend"
+            // only resolves within the same environment, so this needs
+            // backend's full internal FQDN instead. Both environments'
+            // private DNS zones are linked to the same VNet, so this
+            // resolves fine from `frontendEnv`. The NSG on backend-subnet
+            // still only allows traffic FROM frontend-subnet on 8000.
+            { name: 'BACKEND_HOST', value: 'backend.${backendEnv.properties.defaultDomain}' }
+            { name: 'BACKEND_PORT', value: '8000' }
+            { name: 'ENABLE_API_DOCS', value: string(enableApiDocs) } // must match backend's own value -- see nginx/default.conf.template's /docs passthrough gating
+            // RESOLVER_IP deliberately NOT set -- nginx/docker-entrypoint.d/15-detect-resolver-ip.sh
+            // reads it from Container Apps' own /etc/resolv.conf at boot.
           ]
           probes: [
             { type: 'Liveness', httpGet: { path: '/', port: 80 }, initialDelaySeconds: 5, periodSeconds: 30 }
+            { type: 'Readiness', httpGet: { path: '/', port: 80 }, initialDelaySeconds: 5, periodSeconds: 10 }
           ]
         }
       ]
       scale: {
-        minReplicas: 1
-        maxReplicas: 5
+        minReplicas: frontendMinReplicas
+        maxReplicas: frontendMaxReplicas
         rules: [
-          { name: 'http-concurrency', http: { metadata: { concurrentRequests: '100' } } }
+          {
+            name: 'http-concurrency'
+            http: { metadata: { concurrentRequests: '100' } } // higher than backend's -- static/proxy responses are cheap, one replica handles more concurrent requests before needing to scale
+          }
         ]
       }
     }
   }
+  dependsOn: [
+    backendApp
+  ]
 }
 
 // ---------------------------------------------------------------------------
-// migrate -- Container Apps Job running `alembic upgrade head` as an
-// explicit, one-shot step. Triggered manually by the CI/CD pipeline
-// (`az containerapp job start`) BEFORE the new backend/worker/beat image is
-// rolled out -- see docker-compose.yml's own "never on container boot"
-// migration comment and DEPLOYMENT.md's promotion pipeline diagram.
+// `migrate` -- Container Apps Job running `alembic upgrade head` against
+// `backend`'s own image, as an explicit, one-shot step, triggered by the
+// CI/CD pipeline BEFORE `backend`'s new image is rolled out. Jobs only bill
+// for the seconds they actually run -- zero standing cost.
 // ---------------------------------------------------------------------------
 resource migrateJob 'Microsoft.App/jobs@2024-03-01' = {
   name: 'migrate'
   location: location
-  identity: {
-    type: 'UserAssigned'
-    userAssignedIdentities: { '${identity.id}': {} }
-  }
   properties: {
-    environmentId: containerAppEnv.id
+    // Must run from backend-subnet, not frontend-subnet or a standalone
+    // environment -- nsgData only allows inbound to data-subnet from
+    // backendSubnetPrefix (see the VNet isolation comment above).
+    environmentId: backendEnv.id
     configuration: {
       triggerType: 'Manual'
       replicaTimeout: 600
       replicaRetryLimit: 1
       manualTriggerConfig: { parallelism: 1, replicaCompletionCount: 1 }
-      registries: [
-        { server: acr.properties.loginServer, identity: identity.id }
-      ]
+      registries: registries
       secrets: sharedSecrets
     }
     template: {
       containers: [
         {
           name: 'migrate'
-          image: '${acr.properties.loginServer}/snipeit-backend:${initialImageTag}'
+          image: backendImage
           command: ['alembic', 'upgrade', 'head']
           resources: { cpu: json('0.5'), memory: '1Gi' }
           env: concat(sharedEnv, sharedSecretEnvRefs)
@@ -719,23 +1007,21 @@ resource migrateJob 'Microsoft.App/jobs@2024-03-01' = {
       ]
     }
   }
+  dependsOn: [
+    dbApp
+  ]
 }
 
 // ---------------------------------------------------------------------------
 // Outputs -- consumed by the GitHub Actions deploy workflows.
 // ---------------------------------------------------------------------------
-output acrLoginServer string = acr.properties.loginServer
-output acrName string = acr.name
-output containerAppEnvName string = containerAppEnv.name
+output frontendEnvName string = frontendEnv.name
+output backendEnvName string = backendEnv.name
+output dataEnvName string = dataEnv.name
 output frontendFqdn string = frontendApp.properties.configuration.ingress.fqdn
-output backendAppName string = backendApp.name
-output workerAppName string = workerApp.name
-output beatAppName string = beatApp.name
 output frontendAppName string = frontendApp.name
+output backendAppName string = backendApp.name
+output dbAppName string = dbApp.name
+output redisAppName string = redisApp.name
 output migrateJobName string = migrateJob.name
 output logAnalyticsWorkspaceId string = logAnalytics.id
-output appInsightsConnectionString string = appInsights.properties.ConnectionString
-output identityClientId string = identity.properties.clientId
-output identityId string = identity.id
-output postgresFqdn string = postgres.properties.fullyQualifiedDomainName
-output redisHostName string = redis.properties.hostName

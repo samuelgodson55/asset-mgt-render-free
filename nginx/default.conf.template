@@ -16,12 +16,12 @@
 #
 #   Variable       | Local (docker-compose.yml)      | Render / Cloud
 #   ---------------|----------------------------------|--------------------------------
-#   PORT           | 80 (default, see nginx/Dockerfile)| Render injects its own port
+#   PORT           | 80 (default, see frontend/Dockerfile)| Render injects its own port
 #   BACKEND_HOST   | backend (Compose service name)    | your backend service's hostname
 #   BACKEND_PORT   | 8000                               | whatever port that service listens on
 #   RESOLVER_IP    | 127.0.0.11 (Docker's embedded DNS) | your platform's internal DNS IP
 #
-# See nginx/Dockerfile for the default values baked into the image, and
+# See frontend/Dockerfile for the default values baked into the image, and
 # README.md for how to override them per environment.
 #
 # THE CORE IDEA (what makes this a "reverse proxy" and not just a static
@@ -56,7 +56,7 @@ resolver ${RESOLVER_IP} valid=10s;
 server {
     # ${PORT} lets this exact same image satisfy platforms (like Render)
     # that assign their own port at runtime, while still defaulting to the
-    # standard port 80 for local Docker Compose. See nginx/Dockerfile.
+    # standard port 80 for local Docker Compose. See frontend/Dockerfile.
     listen ${PORT};
     server_name _;
 
@@ -214,7 +214,7 @@ server {
     # gating on the identically-named backend setting -- see config.py's
     # ENABLE_API_DOCS docstring for the full reasoning. Set ENABLE_API_DOCS
     # to anything other than exactly "true" (e.g. "false", or leave it
-    # unset -- see nginx/Dockerfile's ENV default) in any environment
+    # unset -- see frontend/Dockerfile's ENV default) in any environment
     # reachable from the public internet, so these routes are blocked
     # HERE, before the request ever reaches the backend at all -- not
     # merely relying on the backend happening to be configured correctly.

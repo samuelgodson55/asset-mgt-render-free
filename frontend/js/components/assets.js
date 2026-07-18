@@ -7,7 +7,7 @@
 // =============================================================================
 
 import { apiRequest } from '../api.js';
-import { escapeHtml, openModal, closeModal, toggleRoute, toggleCapacityEdit, toggleNameEdit, toggleCategoryEdit, togglePriceEdit, formatPrice, statusBadge, debounce, renderServerPaginationBar, rowDetailsTrigger, showFieldError, clearFieldError } from '../ui.js';
+import { escapeHtml, openModal, closeModal, toggleRoute, toggleCapacityEdit, toggleNameEdit, toggleCategoryEdit, togglePriceEdit, formatPrice, statusBadge, debounce, renderServerPaginationBar, rowDetailsTrigger, showFieldError, clearFieldError, formatTimestamp } from '../ui.js';
 import { refreshDashboard } from '../dashboard.js';
 
 let currentDispatchAssetId = null; // remembers which asset the open dispatch drawer is for
@@ -139,7 +139,7 @@ export function changeAssetsPage(delta) {
 // (added above in renderAssetsTable) to it, mirroring
 // components/users.js's deleteProfile().
 export async function deleteAssetPool(assetId, assetName) {
-  if (!confirm(`Delete asset pool "${assetName}"? This cannot be undone, and only pools with no outstanding checkouts or isolated units can be deleted.`)) return;
+  if (!confirm(`Delete asset pool "${assetName}"? It will be removed from active inventory, but can be restored later from the Restore Deleted Assets panel. Only pools with no outstanding checkouts or isolated units can be deleted.`)) return;
   try {
     const result = await apiRequest(`/assets/${assetId}`, { method: 'DELETE' });
     alert(result.message);
@@ -147,6 +147,97 @@ export async function deleteAssetPool(assetId, assetName) {
     // it -- it would otherwise be showing details for a pool that no
     // longer exists in active inventory.
     if (currentPropsAssetId === assetId) closeModal('propsModal');
+    refreshDashboard();
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+// ---- Restore Deleted Assets (Super Admin only) ----
+// Same true server-side search + pagination pattern as assetsState above
+// (and components/users.js's deletedUsersState), against its own separate
+// GET /assets/deleted list. Powers a "Restore Deleted Assets" panel next
+// to the Restore Deleted Users one on the admin dashboard.
+const deletedAssetsState = { page: 1, perPage: 5, search: '', total: 0 };
+
+export async function loadDeletedAssets() {
+  const tbody = document.getElementById('deletedAssetTableBody');
+  if (!tbody) return; // Not on this page (e.g. manager.html has no restore panel).
+  try {
+    const offset = (deletedAssetsState.page - 1) * deletedAssetsState.perPage;
+    const params = new URLSearchParams({ limit: deletedAssetsState.perPage, offset });
+    if (deletedAssetsState.search.trim()) params.set('search', deletedAssetsState.search.trim());
+    const result = await apiRequest(`/assets/deleted?${params.toString()}`);
+    deletedAssetsState.total = result.total;
+    renderDeletedAssetsTable(result.items);
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="4" class="px-5 py-6 text-center text-rose-400">${escapeHtml(err.message)}</td></tr>`;
+  }
+}
+
+function renderDeletedAssetsTable(items) {
+  const tbody = document.getElementById('deletedAssetTableBody');
+  if (!tbody) return;
+
+  document.querySelectorAll('.deleted-asset-count').forEach(el => el.textContent = deletedAssetsState.total);
+
+  tbody.innerHTML = items.map(a => {
+    const actionButtons = `<button data-action="restore-asset-pool" data-asset-id="${a.id}" data-asset-name="${escapeHtml(a.name)}" class="rounded-md border border-emerald-500/30 px-2.5 py-1.5 text-[12px] font-medium text-emerald-400 transition hover:border-emerald-500 hover:bg-emerald-500/10">Restore</button>`;
+
+    return `
+    <tr ${rowDetailsTrigger(escapeHtml(a.name), [
+      ['Total Quantity', `${a.total_quantity} units`],
+      ...(a.category ? [['Category', escapeHtml(a.category)]] : []),
+      ...(a.price !== null && a.price !== undefined ? [['Price', escapeHtml(formatPrice(a.price))]] : []),
+      ['Deleted On', a.deleted_at ? escapeHtml(formatTimestamp(a.deleted_at)) : '—'],
+      ['', `<div class="flex flex-wrap gap-2">${actionButtons}</div>`],
+    ])} class="cursor-pointer transition hover:bg-card2/40 active:bg-card2/60 sm:cursor-default">
+      <td class="px-5 py-3.5">
+        <div class="flex items-center gap-2">
+          <div>
+            <p class="font-medium text-slate-100">${escapeHtml(a.name)}</p>
+            <p class="tag-mono text-[11px] text-slate-500">POOL-${a.id}${a.category ? ` · ${escapeHtml(a.category)}` : ''}</p>
+          </div>
+          <!-- Mobile-only affordance showing the row itself is tappable
+               (replaces the old separate "Details" button). -->
+          <svg class="ml-auto h-4 w-4 shrink-0 text-slate-600 sm:hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
+        </div>
+      </td>
+      <td class="hidden px-5 py-3.5 tag-mono text-slate-300 sm:table-cell">${a.total_quantity} units</td>
+      <td class="hidden px-5 py-3.5 tag-mono text-slate-400 sm:table-cell" title="${escapeHtml(a.deleted_at || '')}">${a.deleted_at ? formatTimestamp(a.deleted_at) : '—'}</td>
+      <td class="hidden px-5 py-3.5 sm:table-cell">
+        <div class="flex flex-wrap justify-end gap-2">${actionButtons}</div>
+      </td>
+    </tr>`;
+  }).join('') || `<tr><td colspan="4" class="px-5 py-6 text-center text-slate-500">No deleted asset pools.</td></tr>`;
+
+  renderServerPaginationBar('deletedAssets', deletedAssetsState);
+}
+
+export const setDeletedAssetsSearch = debounce((value) => {
+  deletedAssetsState.search = value;
+  deletedAssetsState.page = 1;
+  loadDeletedAssets();
+});
+
+export function setDeletedAssetsPerPage(value) {
+  deletedAssetsState.perPage = parseInt(value, 10) || 5;
+  deletedAssetsState.page = 1;
+  loadDeletedAssets();
+}
+
+export function changeDeletedAssetsPage(delta) {
+  const nextPage = deletedAssetsState.page + delta;
+  if (nextPage < 1) return;
+  deletedAssetsState.page = nextPage;
+  loadDeletedAssets();
+}
+
+export async function restoreAssetPool(assetId, assetName) {
+  if (!confirm(`Restore asset pool "${assetName}"? It will reappear in the active Asset Inventory table immediately.`)) return;
+  try {
+    await apiRequest(`/assets/${assetId}/restore`, { method: 'POST' });
+    loadDeletedAssets();
     refreshDashboard();
   } catch (err) {
     alert(err.message);
