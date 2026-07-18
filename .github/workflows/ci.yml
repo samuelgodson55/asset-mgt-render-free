@@ -19,7 +19,7 @@ on:
   push:
     branches: ['**']
   pull_request:
-    branches: [main, develop]
+    branches: [main, development]
   workflow_call:
 
 concurrency:
