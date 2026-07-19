@@ -25,21 +25,23 @@ config = context.config
 # -----------------------------------------------------------------------------
 # BUG FIX (was: `from config import settings`):
 #
-# backend/config.py's `Settings` class runs two `model_validator` startup
-# checks (`_enforce_prod_jwt_secret` / `_enforce_prod_super_admin_password`)
-# the INSTANT it's instantiated, which happens at module import time -- i.e.
-# the moment this file did `from config import settings`. Those checks
-# refuse to construct `Settings()` at all if ENVIRONMENT=production and
-# JWT_SECRET_KEY/SUPER_ADMIN_PASSWORD aren't yet set to real values.
+# backend/config.py's `Settings` class runs a `model_validator` startup
+# check (`_enforce_prod_jwt_secret`) the INSTANT it's instantiated, which
+# happens at module import time -- i.e. the moment this file did
+# `from config import settings`. That check refuses to construct
+# `Settings()` at all if ENVIRONMENT=production and JWT_SECRET_KEY isn't
+# yet set to a real value.
 #
 # That's exactly the right behavior for the actual app (main.py) -- it
-# should never boot with forgeable secrets. But it made `alembic upgrade
-# head` (and every other alembic subcommand) impossible to run before those
-# unrelated app secrets existed: migrations only need DATABASE_URL, so
-# requiring the JWT secret and Super Admin password just to connect and
-# apply schema changes was a chicken-and-egg problem that failed with a
-# cryptic pydantic ValidationError on every single invocation, regardless
-# of the command.
+# should never boot with a forgeable session-signing secret. But it made
+# `alembic upgrade head` (and every other alembic subcommand) impossible
+# to run before that unrelated app secret existed: migrations only need
+# DATABASE_URL (plus, for 0002_bootstrap_root_admin.py, a couple of plain
+# non-secret env vars it reads directly via `os.environ`, not through this
+# settings object -- see that file's own comment for why), so requiring
+# the JWT secret just to connect and apply schema changes was a chicken-
+# and-egg problem that failed with a cryptic pydantic ValidationError on
+# every single invocation, regardless of the command.
 #
 # The fix: define a second, minimal settings class here that reads ONLY
 # `DATABASE_URL` (same `.env` file support as the real one) and has none of

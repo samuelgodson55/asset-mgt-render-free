@@ -177,13 +177,17 @@ services:
       # (same .env key drives both, so this happens automatically as long
       # as you don't override just one of the two services individually).
       ENABLE_API_DOCS: ${ENABLE_API_DOCS:-}
-      # Hardcoded Super Admin (root account) -- see .env.example and
-      # backend/config.py's SUPER_ADMIN_* docstring. Defaults keep local
-      # Docker Compose working out of the box; generate a real password
-      # before deploying anywhere real.
+      # Root Administrator identity (root account) -- see .env.example and
+      # backend/config.py's SUPER_ADMIN_* docstring. These two are just the
+      # fixed identity (not a secret); the password lives in the database
+      # now, seeded by `alembic upgrade head` in production (see
+      # backend/alembic/versions/0002_bootstrap_root_admin.py) -- that
+      # migration reads ROOT_ADMIN_BOOTSTRAP_PASSWORD directly from the
+      # environment, ONCE, the very first time it runs, so it's passed
+      # through here too even though the running app never reads it itself.
       SUPER_ADMIN_USERNAME: ${SUPER_ADMIN_USERNAME:-superadmin}
       SUPER_ADMIN_NAME: ${SUPER_ADMIN_NAME:-Super Admin}
-      SUPER_ADMIN_PASSWORD: ${SUPER_ADMIN_PASSWORD:-change-this-super-admin-password}
+      ROOT_ADMIN_BOOTSTRAP_PASSWORD: ${ROOT_ADMIN_BOOTSTRAP_PASSWORD:-}
       # Email notifications (extension requests + overdue-checkout digest)
       # -- see backend/config.py's NOTIFICATIONS_ENABLED docstring. Leave
       # disabled for local dev with no mail server; the app works fine
@@ -295,18 +299,13 @@ services:
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in your .env file -- see .env.example}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_FORMAT: ${LOG_FORMAT:-json}
-      # The worker never logs anyone in with the Super Admin account, but
-      # it shares config.py's Settings() with `backend`, and that class's
-      # startup validator (requirement #5) runs unconditionally the moment
-      # Settings() is constructed -- regardless of whether THIS process
-      # ever reads the value. Without this passthrough, SUPER_ADMIN_PASSWORD
-      # falls back to Settings' own empty-string default here, which is
-      # itself in the insecure-placeholder list, so ENVIRONMENT=production
-      # makes the worker refuse to boot even with a real password set in
-      # .env. Must stay identical to the backend service's block above.
-      SUPER_ADMIN_USERNAME: ${SUPER_ADMIN_USERNAME:-superadmin}
-      SUPER_ADMIN_NAME: ${SUPER_ADMIN_NAME:-Super Admin}
-      SUPER_ADMIN_PASSWORD: ${SUPER_ADMIN_PASSWORD:-change-this-super-admin-password}
+      # The worker never logs anyone in with the Super Admin/root account,
+      # and unlike before, config.py's Settings() no longer has a startup
+      # validator that requires a password value here at all -- the root
+      # admin's password lives only in the database now (see
+      # backend/security.py's module docstring). SUPER_ADMIN_USERNAME/NAME
+      # are harmless non-secret defaults baked into Settings() itself, so
+      # this service doesn't need to pass any of the three through anymore.
       # The worker never runs its own DB migrations/seeding -- `backend`
       # already owns that on its startup hook -- so these stay disabled
       # here regardless of the .env values used for `backend`.
@@ -358,14 +357,9 @@ services:
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in your .env file -- see .env.example}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_FORMAT: ${LOG_FORMAT:-json}
-      # Same reasoning as the `worker` service above: config.py's Settings()
-      # startup validator runs the instant Settings() is constructed, no
-      # matter whether `beat` itself ever logs anyone in. Without this,
-      # SUPER_ADMIN_PASSWORD falls back to the empty-string default here,
-      # which fails the production check even with a real password in .env.
-      SUPER_ADMIN_USERNAME: ${SUPER_ADMIN_USERNAME:-superadmin}
-      SUPER_ADMIN_NAME: ${SUPER_ADMIN_NAME:-Super Admin}
-      SUPER_ADMIN_PASSWORD: ${SUPER_ADMIN_PASSWORD:-change-this-super-admin-password}
+      # Same reasoning as the `worker` service above: no startup validator
+      # requires these anymore, since the root admin's password lives in
+      # the database now, not in an environment variable.
       AUTO_INIT_DB: "false"
       AUTO_SEED_DEMO_DATA: "false"
       NOTIFICATIONS_ENABLED: ${NOTIFICATIONS_ENABLED:-false}

@@ -23,7 +23,7 @@
 // =============================================================================
 
 import { checkAccess, startIdleWatchdog, login, redirectByUserRole, logout, getSession } from './auth.js';
-import { closeModal, switchTab, toggleRoute, toggleCapacityEdit, toggleNameEdit, toggleCategoryEdit, togglePriceEdit, changePage, setSearch, setPerPage, openRowDetailsFromElement, initSwipeNav, initModalBackdropDismiss, switchDashboardTab, initDashSwipeNav, initSearchClearButtons } from './ui.js';
+import { closeModal, switchTab, toggleRoute, toggleAdhocExisting, toggleCapacityEdit, toggleNameEdit, toggleCategoryEdit, togglePriceEdit, changePage, setSearch, setPerPage, openRowDetailsFromElement, initSwipeNav, initModalBackdropDismiss, switchDashboardTab, initDashSwipeNav, initSearchClearButtons } from './ui.js';
 import { toggleTheme, initThemeToggle } from './theme.js';
 import { refreshDashboard } from './dashboard.js';
 import { initNotificationBell, toggleNotificationDropdown, closeNotificationDropdown, refreshNotifications } from './components/notifications.js';
@@ -45,7 +45,7 @@ import { exportAuditLogs, changeAuditPage, setAuditPerPage } from './components/
 import { loadMyItems } from './components/myitems.js';
 import {
   setOutsidersSearch, setOutsidersPerPage, changeOutsidersPage,
-  openEditOutsiderModal, submitEditOutsiderForm,
+  openEditOutsiderModal, submitEditOutsiderForm, deleteOutsider,
 } from './components/outsiders.js';
 import {
   openCustodyModal, processReturn, updateCustodySelection, toggleSelectAllCustody,
@@ -67,7 +67,7 @@ import {
   addShortfallAllocationRow, removeShortfallAllocationRow,
   openMyQuoteDetail, updateMyQuoteItemQuantity, removeMyQuoteItem,
   addMyQuoteDetailItem, searchMyQuoteDetailAssets, selectMyQuoteDetailAsset, clearMyQuoteDetailAsset,
-  toggleQuoteAssignAdhocForm, submitQuoteAssignAdhoc,
+  toggleQuoteAssignAdhocForm, submitQuoteAssignAdhoc, toggleQuoteAssignAdhocExisting, toggleQuoteAdhocExisting,
 } from './components/quotation.js';
 import {
   refreshBackupsPanel,
@@ -134,6 +134,7 @@ const CLICK_ACTIONS = {
   'restore-user': (el) => restoreUser(parseInt(el.dataset.userId, 10), el.dataset.userName),
   'edit-user': (el) => openEditUserModal(parseInt(el.dataset.userId, 10)),
   'edit-outsider': (el) => openEditOutsiderModal(parseInt(el.dataset.outsiderId, 10)),
+  'delete-outsider': (el) => deleteOutsider(parseInt(el.dataset.outsiderId, 10), el.dataset.outsiderName),
   'delete-asset-pool': (el) => deleteAssetPool(parseInt(el.dataset.assetId, 10), el.dataset.assetName),
   'restore-asset-pool': (el) => restoreAssetPool(parseInt(el.dataset.assetId, 10), el.dataset.assetName),
   'open-asset-export': () => openAssetExportModal(),
@@ -242,7 +243,10 @@ const CHANGE_ACTIONS = {
   'update-custody-selection': () => updateCustodySelection(),
   'toggle-select-all-custody': (el) => toggleSelectAllCustody(el),
   'toggle-route': () => toggleRoute(),
+  'toggle-adhoc-existing': () => toggleAdhocExisting(),
   'toggle-quote-route': () => toggleQuoteRoute(),
+  'toggle-quote-adhoc-existing': () => toggleQuoteAdhocExisting(),
+  'toggle-quote-assign-adhoc-existing': () => toggleQuoteAssignAdhocExisting(),
   'set-audit-perpage': (el) => setAuditPerPage(el.value),
   'update-order-qty': (el) => updateOrderItemQuantity(parseInt(el.dataset.itemId, 10), el.value),
   'update-my-quote-item-qty': (el) => updateMyQuoteItemQuantity(parseInt(el.dataset.itemId, 10), el.value),

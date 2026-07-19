@@ -46,7 +46,12 @@ def list_outsiders(db: Session, limit: int = DEFAULT_LIMIT, offset: int = 0, sea
     limit = max(1, min(limit, MAX_LIMIT))
     offset = max(0, offset)
 
-    query = db.query(models.Outsider)
+    # Same "excludes soft-deleted rows" pattern as user_service.list_users()
+    # -- a deleted ad-hoc profile disappears from the directory (and from
+    # every "existing outsider" picker in the Dispatch drawer / Quote
+    # creation, both of which call this same GET /outsiders under the
+    # hood) but its historical checkout rows are untouched.
+    query = db.query(models.Outsider).filter(~models.Outsider.is_deleted)
     query = apply_search_filter(query, search, [
         models.Outsider.name, models.Outsider.contact_details, models.Outsider.company,
     ])
@@ -92,7 +97,9 @@ def update_outsider(db: Session, outsider_id: int, req: OutsiderUpdateRequest, u
     it (company is nullable), same as leaving it blank at ad-hoc dispatch
     time.
     """
-    target = db.query(models.Outsider).filter(models.Outsider.id == outsider_id).first()
+    target = db.query(models.Outsider).filter(
+        models.Outsider.id == outsider_id, ~models.Outsider.is_deleted
+    ).first()
     if not target:
         raise HTTPException(status_code=404, detail="Ad-hoc individual not found")
 
@@ -114,6 +121,49 @@ def update_outsider(db: Session, outsider_id: int, req: OutsiderUpdateRequest, u
         "message": f"Profile for {target.name} updated successfully.",
         "id": target.id, "name": target.name, "contact_details": target.contact_details, "company": target.company,
     }
+
+
+def delete_outsider(db: Session, outsider_id: int, user: dict) -> dict:
+    """
+    Deletes an ad-hoc/unlinked profile. Available to both a Super
+    Admin/Admin and a Manager -- same access tier as update_outsider()
+    above, and same reasoning: ad-hoc profiles aren't tied to a
+    system-user role, so there's no narrower boundary to enforce.
+
+    Mirrors services/user_service.py's delete_user() closely:
+      1. SOFT DELETE ONLY -- see models.Outsider.is_deleted's own comment
+         for why the row itself is never removed.
+      2. OUTSTANDING-CUSTODY BLOCK -- a profile that still has items
+         checked out to it cannot be deleted until those items are
+         returned, so a piece of equipment can never end up assigned to a
+         profile that's no longer selectable/visible anywhere in the app.
+      3. ALREADY-DELETED BLOCK -- the same 404 as a genuinely-missing id;
+         a profile that's already gone can't be deleted a second time.
+    """
+    target = db.query(models.Outsider).filter(
+        models.Outsider.id == outsider_id, ~models.Outsider.is_deleted
+    ).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Ad-hoc individual not found")
+
+    outstanding_items = sum(
+        c.quantity - c.quantity_returned for c in target.checkouts if c.status == "active"
+    )
+    if outstanding_items > 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot delete: this ad-hoc individual still has {outstanding_items} item(s) in active custody. Process their returns first.",
+        )
+
+    target.is_deleted = True
+    target.deleted_at = models.utc_now()
+
+    db.add(models.AuditLog(
+        operator=user["email"], action="OUTSIDER_DELETED", target_type="Outsider", target_id=target.id,
+        details=f"Deleted ad-hoc profile for {target.name} (checkout history preserved).",
+    ))
+    db.commit()
+    return {"message": f"Ad-hoc profile for {target.name} deleted successfully."}
 
 
 def _pending_extension_fields(checkout: "models.AssetCheckout") -> dict:
@@ -233,7 +283,7 @@ def export_all_outsiders_items(db: Session, user: dict, fmt: str = "csv"):
     individual on file, one row per checkout (same "one row per checkout,
     not one row per profile" shape as user_service.export_all_users_items).
     """
-    outsiders = db.query(models.Outsider).order_by(models.Outsider.id).all()
+    outsiders = db.query(models.Outsider).filter(~models.Outsider.is_deleted).order_by(models.Outsider.id).all()
 
     headers = ["Individual", "Contact", "Company", "Asset", "Category", "Vendor / Source", "Quantity", "Outstanding", "Checked Out", "Due Date"]
     rows = []

@@ -62,12 +62,14 @@ if BACKEND_DIR not in sys.path:
 # --- Test environment configuration (see module docstring) ----------------
 # Deliberately harmless, throwaway values -- this process never talks to a
 # real SMTP server, real Redis, or real Postgres. `setdefault` so a
-# developer can still override any of these locally (e.g. to point
-# SUPER_ADMIN_PASSWORD at something else) without editing this file.
+# developer can still override any of these locally without editing this
+# file. Note there's no SUPER_ADMIN_PASSWORD anymore -- the root admin's
+# password now lives only in the `users` table (see security.py's module
+# docstring), seeded here with the same well-known demo password
+# database.py's seed_db() uses for local/dev (see _root_admin_demo_row()).
 os.environ.setdefault("ENVIRONMENT", "test")
 os.environ.setdefault("JWT_SECRET_KEY", "test-only-jwt-secret-key-do-not-use-in-production-0123456789")
 os.environ.setdefault("SUPER_ADMIN_USERNAME", "superadmin")
-os.environ.setdefault("SUPER_ADMIN_PASSWORD", "TestSuperAdmin123!")
 os.environ.setdefault("NOTIFICATIONS_ENABLED", "false")
 os.environ.setdefault("ENABLE_AUTO_BACKUP", "false")
 os.environ.setdefault("ENABLE_API_DOCS", "false")
@@ -100,7 +102,7 @@ DEMO_USERS = {
     "staff2": {"identifier": "a.bello@corp.io", "password": "Staff123!"},
     "customer": {"identifier": "d.martins@customer.io", "password": "Customer123!"},
 }
-SUPER_ADMIN = {"identifier": os.environ["SUPER_ADMIN_USERNAME"], "password": os.environ["SUPER_ADMIN_PASSWORD"]}
+SUPER_ADMIN = {"identifier": os.environ["SUPER_ADMIN_USERNAME"], "password": "RootAdmin123!"}
 
 
 @pytest.fixture()

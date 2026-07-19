@@ -273,11 +273,14 @@ class User(Base):
     # EITHER this value or the email address interchangeably.
     username = Column(String, unique=True, index=True, nullable=True)
 
-    # "admin" | "manager" | "staff" | "customer" -- NEVER "super_admin".
-    # That role is reserved for the single hardcoded root identity (see
-    # security.py's super_admin_principal()) and is never stored as a
-    # database row; services/user_service.py's create_user() enforces
-    # this at the API layer too.
+    # "admin" | "manager" | "staff" | "customer" | "super_admin". Unlike
+    # the first four, "super_admin" is never assignable through the app's
+    # user-provisioning API (services/user_service.py's create_user()
+    # blocks it via RESERVED_ROLES) -- the single row with this role is
+    # bootstrapped once by alembic/versions/0002_bootstrap_root_admin.py
+    # (production) or database.py's seed_db() (local/dev/test only), and
+    # every directory/audit listing in the app explicitly filters it out
+    # (see security.py's module docstring for the full rationale).
     role = Column(String, default="staff")
     password_hash = Column(String, nullable=False)
     is_verified = Column(Boolean, default=False, nullable=False)
@@ -330,6 +333,27 @@ class Outsider(Base):
     name = Column(String, nullable=False)
     contact_details = Column(String, nullable=False)
     company = Column(String, nullable=True)
+
+    # --- Soft delete -------------------------------------------------------
+    # Same "never hard-delete" reasoning as User.is_deleted/deleted_at
+    # above: a models.Outsider row is what AssetCheckout.outsider_id (and
+    # Quotation.assigned_outsider_id) actually point at, and every
+    # checkout/quotation listing that shows who an item went to reads
+    # `checkout.outsider.name` live off this row rather than a frozen
+    # snapshot (see services/checkout_service.py's holder_label/
+    # assignee_name, services/outsider_service.py's get_outsider_assigned_
+    # items()). Hard-deleting the row would silently blank out every past
+    # checkout's "assigned to" display. Instead, "deleting" an ad-hoc
+    # profile (Admin/Manager, see services/outsider_service.py ->
+    # delete_outsider()) just flips these two flags: the profile can no
+    # longer be picked for a NEW dispatch/quote assignment and disappears
+    # from the Ad-Hoc Directory, but every historical checkout/quotation
+    # referencing this outsider_id keeps resolving its name/company/
+    # contact exactly as before. Blocked entirely (same as delete_user())
+    # while the profile still has items in active custody, so equipment
+    # can never silently lose its assignee.
+    is_deleted = Column(Boolean, default=False, nullable=False)
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
 
     checkouts = relationship("AssetCheckout", back_populates="outsider")
 

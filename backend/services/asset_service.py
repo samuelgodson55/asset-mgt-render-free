@@ -624,16 +624,30 @@ def checkout_advanced(db: Session, asset_id: int, req: AdvancedCheckoutRequest, 
             assignee_label = f"{target_user.role.capitalize()}: {target_user.name}"
 
         elif req.assignee_type == "outsider":
-            if not req.outsider_name or not req.outsider_contact:
-                raise HTTPException(status_code=400, detail="Name and contact are required for outsiders.")
             if not req.due_date:
                 raise HTTPException(status_code=400, detail="Due date is mandatory for external unauthenticated allocations.")
 
-            outsider = models.Outsider(name=req.outsider_name, contact_details=req.outsider_contact, company=req.outsider_company)
-            db.add(outsider)
-            db.flush()
+            if req.outsider_id:
+                # Route 1: dispatch to an ad-hoc profile ALREADY on file
+                # (picked from the "Existing Ad-Hoc Individual" dropdown --
+                # see frontend/js/components/assets.js's submitDispatchForm())
+                # instead of creating a new one from scratch.
+                outsider = db.query(models.Outsider).filter(
+                    models.Outsider.id == req.outsider_id, ~models.Outsider.is_deleted
+                ).first()
+                if not outsider:
+                    raise HTTPException(status_code=404, detail="Ad-hoc individual not found.")
+            else:
+                # Route 2: create a brand new unlinked profile on the spot
+                # (the original, only-ever-existing behavior).
+                if not req.outsider_name or not req.outsider_contact:
+                    raise HTTPException(status_code=400, detail="Name and contact are required for outsiders.")
+                outsider = models.Outsider(name=req.outsider_name, contact_details=req.outsider_contact, company=req.outsider_company)
+                db.add(outsider)
+                db.flush()
+
             target_outsider_id = outsider.id
-            assignee_label = f"Outsider: {outsider.name} ({req.outsider_company or 'No Company'})"
+            assignee_label = f"Outsider: {outsider.name} ({outsider.company or 'No Company'})"
         else:
             raise HTTPException(status_code=400, detail="Invalid assignee type specified.")
 

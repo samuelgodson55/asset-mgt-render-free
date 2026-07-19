@@ -39,17 +39,22 @@ def test_login_rejects_unknown_identifier(client):
     assert response.status_code == 401
 
 
-def test_super_admin_can_log_in_and_is_never_a_user_row(as_super_admin, db_session):
-    client, headers = as_super_admin
-    me = client.get("/api/auth/me", headers=headers)
+def test_super_admin_is_a_hidden_db_row(as_super_admin, client, db_session):
+    su_client, headers = as_super_admin
+    me = su_client.get("/api/auth/me", headers=headers)
     assert me.status_code == 200
     assert me.json()["role"] == "super_admin"
 
-    # The hardcoded Super Admin must never appear as a `users` table row
-    # (see security.py's module docstring) -- it can't show up in the User
-    # Directory or any other listing built from that table.
+    # The root admin IS a real `users` table row now (see security.py's
+    # module docstring) -- exactly one -- but it must never appear in the
+    # User Directory (GET /users), even to another privileged account.
     import models
-    assert db_session.query(models.User).filter(models.User.role == "super_admin").count() == 0
+    assert db_session.query(models.User).filter(models.User.role == "super_admin").count() == 1
+
+    admin_headers = headers  # already a Super Admin/Admin-equivalent token
+    directory = client.get("/api/users", headers=admin_headers)
+    assert directory.status_code == 200
+    assert all(u["role"] != "super_admin" for u in directory.json()["items"])
 
 
 def test_protected_route_requires_authentication(client):

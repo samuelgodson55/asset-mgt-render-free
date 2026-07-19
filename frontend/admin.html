@@ -985,11 +985,19 @@
         <select id="customerSelect" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60"></select>
       </div>
 
-      <div id="adhocField" class="hidden space-y-3 rounded-lg border border-border bg-card2/50 p-3">
-        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Unlinked Profile Details</p>
-        <input type="text" id="adhocName" placeholder="Full name" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
-        <input type="text" id="adhocCompany" placeholder="Company" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
-        <input type="text" id="adhocContact" placeholder="Contact (email or phone)" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+      <div id="adhocField" class="hidden space-y-3">
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">Ad-Hoc Individual</label>
+          <select id="adhocExistingSelect" data-action="toggle-adhoc-existing" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60">
+            <option value="new">+ Create New Unlinked Profile</option>
+          </select>
+        </div>
+        <div id="adhocNewFields" class="space-y-3 rounded-lg border border-border bg-card2/50 p-3">
+          <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Unlinked Profile Details</p>
+          <input type="text" id="adhocName" placeholder="Full name" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          <input type="text" id="adhocCompany" placeholder="Company" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          <input type="text" id="adhocContact" placeholder="Contact (email or phone)" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+        </div>
       </div>
 
       <div class="grid grid-cols-2 gap-3">
@@ -1802,10 +1810,15 @@
         <!-- Ad-Hoc assignment mini-form -- hidden until the link above is clicked. Creates a
              new Outsider row on submit, exactly like the Issue/Dispatch drawer's own Ad-Hoc
              route. See components/quotation.js's submitQuoteAssignAdhoc(). -->
-        <div id="quoteAssignAdhocForm" class="hidden mt-2 space-y-2 rounded-lg border border-border bg-card2/50 p-3">
-          <input type="text" id="quoteAssignAdhocName" placeholder="Full name" class="w-full rounded-md border border-border bg-card2 px-3 py-2 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
-          <input type="text" id="quoteAssignAdhocCompany" placeholder="Company" class="w-full rounded-md border border-border bg-card2 px-3 py-2 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
-          <input type="text" id="quoteAssignAdhocContact" placeholder="Contact (email or phone)" class="w-full rounded-md border border-border bg-card2 px-3 py-2 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+        <div id="quoteAssignAdhocForm" class="hidden mt-2 space-y-2">
+          <select id="quoteAssignAdhocExistingSelect" data-action="toggle-quote-assign-adhoc-existing" class="w-full rounded-md border border-border bg-card2 px-3 py-2 text-[12px] text-slate-200 outline-none focus:border-blue-500/60">
+            <option value="new">+ Create New Unlinked Profile</option>
+          </select>
+          <div id="quoteAssignAdhocNewFields" class="space-y-2 rounded-lg border border-border bg-card2/50 p-3">
+            <input type="text" id="quoteAssignAdhocName" placeholder="Full name" class="w-full rounded-md border border-border bg-card2 px-3 py-2 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+            <input type="text" id="quoteAssignAdhocCompany" placeholder="Company" class="w-full rounded-md border border-border bg-card2 px-3 py-2 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+            <input type="text" id="quoteAssignAdhocContact" placeholder="Contact (email or phone)" class="w-full rounded-md border border-border bg-card2 px-3 py-2 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          </div>
           <button type="button" data-action="submit-quote-assign-adhoc" class="w-full rounded-md bg-blue-600 px-3 py-1.5 text-[12px] font-semibold text-white transition hover:bg-blue-500">
             Assign to Ad-Hoc Individual
           </button>
@@ -1871,11 +1884,19 @@
         <select id="quoteCustomerSelect" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60"></select>
       </div>
 
-      <div id="quoteAdhocField" class="hidden space-y-3 rounded-lg border border-border bg-card2/50 p-3">
-        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Unlinked Profile Details</p>
-        <input type="text" id="quoteAdhocName" placeholder="Full name" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
-        <input type="text" id="quoteAdhocCompany" placeholder="Company" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
-        <input type="text" id="quoteAdhocContact" placeholder="Contact (email or phone)" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+      <div id="quoteAdhocField" class="hidden space-y-3">
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">Ad-Hoc Individual</label>
+          <select id="quoteAdhocExistingSelect" data-action="toggle-quote-adhoc-existing" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60">
+            <option value="new">+ Create New Unlinked Profile</option>
+          </select>
+        </div>
+        <div id="quoteAdhocNewFields" class="space-y-3 rounded-lg border border-border bg-card2/50 p-3">
+          <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Unlinked Profile Details</p>
+          <input type="text" id="quoteAdhocName" placeholder="Full name" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          <input type="text" id="quoteAdhocCompany" placeholder="Company" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          <input type="text" id="quoteAdhocContact" placeholder="Contact (email or phone)" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+        </div>
       </div>
 
       <p id="createQuoteUnassignedHint" class="text-[11px] text-slate-500">Leave unassigned to decide later -- you can assign it anytime from the Quote Detail screen.</p>

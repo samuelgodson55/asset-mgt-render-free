@@ -1,16 +1,19 @@
 """
 celery_app.py
 -------------
-The single Celery application instance shared by two different processes:
+The single Celery application instance shared by two different deployment
+shapes:
 
-  1. The FastAPI `backend` container -- as a *producer* only. It imports
-     `celery_app` + the task functions from `tasks/` and calls
-     `.delay(...)` on them to enqueue a job, then immediately returns a
-     task_id to the browser instead of blocking a request/response cycle
-     on export generation (see api/audit.py).
-  2. The `worker` container (docker-compose.yml) -- as the *consumer*. It
-     runs `celery -A celery_app worker` and does the actual CSV/PDF
-     generation work, completely out-of-band from any HTTP request.
+  1. docker-compose.yml's separate `worker` + `beat` containers (and the
+     FastAPI `backend` container as a producer only, via `.delay(...)` --
+     see api/audit.py).
+  2. The embedded-worker deployment shape (Render's free-tier
+     render-start.sh, Azure's cost-optimized backend/start.sh): worker
+     AND beat run inside the SAME process as the FastAPI app, since
+     neither deployment provisions a separate worker/beat service. See
+     RedBeat below for why that's safe even when this process runs as
+     more than one replica (Azure's `backendApp` can scale to
+     `backendMaxReplicas`).
 
 Both processes point at the SAME Redis instance (`settings.REDIS_URL`),
 which Celery uses as both the message broker (where queued jobs live until
@@ -46,6 +49,27 @@ celery_app = Celery(
 )
 
 celery_app.conf.update(
+    # BUG FIX (Render free-tier cold start): the render-start.sh embedded
+    # worker (RUN_EMBEDDED_WORKER=true) and this FastAPI process both
+    # start up on the SAME 0.1-shared-CPU free instance. Celery's
+    # defaults have no bound on how long a broker connection attempt can
+    # take, and it retries on startup indefinitely by default -- against
+    # a Redis instance that's ALSO a free Render Key Value service (and
+    # therefore ALSO asleep after inactivity), that retry loop was
+    # burning the container's one sliver of CPU for a long stretch
+    # before Redis finished spinning up, directly at the expense of
+    # uvicorn's own boot. `broker_transport_options` bounds each
+    # individual connection attempt to a couple of seconds;
+    # `broker_connection_retry_on_startup`/`broker_connection_max_retries`
+    # bound the total number of attempts so this settles (successfully
+    # or not) in seconds rather than competing for CPU for minutes.
+    broker_transport_options={
+        "socket_connect_timeout": 2,
+        "socket_timeout": 2,
+    },
+    broker_connection_retry_on_startup=True,
+    broker_connection_retry=True,
+    broker_connection_max_retries=5,
     # Store each task's return value (or exception) for
     # EXPORT_RESULT_TTL_SECONDS after it finishes, then let Redis expire it
     # automatically -- we don't want finished export files (which can
@@ -70,6 +94,22 @@ celery_app.conf.update(
     # running twice -- better to surface the failure and let the person
     # click "export" again.
     task_acks_late=False,
+    # --- RedBeat: makes embedding Beat in every replica safe -----------
+    # See the "LOAD BALANCING" comment on beat_schedule below for the
+    # full story. In short: RedBeat stores the schedule AND a distributed
+    # lock in Redis, so no matter how many processes run
+    # `celery -A celery_app worker -B`, only the one currently holding
+    # the lock actually fires scheduled tasks -- the rest sit idle as
+    # standby. If the lock holder dies, the lock's TTL expires and
+    # another replica picks it up automatically on its next tick. No
+    # manual "only run Beat on one replica" bookkeeping required.
+    redbeat_redis_url=settings.REDIS_URL,
+    beat_scheduler="redbeat.RedBeatScheduler",
+    # How long the leader's lock is held before it must renew -- longer
+    # than beat's own tick interval so a healthy leader always renews in
+    # time, short enough that a crashed leader's replacement takes over
+    # within a reasonable window rather than leaving the schedule stalled.
+    redbeat_lock_timeout=90,
 )
 
 # ---------------------------------------------------------------------------
@@ -91,17 +131,25 @@ celery_app.conf.update(
 # temporarily set one of these to a couple of minutes and watch your
 # terminal/mail-catcher for the first send) without waiting a full day.
 #
-# LOAD BALANCING: Beat runs as its OWN dedicated `beat` service in
-# docker-compose.yml (`celery -A celery_app beat`), separate from `worker`.
-# It used to be embedded inside the worker process via the `-B` flag,
-# which was fine for a single, never-scaled worker container -- but every
-# REPLICA of a `-B`-embedded worker would run its own independent Beat
-# scheduler and each fire these tasks on its own timer, sending duplicate
-# notification emails. Splitting Beat out into its own single-replica
-# service (never scaled -- see docker-compose.yml's `beat` service
-# comment) is what makes `worker` itself safe to scale to N replicas
-# during peak load (see DEPLOYMENT.md's load balancing section) without
-# that risk.
+# LOAD BALANCING: safe to embed in every replica (RedBeat)
+# ------------------------------------------------------------------------
+# docker-compose.yml still runs Beat as its OWN dedicated `beat` service,
+# separate from `worker` -- a fine, simple shape when you have a service
+# type to spare. Render's free-tier and Azure's cost-optimized layouts
+# don't (see render-start.sh / backend/start.sh's RUN_EMBEDDED_WORKER),
+# so they run `celery -A celery_app worker -B` -- worker AND beat -- in
+# the SAME process as the API.
+#
+# Naively, THAT would mean every replica of an embedded worker+beat
+# process independently fires these two tasks on its own timer, i.e.
+# duplicate notification emails once you're running more than one
+# replica (Azure's `backendApp` can scale to `backendMaxReplicas`). The
+# `beat_scheduler`/`redbeat_redis_url` config above fixes this at the
+# scheduler level instead of requiring operators to keep Beat pinned to
+# exactly one replica by hand: RedBeat stores a distributed lock in
+# Redis, so only ONE embedded replica is ever the active scheduler at a
+# time, no matter how many replicas are running `-B` -- see that config
+# block's comment for the full mechanism.
 celery_app.conf.beat_schedule = {
     "send-overdue-checkout-notifications": {
         "task": "tasks.send_overdue_notifications",

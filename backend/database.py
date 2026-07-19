@@ -14,7 +14,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from models import Base, utc_now
 import models
-from security import hash_password
+from security import hash_password, SUPER_ADMIN_ROLE
 from config import settings
 
 # Retrieve the connection string from the central `settings` object
@@ -203,6 +203,35 @@ def get_schema_status() -> dict:
     }
 
 
+def _root_admin_demo_row() -> "models.User":
+    """
+    Builds the LOCAL/DEV/TEST-only root admin row seed_db() inserts
+    alongside the other demo accounts (see seed_db()'s docstring). This is
+    NOT how production gets its root admin -- see
+    alembic/versions/0002_bootstrap_root_admin.py for that -- this exists
+    purely so a fresh `docker compose up` (AUTO_SEED_DEMO_DATA=true) has
+    something to log into as "super_admin" without requiring Alembic to be
+    run by hand first.
+
+    Uses a fixed, well-known demo password (same convention as every other
+    demo account below -- e.g. "Admin123!") rather than a randomly
+    generated one: unlike the production migration, this path is never
+    reachable with ENVIRONMENT=production (config.py's AUTO_SEED_DEMO_DATA
+    defaults to false there, and the two are meant to be mutually
+    exclusive ways of getting the very first root admin row), so there's
+    no real secret to protect here -- same threat model as
+    "Admin123!"/"Manager123!" below.
+    """
+    return models.User(
+        name=settings.SUPER_ADMIN_NAME,
+        email=f"{settings.SUPER_ADMIN_USERNAME}@local",
+        username=settings.SUPER_ADMIN_USERNAME,
+        role=SUPER_ADMIN_ROLE,
+        password_hash=hash_password("RootAdmin123!"),
+        is_verified=True, is_active=True,
+    )
+
+
 def seed_db():
     """
     Populate the database with a small set of realistic demo records the
@@ -220,12 +249,18 @@ def seed_db():
       Manager     -> s.chen@corp.io      / username s.chen      / Manager123!
       Staff       -> t.okafor@corp.io    / username t.okafor    / Staff123!
       Customer    -> d.martins@customer.io / username d.martins / Customer123!
+      Root Admin  -> (SUPER_ADMIN_USERNAME, default "superadmin") / RootAdmin123!
+                     -- local/dev/test only, see _root_admin_demo_row() below.
 
-    NOTE: there's no "Super Admin" row here on purpose. The Super Admin is
-    a single hardcoded identity configured via the SUPER_ADMIN_USERNAME/
-    SUPER_ADMIN_PASSWORD environment variables (see config.py and
-    security.py's super_admin_principal()) -- it's never a database row,
-    so it can't be seeded, edited, or deleted like the accounts below.
+    NOTE on the root admin: there's no "Super Admin" row created below on
+    purpose -- this function only runs when AUTO_SEED_DEMO_DATA=true
+    (local/dev/test, never production; see config.py). In production, the
+    root admin is bootstrapped exactly once by
+    alembic/versions/0002_bootstrap_root_admin.py during
+    `alembic upgrade head` instead. For local/dev/test convenience (so
+    there's still something to log into as "super_admin" without running
+    Alembic by hand), _seed_root_admin() below inserts the same singleton
+    role, but with a well-known demo password -- see its own docstring.
     """
     db = SessionLocal()
     try:
@@ -264,7 +299,7 @@ def seed_db():
             department_role="External Client Contact",
             password_hash=hash_password("Customer123!"), is_verified=True, is_active=True,
         )
-        db.add_all([admin, manager, staff_1, staff_2, customer_1])
+        db.add_all([admin, manager, staff_1, staff_2, customer_1, _root_admin_demo_row()])
         db.commit()
 
         # --- Demo asset pools ----------------------------------------------------

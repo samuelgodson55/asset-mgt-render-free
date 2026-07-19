@@ -67,6 +67,18 @@ def update_outsider(outsider_id: int, req: OutsiderUpdateRequest, db: Session = 
     return outsider_service.update_outsider(db, outsider_id, req, user)
 
 
+@router.delete("/{outsider_id}")
+def delete_outsider(outsider_id: int, db: Session = Depends(get_db), user: dict = Depends(require_privileged_role)):
+    """
+    Deletes an ad-hoc individual's profile (soft delete -- see
+    services/outsider_service.py -> delete_outsider() for the full
+    rationale). Available to both a Super Admin/Admin and a Manager, same
+    as PATCH above; blocked while the profile still has items in active
+    custody.
+    """
+    return outsider_service.delete_outsider(db, outsider_id, user)
+
+
 @router.get("/{outsider_id}/items/export")
 def export_outsider_assigned_items(
     outsider_id: int,

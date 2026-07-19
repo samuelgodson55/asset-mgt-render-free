@@ -50,20 +50,6 @@ _INSECURE_JWT_SECRETS = {
 }
 _MIN_PROD_JWT_SECRET_LENGTH = 32
 
-# Same idea as _INSECURE_JWT_SECRETS above, but for the hardcoded Super
-# Admin's password (see the SUPER_ADMIN_* settings below and
-# security.py's super_admin_principal()). If ANY of these is still the
-# active SUPER_ADMIN_PASSWORD while ENVIRONMENT=production, anyone who has
-# read this public repo can log in as the one account that can never be
-# deleted and always has full privileges.
-_INSECURE_SUPER_ADMIN_PASSWORDS = {
-    "",
-    "change-this-super-admin-password",
-    "RootAccess123!",
-}
-_MIN_PROD_SUPER_ADMIN_PASSWORD_LENGTH = 12
-
-
 class Settings(BaseSettings):
     """
     Each attribute below maps 1:1 to an environment variable of the same
@@ -285,27 +271,29 @@ class Settings(BaseSettings):
     #      between these routes and the public internet.
     ENABLE_API_DOCS: bool = True
 
-    # --- Hardcoded Super Admin (root account) ------------------------------
-    # Unlike every other role (manager/admin/staff/customer), "super_admin"
-    # is NOT a row in the `users` table -- it's a single fixed identity
-    # defined entirely by these three settings, checked directly against
-    # the login form's `identifier` field before the database is ever
-    # queried (see services/auth_service.py -> login()). This is what
-    # guarantees there is always EXACTLY one Super Admin, that it can never
-    # be created/edited/deleted through the app (there's no row to delete),
-    # and that it never shows up in the User Directory or any other listing
-    # (those all query the `users` table, which this account never touches).
+    # --- Root Administrator identity (root account) -------------------------
+    # "super_admin" IS a real row in the `users` table now -- exactly one,
+    # bootstrapped by `alembic/versions/0002_bootstrap_root_admin.py` the
+    # first time `alembic upgrade head` runs against a production database
+    # (see that file's module docstring for the full rationale). Only the
+    # IDENTITY (username/display name) is hardcoded/configured here; the
+    # PASSWORD is never read from an environment variable at runtime --
+    # it's a normal Argon2id hash in `password_hash`, just like every other
+    # account, so it can be rotated (self-service change-password, or an
+    # Admin-issued reset) and every login/rotation goes through the exact
+    # same audited code path (services/auth_service.py -> login()/
+    # update_password(), services/user_service.py -> reset_user_password())
+    # as any other user. There is deliberately no SUPER_ADMIN_PASSWORD
+    # setting anymore -- see security.py's module docstring for what
+    # replaced it.
     #
-    # SUPER_ADMIN_PASSWORD has NO safe built-in default the way most other
-    # settings do -- see _enforce_prod_super_admin_password below, which
-    # refuses to boot in production if this is still empty or one of the
-    # obviously-public placeholder values. Locally, leave it unset (or use
-    # the placeholder in .env.example) and this login path simply won't
-    # activate -- normal DB-backed accounts (see database.py's seed_db())
-    # still work fine without it.
+    # These two values are read directly by the bootstrap migration too
+    # (via `os.environ`, NOT by importing this settings object -- see that
+    # migration file's comment for why), so set them identically in your
+    # `.env` if you want the migration and the running app to agree on the
+    # root account's username/display name.
     SUPER_ADMIN_USERNAME: str = "superadmin"
     SUPER_ADMIN_NAME: str = "Super Admin"
-    SUPER_ADMIN_PASSWORD: str = ""
 
     # --- Email notifications (extension requests + overdue + due-soon) ----
     # This app sends exactly three kinds of email:
@@ -464,17 +452,32 @@ class Settings(BaseSettings):
     SERVE_FRONTEND: bool = False
     FRONTEND_DIR: str = "/app/frontend"
 
-    # --- Embedded Celery worker/beat (free-tier deployment mode) -----------
-    # Render's Free plan has no Background Worker service type at all (see
-    # SERVE_FRONTEND above), so there's nowhere to run `celery -A celery_app
-    # worker -B` as its own service the way docker-compose.yml's `worker`
-    # container does. render-start.sh instead launches that same Celery
-    # command as a background process INSIDE this web service's single
-    # container when RUN_EMBEDDED_WORKER=true, sharing this process's Redis
-    # (a free Render Key Value instance) and Postgres connections. This is a
-    # deliberate free-tier tradeoff, not a general recommendation -- see
-    # README.md for its caveats (the worker dies/restarts along with the web
-    # service on every free-instance spin-down and redeploy).
+    # --- Embedded Celery worker/beat (no separate worker container) -------
+    # Two deployment shapes read this flag and both avoid running a
+    # dedicated `worker`/`beat` service the way docker-compose.yml does:
+    #   - Render's Free plan has no Background Worker service type at all
+    #     (see SERVE_FRONTEND above) -- render-start.sh launches
+    #     `celery -A celery_app worker -B` as a background process INSIDE
+    #     this web service's single free container when
+    #     RUN_EMBEDDED_WORKER=true, sharing this process's Redis (a free
+    #     Render Key Value instance) and Postgres connections.
+    #   - Azure's cost-optimized layout (infra/main.bicep's `backendApp`)
+    #     sets this same flag for the same reason -- one fewer Container
+    #     App to pay for -- and backend/start.sh launches the identical
+    #     embedded worker command.
+    # BUG FIX: backend/start.sh used to not read this variable at all, so
+    # setting it on Azure's `backendApp` had no effect -- `.delay(...)`
+    # calls (audit export, extension emails) queued into Redis with
+    # nothing ever consuming them. start.sh now launches the same embedded
+    # worker render-start.sh does.
+    #
+    # Both scripts pass `-B` (embedded Beat) unconditionally, including on
+    # Azure where `backendApp` can scale to more than one replica -- that's
+    # safe without any further configuration here because celery_app.py
+    # configures RedBeat as the Beat scheduler (`beat_scheduler` +
+    # `redbeat_redis_url`), which keeps its own distributed lock in Redis:
+    # only one replica is ever the active scheduler at a time, regardless
+    # of how many replicas have RUN_EMBEDDED_WORKER=true.
     RUN_EMBEDDED_WORKER: bool = False
 
     # --- Database backups (pg_dump/pg_restore + optional Google Drive) ----
@@ -643,37 +646,6 @@ class Settings(BaseSettings):
                 f"{len(self.JWT_SECRET_KEY)} character(s) long. It must be at least "
                 f"{_MIN_PROD_JWT_SECRET_LENGTH} characters of random data, e.g.: "
                 'python3 -c "import secrets; print(secrets.token_hex(32))"'
-            )
-
-        return self
-
-    # -----------------------------------------------------------------
-    # STARTUP CHECK: hardcoded Super Admin password
-    # -----------------------------------------------------------------
-    # Same rationale as _enforce_prod_jwt_secret above: refuse to boot in
-    # production if SUPER_ADMIN_PASSWORD is still empty or a placeholder
-    # value anyone can read straight out of this public repo. Unlike the
-    # JWT secret, this one is allowed to be empty/placeholder in
-    # development -- an empty value simply disables the Super Admin login
-    # path entirely (see auth_service.py -> login()), rather than logging
-    # anyone in with a blank password.
-    @model_validator(mode="after")
-    def _enforce_prod_super_admin_password(self) -> "Settings":
-        if not self.is_production:
-            return self
-
-        if self.SUPER_ADMIN_PASSWORD in _INSECURE_SUPER_ADMIN_PASSWORDS:
-            raise ValueError(
-                "Refusing to start: ENVIRONMENT=production but SUPER_ADMIN_PASSWORD is "
-                "still empty or a placeholder/default value. Set a real, unique password "
-                "for the hardcoded Super Admin account in your environment/.env file."
-            )
-
-        if len(self.SUPER_ADMIN_PASSWORD) < _MIN_PROD_SUPER_ADMIN_PASSWORD_LENGTH:
-            raise ValueError(
-                f"Refusing to start: ENVIRONMENT=production but SUPER_ADMIN_PASSWORD is "
-                f"only {len(self.SUPER_ADMIN_PASSWORD)} character(s) long. It must be at "
-                f"least {_MIN_PROD_SUPER_ADMIN_PASSWORD_LENGTH} characters long."
             )
 
         return self
