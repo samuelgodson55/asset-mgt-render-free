@@ -53,7 +53,7 @@ Five kinds of people use the system:
 
 | Role | Can do |
 |------|--------|
-| `super_admin` | Everything `admin` can do (see below). This is a single **hardcoded** identity, not a `users` table row — configured via `SUPER_ADMIN_USERNAME`/`SUPER_ADMIN_PASSWORD` in your environment (see [Environment Variables Reference](#environment-variables-reference)). There is always exactly one, it can never be created/edited/deleted through the app, and it never appears in the User Directory or any other listing. |
+| `super_admin` | Everything `admin` can do (see below). This IS a `users` table row now — exactly one, bootstrapped by `alembic upgrade head` in production (or `database.py`'s `seed_db()` for local/dev) — but its identity (`SUPER_ADMIN_USERNAME`/`SUPER_ADMIN_NAME`) is still fixed/hardcoded and it can never be created/edited/deleted through the app. Its password is a normal database-backed hash, rotatable through the same flows as any other account (see [Environment Variables Reference](#environment-variables-reference)). It never appears in the User Directory, bulk exports, or the Audit Trail. |
 | `admin` | Everything: create/delete asset pools, adjust capacity, flag maintenance exceptions, provision any account, view/export all audit logs, export properties for anyone. A normal, database-backed, editable/deletable account — functionally identical in privilege to `super_admin`, just not the one hardcoded root identity. |
 | `manager` | View inventory, dispatch/check-in items to Staff, Linked Customers, or Ad-Hoc Individuals; manage custody for ANY user (no department-scoping); provision new Staff/Customer logins (never Manager/Admin) with any department; export properties/audit data system-wide, same as Admin. |
 | `staff` | Self-service dashboard showing their own checked-out items, with the ability to export their own list; can view/edit their own profile and change their own password. |
@@ -1143,9 +1143,9 @@ see `.gitignore`) and are read by `backend/config.py` into a single typed
 | `LOGIN_RATE_LIMIT_MAX` | `5` | Max `/auth/login` attempts per IP per window before HTTP 429. |
 | `LOGIN_RATE_LIMIT_WINDOW_SECONDS` | `60` | The window (in seconds) the above limit applies over. |
 | `ENABLE_API_DOCS` | `true` | Whether `/docs`, `/redoc`, `/openapi.json` exist at all. **Set `false` in Render/cloud** — see the Security Model section below. Also read by the frontend/nginx service (see the table below) as a second, independent layer. |
-| `SUPER_ADMIN_USERNAME` | `superadmin` | Login identifier for the hardcoded Super Admin (root) account — see [Roles & Permissions Model](#roles--permissions-model). |
-| `SUPER_ADMIN_NAME` | `Super Admin` | Display name for that account (shown in the navbar/profile, same as any other user's `name`). |
-| `SUPER_ADMIN_PASSWORD` | *(placeholder, must be changed in production)* | Password for the hardcoded Super Admin. Leaving it empty fully disables that login path. **Must** be a real, unique value in production — the backend refuses to start otherwise (same idea as `JWT_SECRET_KEY`). |
+| `SUPER_ADMIN_USERNAME` | `superadmin` | Login identifier for the root admin account — see [Roles & Permissions Model](#roles--permissions-model). Also read directly (same env var name) by `alembic/versions/0002_bootstrap_root_admin.py` when it bootstraps this account in production. |
+| `SUPER_ADMIN_NAME` | `Super Admin` | Display name for that account (shown in the navbar/profile, same as any other user's `name`). Also read by the bootstrap migration. |
+| `ROOT_ADMIN_BOOTSTRAP_PASSWORD` | *(empty — auto-generated if unset)* | OPTIONAL. Read once, directly, by `alembic/versions/0002_bootstrap_root_admin.py` the first time it inserts the root admin row in production — never by the running app. Leave unset to have that migration generate a random password and print it to the migration job's own output exactly once instead. Not needed at all for local dev (`database.py`'s `seed_db()` uses a fixed demo password there). |
 | `NOTIFICATIONS_ENABLED` | `false` | Master switch for all email (see [Due-Date Extensions & Notifications](#due-date-extensions--notifications)). Leave `false` for local dev with no mail server — every send is logged at `DEBUG` instead. |
 | `SMTP_HOST` | *(empty)* | Mail server hostname. Required if `NOTIFICATIONS_ENABLED=true`. |
 | `SMTP_PORT` | `587` | Mail server port (587 = STARTTLS, the standard). |
@@ -1236,47 +1236,49 @@ for the full workflow; the short version of who can do what:
 | Look up / adjust / assign any submitted Quotation, add a not-in-inventory line, approve, bulk-fulfill | Manager / Admin / Super Admin only (`require_privileged_role`). No department-scoping. |
 | Change the global VAT percentage | Super Admin / Admin only (`require_super_admin`). |
 
-### The hardcoded Super Admin
+### The root admin account
 
-`super_admin` is treated completely differently from every other role. It
-is **not** a row in the `users` table — it's a single fixed identity built
-entirely from the `SUPER_ADMIN_USERNAME`/`SUPER_ADMIN_PASSWORD`/
-`SUPER_ADMIN_NAME` settings (see [Environment Variables
-Reference](#environment-variables-reference) and `backend/config.py`'s
-docstring). That design is what makes the following true **structurally**,
-not just by convention:
+`super_admin` used to be treated completely differently from every other
+role: not a row in the `users` table at all, just a fixed identity built
+entirely from environment variables. That's changed — the root admin **is**
+a real `users` row now, exactly one, bootstrapped once by
+`alembic/versions/0002_bootstrap_root_admin.py` during `alembic upgrade
+head` in production (or by `database.py`'s `seed_db()` for local/dev/test —
+see that migration's and that function's docstrings). What's still fixed
+**structurally**, not just by convention, is its identity, not its
+credential:
 
-- **Exactly one exists, always.** There's no table row to duplicate, and
-  `POST /users` explicitly rejects `role: "super_admin"` as a reserved
-  value no matter who's provisioning the account (see
-  `services/user_service.py`'s `RESERVED_ROLES`) — anyone who needs the
-  same privileges gets the `admin` role instead (see below).
-- **It can never be deleted.** `DELETE /users/{id}` only ever operates on
-  real `users` rows (`services/user_service.py`'s `delete_user()`); there's
-  no row for the Super Admin to be deleted from.
-- **It never appears anywhere in the UI.** The User Directory, exports,
-  and every other listing all come from `SELECT ... FROM users` — a query
-  that structurally can never return this identity.
-- **Its password lives only in the environment.** `POST
-  /auth/update-password` **and** `POST /users/{id}/reset-password` both
-  explicitly reject any attempt to target it (see
-  `services/auth_service.py`'s `update_password()` and
-  `services/user_service.py`'s `reset_user_password()`) — change it by
-  editing `SUPER_ADMIN_PASSWORD` and restarting the backend, not through
-  the app.
-- **Login is checked first, before the database.** `services/
-  auth_service.py`'s `login()` compares the submitted identifier/password
-  against `SUPER_ADMIN_USERNAME`/a pre-hashed `SUPER_ADMIN_PASSWORD`
-  *before* ever querying `users` — see that function's comments for the
-  exact flow, including why an empty `SUPER_ADMIN_PASSWORD` fully disables
-  this path rather than accepting a blank password.
-- **Its JWT is recognized, not re-validated against the database.**
-  `deps.get_current_user` normally re-queries `users` on every request so
-  deactivating/deleting an account revokes access immediately (see above)
-  — there's no row to re-query for the Super Admin, so its token is simply
-  trusted until it expires. To revoke Super Admin access immediately,
-  rotate `JWT_SECRET_KEY` and/or unset `SUPER_ADMIN_PASSWORD`, then restart
-  the backend.
+- **Exactly one exists, always.** `POST /users` explicitly rejects `role:
+  "super_admin"` as a reserved value no matter who's provisioning the
+  account (see `services/user_service.py`'s `RESERVED_ROLES`), and the
+  bootstrap migration itself checks for an existing row before ever
+  inserting one — anyone who needs the same privileges gets the `admin`
+  role instead (see below).
+- **It can never be deleted or edited through the app.**
+  `DELETE /users/{id}` and `PATCH /users/{id}` both respond with a plain
+  404 — not a clearer "that's the root account" message — the instant they
+  resolve to this row (see `services/user_service.py`'s
+  `is_hidden_root_admin()`), so its existence isn't revealed even to
+  someone probing ids directly.
+- **It never appears in the User Directory, bulk exports, or the Audit
+  Trail.** Every listing/export in `services/user_service.py` and
+  `services/audit_service.py` explicitly filters it out — a real,
+  fully-auditable database row that nonetheless never shows up in the
+  ordinary admin-facing UI ("a secure door for the developer").
+- **Its password is a normal database-backed hash, not an environment
+  variable.** It logs in through the exact same DB-backed lookup in
+  `services/auth_service.py`'s `login()` as any other account, and it can
+  be rotated through the exact same self-service `POST
+  /auth/update-password` / admin-issued `POST /users/{id}/reset-password`
+  flows as any other account — each producing a normal, queryable
+  `AuditLog` row. There is no more "edit an env var and restart the
+  backend" escape hatch, and no more "this fully disables the login path"
+  empty-password special case.
+- **Its JWT is re-validated against the database like anyone else's.**
+  `deps.get_current_user` re-queries `users` on every request, so
+  deactivating this row (an Admin/another Super Admin session, working
+  directly against its known id) revokes its access immediately, exactly
+  like any other account.
 
 `admin` exists precisely so you're not stuck using this one hardcoded
 identity for everyday work: it's a normal, database-backed account with

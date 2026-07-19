@@ -136,7 +136,7 @@
 //                  postgresPassword=$(openssl rand -hex 16) \
 //                  redisPassword=$(openssl rand -hex 16) \
 //                  jwtSecretKey=$(openssl rand -hex 32) \
-//                  superAdminPassword=...
+//                  rootAdminBootstrapPassword=... (optional -- omit to let the migrate Job generate one)
 //
 // Re-run the same command any time to update the environment idempotently --
 // this file does NOT set `backend`/`frontend`/`migrate`'s image tags on
@@ -185,14 +185,14 @@ param redisPassword string
 @secure()
 param jwtSecretKey string
 
-@description('Super Admin (root account) password -- see backend/config.py SUPER_ADMIN_* docstring.')
+@description('OPTIONAL. One-time root admin bootstrap password, read directly by the migrate Job the first time it runs (see backend/alembic/versions/0002_bootstrap_root_admin.py). Never read by the running backend/frontend apps. Leave empty to have that migration generate and print a random password to the Job''s logs exactly once instead.')
 @secure()
-param superAdminPassword string
+param rootAdminBootstrapPassword string = ''
 
 @description('Minimum `backend` replicas. 0 = scale-to-zero (cold start after idle, cheapest). 1 = always warm, small extra cost, no cold start. Independent of `frontend` -- that is the whole point of the split.')
 param backendMinReplicas int = 0
 
-@description('Maximum `backend` replicas under load.')
+@description('Maximum `backend` replicas under load. NOTE: `backend` embeds Celery worker+beat in-process (see RUN_EMBEDDED_WORKER below) since there is no separate worker/beat Container App in this cost-optimized layout. That is safe at any replica count: celery_app.py configures RedBeat as the Beat scheduler, which keeps a distributed lock in Redis so only one replica is ever the active scheduler at a time (automatic failover if that replica dies) -- no per-replica configuration needed here.')
 param backendMaxReplicas int = 3
 
 @description('Minimum `frontend` replicas. 0 = scale-to-zero. Usually safe to leave at 0 even in production -- static-file + proxy responses are fast, so a cold start here is much shorter than `backend`''s.')
@@ -808,7 +808,7 @@ var sharedEnv = [
 
 var sharedSecrets = concat([
   { name: 'jwt-secret-key', value: jwtSecretKey }
-  { name: 'super-admin-password', value: superAdminPassword }
+  { name: 'root-admin-bootstrap-password', value: rootAdminBootstrapPassword }
   { name: 'database-url', value: databaseUrl }
   { name: 'redis-url', value: redisUrl }
   { name: 'smtp-password', value: empty(smtpPassword) ? 'unset' : smtpPassword }
@@ -818,7 +818,11 @@ var sharedSecrets = concat([
 
 var sharedSecretEnvRefs = [
   { name: 'JWT_SECRET_KEY', secretRef: 'jwt-secret-key' }
-  { name: 'SUPER_ADMIN_PASSWORD', secretRef: 'super-admin-password' }
+  // Only ever read by the `migrate` Job below, and only the very first
+  // time it runs (see backend/alembic/versions/0002_bootstrap_root_admin.py)
+  // -- harmless to also hand to backend/frontend/worker/beat, which simply
+  // never read it, same as several other env vars in this shared list.
+  { name: 'ROOT_ADMIN_BOOTSTRAP_PASSWORD', secretRef: 'root-admin-bootstrap-password' }
   { name: 'DATABASE_URL', secretRef: 'database-url' }
   { name: 'REDIS_URL', secretRef: 'redis-url' }
   { name: 'SMTP_PASSWORD', secretRef: 'smtp-password' }
@@ -860,6 +864,13 @@ resource backendApp 'Microsoft.App/containerApps@2024-03-01' = {
           image: backendImage
           resources: { cpu: json('0.5'), memory: '1Gi' }
           env: concat(sharedEnv, sharedSecretEnvRefs, [
+            // BUG FIX: this was previously a no-op -- backend/start.sh
+            // didn't read RUN_EMBEDDED_WORKER at all, so audit exports
+            // queued into Redis with nothing consuming them and the
+            // notification digest never fired. start.sh now actually
+            // launches the embedded worker (see its own comments and
+            // celery_app.py's RedBeat config, which is what makes this
+            // safe even as `backend` scales to more than one replica).
             { name: 'RUN_EMBEDDED_WORKER', value: 'true' }
             // No SERVE_FRONTEND here -- `frontend` serves the static build
             // now, `backend` is API-only. CORS_ORIGINS still set (defense

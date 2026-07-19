@@ -13,7 +13,7 @@ from sqlalchemy import func
 import models
 from models import utc_now
 from config import settings
-from security import hash_password, verify_password, SUPER_ADMIN_ID, SUPER_ADMIN_ROLE, SUPER_ADMIN_PASSWORD_HASH
+from security import hash_password, verify_password, SUPER_ADMIN_ROLE
 from schemas.users import UserCreateRequest, UserUpdateRequest
 import services.export_service as export_service
 from services.search_utils import apply_search_filter
@@ -25,12 +25,43 @@ from services.search_utils import apply_search_filter
 # limited by this list (checked in create_user below).
 MANAGER_PROVISIONABLE_ROLES = ("staff", "customer")
 
-# "super_admin" is reserved for the single hardcoded root identity (see
-# security.py's super_admin_principal()) -- it is never a valid role for a
-# database-backed account, no matter who is provisioning it. Anyone who
-# needs Super-Admin-equivalent privileges on a normal, deletable account
-# gets the "admin" role instead (see deps.py's _FULL_ADMIN_ROLES).
+# "super_admin" is reserved for the single hardcoded-IDENTITY root account
+# (see security.py's module docstring) -- it can never be assigned via
+# THIS provisioning API, no matter who's calling it. The one row that has
+# this role is bootstrapped directly by a migration/seed routine instead
+# (bypassing create_user() entirely). Anyone who needs Super-Admin-
+# equivalent privileges on a normal, deletable account gets the "admin"
+# role instead (see deps.py's _FULL_ADMIN_ROLES).
 RESERVED_ROLES = (SUPER_ADMIN_ROLE,)
+
+
+def _visible_users_query(db: Session):
+    """
+    Shared base query for every User Directory / bulk-export listing in
+    this file: excludes soft-deleted accounts (as before) AND the single
+    hardcoded root admin row (role=SUPER_ADMIN_ROLE). The root account is
+    a real `users` row now (see security.py's module docstring), but it's
+    a "secure door for the developer" -- it must never appear in the
+    directory, in bulk exports, or (see services/audit_service.py) in the
+    Audit Trail UI, even though it's a completely normal, queryable,
+    audited row at the database level.
+    """
+    return db.query(models.User).filter(~models.User.is_deleted, models.User.role != SUPER_ADMIN_ROLE)
+
+
+def is_hidden_root_admin(target: "models.User") -> bool:
+    """
+    True for the one hardcoded root admin row. Any endpoint that targets a
+    SPECIFIC user by id (edit, delete, per-user item export, password
+    reset, restore, ...) checks this and responds exactly as if the id
+    didn't exist (404) -- never a 403 -- so the account's existence isn't
+    revealed even to someone probing ids directly. Self-service routes
+    (GET /users/me/items, POST /auth/update-password acting on your own
+    account) are unaffected -- the root admin can still fully manage
+    itself when logged in as itself; this guard only stops OTHER callers
+    (and generic id-based listings) from reaching it.
+    """
+    return target.role == SUPER_ADMIN_ROLE
 
 # Directories can grow large over time -- these caps stop a single request
 # from ever having to load an unbounded number of rows into memory at once
@@ -163,13 +194,14 @@ def update_user(db: Session, user_id: int, req: UserUpdateRequest, user: dict) -
 
     Only the fields actually present on the request are touched (Pydantic
     `exclude_unset`) -- omitting a field leaves it exactly as it was rather
-    than blanking it out. The hardcoded Super Admin identity has no `users`
-    table row (see security.py), so it's simply unreachable here (the
-    lookup below returns nothing and this raises a 404), exactly like
-    reset_user_password()'s equivalent case.
+    than blanking it out. The hardcoded root admin row IS reachable by the
+    lookup below now (it's a real `users` row -- see security.py's module
+    docstring), but its identity is fixed/hardcoded and it must stay
+    invisible everywhere, so is_hidden_root_admin() below turns that into
+    the same 404 an actually-nonexistent id would produce.
     """
     target = db.query(models.User).filter(models.User.id == user_id, ~models.User.is_deleted).first()
-    if not target:
+    if not target or is_hidden_root_admin(target):
         raise HTTPException(status_code=404, detail="User not found.")
 
     if user["role"] == "manager" and target.role not in MANAGER_PROVISIONABLE_ROLES:
@@ -250,8 +282,9 @@ def list_users(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offset: int 
     """
     # Managers get the same unscoped view as a Super Admin here -- no
     # department filter is applied for either role. (See list_users()'s
-    # docstring above.)
-    query = db.query(models.User).filter(~models.User.is_deleted)
+    # docstring above.) The hidden root admin row is also excluded here --
+    # see _visible_users_query()'s docstring.
+    query = _visible_users_query(db)
     query = apply_search_filter(query, search, [
         models.User.name, models.User.email, models.User.role,
         models.User.department, models.User.department_role,
@@ -402,7 +435,7 @@ def get_my_assigned_items(db: Session, user: dict) -> dict:
 
 def get_user_assigned_items(db: Session, user_id: int, user: dict) -> dict:
     target = db.query(models.User).filter(models.User.id == user_id, ~models.User.is_deleted).first()
-    if not target:
+    if not target or is_hidden_root_admin(target):
         raise HTTPException(status_code=404, detail="User not found")
 
     # Managers may now inspect custody for anyone in the directory, not
@@ -515,7 +548,7 @@ def export_all_users_items(db: Session, user: dict, fmt: str = "csv"):
     combined row). Scope mirrors list_users() exactly: both a Super Admin
     and a Manager get the entire directory.
     """
-    query = db.query(models.User).filter(~models.User.is_deleted)
+    query = _visible_users_query(db)
     users = query.order_by(models.User.id).all()
 
     headers = ["User", "Email", "User Department", "Role", "Asset", "Asset Category", "Vendor / Source", "Quantity", "Outstanding", "Checked Out", "Due Date"]
@@ -563,19 +596,19 @@ def delete_user(db: Session, user_id: int, user: dict) -> dict:
       3. ACTIVE CUSTODY GUARD -- an account still holding outstanding
          checked-out items cannot be deleted until those items are returned,
          so inventory can't silently "disappear" with the deleted account.
+      4. ROOT ADMIN GUARD -- the single hardcoded root admin row
+         (role=SUPER_ADMIN_ROLE, bootstrapped by
+         alembic/versions/0002_bootstrap_root_admin.py) can never be
+         deleted, even by another Super Admin/Admin. It responds with the
+         same 404 an actually-nonexistent id would -- never a clearer
+         "that's the root account" message -- so this endpoint can't be
+         used to fingerprint which id it lives at either.
     """
     if user_id == int(user["sub"]):
         raise HTTPException(status_code=403, detail="You cannot delete your own account while logged in as it.")
 
-    # Defense in depth: the hardcoded Super Admin (see security.py's
-    # SUPER_ADMIN_ID) isn't a `users` table row, so the query below would
-    # already return nothing for it -- this just gives a clearer error
-    # than a generic 404 if it's ever targeted directly.
-    if user_id == SUPER_ADMIN_ID:
-        raise HTTPException(status_code=400, detail="The Super Admin account cannot be deleted.")
-
     target = db.query(models.User).filter(models.User.id == user_id, ~models.User.is_deleted).first()
-    if not target:
+    if not target or is_hidden_root_admin(target):
         raise HTTPException(status_code=404, detail="User not found")
 
     outstanding_items = db.query(func.coalesce(func.sum(
@@ -617,45 +650,24 @@ def reset_user_password(db: Session, user_id: int, new_password: str, admin_pass
     An admin performing a reset never needs to know -- or be asked for --
     the TARGET's old password.
 
-    SECURITY: even though the target's old password is never needed, the
-    ACTING admin must re-confirm their OWN current password (`admin_password`)
-    before this proceeds -- same "step-up" idea as update_password()'s
-    self-service current-password check, just guarding a different account.
-    Without this, anyone who got hold of a still-valid admin/super-admin JWT
-    (an unattended logged-in browser tab, a leaked token, etc.) could reset
-    any other account's password -- including handing themselves a path to
-    another privileged account -- without ever having to prove they still
-    are who the token says they are.
-
-    Mirrors update_password()'s recovery behavior: a successful reset also
-    clears any accumulated brute-force lockout state (failed_login_attempts
-    / locked_until), since a fresh admin-issued password is just as
-    legitimate a recovery event as the user finally remembering their own.
+    SECURITY CHANGE: resetting the root admin's (role=SUPER_ADMIN_ROLE)
+    own password used to be permanently blocked here, because its
+    password lived only in the SUPER_ADMIN_PASSWORD environment variable
+    and had no `users` row to update. Now that it's a real row (see
+    security.py's module docstring), it can be reset through this exact
+    same audited path as any other account -- that's the whole point of
+    moving its credential into the database: rotation and auditing
+    through the normal mechanisms, not a permanent "can only be changed by
+    editing the server environment" exception.
     """
     # Re-authentication step: verify the ACTING admin's own current
-    # password. The Super Admin's hash is the precomputed constant from
-    # security.py (it has no `users` table row); any other admin/manager
-    # is looked up by their own JWT subject id. A missing/unresolvable
-    # admin account or an incorrect password both fail closed.
-    if str(admin_user["sub"]) == str(SUPER_ADMIN_ID):
-        admin_hash = SUPER_ADMIN_PASSWORD_HASH
-    else:
-        admin_row = db.query(models.User).filter(models.User.id == int(admin_user["sub"])).first()
-        admin_hash = admin_row.password_hash if admin_row else None
+    # password by looking up their own row -- the root admin is a real
+    # `users` row too now, so this is the same lookup for every caller.
+    admin_row = db.query(models.User).filter(models.User.id == int(admin_user["sub"])).first()
+    admin_hash = admin_row.password_hash if admin_row else None
 
     if not admin_hash or not admin_password or not verify_password(admin_password, admin_hash):
         raise HTTPException(status_code=400, detail="Your password is incorrect.")
-
-    # The hardcoded Super Admin's password lives only in the
-    # SUPER_ADMIN_PASSWORD environment variable (see security.py) -- it has
-    # no `users` table row to update, so it can never be reset from within
-    # the app itself. Change it by updating the environment and restarting
-    # the backend instead.
-    if user_id == SUPER_ADMIN_ID:
-        raise HTTPException(
-            status_code=400,
-            detail="The Super Admin password is set via the server environment and cannot be changed from the app.",
-        )
 
     # Deliberately excludes soft-deleted accounts -- a deleted user has no
     # password to reset until a Super Admin restores it first (see
@@ -696,7 +708,7 @@ def list_deleted_users(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offs
     js/ui.js's renderServerPaginationBar()) against a second, independent
     table state.
     """
-    query = db.query(models.User).filter(models.User.is_deleted)
+    query = db.query(models.User).filter(models.User.is_deleted, models.User.role != SUPER_ADMIN_ROLE)
     query = apply_search_filter(query, search, [
         models.User.name, models.User.email, models.User.role,
         models.User.department, models.User.department_role,
@@ -736,11 +748,8 @@ def restore_user(db: Session, user_id: int, admin_user: dict) -> dict:
     for grabs while it sat deleted -- restoring it can't collide with
     anything provisioned in the meantime.
     """
-    if user_id == SUPER_ADMIN_ID:
-        raise HTTPException(status_code=400, detail="The Super Admin account cannot be deleted, so it never needs restoring.")
-
     target = db.query(models.User).filter(models.User.id == user_id, models.User.is_deleted).first()
-    if not target:
+    if not target or is_hidden_root_admin(target):
         raise HTTPException(status_code=404, detail="Deleted user not found.")
 
     target.is_deleted = False

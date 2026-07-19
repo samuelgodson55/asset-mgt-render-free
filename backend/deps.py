@@ -19,17 +19,19 @@ import jwt
 
 import models
 from database import get_db
-from security import decode_access_token, SUPER_ADMIN_ID
+from security import decode_access_token
 
 security = HTTPBearer(auto_error=False)
 
 # Roles that carry full Super-Admin-equivalent privileges. `admin` is a
 # normal, DB-backed, deletable account (see database.py's seed_db() and
 # services/user_service.py's create_user()); `super_admin` is the single
-# hardcoded root identity (see security.py's super_admin_principal()).
-# Both are treated identically by every permission check below -- the only
-# difference between them is *how the account exists*, never what it's
-# allowed to do.
+# hardcoded-IDENTITY root account (see security.py's module docstring) --
+# it now IS a real `users` row too, just one that's bootstrapped by
+# migration instead of provisioned through the app, and hidden from
+# directory/audit listings. Both are treated identically by every
+# permission check below -- the only difference between them is *how the
+# account exists*, never what it's allowed to do.
 _FULL_ADMIN_ROLES = ("super_admin", "admin")
 
 
@@ -58,14 +60,6 @@ def get_current_user(
         raise HTTPException(status_code=401, detail="Session expired. Please log in again.")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid authentication token.")
-
-    # The hardcoded Super Admin isn't a `users` table row at all, so there's
-    # nothing to re-query here -- its token is valid for as long as it's
-    # cryptographically valid and unexpired, same as any JWT. (To instantly
-    # revoke Super Admin access, rotate JWT_SECRET_KEY and/or unset
-    # SUPER_ADMIN_PASSWORD and restart the backend.)
-    if payload.get("role") == "super_admin" and str(payload.get("sub")) == str(SUPER_ADMIN_ID):
-        return payload
 
     # Requirement #4 (Auth/User routes must exclude soft-deleted records):
     # the JWT itself is stateless and stays cryptographically valid until it

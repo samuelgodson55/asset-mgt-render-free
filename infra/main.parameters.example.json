@@ -13,7 +13,7 @@
     "postgresPassword": { "value": "REPLACE_ME_OR_PASS_VIA_CLI" },
     "redisPassword": { "value": "REPLACE_ME_OR_PASS_VIA_CLI" },
     "jwtSecretKey": { "value": "REPLACE_ME_OR_PASS_VIA_CLI" },
-    "superAdminPassword": { "value": "REPLACE_ME_OR_PASS_VIA_CLI" },
+    "rootAdminBootstrapPassword": { "value": "" },
     "customDomain": { "value": "" },
     "backendMinReplicas": { "value": 0 },
     "backendMaxReplicas": { "value": 3 },

@@ -538,6 +538,23 @@ export function toggleRoute() {
   document.getElementById('staffField').classList.toggle('hidden', val !== 'staff');
   document.getElementById('customerField').classList.toggle('hidden', val !== 'customer');
   document.getElementById('adhocField').classList.toggle('hidden', val !== 'adhoc');
+  toggleAdhocExisting();
+}
+
+// Sub-toggle inside the "Ad-Hoc Individual" route (see toggleRoute() above):
+// #adhocExistingSelect offers a choice between every ad-hoc profile
+// already on file (populated by components/outsiders.js's
+// populateOutsiderSelects()) and a leading "+ Create New Unlinked
+// Profile" option. The Unlinked Profile Details mini-form
+// (#adhocNewFields) only needs to be shown -- and only needs its
+// name/contact filled in -- when that "create new" option is selected;
+// picking an existing profile just needs its id (see components/
+// assets.js's submitDispatchForm()).
+export function toggleAdhocExisting() {
+  const select = document.getElementById('adhocExistingSelect');
+  const newFields = document.getElementById('adhocNewFields');
+  if (!select || !newFields) return;
+  newFields.classList.toggle('hidden', select.value !== 'new');
 }
 
 export function toggleCapacityEdit() {

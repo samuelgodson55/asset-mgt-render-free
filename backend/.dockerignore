@@ -26,3 +26,13 @@
 .DS_Store
 
 *.log
+
+# --- Tests -- CI-only, never needed at runtime, never shipped ---------------
+# `pytest backend/tests` (see .github/workflows/ci.yml) always runs against
+# the checked-out source tree directly, never against a built image -- there
+# is no reason for test code, its fixtures/ (sample CSVs, etc.), or pytest's
+# own config to ever cross into `COPY . /app/` in the Dockerfile. Keeping
+# these out of the image also shrinks its attack surface (less shipped code
+# to audit/scan) and keeps `docker build`/pull faster.
+tests/
+pytest.ini

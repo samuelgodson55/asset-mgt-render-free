@@ -20,15 +20,20 @@ Authentication model:
     is calling and what they're allowed to do.
 
 Role model:
-  - "super_admin" -> full access to everything. NOT a database row -- this
-                     is a single hardcoded root identity configured via the
-                     SUPER_ADMIN_USERNAME/SUPER_ADMIN_PASSWORD environment
-                     variables (see config.py and security.py's
-                     super_admin_principal()). Exactly one exists, always;
-                     it can never be created, edited, or deleted through
-                     the app, and it never appears in the User Directory or
-                     any other listing (see deps.py + services/auth_service.py
-                     + services/user_service.py for where this is enforced).
+  - "super_admin" -> full access to everything. IS a database row now (see
+                     security.py's module docstring) -- exactly one,
+                     bootstrapped by alembic/versions/0002_bootstrap_root_admin.py
+                     during `alembic upgrade head` in production. Its
+                     IDENTITY (username/name) is fixed/hardcoded via
+                     config.py's SUPER_ADMIN_USERNAME/SUPER_ADMIN_NAME, but
+                     its password is a normal Argon2id hash, rotatable
+                     through the same self-service/admin-reset flows as any
+                     other account. It can never be created (again),
+                     edited, or deleted through the app, and it never
+                     appears in the User Directory, bulk exports, or the
+                     Audit Trail (see deps.py + services/auth_service.py +
+                     services/user_service.py + services/audit_service.py
+                     for where this is enforced).
   - "admin"       -> a normal, database-backed account with every privilege
                      "super_admin" has (see deps.py's _FULL_ADMIN_ROLES) --
                      the difference is purely how the account exists

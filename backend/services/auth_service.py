@@ -14,15 +14,7 @@ from sqlalchemy import or_, func
 import models
 from models import utc_now
 from config import settings
-from security import (
-    hash_password,
-    verify_password,
-    create_access_token,
-    SUPER_ADMIN_ID,
-    SUPER_ADMIN_ROLE,
-    SUPER_ADMIN_PASSWORD_HASH,
-    super_admin_principal,
-)
+from security import hash_password, verify_password, create_access_token
 from schemas.auth import LoginRequest, PasswordUpdateRequest
 
 logger = logging.getLogger(__name__)
@@ -82,36 +74,17 @@ def login(db: Session, req: LoginRequest) -> dict:
     # guesses across many IPs from ever brute-forcing one specific account.
     identifier = req.identifier.strip()
 
-    # --- Hardcoded Super Admin login path -----------------------------
-    # Checked FIRST, before the `users` table is ever touched. This is a
-    # single fixed identity built from SUPER_ADMIN_USERNAME/
-    # SUPER_ADMIN_PASSWORD (see config.py + security.py's
-    # super_admin_principal()), not a database row -- see that module's
-    # docstring for the full rationale (exactly one Super Admin, never
-    # deletable, never listed anywhere). If SUPER_ADMIN_PASSWORD is unset,
-    # SUPER_ADMIN_PASSWORD_HASH is None and this path is fully disabled --
-    # `identifier == settings.SUPER_ADMIN_USERNAME` alone is never enough
-    # to authenticate.
-    if SUPER_ADMIN_PASSWORD_HASH and identifier.lower() == settings.SUPER_ADMIN_USERNAME.strip().lower():
-        if not verify_password(req.password, SUPER_ADMIN_PASSWORD_HASH):
-            logger.warning("Login failed: Super Admin, wrong password")
-            raise HTTPException(status_code=401, detail="Invalid email/username or password.")
-
-        principal = super_admin_principal()
-        token = create_access_token(principal)
-        logger.info("Login succeeded", extra={"user": principal.email, "role": SUPER_ADMIN_ROLE, "user_id": SUPER_ADMIN_ID})
-        return _build_login_result(
-            {
-                "user_id": SUPER_ADMIN_ID,
-                "name": principal.name,
-                "username": principal.username,
-                "role": SUPER_ADMIN_ROLE,
-                "department": None,
-            },
-            token,
-            False,
-        )
-
+    # SECURITY CHANGE: there used to be a hardcoded Super Admin login path
+    # checked HERE, before the `users` table was ever touched -- it
+    # compared `identifier`/`password` directly against the
+    # SUPER_ADMIN_USERNAME/SUPER_ADMIN_PASSWORD environment variables and
+    # never queried the database at all. That's gone: the root admin
+    # account (role=SUPER_ADMIN_ROLE) is now a real `users` row,
+    # bootstrapped once by `alembic/versions/0002_bootstrap_root_admin.py`
+    # (see that file, and security.py's module docstring, for the full
+    # rationale). It authenticates through the exact same DB-backed
+    # lookup/lockout/password-verification logic below as every other
+    # account -- no special-casing needed here anymore.
     identifier_lower = identifier.lower()
     user = db.query(models.User).filter(
         or_(func.lower(models.User.email) == identifier_lower, func.lower(models.User.username) == identifier_lower),
@@ -202,19 +175,6 @@ def get_profile(db: Session, current_user: dict) -> dict:
     even stored in the JWT at all -- see security.py's create_access_token
     -- or a `department` a Super Admin edited after this session started).
     """
-    if current_user.get("role") == SUPER_ADMIN_ROLE and str(current_user.get("sub")) == str(SUPER_ADMIN_ID):
-        # Not a database row -- rehydrate straight from the JWT's own
-        # claims (identical to what login() issued) instead of querying.
-        return {
-            "id": SUPER_ADMIN_ID,
-            "name": current_user.get("name"),
-            "email": current_user.get("email"),
-            "username": current_user.get("username"),
-            "role": SUPER_ADMIN_ROLE,
-            "department": None,
-            "department_role": None,
-        }
-
     user = db.query(models.User).filter(models.User.id == int(current_user["sub"])).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
@@ -230,16 +190,13 @@ def get_profile(db: Session, current_user: dict) -> dict:
 
 
 def update_password(db: Session, req: PasswordUpdateRequest, current_user: dict) -> dict:
-    # The hardcoded Super Admin's password lives only in the
-    # SUPER_ADMIN_PASSWORD environment variable (see config.py) -- it has
-    # no `users` table row to update, so it can never be changed from
-    # within the app itself, by anyone, including itself. Change it by
-    # updating the environment and restarting the backend instead.
-    if req.user_id == SUPER_ADMIN_ID:
-        raise HTTPException(
-            status_code=400,
-            detail="The Super Admin password is set via the server environment and cannot be changed from the app.",
-        )
+    # SECURITY CHANGE: the root admin's password used to live only in the
+    # SUPER_ADMIN_PASSWORD environment variable and could never be changed
+    # from inside the app. It's now a real `password_hash` column like any
+    # other account (see security.py's module docstring), so it goes
+    # through this exact same self-service flow -- current-password
+    # re-confirmation, complexity validation, and an audited update --
+    # rather than being permanently un-rotatable from here.
 
     # A user may only reset their own password unless they are an Admin or
     # the Super Admin.

@@ -206,19 +206,22 @@ services:
       # generates/registers these routes at all when disabled).
       - key: ENABLE_API_DOCS
         value: false
-      # Hardcoded Super Admin (root account) -- see backend/config.py's
-      # SUPER_ADMIN_* docstring and .env.example. ENVIRONMENT=production
-      # above means config.py's startup check REQUIRES this to be set to a
-      # real value or the app refuses to boot -- generateValue: true
-      # satisfies that automatically, the same way it does for
-      # JWT_SECRET_KEY. Find the generated value in the Render dashboard
-      # (Environment tab) if you need to log in as this account.
+      # Root Administrator identity (root account) -- see
+      # backend/security.py's module docstring and .env.example. Its
+      # password is no longer an environment secret: this demo deployment
+      # has AUTO_SEED_DEMO_DATA=true above, so backend/database.py's
+      # seed_db() inserts it with the same well-known demo password as
+      # every other seeded account (see that file's docstring for the
+      # full credentials list) -- there's nothing to `generateValue` here
+      # anymore. A real production deployment should flip
+      # AUTO_SEED_DEMO_DATA to "false" and run `alembic upgrade head`
+      # instead (see backend/alembic/versions/0002_bootstrap_root_admin.py),
+      # which prints a randomly generated password to that job's logs
+      # exactly once instead of using a fixed demo value.
       - key: SUPER_ADMIN_USERNAME
         value: superadmin
       - key: SUPER_ADMIN_NAME
         value: Super Admin
-      - key: SUPER_ADMIN_PASSWORD
-        generateValue: true
       # Email notifications (extension requests + overdue-checkout digest +
       # due-soon reminders) -- see backend/config.py's NOTIFICATIONS_ENABLED
       # docstring and .env.example. Disabled by default here too; flip

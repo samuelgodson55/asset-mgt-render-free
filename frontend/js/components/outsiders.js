@@ -34,6 +34,29 @@ export async function loadOutsiders() {
     const result = await apiRequest(`/outsiders?${params.toString()}`);
     outsidersState.total = result.total;
     renderOutsidersTable(result.items);
+
+    // Also populate every "Ad-Hoc Individual" dropdown that offers a
+    // choice between an EXISTING unlinked profile and creating a new one
+    // -- the Issue/Dispatch drawer's #adhocExistingSelect, the Quote
+    // Detail screen's #quoteAssignAdhocExistingSelect, and the Create
+    // Quote modal's #quoteAdhocExistingSelect. Same reasoning as
+    // components/users.js's loadUsers() populating #staffSelect/
+    // #customerSelect: a SEPARATE, unpaginated/unfiltered fetch (rather
+    // than reusing `result.items` above) since this is a dropdown of
+    // every valid existing profile, not the current page/search slice of
+    // the Ad-Hoc Directory table.
+    const adhocExistingSelect = document.getElementById('adhocExistingSelect');
+    const quoteAssignAdhocExistingSelect = document.getElementById('quoteAssignAdhocExistingSelect');
+    const quoteAdhocExistingSelect = document.getElementById('quoteAdhocExistingSelect');
+    if (adhocExistingSelect || quoteAssignAdhocExistingSelect || quoteAdhocExistingSelect) {
+      const roster = await apiRequest('/outsiders?limit=1000');
+      const optionsHtml = '<option value="new">+ Create New Unlinked Profile</option>' + roster.items.map(o =>
+        `<option value="${o.id}">${escapeHtml(o.name)}${o.company ? ` (${escapeHtml(o.company)})` : ''}</option>`
+      ).join('');
+      if (adhocExistingSelect) adhocExistingSelect.innerHTML = optionsHtml;
+      if (quoteAssignAdhocExistingSelect) quoteAssignAdhocExistingSelect.innerHTML = optionsHtml;
+      if (quoteAdhocExistingSelect) quoteAdhocExistingSelect.innerHTML = optionsHtml;
+    }
   } catch (err) {
     tbody.innerHTML = `<tr><td colspan="4" class="px-5 py-6 text-center text-rose-400">${escapeHtml(err.message)}</td></tr>`;
   }
@@ -55,7 +78,8 @@ function renderOutsidersTable(outsiders) {
     // update_outsider()).
     const actionButtons = `
       <button data-action="edit-outsider" data-outsider-id="${o.id}" class="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">Edit</button>
-      <button data-action="open-custody" data-entity-id="${o.id}" data-entity-type="outsider" class="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">Custody Ledger</button>`;
+      <button data-action="open-custody" data-entity-id="${o.id}" data-entity-type="outsider" class="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">Custody Ledger</button>
+      <button data-action="delete-outsider" data-outsider-id="${o.id}" data-outsider-name="${escapeHtml(o.name)}" class="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-rose-400 transition hover:border-rose-500/50 hover:text-rose-300">Delete</button>`;
 
     // Whole row is tappable on mobile -- see components/assets.js's
     // renderAssetsTable() for the full explanation of this pattern.
@@ -108,6 +132,24 @@ export function changeOutsidersPage(delta) {
   if (nextPage < 1) return;
   outsidersState.page = nextPage;
   loadOutsiders();
+}
+
+// ---- Delete Ad-Hoc Individual (Super Admin/Admin and Manager) ----
+// Mirrors components/users.js's deleteProfile() / components/backups.js's
+// deleteBackup(): confirm, DELETE, then refresh the table. Backend soft-
+// deletes the row (see services/outsider_service.py -> delete_outsider())
+// and blocks the request with a 400 if the profile still has items in
+// active custody -- apiRequest()'s thrown Error already carries that
+// message straight from the backend's `detail`, so the alert() below
+// surfaces it verbatim.
+export async function deleteOutsider(outsiderId, outsiderName) {
+  if (!confirm(`Delete the Ad-Hoc profile for ${outsiderName}? This cannot be undone.`)) return;
+  try {
+    await apiRequest(`/outsiders/${outsiderId}`, { method: 'DELETE' });
+    loadOutsiders();
+  } catch (err) {
+    alert(`Delete failed: ${err.message}`);
+  }
 }
 
 // ---- Edit Ad-Hoc Individual (Super Admin/Admin and Manager) ----

@@ -10,5 +10,13 @@ alembic==1.13.2
 reportlab==4.2.5
 celery==5.4.0
 redis==5.0.8
+# Redis-backed Celery Beat scheduler with a built-in distributed lock:
+# whichever replica currently holds the lock is the only one that actually
+# fires scheduled tasks (celery_app.py's beat_schedule); if it dies, the
+# lock expires and another replica's embedded Beat automatically takes
+# over. This is what makes it safe to pass `-B` unconditionally in every
+# replica (see backend/start.sh + render-start.sh) instead of requiring an
+# operator to manually keep Beat to a single instance.
+celery-redbeat==2.4.1
 google-api-python-client==2.143.0
 google-auth==2.34.0

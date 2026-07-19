@@ -7,7 +7,7 @@
 // =============================================================================
 
 import { apiRequest } from '../api.js';
-import { escapeHtml, openModal, closeModal, toggleRoute, toggleCapacityEdit, toggleNameEdit, toggleCategoryEdit, togglePriceEdit, formatPrice, statusBadge, debounce, renderServerPaginationBar, rowDetailsTrigger, showFieldError, clearFieldError, formatTimestamp } from '../ui.js';
+import { escapeHtml, openModal, closeModal, toggleRoute, toggleAdhocExisting, toggleCapacityEdit, toggleNameEdit, toggleCategoryEdit, togglePriceEdit, formatPrice, statusBadge, debounce, renderServerPaginationBar, rowDetailsTrigger, showFieldError, clearFieldError, formatTimestamp } from '../ui.js';
 import { refreshDashboard } from '../dashboard.js';
 
 let currentDispatchAssetId = null; // remembers which asset the open dispatch drawer is for
@@ -287,6 +287,7 @@ export function openDispatchModal(assetId, assetName, available) {
   // across midnight.
   applyDueDateBounds(document.getElementById('dispatchDueDate'));
   toggleRoute();
+  toggleAdhocExisting();
   openModal('dispatchModal');
 }
 
@@ -323,9 +324,23 @@ export async function submitDispatchForm(event) {
     }
   } else {
     payload.assignee_type = 'outsider';
-    payload.outsider_name = document.getElementById('adhocName').value;
-    payload.outsider_company = document.getElementById('adhocCompany').value;
-    payload.outsider_contact = document.getElementById('adhocContact').value;
+    // "+ Create New Unlinked Profile" (value="new", the only option that
+    // used to exist -- see #adhocExistingSelect's static HTML) still
+    // fabricates a brand new Outsider row from the name/company/contact
+    // fields below. Any OTHER option is an existing outsider's real id,
+    // populated by components/outsiders.js's loadOutsiders() -- selecting
+    // one of those reuses that profile instead (backend/schemas/assets.py's
+    // AdvancedCheckoutRequest.outsider_id), so the same person doesn't end
+    // up with a duplicate Ad-Hoc profile every time they're dispatched to.
+    const existingSelect = document.getElementById('adhocExistingSelect');
+    const existingId = existingSelect ? existingSelect.value : 'new';
+    if (existingId && existingId !== 'new') {
+      payload.outsider_id = parseInt(existingId, 10);
+    } else {
+      payload.outsider_name = document.getElementById('adhocName').value;
+      payload.outsider_company = document.getElementById('adhocCompany').value;
+      payload.outsider_contact = document.getElementById('adhocContact').value;
+    }
   }
 
   try {

@@ -109,7 +109,7 @@ jobs:
               postgresPassword="${{ secrets.POSTGRES_PASSWORD }}" \
               redisPassword="${{ secrets.REDIS_PASSWORD }}" \
               jwtSecretKey="${{ secrets.JWT_SECRET_KEY }}" \
-              superAdminPassword="${{ secrets.SUPER_ADMIN_PASSWORD }}" \
+              rootAdminBootstrapPassword="${{ secrets.ROOT_ADMIN_BOOTSTRAP_PASSWORD }}" \
               customDomain="${{ secrets.CUSTOM_DOMAIN }}"
 
       - name: Show outputs

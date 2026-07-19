@@ -150,6 +150,11 @@ class QuotationAssignRequest(BaseModel):
 
     assignee_type: Optional[str] = None  # "user" | "outsider" | None (clears assignment)
     user_id: Optional[int] = None
+    # Same EXISTING-vs-BRAND-NEW split as schemas/assets.py's
+    # AdvancedCheckoutRequest.outsider_id -- set this to assign to an
+    # ad-hoc profile already on file instead of creating a new one via
+    # outsider_name/outsider_contact/outsider_company.
+    outsider_id: Optional[int] = None
     outsider_name: Optional[str] = None
     outsider_contact: Optional[str] = None
     outsider_company: Optional[str] = None
@@ -158,8 +163,8 @@ class QuotationAssignRequest(BaseModel):
     def _validate_assignee(self) -> "QuotationAssignRequest":
         if self.assignee_type == "user" and not self.user_id:
             raise ValueError("user_id is required when assignee_type is \"user\".")
-        if self.assignee_type == "outsider" and (not self.outsider_name or not self.outsider_contact):
-            raise ValueError("outsider_name and outsider_contact are required when assignee_type is \"outsider\".")
+        if self.assignee_type == "outsider" and not self.outsider_id and (not self.outsider_name or not self.outsider_contact):
+            raise ValueError("outsider_id, or both outsider_name and outsider_contact, are required when assignee_type is \"outsider\".")
         return self
 
 
@@ -198,6 +203,10 @@ class QuotationCreateRequest(BaseModel):
 
     assignee_type: Optional[str] = None  # "user" | "outsider" | None (starts unassigned)
     assigned_user_id: Optional[int] = None
+    # Same EXISTING-vs-BRAND-NEW split as schemas/assets.py's
+    # AdvancedCheckoutRequest.outsider_id -- see QuotationAssignRequest
+    # above for the full explanation.
+    outsider_id: Optional[int] = None
     outsider_name: Optional[str] = None
     outsider_contact: Optional[str] = None
     outsider_company: Optional[str] = None
@@ -206,6 +215,6 @@ class QuotationCreateRequest(BaseModel):
     def _validate_assignee(self) -> "QuotationCreateRequest":
         if self.assignee_type == "user" and not self.assigned_user_id:
             raise ValueError("assigned_user_id is required when assignee_type is \"user\".")
-        if self.assignee_type == "outsider" and (not self.outsider_name or not self.outsider_contact):
-            raise ValueError("outsider_name and outsider_contact are required when assignee_type is \"outsider\".")
+        if self.assignee_type == "outsider" and not self.outsider_id and (not self.outsider_name or not self.outsider_contact):
+            raise ValueError("outsider_id, or both outsider_name and outsider_contact, are required when assignee_type is \"outsider\".")
         return self
