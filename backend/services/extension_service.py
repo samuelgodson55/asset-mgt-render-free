@@ -45,7 +45,7 @@ from sqlalchemy.orm import Session
 
 import models
 from models import utc_now
-from schemas.checkouts import ExtensionRequestCreate, ExtensionDecisionRequest, DirectExtensionRequest, BulkExtendRequest
+from schemas.checkouts_schema import ExtensionRequestCreate, ExtensionDecisionRequest, DirectExtensionRequest, BulkExtendRequest
 from tasks.notification_tasks import send_email_task
 from services.notification_service import get_digest_recipient_emails
 from config import settings

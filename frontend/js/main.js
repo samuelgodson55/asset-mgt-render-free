@@ -33,19 +33,21 @@ import {
   saveCapacity, saveName, saveCategory, savePrice, submitExceptionForm, submitCreatePoolForm, submitCsvImportForm,
   deleteAssetPool, setAssetsSearch, setAssetsPerPage, changeAssetsPage, openAssetExportModal,
   downloadCsvImportTemplate,
-  setDeletedAssetsSearch, setDeletedAssetsPerPage, changeDeletedAssetsPage, restoreAssetPool,
+  setDeletedAssetsSearch, setDeletedAssetsPerPage, changeDeletedAssetsPage, restoreAssetPool, purgeAssetPool,
 } from './components/assets.js';
 import {
   deleteProfile, submitCreateUserForm, setUsersSearch, setUsersPerPage, changeUsersPage,
   openResetPasswordModal, submitResetPasswordForm,
-  setDeletedUsersSearch, setDeletedUsersPerPage, changeDeletedUsersPage, restoreUser,
+  setDeletedUsersSearch, setDeletedUsersPerPage, changeDeletedUsersPage, restoreUser, purgeUser,
   openEditUserModal, submitEditUserForm,
+  openRevokeUserModal, submitRevokeUserForm,
 } from './components/users.js';
 import { exportAuditLogs, changeAuditPage, setAuditPerPage } from './components/audit.js';
 import { loadMyItems } from './components/myitems.js';
 import {
   setOutsidersSearch, setOutsidersPerPage, changeOutsidersPage,
   openEditOutsiderModal, submitEditOutsiderForm, deleteOutsider,
+  openConvertOutsiderModal, submitConvertOutsiderForm,
 } from './components/outsiders.js';
 import {
   openCustodyModal, processReturn, updateCustodySelection, toggleSelectAllCustody,
@@ -132,11 +134,15 @@ const CLICK_ACTIONS = {
   'delete-profile': (el) => deleteProfile(parseInt(el.dataset.userId, 10), el.dataset.userName),
   'reset-password': (el) => openResetPasswordModal(parseInt(el.dataset.userId, 10), el.dataset.userName),
   'restore-user': (el) => restoreUser(parseInt(el.dataset.userId, 10), el.dataset.userName),
+  'purge-user': (el) => purgeUser(parseInt(el.dataset.userId, 10), el.dataset.userName),
   'edit-user': (el) => openEditUserModal(parseInt(el.dataset.userId, 10)),
+  'revoke-user': (el) => openRevokeUserModal(parseInt(el.dataset.userId, 10)),
   'edit-outsider': (el) => openEditOutsiderModal(parseInt(el.dataset.outsiderId, 10)),
   'delete-outsider': (el) => deleteOutsider(parseInt(el.dataset.outsiderId, 10), el.dataset.outsiderName),
+  'convert-outsider': (el) => openConvertOutsiderModal(parseInt(el.dataset.outsiderId, 10)),
   'delete-asset-pool': (el) => deleteAssetPool(parseInt(el.dataset.assetId, 10), el.dataset.assetName),
   'restore-asset-pool': (el) => restoreAssetPool(parseInt(el.dataset.assetId, 10), el.dataset.assetName),
+  'purge-asset-pool': (el) => purgeAssetPool(parseInt(el.dataset.assetId, 10), el.dataset.assetName),
   'open-asset-export': () => openAssetExportModal(),
   'download-csv-template': () => downloadCsvImportTemplate(),
   'change-page': (el) => {
@@ -511,9 +517,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const editUserForm = document.getElementById('editUserForm');
   if (editUserForm) editUserForm.addEventListener('submit', submitEditUserForm);
+  const revokeUserForm = document.getElementById('revokeUserForm');
+  if (revokeUserForm) revokeUserForm.addEventListener('submit', submitRevokeUserForm);
 
   const editOutsiderForm = document.getElementById('editOutsiderForm');
   if (editOutsiderForm) editOutsiderForm.addEventListener('submit', submitEditOutsiderForm);
+  const convertOutsiderForm = document.getElementById('convertOutsiderForm');
+  if (convertOutsiderForm) convertOutsiderForm.addEventListener('submit', submitConvertOutsiderForm);
 
   const dispatchForm = document.getElementById('dispatchForm');
   if (dispatchForm) dispatchForm.addEventListener('submit', submitDispatchForm);

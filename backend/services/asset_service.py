@@ -18,7 +18,7 @@ from sqlalchemy import func
 import models
 from services.search_utils import apply_search_filter
 from models import utc_now
-from schemas.assets import AssetTypeCreate, ExceptionCreate, AdvancedCheckoutRequest, QuantityUpdateRequest, NameUpdateRequest, CategoryUpdateRequest, PriceUpdateRequest
+from schemas.assets_schema import AssetTypeCreate, ExceptionCreate, AdvancedCheckoutRequest, QuantityUpdateRequest, NameUpdateRequest, CategoryUpdateRequest, PriceUpdateRequest
 from services.stock import recalculate_asset_stock
 import services.export_service as export_service
 
@@ -393,11 +393,17 @@ def list_deleted_assets(db: Session, limit: int = DEFAULT_LIMIT, offset: int = 0
     reuse the exact same pagination/search plumbing (see
     js/ui.js's renderServerPaginationBar()) against a second, independent
     table state.
+
+    EXCLUDES PURGED POOLS -- purge_asset_type() below overwrites a
+    pool's `name` with an anonymized placeholder and stamps
+    `purged_at`, specifically so its original name's uniqueness lock is
+    released. There's nothing meaningful left to "restore" under its
+    original name at that point, so purged pools are filtered out here.
     """
     limit = max(1, min(limit, MAX_LIMIT))
     offset = max(0, offset)
 
-    query = db.query(models.AssetType).filter(models.AssetType.is_deleted)
+    query = db.query(models.AssetType).filter(models.AssetType.is_deleted, models.AssetType.purged_at.is_(None))
     query = apply_search_filter(query, search, [models.AssetType.name])
 
     total = query.count()
@@ -429,9 +435,19 @@ def restore_asset_type(db: Session, asset_id: int, user: dict) -> dict:
     is_deleted (see its comment), so a soft-deleted pool's original name
     was never up for grabs while it sat deleted -- restoring it can't
     collide with anything created in the meantime.
+
+    NOT FOR PURGED POOLS -- list_deleted_assets() above already keeps
+    these out of the "Restore Deleted Assets" panel, but this check is
+    repeated here in case restore_asset_type() is ever called directly.
+    purge_asset_type() below has already overwritten this row's `name`
+    with an anonymized placeholder, so "restoring" it wouldn't bring the
+    pool's original name back at all -- it would just reappear in active
+    inventory under the placeholder name.
     """
     target = db.query(models.AssetType).filter(
-        models.AssetType.id == asset_id, models.AssetType.is_deleted
+        models.AssetType.id == asset_id,
+        models.AssetType.is_deleted,
+        models.AssetType.purged_at.is_(None),
     ).first()
     if not target:
         raise HTTPException(status_code=404, detail="Deleted asset not found.")
@@ -445,6 +461,79 @@ def restore_asset_type(db: Session, asset_id: int, user: dict) -> dict:
     ))
     db.commit()
     return {"message": f"Asset category '{target.name}' has been restored."}
+
+
+# ---------------------------------------------------------------------------
+# PURGE ("I'm done with this deleted pool, free up its name")
+# ---------------------------------------------------------------------------
+def purge_asset_type(db: Session, asset_id: int, user: dict) -> dict:
+    """
+    Permanently releases a soft-deleted pool's `name` so a brand-new pool
+    can reuse it -- called from the "Purge" button that sits next to
+    Restore on the Restore Deleted Assets panel. Super Admin only, same
+    gate as delete_asset_type()/restore_asset_type().
+
+    WHY THIS EXISTS: `asset_types.name` carries a DB-level `unique=True`
+    constraint (see models.py). delete_asset_type() only ever flips
+    is_deleted/deleted_at -- it never touches `name` -- so a deleted
+    pool's original name stays permanently "reserved" and
+    create_asset_type() will keep rejecting it for a new pool (see its
+    existing-name check, which deliberately queries ALL rows regardless
+    of is_deleted). Previously the only way around that was to restore
+    the old pool first (bringing it back into active inventory) purely
+    so it could be renamed -- this button skips that detour.
+
+    WHAT "PURGE" DOES *NOT* DO: it is NOT a hard delete. We never
+    `db.delete()` this row, for the exact same reason delete_asset_type()
+    doesn't -- historical AssetCheckout.asset_id / AssetException rows
+    still point at it, and hard-deleting would either violate that
+    foreign key or silently erase this pool out of the historical
+    custody/audit trail. Instead:
+      1. `name` is overwritten with a placeholder that embeds this
+         row's own (permanent, unique) id -- "Purged Asset Pool #{id}"
+         -- so it can never collide with any other pool, purged or not.
+      2. `purged_at` is stamped, which both list_deleted_assets() and
+         restore_asset_type() above check -- once purged, the pool
+         drops out of the "Restore Deleted Assets" panel entirely and
+         can no longer be restored (there'd be nothing meaningful to
+         bring back under its original name).
+      3. The pool's original name is recorded in the audit log entry
+         below (before it's overwritten) so it's still discoverable
+         later via the Audit Trail even though the `asset_types` row
+         itself no longer carries it.
+
+    Irreversible in the same sense delete_asset_type()'s soft delete is
+    reversible and this is not: there's no "unpurge". A caller who
+    isn't sure yet should use Restore, not Purge.
+
+    Only ever reachable for rows list_deleted_assets() would surface
+    (already soft-deleted, not already purged) -- the same filter is
+    repeated here so a raw API call can't purge a live pool or one
+    that's already been purged.
+    """
+    target = db.query(models.AssetType).filter(
+        models.AssetType.id == asset_id,
+        models.AssetType.is_deleted,
+        models.AssetType.purged_at.is_(None),
+    ).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Deleted asset not found.")
+
+    original_name = target.name
+
+    target.name = f"Purged Asset Pool #{target.id}"
+    target.purged_at = utc_now()
+
+    db.add(models.AuditLog(
+        operator=user["email"], action="ASSET_PURGED", target_type="AssetType", target_id=asset_id,
+        details=(
+            f"Permanently purged deleted asset category '{original_name}'. Its name is now "
+            f"free to be reused by a new pool; historical checkout/exception records remain "
+            f"intact under this now-renamed row."
+        ),
+    ))
+    db.commit()
+    return {"message": f"Asset category '{original_name}' has been purged. Its name is now free to be reused."}
 
 
 def flag_asset_exception(db: Session, asset_id: int, exc: ExceptionCreate, user: dict) -> dict:

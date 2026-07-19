@@ -61,7 +61,7 @@ from sqlalchemy.orm import Session, joinedload
 
 import models
 from config import settings
-from schemas.quotations import (
+from schemas.quotations_schema import (
     QuotationItemCreate, QuotationItemQuantityUpdate, VatUpdateRequest,
     QuotationAssignRequest, QuotationMetaUpdate, QuotationCreateRequest,
     QuotationOutsourcedItemCreate, QuotationOutsourceShortfallItem,

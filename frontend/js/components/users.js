@@ -120,6 +120,7 @@ function renderUsersTable(users) {
       ${canEdit ? `<button data-action="edit-user" data-user-id="${u.id}" class="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">Edit</button>` : ''}
       <button data-action="open-custody" data-entity-id="${u.id}" data-entity-type="user" class="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">Custody Ledger</button>
       ${isManagerView ? '' : `<button data-action="reset-password" data-user-id="${u.id}" data-user-name="${escapeHtml(u.name)}" class="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-amber-500/50 hover:text-amber-400">Reset Password</button>`}
+      ${canEdit ? `<button data-action="revoke-user" data-user-id="${u.id}" data-user-name="${escapeHtml(u.name)}" class="rounded-md border border-amber-500/30 px-2.5 py-1.5 text-[12px] font-medium text-amber-400 transition hover:border-amber-500 hover:bg-amber-500/10">Revoke Access</button>` : ''}
       ${isManagerView ? '' : `<button data-action="delete-profile" data-user-id="${u.id}" data-user-name="${escapeHtml(u.name)}" class="rounded-md border border-rose-500/30 px-2.5 py-1.5 text-[12px] font-medium text-rose-400 transition hover:border-rose-500 hover:bg-rose-500/10">Delete Profile</button>`}`;
 
     // Whole row is tappable on mobile -- see components/assets.js's
@@ -238,12 +239,61 @@ export async function deleteProfile(userId, userName) {
     alert("You cannot delete your own account while logged in as it.");
     return;
   }
-  if (!confirm(`Delete profile for ${userName}? This cannot be undone.`)) return;
+  if (!confirm(`Delete profile for ${userName}? It will be removed from active users, but can be restored later from the Restore Deleted Users panel. Only Users with no outstanding checkouts can be deleted..`)) return;
   try {
     await apiRequest(`/users/${userId}`, { method: 'DELETE' });
     refreshDashboard();
   } catch (err) {
     alert(err.message);
+  }
+}
+
+// ---- Revoke Login Access (Super Admin/Admin and Manager -- "the reverse
+// of Outsider -> User", see components/outsiders.js's
+// openConvertOutsiderModal()/submitConvertOutsiderForm() and
+// services/user_service.py -> convert_user_to_outsider()) ----
+let pendingRevokeUserId = null;
+
+function setRevokeUserMessage(text, isError) {
+  const msgEl = document.getElementById('revokeUserMessage');
+  if (!msgEl) return;
+  msgEl.textContent = text || '';
+  msgEl.classList.toggle('hidden', !text);
+  msgEl.classList.toggle('text-rose-400', !!isError);
+  msgEl.classList.toggle('text-emerald-400', !isError);
+}
+
+export function openRevokeUserModal(userId, userName) {
+  const u = usersById[userId];
+  pendingRevokeUserId = userId;
+  document.getElementById('revokeUserTargetName').textContent = userName || (u && u.name) || '';
+  document.getElementById('revokeUserContact').value = (u && u.email) || '';
+  document.getElementById('revokeUserCompany').value = '';
+  setRevokeUserMessage('', false);
+  openModal('revokeUserModal');
+}
+
+export async function submitRevokeUserForm(event) {
+  event.preventDefault();
+  if (!pendingRevokeUserId) return;
+  setRevokeUserMessage('', false);
+
+  const payload = {
+    contact_details: document.getElementById('revokeUserContact').value || null,
+    company: document.getElementById('revokeUserCompany').value || null,
+  };
+
+  try {
+    const result = await apiRequest(`/users/${pendingRevokeUserId}/convert-to-outsider`, {
+      method: 'POST', body: JSON.stringify(payload),
+    });
+    closeModal('revokeUserModal');
+    alert(result.message);
+    loadUsers();
+    refreshDashboard();
+    pendingRevokeUserId = null;
+  } catch (err) {
+    setRevokeUserMessage(err.message, true);
   }
 }
 
@@ -337,7 +387,8 @@ function renderDeletedUsersTable(users) {
 
   tbody.innerHTML = users.map(u => {
     const initials = u.name.split(' ').map(p => p[0]).join('').slice(0, 2).toUpperCase();
-    const actionButtons = `<button data-action="restore-user" data-user-id="${u.id}" data-user-name="${escapeHtml(u.name)}" class="rounded-md border border-emerald-500/30 px-2.5 py-1.5 text-[12px] font-medium text-emerald-400 transition hover:border-emerald-500 hover:bg-emerald-500/10">Restore</button>`;
+    const actionButtons = `<button data-action="restore-user" data-user-id="${u.id}" data-user-name="${escapeHtml(u.name)}" class="rounded-md border border-emerald-500/30 px-2.5 py-1.5 text-[12px] font-medium text-emerald-400 transition hover:border-emerald-500 hover:bg-emerald-500/10">Restore</button>
+      <button data-action="purge-user" data-user-id="${u.id}" data-user-name="${escapeHtml(u.name)}" class="rounded-md border border-rose-500/30 px-2.5 py-1.5 text-[12px] font-medium text-rose-400 transition hover:border-rose-500 hover:bg-rose-500/10">Purge</button>`;
 
     return `
     <tr ${rowDetailsTrigger(escapeHtml(u.name), [
@@ -395,6 +446,25 @@ export async function restoreUser(userId, userName) {
   if (!confirm(`Restore ${userName}'s account? They will be able to log in again immediately.`)) return;
   try {
     await apiRequest(`/users/${userId}/restore`, { method: 'POST' });
+    loadDeletedUsers();
+    refreshDashboard();
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+// Purge is deliberately a separate, more strongly-worded confirmation than
+// Restore: it's irreversible (no "unpurge") and its whole point is to erase
+// the account's email/username so a new account can reuse them -- so the
+// warning says exactly that, rather than reusing restoreUser()'s wording.
+export async function purgeUser(userId, userName) {
+  if (!confirm(
+    `Permanently purge ${userName}'s deleted account? This cannot be undone. `
+    + `Their email and username will be freed up for reuse by a new account, `
+    + `but this account can no longer be restored afterward.`
+  )) return;
+  try {
+    await apiRequest(`/users/${userId}/purge`, { method: 'POST' });
     loadDeletedUsers();
     refreshDashboard();
   } catch (err) {

@@ -14,7 +14,7 @@ import models
 from models import utc_now
 from config import settings
 from security import hash_password, verify_password, SUPER_ADMIN_ROLE
-from schemas.users import UserCreateRequest, UserUpdateRequest
+from schemas.users_schema import UserCreateRequest, UserUpdateRequest, UserConvertToOutsiderRequest
 import services.export_service as export_service
 from services.search_utils import apply_search_filter
 
@@ -102,28 +102,42 @@ def _derive_username(db: Session, email: str) -> str:
     return candidate
 
 
-def create_user(db: Session, req: UserCreateRequest, user: dict) -> dict:
+def _provision_user_row(
+    db: Session, *, name: str, email: str, role: str, password: str,
+    department: Optional[str], department_role: Optional[str], actor: dict,
+) -> "models.User":
     """
-    Provisions a brand-new login. Both Super Admins and Managers may call
-    this, but a Manager's power here is intentionally narrower on ROLE:
+    Shared core of "create one brand-new login row", factored out of
+    create_user() below so services/outsider_service.py's
+    convert_outsider_to_user() -- an Ad-Hoc Individual finally deciding
+    they want a real account -- enforces the EXACT same role restrictions,
+    email-uniqueness check, and username-derivation logic as a normal
+    Admin/Manager-provisioned account, with no risk of the two paths ever
+    drifting apart.
 
-      1. A Manager may only create "staff" or "customer" accounts -- never
-         "manager" or "admin" (and never "super_admin" either, which is
-         reserved for the hardcoded root account and blocked for EVERY
-         caller, not just Managers -- see RESERVED_ROLES below). This is
-         enforced on the BACKEND (not just hidden in the UI), so a Manager
-         can't grant themselves admin rights via a raw API call either.
+    A Manager's power here is intentionally narrower on ROLE:
 
-    Department assignment is NOT restricted for Managers any more -- they
-    can set (or leave blank) whatever department they like on a "staff"
-    account, exactly like a Super Admin, since Managers no longer have any
-    department-scoping elsewhere in the app either. A "customer" account
-    still never gets a department (customers aren't tied to any internal
-    department, regardless of who creates them).
+      1. A Manager may only provision "staff" or "customer" accounts --
+         never "manager" or "admin" (and never "super_admin" either,
+         which is reserved for the hardcoded root account and blocked for
+         EVERY caller, not just Managers -- see RESERVED_ROLES above).
+         This is enforced on the BACKEND (not just hidden in the UI), so
+         a Manager can't grant themselves admin rights via a raw API
+         call either.
 
-    Super Admins are unrestricted, exactly like before.
+    Department assignment is NOT restricted for Managers -- they can set
+    (or leave blank) whatever department they like on a "staff" account,
+    exactly like a Super Admin. A "customer" account never gets a
+    department, regardless of who provisions it.
+
+    Super Admins/Admins are unrestricted, exactly like before.
+
+    Commits the new row and returns it, but does NOT write an audit log
+    entry or build a response message -- callers own both of those, since
+    "created fresh" vs "converted from an ad-hoc profile" deserve
+    different audit trails and messages.
     """
-    requested_role = req.role.lower()
+    requested_role = role.lower()
 
     # "super_admin" is reserved for the one hardcoded root identity -- it
     # can never be assigned to a database-backed account, even by another
@@ -134,7 +148,7 @@ def create_user(db: Session, req: UserCreateRequest, user: dict) -> dict:
             detail="The 'super_admin' role is reserved for the hardcoded root account and cannot be assigned. Use 'admin' instead.",
         )
 
-    if user["role"] == "manager" and requested_role not in MANAGER_PROVISIONABLE_ROLES:
+    if actor["role"] == "manager" and requested_role not in MANAGER_PROVISIONABLE_ROLES:
         raise HTTPException(
             status_code=403,
             detail="Managers may only provision Staff or Customer accounts.",
@@ -144,7 +158,7 @@ def create_user(db: Session, req: UserCreateRequest, user: dict) -> dict:
     # email/username case-insensitively, so allowing e.g. "T.Okafor@corp.io"
     # and "t.okafor@corp.io" to exist as two separate accounts would make
     # that lookup ambiguous. Blocking the clash here keeps it impossible.
-    existing = db.query(models.User).filter(func.lower(models.User.email) == req.email.strip().lower()).first()
+    existing = db.query(models.User).filter(func.lower(models.User.email) == email.strip().lower()).first()
     if existing:
         raise HTTPException(status_code=400, detail="A user with this email already exists.")
 
@@ -152,20 +166,33 @@ def create_user(db: Session, req: UserCreateRequest, user: dict) -> dict:
     # Managers get whatever was typed in the form for a "staff" account;
     # "customer" accounts never get a department, regardless of caller.
     if requested_role == "customer":
-        department = None
+        department_value = None
     else:
-        department = req.department
+        department_value = department
 
     new_user = models.User(
-        name=req.name, email=req.email, role=requested_role,
-        username=_derive_username(db, req.email),
-        password_hash=hash_password(req.password),
-        department=department, department_role=req.department_role,
+        name=name, email=email, role=requested_role,
+        username=_derive_username(db, email),
+        password_hash=hash_password(password),
+        department=department_value, department_role=department_role,
         is_verified=False, is_active=True,
     )
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
+    return new_user
+
+
+def create_user(db: Session, req: UserCreateRequest, user: dict) -> dict:
+    """
+    Provisions a brand-new login. Both Super Admins and Managers may call
+    this -- see _provision_user_row() above for the full role/department
+    permission model this delegates to.
+    """
+    new_user = _provision_user_row(
+        db, name=req.name, email=req.email, role=req.role, password=req.password,
+        department=req.department, department_role=req.department_role, actor=user,
+    )
 
     db.add(models.AuditLog(
         operator=user["email"], action="USER_PROVISIONED", target_type="User", target_id=new_user.id,
@@ -635,6 +662,139 @@ def delete_user(db: Session, user_id: int, user: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# REVOKE LOGIN ACCESS ("the reverse of Outsider -> User")
+# ---------------------------------------------------------------------------
+def convert_user_to_outsider(db: Session, user_id: int, req: UserConvertToOutsiderRequest, user: dict) -> dict:
+    """
+    "This person no longer needs (or shouldn't have) a login, but is still
+    tracked as a custody holder": the reverse of
+    services/outsider_service.py's convert_outsider_to_user(). Turns a
+    real, log-in-capable `models.User` row into an Ad-Hoc (no-login)
+    `models.Outsider` row, migrating every bit of their existing custody
+    history over to the new profile intact.
+
+    Available to the same access tier as account provisioning (Super
+    Admin/Admin or Manager, see deps.require_privileged_role), with the
+    same Manager role ceiling create_user()/_provision_user_row() apply
+    in the other direction: a Manager may only revoke login access from a
+    "staff" or "customer" account -- never from another Manager or an
+    Admin. This is deliberately narrower than delete_user() (Super Admin
+    only) because unlike a hard account removal, this is reversible in
+    spirit (the person can always be converted back via
+    services/outsider_service.py's convert_outsider_to_user()) and is the
+    natural Manager-level counterpart to provisioning a Staff/Customer
+    account in the first place.
+
+    SAFETY / WHAT "SAFELY MIGRATE" MEANS HERE (mirrors
+    convert_outsider_to_user()'s docstring, just pointed the other way):
+      1. SELF-REVOKE BLOCK -- a caller can never revoke their OWN login
+         access while logged in as it (same guard as delete_user()'s
+         self-delete block) -- that would lock them out mid-session with
+         no way back in.
+      2. ROOT ADMIN / ALREADY-CONVERTED GUARD -- 404 (matching every
+         other id-based user action) if the id doesn't exist, is already
+         soft-deleted, was already converted previously, or is the single
+         hardcoded root admin row (is_hidden_root_admin()) -- that
+         account can never lose its login through this door.
+      3. CUSTODY HISTORY MOVES, NOT COPIES -- every AssetCheckout row
+         (active AND already-returned) that pointed at `user_id=target.id`
+         is re-pointed at `outsider_id=new_outsider.id` (and `user_id`
+         cleared) in one bulk UPDATE, so nothing is left orphaned under
+         the now-revoked account. Deliberately no outstanding-items block
+         (unlike delete_user()'s): migrating those very checkouts over to
+         the ad-hoc profile IS the point here, same reasoning as
+         convert_outsider_to_user().
+      4. QUOTATION ASSIGNMENTS MOVE TOO -- any Quotation this account was
+         the assignee of (`assigned_to_id`) is re-pointed at
+         `assigned_outsider_id=new_outsider.id` the same way.
+      5. THE OLD ACCOUNT IS RETIRED, NOT ERASED -- same soft-delete flip
+         as delete_user() (is_deleted/is_active/deleted_at), so it can no
+         longer log in and drops out of the User Directory, but the row
+         itself and this migration's audit trail stay queryable forever.
+         `converted_to_outsider_id` (see models.User) is the permanent
+         link recording exactly which ad-hoc profile it became.
+      6. ONE ATOMIC COMMIT FOR THE MIGRATION STEPS -- the new Outsider
+         row, both bulk UPDATEs, the account's soft-delete flip, and both
+         audit log rows are all flushed in the SAME commit, so a crash
+         mid-way can't leave checkout/quotation data half-migrated.
+    """
+    if user_id == int(user["sub"]):
+        raise HTTPException(status_code=403, detail="You cannot revoke your own login access while logged in as it.")
+
+    target = db.query(models.User).filter(models.User.id == user_id, ~models.User.is_deleted).first()
+    if not target or is_hidden_root_admin(target):
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if user["role"] == "manager" and target.role not in MANAGER_PROVISIONABLE_ROLES:
+        raise HTTPException(
+            status_code=403,
+            detail="Managers may only revoke login access for Staff or Customer accounts.",
+        )
+
+    # `name` is always carried over from the account's existing profile
+    # (never re-typed) -- see docstring point above. contact_details
+    # defaults to the account's existing login email when not supplied;
+    # company has no automatic default (see schemas.users.
+    # UserConvertToOutsiderRequest's docstring).
+    contact_details = req.contact_details or target.email
+    new_outsider = models.Outsider(name=target.name, contact_details=contact_details, company=req.company)
+    db.add(new_outsider)
+    db.flush()  # assigns new_outsider.id without ending this function's single commit
+
+    # Move every checkout (active AND historical) over to the new ad-hoc
+    # profile in one bulk UPDATE -- see docstring point #3.
+    checkouts_migrated = (
+        db.query(models.AssetCheckout)
+        .filter(models.AssetCheckout.user_id == target.id)
+        .update({"user_id": None, "outsider_id": new_outsider.id}, synchronize_session=False)
+    )
+
+    # Same treatment for any Quotation this account was the assignee of --
+    # see docstring point #4.
+    quotations_migrated = (
+        db.query(models.Quotation)
+        .filter(models.Quotation.assigned_to_id == target.id)
+        .update({"assigned_to_id": None, "assigned_outsider_id": new_outsider.id}, synchronize_session=False)
+    )
+
+    # Retire the login -- see docstring point #5.
+    target.is_deleted = True
+    target.is_active = False
+    target.deleted_at = utc_now()
+    target.converted_to_outsider_id = new_outsider.id
+
+    db.add(models.AuditLog(
+        operator=user["email"], action="USER_CONVERTED_TO_OUTSIDER", target_type="User", target_id=target.id,
+        details=(
+            f"Revoked login access for {target.name} and converted their account into an "
+            f"ad-hoc profile (outsider #{new_outsider.id}). Migrated {checkouts_migrated} "
+            f"checkout(s) and {quotations_migrated} quotation assignment(s)."
+        ),
+    ))
+    db.add(models.AuditLog(
+        operator=user["email"], action="OUTSIDER_PROVISIONED_FROM_USER", target_type="Outsider", target_id=new_outsider.id,
+        details=f"Ad-hoc profile created from revoked account #{target.id} ({target.name}).",
+    ))
+    db.commit()
+    db.refresh(new_outsider)
+
+    return {
+        "message": (
+            f"{target.name}'s login access has been revoked. "
+            f"{checkouts_migrated} checkout(s) and {quotations_migrated} quotation "
+            f"assignment(s) were moved to their new ad-hoc profile."
+        ),
+        "user_id": target.id,
+        "outsider_id": new_outsider.id,
+        "name": new_outsider.name,
+        "contact_details": new_outsider.contact_details,
+        "company": new_outsider.company,
+        "checkouts_migrated": checkouts_migrated,
+        "quotations_migrated": quotations_migrated,
+    }
+
+
+# ---------------------------------------------------------------------------
 # ADMIN-ISSUED PASSWORD RESET ("forgot password" recovery path)
 # ---------------------------------------------------------------------------
 def reset_user_password(db: Session, user_id: int, new_password: str, admin_password: str, admin_user: dict) -> dict:
@@ -707,8 +867,32 @@ def list_deleted_users(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offs
     reuse the exact same pagination/search plumbing (see
     js/ui.js's renderServerPaginationBar()) against a second, independent
     table state.
+
+    EXCLUDES REVOKED/CONVERTED ACCOUNTS -- convert_user_to_outsider()
+    above also flips is_deleted (it reuses delete_user()'s soft-delete
+    flip so the retired login drops out of the User Directory), but that
+    account's custody history and identity have already been migrated
+    forward onto a brand-new Outsider row -- it isn't "deleted" in the
+    undo-able sense this panel is for, it moved to the Ad-Hoc Directory
+    on purpose. Surfacing it here would let someone "restore" a login
+    whose checkouts/quotations no longer point at it at all, producing a
+    duplicate identity (the live Outsider profile AND a resurrected
+    User row). `converted_to_outsider_id IS NULL` filters those out,
+    leaving only accounts removed via delete_user().
+
+    EXCLUDES PURGED ACCOUNTS -- purge_user() below overwrites a row's
+    email/username with an anonymized placeholder and stamps
+    `purged_at`, specifically so its original identity's uniqueness
+    lock is released. There's nothing meaningful left to "restore" under
+    its original name at that point, so purged rows are filtered out
+    here too, same reasoning as the converted-account exclusion above.
     """
-    query = db.query(models.User).filter(models.User.is_deleted, models.User.role != SUPER_ADMIN_ROLE)
+    query = db.query(models.User).filter(
+        models.User.is_deleted,
+        models.User.role != SUPER_ADMIN_ROLE,
+        models.User.converted_to_outsider_id.is_(None),
+        models.User.purged_at.is_(None),
+    )
     query = apply_search_filter(query, search, [
         models.User.name, models.User.email, models.User.role,
         models.User.department, models.User.department_role,
@@ -747,8 +931,29 @@ def restore_user(db: Session, user_id: int, admin_user: dict) -> dict:
     so a soft-deleted account's original email and username were never up
     for grabs while it sat deleted -- restoring it can't collide with
     anything provisioned in the meantime.
+
+    NOT FOR REVOKED/CONVERTED ACCOUNTS -- list_deleted_users() above
+    already keeps these out of the "Restore Deleted Users" panel, but
+    this check is repeated here in case restore_user() is ever called
+    directly (e.g. a stale id from before a conversion). A row with
+    `converted_to_outsider_id` set had its checkouts/quotations migrated
+    onto that Outsider by convert_user_to_outsider() -- reactivating the
+    login here wouldn't bring any of that back, it would just create a
+    second, hollow identity alongside the live ad-hoc profile.
+
+    NOT FOR PURGED ACCOUNTS EITHER -- same reasoning, repeated here as a
+    second line of defense: purge_user() below has already overwritten
+    this row's email/username with an anonymized placeholder, so
+    "restoring" it wouldn't bring the person's original login back at
+    all -- it would just re-enable a login under a placeholder email
+    nobody can log into.
     """
-    target = db.query(models.User).filter(models.User.id == user_id, models.User.is_deleted).first()
+    target = db.query(models.User).filter(
+        models.User.id == user_id,
+        models.User.is_deleted,
+        models.User.converted_to_outsider_id.is_(None),
+        models.User.purged_at.is_(None),
+    ).first()
     if not target or is_hidden_root_admin(target):
         raise HTTPException(status_code=404, detail="Deleted user not found.")
 
@@ -762,3 +967,85 @@ def restore_user(db: Session, user_id: int, admin_user: dict) -> dict:
     ))
     db.commit()
     return {"message": f"User {target.name} has been restored."}
+
+
+# ---------------------------------------------------------------------------
+# PURGE ("I'm done with this deleted account, free up its email/username")
+# ---------------------------------------------------------------------------
+def purge_user(db: Session, user_id: int, admin_user: dict) -> dict:
+    """
+    Permanently releases a soft-deleted account's email/username so a
+    brand-new account can reuse them -- called from the "Purge" button
+    that sits next to Restore on the Restore Deleted Users panel.
+    Super Admin only, same gate as delete_user()/restore_user().
+
+    WHY THIS EXISTS: `users.email` and `users.username` both carry
+    DB-level `unique=True` constraints (see models.py). delete_user()
+    only ever flips is_deleted/is_active -- it never touches those
+    columns -- so a deleted account's original email stays permanently
+    "reserved" and create_user() will keep rejecting it for a new
+    account (see _provision_user_row()'s existing-email check, which
+    deliberately queries ALL rows regardless of is_deleted). Previously
+    the only way around that was to restore the old account first
+    (re-enabling its login) purely so it could be renamed -- this button
+    skips that detour.
+
+    WHAT "PURGE" DOES *NOT* DO: it is NOT a hard delete. We never
+    `db.delete()` this row, for the exact same reason delete_user()
+    doesn't -- historical AssetCheckout.user_id / Quotation rows still
+    point at it, and hard-deleting would either violate that foreign
+    key or silently erase this person's name out of the custody ledger.
+    Instead:
+      1. `email`/`username` are overwritten with a placeholder that
+         embeds this row's own (permanent, unique) id --
+         "purged-user-{id}@purged.invalid" / "purged-user-{id}" -- so
+         it can never collide with any other row, purged or not.
+      2. `name` is left untouched, so anything they still show up as
+         the historical holder of (Custody Ledger, exports, the Audit
+         Trail) keeps reading like a real name instead of a placeholder.
+      3. `purged_at` is stamped, which both list_deleted_users() and
+         restore_user() above check -- once purged, the row drops out
+         of the "Restore Deleted Users" panel entirely and can no
+         longer be restored (there'd be nothing meaningful to log back
+         into).
+      4. The account's original email is recorded in the audit log
+         entry below (in cleartext, before it's overwritten) so it's
+         still discoverable later via the Audit Trail even though the
+         `users` row itself no longer carries it.
+
+    Irreversible in the same sense delete_user()'s soft delete is
+    reversible and this is not: there's no "unpurge". A caller who
+    isn't sure yet should use Restore, not Purge.
+
+    Only ever reachable for rows list_deleted_users() would surface
+    (already soft-deleted, never converted to an outsider, not already
+    purged) -- the same three-part filter is repeated here so a raw API
+    call can't purge a live account, a converted one, or one that's
+    already been purged.
+    """
+    target = db.query(models.User).filter(
+        models.User.id == user_id,
+        models.User.is_deleted,
+        models.User.converted_to_outsider_id.is_(None),
+        models.User.purged_at.is_(None),
+    ).first()
+    if not target or is_hidden_root_admin(target):
+        raise HTTPException(status_code=404, detail="Deleted user not found.")
+
+    original_name = target.name
+    original_email = target.email
+
+    target.email = f"purged-user-{target.id}@purged.invalid"
+    target.username = f"purged-user-{target.id}"
+    target.purged_at = utc_now()
+
+    db.add(models.AuditLog(
+        operator=admin_user["email"], action="USER_PURGED", target_type="User", target_id=user_id,
+        details=(
+            f"Permanently purged deleted account for {original_name} (was {original_email}). "
+            f"Their email and username are now free to be reused by a new account; login "
+            f"history and custody records remain intact under this now-anonymized row."
+        ),
+    ))
+    db.commit()
+    return {"message": f"{original_name}'s account has been purged. Their email is now free to be reused."}

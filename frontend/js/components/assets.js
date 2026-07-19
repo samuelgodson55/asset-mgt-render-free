@@ -182,7 +182,8 @@ function renderDeletedAssetsTable(items) {
   document.querySelectorAll('.deleted-asset-count').forEach(el => el.textContent = deletedAssetsState.total);
 
   tbody.innerHTML = items.map(a => {
-    const actionButtons = `<button data-action="restore-asset-pool" data-asset-id="${a.id}" data-asset-name="${escapeHtml(a.name)}" class="rounded-md border border-emerald-500/30 px-2.5 py-1.5 text-[12px] font-medium text-emerald-400 transition hover:border-emerald-500 hover:bg-emerald-500/10">Restore</button>`;
+    const actionButtons = `<button data-action="restore-asset-pool" data-asset-id="${a.id}" data-asset-name="${escapeHtml(a.name)}" class="rounded-md border border-emerald-500/30 px-2.5 py-1.5 text-[12px] font-medium text-emerald-400 transition hover:border-emerald-500 hover:bg-emerald-500/10">Restore</button>
+      <button data-action="purge-asset-pool" data-asset-id="${a.id}" data-asset-name="${escapeHtml(a.name)}" class="rounded-md border border-rose-500/30 px-2.5 py-1.5 text-[12px] font-medium text-rose-400 transition hover:border-rose-500 hover:bg-rose-500/10">Purge</button>`;
 
     return `
     <tr ${rowDetailsTrigger(escapeHtml(a.name), [
@@ -237,6 +238,25 @@ export async function restoreAssetPool(assetId, assetName) {
   if (!confirm(`Restore asset pool "${assetName}"? It will reappear in the active Asset Inventory table immediately.`)) return;
   try {
     await apiRequest(`/assets/${assetId}/restore`, { method: 'POST' });
+    loadDeletedAssets();
+    refreshDashboard();
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+// Purge is deliberately a separate, more strongly-worded confirmation than
+// Restore: it's irreversible (no "unpurge") and its whole point is to erase
+// the pool's name so a new pool can reuse it -- so the warning says exactly
+// that, rather than reusing restoreAssetPool()'s wording.
+export async function purgeAssetPool(assetId, assetName) {
+  if (!confirm(
+    `Permanently purge asset pool "${assetName}"? This cannot be undone. `
+    + `Its name will be freed up for reuse by a new pool, but this pool can `
+    + `no longer be restored afterward.`
+  )) return;
+  try {
+    await apiRequest(`/assets/${assetId}/purge`, { method: 'POST' });
     loadDeletedAssets();
     refreshDashboard();
   } catch (err) {

@@ -218,6 +218,25 @@ class AssetType(Base):
     is_deleted = Column(Boolean, default=False, nullable=False)
     deleted_at = Column(DateTime(timezone=True), nullable=True)
 
+    # --- Purge (frees up `name` for reuse) ---------------------------------
+    # Set once, permanently, by services/asset_service.py's
+    # purge_asset_type() -- a Super Admin's deliberate "I'm done with this
+    # deleted pool, I want its name back" action from the Restore Deleted
+    # Assets panel. `name` carries a DB-level `unique=True` constraint (see
+    # above), so a soft-deleted pool's original name stays "reserved"
+    # forever and can never be reused by a brand-new pool -- purging
+    # renames THIS row to a guaranteed-unique placeholder (see
+    # purge_asset_type()'s docstring) so the original name frees up, while
+    # the row itself is still never hard-deleted (same FK/audit-trail
+    # rationale as the comment above) and every historical
+    # checkout/exception still resolves to a real (if renamed) row.
+    # Nullable with no backfill needed -- every pre-existing pool predates
+    # this feature and was never purged, so NULL ("not purged") is correct
+    # for all of them. Once set, list_deleted_assets() excludes the row
+    # (nothing left to meaningfully restore under its original identity)
+    # and restore_asset_type() refuses to bring it back.
+    purged_at = Column(DateTime(timezone=True), nullable=True)
+
     exceptions = relationship("AssetException", back_populates="asset_type")
     checkouts = relationship("AssetCheckout", back_populates="asset")
 
@@ -314,6 +333,27 @@ class User(Base):
     is_deleted = Column(Boolean, default=False, nullable=False)
     deleted_at = Column(DateTime(timezone=True), nullable=True)
 
+    # --- Purge (frees up email/username for reuse) -------------------------
+    # Set once, permanently, by services/user_service.py's purge_user() -- a
+    # Super Admin's deliberate "I'm done with this deleted account, I want
+    # its email back" action from the Restore Deleted Users panel. Both
+    # `email` and `username` carry DB-level `unique=True` constraints (see
+    # above), so a merely soft-deleted account's original email/username
+    # stay "reserved" forever and can never be reused by a brand-new
+    # account -- purging overwrites THIS row's email/username with a
+    # guaranteed-unique placeholder (see purge_user()'s docstring) so the
+    # originals free up, while the row itself is still never hard-deleted
+    # (same FK/audit-trail rationale as the comment above) and every
+    # historical checkout/quotation still resolves to a real (if
+    # anonymized) row. `name` is left untouched so the Custody Ledger of
+    # anything they held onto stays readable.
+    # Nullable with no backfill needed -- every pre-existing user row
+    # predates this feature and was never purged, so NULL ("not purged")
+    # is correct for all of them. Once set, list_deleted_users() excludes
+    # the row (nothing left to meaningfully restore under its original
+    # identity) and restore_user() refuses to bring it back.
+    purged_at = Column(DateTime(timezone=True), nullable=True)
+
     # --- Department scoping (used by the Manager dashboard) ---
     # `department` groups users into teams (e.g. "Engineering", "Design").
     # A manager only ever sees users/audit activity within their own
@@ -324,7 +364,29 @@ class User(Base):
     department = Column(String, nullable=True)
     department_role = Column(String, nullable=True)  # e.g. "Senior Engineer", "Product Designer"
 
+    # --- Convert-to-outsider traceability (the reverse of Outsider.
+    # converted_to_user_id below) ---------------------------------------
+    # Set once, permanently, by services/user_service.py's
+    # convert_user_to_outsider() the moment a Super Admin/Admin or Manager
+    # revokes THIS account's login access, turning it back into an ad-hoc
+    # profile (e.g. someone leaving the company but still needing to be
+    # tracked as a custody holder). That function migrates every
+    # AssetCheckout.user_id / Quotation.assigned_to_id row pointing at
+    # THIS account over to the new models.Outsider row instead, then
+    # soft-deletes this row the same way delete_user() does -- the account
+    # can no longer log in and drops out of the User Directory, but stays
+    # queryable forever.
+    #
+    # Nullable with no backfill needed -- every pre-existing user row was
+    # never converted, so NULL ("not converted") is correct for all of
+    # them. Mirrors Outsider.converted_to_user_id exactly, just pointed
+    # the other way, so "which account did this ad-hoc profile become?"
+    # and "which ad-hoc profile did this now-revoked account become?" can
+    # both be answered with a plain join.
+    converted_to_outsider_id = Column(Integer, ForeignKey("outsiders.id"), nullable=True)
+
     checkouts = relationship("AssetCheckout", back_populates="user")
+    converted_to_outsider = relationship("Outsider", foreign_keys=[converted_to_outsider_id])
 
 
 class Outsider(Base):
@@ -355,7 +417,30 @@ class Outsider(Base):
     is_deleted = Column(Boolean, default=False, nullable=False)
     deleted_at = Column(DateTime(timezone=True), nullable=True)
 
+    # --- Convert-to-user traceability ---------------------------------------
+    # Set once, permanently, by services/outsider_service.py's
+    # convert_outsider_to_user() the moment this ad-hoc individual decides
+    # they want a real login after all. That function migrates every
+    # AssetCheckout.outsider_id / Quotation.assigned_outsider_id row
+    # pointing at THIS profile over to the new models.User row instead
+    # (so their custody history keeps working exactly like any other
+    # linked user's going forward), then soft-deletes this row the same
+    # way delete_outsider() does -- it's no longer a selectable ad-hoc
+    # profile for NEW dispatches/quotes, since anyone dispatching to this
+    # person from now on should pick their real account instead.
+    #
+    # This column is what makes that permanent instead of just a line in
+    # the Audit Trail: it lets "which ad-hoc profile did this account
+    # originally come from?" (or the reverse) be answered with a plain
+    # join, exactly like AssetCheckout.quotation_id exists purely to trace
+    # a checkout back to the Quotation that created it (see that column's
+    # own comment above). Nullable with no backfill needed -- every
+    # pre-existing outsider row was never converted, so NULL ("not
+    # converted") is correct for all of them.
+    converted_to_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+
     checkouts = relationship("AssetCheckout", back_populates="outsider")
+    converted_to_user = relationship("User", foreign_keys=[converted_to_user_id])
 
 
 class AssetCheckout(Base):
