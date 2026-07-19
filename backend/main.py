@@ -69,15 +69,15 @@ from middleware.request_context import RequestContextMiddleware
 from middleware.rate_limit import RateLimitMiddleware
 from middleware.security_headers import SecurityHeadersMiddleware
 
-from api.auth import router as auth_router
-from api.assets import router as assets_router
-from api.users import router as users_router
-from api.outsiders import router as outsiders_router
-from api.checkouts import router as checkouts_router
-from api.audit import router as audit_router
-from api.backup import router as backup_router
-from api.quotations import router as quotations_router
-from api.notifications import router as notifications_router
+from api.auth_api import router as auth_router
+from api.assets_api import router as assets_router
+from api.users_api import router as users_router
+from api.outsiders_api import router as outsiders_router
+from api.checkouts_api import router as checkouts_router
+from api.audit_api import router as audit_router
+from api.backup_api import router as backup_router
+from api.quotations_api import router as quotations_router
+from api.notifications_api import router as notifications_router
 
 # ---------------------------------------------------------------------------
 # STRUCTURED LOGGING -- configure this FIRST, before anything else in the

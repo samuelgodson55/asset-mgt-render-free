@@ -79,6 +79,7 @@ function renderOutsidersTable(outsiders) {
     const actionButtons = `
       <button data-action="edit-outsider" data-outsider-id="${o.id}" class="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">Edit</button>
       <button data-action="open-custody" data-entity-id="${o.id}" data-entity-type="outsider" class="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">Custody Ledger</button>
+      <button data-action="convert-outsider" data-outsider-id="${o.id}" class="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-emerald-500/50 hover:text-emerald-400">Convert to User</button>
       <button data-action="delete-outsider" data-outsider-id="${o.id}" data-outsider-name="${escapeHtml(o.name)}" class="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-rose-400 transition hover:border-rose-500/50 hover:text-rose-300">Delete</button>`;
 
     // Whole row is tappable on mobile -- see components/assets.js's
@@ -193,5 +194,76 @@ export async function submitEditOutsiderForm(event) {
     loadOutsiders();
   } catch (err) {
     setEditOutsiderMessage(err.message, true);
+  }
+}
+
+// ---- Convert to Real User Account (Super Admin/Admin and Manager) --------
+// "The outsider finally decides he wants a login": POST
+// /outsiders/{id}/convert-to-user (see services/outsider_service.py ->
+// convert_outsider_to_user()). The ROLE dropdown available here is
+// restricted per-page exactly like createUserForm's #newUserRole
+// (admin.html offers Admin/Manager/Staff/Customer, manager.html offers
+// only Staff/Customer) -- the backend independently re-enforces that same
+// ceiling, so a Manager can't grant elevated access even by tampering
+// with the page or calling the API directly.
+let pendingConvertOutsiderId = null;
+
+function setConvertOutsiderMessage(text, isError) {
+  const msgEl = document.getElementById('convertOutsiderMessage');
+  if (!msgEl) return;
+  msgEl.textContent = text || '';
+  msgEl.classList.toggle('hidden', !text);
+  msgEl.classList.toggle('text-rose-400', !!isError);
+  msgEl.classList.toggle('text-emerald-400', !isError);
+}
+
+export function openConvertOutsiderModal(outsiderId) {
+  const o = outsidersById[outsiderId];
+  if (!o) return;
+  pendingConvertOutsiderId = outsiderId;
+  document.getElementById('convertOutsiderTargetName').textContent = o.name;
+  // Prefills a reasonable starting email from their on-file contact
+  // details ONLY when that already looks like an email address (ad-hoc
+  // contact_details is free text -- phone numbers are just as common) --
+  // still fully editable, this is a convenience, not a guess the backend
+  // relies on.
+  const emailInput = document.getElementById('convertOutsiderEmail');
+  emailInput.value = /.+@.+\..+/.test(o.contact_details || '') ? o.contact_details : '';
+  document.getElementById('convertOutsiderRole').value = 'staff';
+  document.getElementById('convertOutsiderPassword').value = '';
+  document.getElementById('convertOutsiderDepartment').value = '';
+  document.getElementById('convertOutsiderDeptRole').value = '';
+  setConvertOutsiderMessage('', false);
+  openModal('convertOutsiderModal');
+}
+
+export async function submitConvertOutsiderForm(event) {
+  event.preventDefault();
+  if (!pendingConvertOutsiderId) return;
+  setConvertOutsiderMessage('', false);
+
+  const passwordInput = document.getElementById('convertOutsiderPassword');
+  const payload = {
+    email: document.getElementById('convertOutsiderEmail').value,
+    role: document.getElementById('convertOutsiderRole').value,
+    password: passwordInput.value,
+    department: document.getElementById('convertOutsiderDepartment').value || null,
+    department_role: document.getElementById('convertOutsiderDeptRole').value || null,
+  };
+
+  try {
+    const result = await apiRequest(`/outsiders/${pendingConvertOutsiderId}/convert-to-user`, {
+      method: 'POST', body: JSON.stringify(payload),
+    });
+    closeModal('convertOutsiderModal');
+    // Same "don't leave a plaintext password sitting in the DOM" fix as
+    // submitCreateUserForm() in components/users.js.
+    if (passwordInput) passwordInput.value = '';
+    alert(result.message);
+    loadOutsiders();
+    pendingConvertOutsiderId = null;
+  } catch (err) {
+    setConvertOutsiderMessage(err.message, true);
+    if (passwordInput) passwordInput.value = '';
   }
 }

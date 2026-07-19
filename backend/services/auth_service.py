@@ -15,7 +15,7 @@ import models
 from models import utc_now
 from config import settings
 from security import hash_password, verify_password, create_access_token
-from schemas.auth import LoginRequest, PasswordUpdateRequest
+from schemas.auth_schema import LoginRequest, PasswordUpdateRequest
 
 logger = logging.getLogger(__name__)
 
