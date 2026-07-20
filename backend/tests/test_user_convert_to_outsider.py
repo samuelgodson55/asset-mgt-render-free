@@ -69,8 +69,8 @@ def test_convert_migrates_active_and_returned_checkouts_and_blocks_login(as_admi
     body = convert.json()
     assert body["checkouts_migrated"] == 2
     assert body["quotations_migrated"] == 0
-    # contact_details defaults to the account's own login email when omitted.
-    assert body["contact_details"] == "a.bello@corp.io"
+    # email defaults to the account's own login email when omitted.
+    assert body["email"] == "a.bello@corp.io"
     new_outsider_id = body["outsider_id"]
 
     # The old login can no longer authenticate.
@@ -113,11 +113,11 @@ def test_convert_migrates_quotation_assignment(as_admin, db_session):
 
     convert = admin_client.post(
         f"/api/users/{customer['id']}/convert-to-outsider", headers=admin_headers,
-        json={"contact_details": "d.martins@personal.example", "company": "Martins & Co"},
+        json={"email": "d.martins@personal.example", "company": "Martins & Co"},
     )
     assert convert.status_code == 200, convert.text
     assert convert.json()["quotations_migrated"] == 1
-    assert convert.json()["contact_details"] == "d.martins@personal.example"
+    assert convert.json()["email"] == "d.martins@personal.example"
     assert convert.json()["company"] == "Martins & Co"
     new_outsider_id = convert.json()["outsider_id"]
 

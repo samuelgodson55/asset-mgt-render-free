@@ -54,7 +54,7 @@ def list_outsiders(db: Session, limit: int = DEFAULT_LIMIT, offset: int = 0, sea
     # hood) but its historical checkout rows are untouched.
     query = db.query(models.Outsider).filter(~models.Outsider.is_deleted)
     query = apply_search_filter(query, search, [
-        models.Outsider.name, models.Outsider.contact_details, models.Outsider.company,
+        models.Outsider.name, models.Outsider.email, models.Outsider.phone_number, models.Outsider.company,
     ])
     query = query.order_by(models.Outsider.id)
     total = query.count()
@@ -65,7 +65,7 @@ def list_outsiders(db: Session, limit: int = DEFAULT_LIMIT, offset: int = 0, sea
         active_checkouts = [c for c in o.checkouts if c.status == "active"]
         outstanding = sum(c.quantity - c.quantity_returned for c in active_checkouts)
         results.append({
-            "id": o.id, "name": o.name, "contact_details": o.contact_details,
+            "id": o.id, "name": o.name, "email": o.email, "phone_number": o.phone_number,
             "company": o.company, "outstanding_items": outstanding,
             # Same per-person (not per-item) alert flags as
             # user_service.list_users() -- see that function's comment for
@@ -83,7 +83,7 @@ def list_outsiders(db: Session, limit: int = DEFAULT_LIMIT, offset: int = 0, sea
 
 def update_outsider(db: Session, outsider_id: int, req: OutsiderUpdateRequest, user: dict) -> dict:
     """
-    Edits an ad-hoc individual's name, contact details, and/or company.
+    Edits an ad-hoc individual's name, email, phone number, and/or company.
     Available to both a Super Admin/Admin and a Manager (see
     deps.py's require_privileged_role, which the route sits behind), with
     no further role-based restriction beyond that -- ad-hoc profiles aren't
@@ -94,9 +94,12 @@ def update_outsider(db: Session, outsider_id: int, req: OutsiderUpdateRequest, u
 
     Only the fields actually present on the request are touched (Pydantic
     `exclude_unset`) -- omitting a field leaves it exactly as it was rather
-    than blanking it out. An explicit empty string for `company` DOES clear
-    it (company is nullable), same as leaving it blank at ad-hoc dispatch
-    time.
+    than blanking it out. An explicit empty string for `email`/
+    `phone_number`/`company` DOES clear that field (all three are
+    nullable), same as leaving it blank at ad-hoc dispatch time -- except
+    that email and phone_number can never BOTH end up blank at once (a
+    profile needs at least one way to be reached), checked below using
+    whichever of the two isn't being cleared by this same request.
     """
     target = db.query(models.Outsider).filter(
         models.Outsider.id == outsider_id, ~models.Outsider.is_deleted
@@ -107,8 +110,19 @@ def update_outsider(db: Session, outsider_id: int, req: OutsiderUpdateRequest, u
     updates = req.model_dump(exclude_unset=True)
     if "name" in updates:
         target.name = updates["name"]
-    if "contact_details" in updates:
-        target.contact_details = updates["contact_details"]
+
+    # Resolve what email/phone_number would look like AFTER this update,
+    # so the "at least one must remain" check below sees the final state
+    # rather than just the field(s) actually present on this request.
+    resulting_email = updates["email"] or None if "email" in updates else target.email
+    resulting_phone = updates["phone_number"] or None if "phone_number" in updates else target.phone_number
+    if ("email" in updates or "phone_number" in updates) and not resulting_email and not resulting_phone:
+        raise HTTPException(status_code=400, detail="At least one of email or phone number is required.")
+
+    if "email" in updates:
+        target.email = updates["email"] or None
+    if "phone_number" in updates:
+        target.phone_number = updates["phone_number"] or None
     if "company" in updates:
         target.company = updates["company"] or None
 
@@ -120,7 +134,8 @@ def update_outsider(db: Session, outsider_id: int, req: OutsiderUpdateRequest, u
     db.refresh(target)
     return {
         "message": f"Profile for {target.name} updated successfully.",
-        "id": target.id, "name": target.name, "contact_details": target.contact_details, "company": target.company,
+        "id": target.id, "name": target.name, "email": target.email,
+        "phone_number": target.phone_number, "company": target.company,
     }
 
 
@@ -335,8 +350,24 @@ def convert_outsider_to_user(db: Session, outsider_id: int, req: OutsiderConvert
     # quotations is touched if the role is disallowed or the email is
     # already taken.
     new_user = user_service._provision_user_row(
-        db, name=target.name, email=req.email, role=req.role, password=req.password,
+        db, name=target.name, email=req.email, phone_number=(req.phone_number or target.phone_number),
+        role=req.role, password=req.password,
         department=req.department, department_role=req.department_role, actor=user,
+    )
+
+    # How many of the checkouts about to be migrated are still ACTIVE
+    # (equipment genuinely out in this person's hands right now) vs
+    # already RETURNED (pure history) -- must be counted BEFORE the bulk
+    # UPDATE below, since that update clears `outsider_id` on every
+    # matching row and there'd be nothing left to distinguish them by
+    # afterward. This is what lets the audit/response wording below say
+    # "0 active" instead of just "1 checkout(s)", which on its own reads
+    # as "this person currently has equipment out" even when every
+    # migrated row is a long-since-returned historical record.
+    active_checkouts_count = (
+        db.query(models.AssetCheckout)
+        .filter(models.AssetCheckout.outsider_id == target.id, models.AssetCheckout.status == "active")
+        .count()
     )
 
     # Move every checkout (active AND historical) over to the new
@@ -351,6 +382,18 @@ def convert_outsider_to_user(db: Session, outsider_id: int, req: OutsiderConvert
         .filter(models.AssetCheckout.outsider_id == target.id)
         .update({"outsider_id": None, "user_id": new_user.id}, synchronize_session=False)
     )
+
+    # Human-readable breakdown used in both the audit log detail and the
+    # response message below -- "1 checkout(s)" alone reads as "they had
+    # equipment out at the time", which is only true if some of those
+    # rows were actually still active.
+    if checkouts_migrated:
+        checkout_detail = (
+            f"{checkouts_migrated} checkout(s) ({active_checkouts_count} still active, "
+            f"{checkouts_migrated - active_checkouts_count} already returned)"
+        )
+    else:
+        checkout_detail = "0 checkout(s)"
 
     # Same treatment for any Quotation this profile was the Ad-Hoc
     # assignee of -- see docstring point #3.
@@ -369,8 +412,8 @@ def convert_outsider_to_user(db: Session, outsider_id: int, req: OutsiderConvert
         operator=user["email"], action="OUTSIDER_CONVERTED_TO_USER", target_type="Outsider", target_id=target.id,
         details=(
             f"Converted ad-hoc profile for {target.name} into a real login "
-            f"(user #{new_user.id}, {new_user.email}). Migrated {checkouts_migrated} "
-            f"checkout(s) and {quotations_migrated} quotation assignment(s)."
+            f"(user #{new_user.id}, {new_user.email}). Migrated {checkout_detail} "
+            f"and {quotations_migrated} quotation assignment(s)."
         ),
     ))
     db.add(models.AuditLog(
@@ -383,7 +426,7 @@ def convert_outsider_to_user(db: Session, outsider_id: int, req: OutsiderConvert
     return {
         "message": (
             f"{target.name} now has a real login ({new_user.email}). "
-            f"{checkouts_migrated} checkout(s) and {quotations_migrated} quotation "
+            f"{checkout_detail} and {quotations_migrated} quotation "
             f"assignment(s) were moved to their new account."
         ),
         "outsider_id": target.id,
@@ -443,8 +486,8 @@ def get_outsider_assigned_items(db: Session, outsider_id: int) -> dict:
     } for c in active_checkouts]
 
     return {
-        "outsider_id": target.id, "name": target.name, "contact_details": target.contact_details,
-        "company": target.company, "assigned_items": items,
+        "outsider_id": target.id, "name": target.name, "email": target.email,
+        "phone_number": target.phone_number, "company": target.company, "assigned_items": items,
     }
 
 
@@ -496,7 +539,11 @@ def export_outsider_assigned_items(db: Session, outsider_id: int, user: dict, fm
     rows = _item_export_rows(data["assigned_items"])
     today = datetime.date.today().strftime("%Y-%m-%d")
     title = f"Properties Assigned To {data['name']} (Ad-Hoc)"
-    subtitle_bits = [data["name"], data["contact_details"]]
+    subtitle_bits = [data["name"]]
+    if data["email"]:
+        subtitle_bits.append(data["email"])
+    if data["phone_number"]:
+        subtitle_bits.append(data["phone_number"])
     if data["company"]:
         subtitle_bits.append(data["company"])
     subtitle = f"{' · '.join(subtitle_bits)} · Exported by {user['email']}"
@@ -516,14 +563,14 @@ def export_all_outsiders_items(db: Session, user: dict, fmt: str = "csv"):
     """
     outsiders = db.query(models.Outsider).filter(~models.Outsider.is_deleted).order_by(models.Outsider.id).all()
 
-    headers = ["Individual", "Contact", "Company", "Asset", "Category", "Vendor / Source", "Quantity", "Outstanding", "Checked Out", "Due Date"]
+    headers = ["Individual", "Email", "Phone", "Company", "Asset", "Category", "Vendor / Source", "Quantity", "Outstanding", "Checked Out", "Due Date"]
     rows = []
     for o in outsiders:
         for c in o.checkouts:
             if c.status != "active":
                 continue
             rows.append([
-                o.name, o.contact_details, o.company or "—",
+                o.name, o.email or "—", o.phone_number or "—", o.company or "—",
                 models.checkout_display_name(c),
                 c.asset.category if c.asset and c.asset.category else "—",
                 c.quantity, c.quantity - c.quantity_returned,

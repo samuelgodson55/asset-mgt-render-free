@@ -17,9 +17,9 @@ Celery Beat runs two related jobs on a schedule (see celery_app.py's
 Both send the same two kinds of email each run:
   1. One reminder to each affected checkout's own holder, if they're a
      logged-in User with an email address (Outsiders have no account/inbox
-     this app knows how to reach -- their `contact_details` field isn't
-     necessarily an email at all, so this deliberately does not try to
-     guess-parse it).
+     this app knows how to reach -- their `email`/`phone_number` fields are
+     both optional and neither is guaranteed to be present, so this
+     deliberately does not attempt to notify them).
   2. One combined system-wide summary digest to the admin-configured
      "Digest Recipients" list (see services/notification_service.py's
      get_digest_recipient_emails(), editable at runtime via PUT

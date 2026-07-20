@@ -30,7 +30,7 @@
 
 import { apiRequest, API_URL } from '../api.js';
 import { getSession } from '../auth.js';
-import { escapeHtml, formatTimestamp, renderServerPaginationBar, rowDetailsTrigger } from '../ui.js';
+import { escapeHtml, formatTimestamp, renderServerPaginationBar, rowDetailsTrigger, openModal, closeModal, showFieldError, clearFieldError } from '../ui.js';
 
 const auditState = { page: 1, perPage: 5, total: 0 };
 
@@ -133,16 +133,49 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export async function exportAuditLogs(format = 'csv') {
-  try {
-    const startDate = prompt('Export from which date? (YYYY-MM-DD, leave blank for "no start limit")', '');
-    if (startDate === null) return; // user clicked Cancel -- abort the export entirely
-    const endDate = prompt('Export up to which date? (YYYY-MM-DD, leave blank for "no end limit")', '');
-    if (endDate === null) return;
+// A bare pair of stacked window.prompt() dialogs had no room to label
+// which date was which, couldn't validate that "From" came before "To"
+// until the request round-tripped to the server, and looked nothing like
+// any other form in this app -- see the auditExportModal markup in
+// admin.html and openDenyReasonModal() in components/extensions.js for
+// the same fix applied to a different prompt(). This just remembers
+// which button (CSV vs PDF) opened the modal so submitAuditExportForm()
+// below knows which format to request once the person confirms.
+let pendingExportFormat = 'csv';
 
+export function openAuditExportModal(format = 'csv') {
+  pendingExportFormat = format;
+  document.getElementById('auditExportModalTitle').textContent =
+    `Choose a Date Range (.${format.toUpperCase()})`;
+  document.getElementById('auditExportStartDate').value = '';
+  document.getElementById('auditExportEndDate').value = '';
+  clearFieldError('auditExportEndDate');
+  openModal('auditExportModal');
+}
+
+export async function submitAuditExportForm(event) {
+  event.preventDefault();
+  const startDate = document.getElementById('auditExportStartDate').value;
+  const endDate = document.getElementById('auditExportEndDate').value;
+
+  // Real <input type="date"> values are already well-formed YYYY-MM-DD
+  // (or empty) -- the one thing still worth checking client-side is that
+  // "From" isn't after "To", which the browser has no built-in opinion on.
+  if (startDate && endDate && startDate > endDate) {
+    showFieldError('auditExportEndDate', '"To" must be on or after "From".');
+    return;
+  }
+  clearFieldError('auditExportEndDate');
+
+  closeModal('auditExportModal');
+  await exportAuditLogs(pendingExportFormat, startDate, endDate);
+}
+
+export async function exportAuditLogs(format = 'csv', startDate = '', endDate = '') {
+  try {
     const params = new URLSearchParams();
-    if (startDate.trim()) params.set('start_date', startDate.trim());
-    if (endDate.trim()) params.set('end_date', endDate.trim());
+    if (startDate) params.set('start_date', startDate);
+    if (endDate) params.set('end_date', endDate);
     params.set('format', format);
 
     setExportStatus('Queuing export…');

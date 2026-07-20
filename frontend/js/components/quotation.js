@@ -27,7 +27,7 @@ import { getSession } from '../auth.js';
 import {
   escapeHtml, formatPrice, setCurrencyCode, applySiteName, showToast, showFieldError, clearFieldError,
   openModal, closeModal, tableState, registerRenderer, filterAndPaginate, renderPaginationBar,
-  rowDetailsTrigger, debounce, renderServerPaginationBar, formatTimestamp,
+  rowDetailsTrigger, debounce, renderServerPaginationBar, formatTimestamp, resetTabScroll,
 } from '../ui.js';
 
 let showStock = false;
@@ -765,6 +765,7 @@ export function switchQuotationTab(tab) {
   if (tabHistoryBtn) { tabHistoryBtn.classList.remove(...activeCls, ...inactiveCls); tabHistoryBtn.classList.add(...(isOrder ? inactiveCls : activeCls)); }
 
   updateQuotationSwipeDots(isOrder ? 'order' : 'history');
+  resetTabScroll(document.getElementById('quotationSwipeArea'));
 
   const activeSection = isOrder ? orderSection : historySection;
   activeSection.classList.remove('swipe-content-enter');
@@ -1528,13 +1529,14 @@ export async function submitQuoteAssignAdhoc() {
   const existingId = existingSelect ? existingSelect.value : 'new';
   const nameInput = document.getElementById('quoteAssignAdhocName');
   const companyInput = document.getElementById('quoteAssignAdhocCompany');
-  const contactInput = document.getElementById('quoteAssignAdhocContact');
+  const emailInput = document.getElementById('quoteAssignAdhocEmail');
+  const phoneInput = document.getElementById('quoteAssignAdhocPhone');
 
   // "+ Create New Unlinked Profile" (value="new", the select's only
   // option before components/outsiders.js's loadOutsiders() populates it
   // with real profiles) still creates a brand new Outsider row from the
-  // name/company/contact fields below. Any other option is an existing
-  // outsider's real id -- selecting one reuses that profile
+  // name/company/email/phone fields below. Any other option is an
+  // existing outsider's real id -- selecting one reuses that profile
   // (backend/schemas/quotations.py's QuotationAssignRequest.outsider_id)
   // instead of fabricating a duplicate every time the same person is
   // assigned a quote.
@@ -1543,13 +1545,15 @@ export async function submitQuoteAssignAdhoc() {
     payload.outsider_id = parseInt(existingId, 10);
   } else {
     const name = nameInput ? nameInput.value.trim() : '';
-    const contact = contactInput ? contactInput.value.trim() : '';
-    if (!name || !contact) {
-      alert('Name and contact are required for an Ad-Hoc individual.');
+    const email = emailInput ? emailInput.value.trim() : '';
+    const phone = phoneInput ? phoneInput.value.trim() : '';
+    if (!name || (!email && !phone)) {
+      alert('Name and at least one of email/phone are required for an Ad-Hoc individual.');
       return;
     }
     payload.outsider_name = name;
-    payload.outsider_contact = contact;
+    payload.outsider_email = email || null;
+    payload.outsider_phone = phone || null;
     payload.outsider_company = companyInput ? companyInput.value.trim() : '';
   }
 
@@ -1639,7 +1643,7 @@ export async function submitCreateQuote(button) {
     // Same "existing profile vs. brand new" choice as
     // submitDispatchForm()/submitQuoteAssignAdhoc() above -- "+ Create New
     // Unlinked Profile" (value="new") creates a new Outsider row from the
-    // name/company/contact fields; any other option is an existing
+    // name/company/email/phone fields; any other option is an existing
     // outsider's real id and reuses that profile
     // (backend/schemas/quotations.py's QuotationCreateRequest.outsider_id).
     const existingSelect = document.getElementById('quoteAdhocExistingSelect');
@@ -1649,10 +1653,13 @@ export async function submitCreateQuote(button) {
       payload.outsider_id = parseInt(existingId, 10);
     } else {
       const name = document.getElementById('quoteAdhocName').value.trim();
-      const contact = document.getElementById('quoteAdhocContact').value.trim();
-      if (!name || !contact) { alert('Name and contact are required for an Ad-Hoc individual.'); return; }
+      const email = document.getElementById('quoteAdhocEmail').value.trim();
+      const phoneEl = document.getElementById('quoteAdhocPhone');
+      const phone = phoneEl ? phoneEl.value.trim() : '';
+      if (!name || (!email && !phone)) { alert('Name and at least one of email/phone are required for an Ad-Hoc individual.'); return; }
       payload.outsider_name = name;
-      payload.outsider_contact = contact;
+      payload.outsider_email = email || null;
+      payload.outsider_phone = phone || null;
       payload.outsider_company = document.getElementById('quoteAdhocCompany').value.trim();
     }
   }

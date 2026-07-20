@@ -95,7 +95,7 @@ function renderOutsidersTable(outsiders) {
           <div class="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-amber-500 to-orange-600 text-[11px] font-bold text-white">${initials}</div>
           <div>
             <p class="flex items-center gap-1.5 font-medium text-slate-100">${escapeHtml(o.name)} ${personAlertIcon(o.alerts)}</p>
-            <p class="tag-mono text-[11px] text-slate-500">${escapeHtml(o.contact_details)}</p>
+            <p class="tag-mono text-[11px] text-slate-500">${[o.email, o.phone_number].filter(Boolean).map(escapeHtml).join(' · ') || '—'}</p>
           </div>
           <!-- Mobile-only affordance showing the row itself is tappable
                (replaces the old separate "Details" button). -->
@@ -171,7 +171,9 @@ export function openEditOutsiderModal(outsiderId) {
   pendingEditOutsiderId = outsiderId;
   document.getElementById('editOutsiderTargetName').textContent = o.name;
   document.getElementById('editOutsiderName').value = o.name || '';
-  document.getElementById('editOutsiderContact').value = o.contact_details || '';
+  document.getElementById('editOutsiderEmail').value = o.email || '';
+  const phoneInput = document.getElementById('editOutsiderPhone');
+  if (phoneInput) phoneInput.value = o.phone_number || '';
   document.getElementById('editOutsiderCompany').value = o.company || '';
   setEditOutsiderMessage('', false);
   openModal('editOutsiderModal');
@@ -182,9 +184,11 @@ export async function submitEditOutsiderForm(event) {
   if (!pendingEditOutsiderId) return;
   setEditOutsiderMessage('', false);
 
+  const phoneInput = document.getElementById('editOutsiderPhone');
   const payload = {
     name: document.getElementById('editOutsiderName').value,
-    contact_details: document.getElementById('editOutsiderContact').value,
+    email: document.getElementById('editOutsiderEmail').value || null,
+    phone_number: phoneInput ? (phoneInput.value || null) : null,
     company: document.getElementById('editOutsiderCompany').value,
   };
 
@@ -222,13 +226,14 @@ export function openConvertOutsiderModal(outsiderId) {
   if (!o) return;
   pendingConvertOutsiderId = outsiderId;
   document.getElementById('convertOutsiderTargetName').textContent = o.name;
-  // Prefills a reasonable starting email from their on-file contact
-  // details ONLY when that already looks like an email address (ad-hoc
-  // contact_details is free text -- phone numbers are just as common) --
-  // still fully editable, this is a convenience, not a guess the backend
-  // relies on.
-  const emailInput = document.getElementById('convertOutsiderEmail');
-  emailInput.value = /.+@.+\..+/.test(o.contact_details || '') ? o.contact_details : '';
+  // Prefills from this profile's own on-file email/phone -- still fully
+  // editable, just a convenience starting point (e.g. someone might want
+  // to log in with a different address than the one clients reach them
+  // at). No more guessing required now that email/phone_number are their
+  // own real fields instead of one ambiguous free-text contact_details.
+  document.getElementById('convertOutsiderEmail').value = o.email || '';
+  const phoneInput = document.getElementById('convertOutsiderPhone');
+  if (phoneInput) phoneInput.value = o.phone_number || '';
   document.getElementById('convertOutsiderRole').value = 'staff';
   document.getElementById('convertOutsiderPassword').value = '';
   document.getElementById('convertOutsiderDepartment').value = '';
@@ -243,8 +248,10 @@ export async function submitConvertOutsiderForm(event) {
   setConvertOutsiderMessage('', false);
 
   const passwordInput = document.getElementById('convertOutsiderPassword');
+  const phoneInput = document.getElementById('convertOutsiderPhone');
   const payload = {
     email: document.getElementById('convertOutsiderEmail').value,
+    phone_number: phoneInput ? (phoneInput.value || null) : null,
     role: document.getElementById('convertOutsiderRole').value,
     password: passwordInput.value,
     department: document.getElementById('convertOutsiderDepartment').value || null,

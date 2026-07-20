@@ -281,6 +281,13 @@ class User(Base):
     name = Column(String, nullable=False)
     email = Column(String, unique=True, index=True, nullable=False)
 
+    # Optional, no uniqueness constraint (unlike email/username above) --
+    # a phone number is a convenience contact detail, not a login
+    # credential, so several accounts legitimately sharing one (e.g. a
+    # shared office line) is fine. Editable via UserUpdateRequest exactly
+    # like name/username/email.
+    phone_number = Column(String, nullable=True)
+
     # --- Username login (Data Quality & Usability requirement #6) ---------
     # Auto-derived from the local part of the email address the FIRST time
     # an account is created (see services/user_service.py's
@@ -393,7 +400,16 @@ class Outsider(Base):
     __tablename__ = "outsiders"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
-    contact_details = Column(String, nullable=False)
+    # Split into two distinct, both-optional fields (previously a single
+    # required free-text `contact_details` column that could hold either
+    # an email or a phone number, ambiguously). At least one of the two is
+    # still enforced at creation time (see services/asset_service.py's
+    # checkout_advanced() and services/quotation_service.py's ad-hoc
+    # creation branches), but neither column itself carries a NOT NULL --
+    # a profile that only ever gave a phone number, or only an email,
+    # is common and shouldn't be forced to fabricate the other.
+    email = Column(String, nullable=True)
+    phone_number = Column(String, nullable=True)
     company = Column(String, nullable=True)
 
     # --- Soft delete -------------------------------------------------------

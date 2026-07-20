@@ -116,7 +116,10 @@ def _user_brief(user: Optional["models.User"]) -> Optional[dict]:
 def _outsider_brief(outsider: Optional["models.Outsider"]) -> Optional[dict]:
     if outsider is None:
         return None
-    return {"id": outsider.id, "name": outsider.name, "company": outsider.company, "contact_details": outsider.contact_details, "is_outsider": True}
+    return {
+        "id": outsider.id, "name": outsider.name, "company": outsider.company,
+        "email": outsider.email, "phone_number": outsider.phone_number, "is_outsider": True,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -895,7 +898,7 @@ def admin_create_quotation(db: Session, actor: dict, payload: QuotationCreateReq
             if not outsider:
                 raise HTTPException(status_code=404, detail="That ad-hoc individual was not found.")
         else:
-            outsider = models.Outsider(name=payload.outsider_name, contact_details=payload.outsider_contact, company=payload.outsider_company)
+            outsider = models.Outsider(name=payload.outsider_name, email=payload.outsider_email, phone_number=payload.outsider_phone, company=payload.outsider_company)
             db.add(outsider)
             db.flush()
         assigned_outsider_id = outsider.id
@@ -958,7 +961,7 @@ def assign_quotation(db: Session, actor: dict, quotation_id: int, payload: Quota
             if not outsider:
                 raise HTTPException(status_code=404, detail="That ad-hoc individual was not found.")
         else:
-            outsider = models.Outsider(name=payload.outsider_name, contact_details=payload.outsider_contact, company=payload.outsider_company)
+            outsider = models.Outsider(name=payload.outsider_name, email=payload.outsider_email, phone_number=payload.outsider_phone, company=payload.outsider_company)
             db.add(outsider)
             db.flush()
         quotation.assigned_to_id = None
@@ -1400,14 +1403,17 @@ def _build_quotation_pdf(data: dict, requester_name: str):
     if assigned_outsider:
         customer_name = assigned_outsider["name"]
         company_name = assigned_outsider.get("company") or "—"
-        phone_number = assigned_outsider.get("contact_details") or "—"
+        email_address = assigned_outsider.get("email") or "—"
+        phone_number = assigned_outsider.get("phone_number") or "—"
     elif assigned_to:
         customer_name = assigned_to["name"]
         company_name = "—"
+        email_address = assigned_to.get("email") or "—"
         phone_number = "—"
     else:
         customer_name = requester_name
         company_name = "—"
+        email_address = "—"
         phone_number = "—"
 
     approved_by = data.get("approved_by")
@@ -1418,6 +1424,7 @@ def _build_quotation_pdf(data: dict, requester_name: str):
     client_fields = [
         ("Customer Name", customer_name),
         ("Company Name", company_name),
+        ("Email", email_address),
         ("Phone Number", phone_number),
         ("Manager", manager_name),
         ("Fulfiller", fulfiller_name),

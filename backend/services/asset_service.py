@@ -729,9 +729,12 @@ def checkout_advanced(db: Session, asset_id: int, req: AdvancedCheckoutRequest, 
             else:
                 # Route 2: create a brand new unlinked profile on the spot
                 # (the original, only-ever-existing behavior).
-                if not req.outsider_name or not req.outsider_contact:
-                    raise HTTPException(status_code=400, detail="Name and contact are required for outsiders.")
-                outsider = models.Outsider(name=req.outsider_name, contact_details=req.outsider_contact, company=req.outsider_company)
+                if not req.outsider_name or (not req.outsider_email and not req.outsider_phone):
+                    raise HTTPException(status_code=400, detail="Name and at least one of email/phone are required for outsiders.")
+                outsider = models.Outsider(
+                    name=req.outsider_name, email=req.outsider_email,
+                    phone_number=req.outsider_phone, company=req.outsider_company,
+                )
                 db.add(outsider)
                 db.flush()
 
