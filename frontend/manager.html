@@ -366,6 +366,13 @@
               class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
           </div>
         </div>
+        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <div>
+            <label class="mb-1 block text-[12px] font-medium text-slate-400">Phone Number (optional)</label>
+            <input type="tel" id="newUserPhone" placeholder="e.g. +234 801 234 5678"
+              class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
+          </div>
+        </div>
         <div class="grid grid-cols-2 gap-3">
           <div>
             <label class="mb-1 block text-[12px] font-medium text-slate-400">Role</label>
@@ -656,7 +663,8 @@
           <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Unlinked Profile Details</p>
           <input type="text" id="adhocName" placeholder="Full name" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
           <input type="text" id="adhocCompany" placeholder="Company" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
-          <input type="text" id="adhocContact" placeholder="Contact (email or phone)" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          <input type="email" id="adhocEmail" placeholder="Email (at least one of email/phone required)" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          <input type="tel" id="adhocPhone" placeholder="Phone number" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
         </div>
       </div>
 
@@ -890,6 +898,11 @@
         <input type="email" id="editUserEmail" required
           class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
       </div>
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Phone Number (optional)</label>
+        <input type="tel" id="editUserPhone"
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+      </div>
       <p id="editUserMessage" class="hidden text-[12px]"></p>
       <div class="flex gap-3 pt-1">
         <button type="button" data-action="close-modal" data-modal="editUserModal" class="flex-1 rounded-lg border border-border py-2.5 text-[13px] font-semibold text-slate-300 transition hover:border-slate-500">Cancel</button>
@@ -923,10 +936,17 @@
         <input type="text" id="editOutsiderName" required
           class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
       </div>
-      <div>
-        <label class="mb-1 block text-[12px] font-medium text-slate-400">Contact Details</label>
-        <input type="text" id="editOutsiderContact" required placeholder="Phone or email"
-          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+      <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">Email</label>
+          <input type="email" id="editOutsiderEmail"
+            class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+        </div>
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">Phone Number</label>
+          <input type="tel" id="editOutsiderPhone" placeholder="At least one of email/phone is required"
+            class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+        </div>
       </div>
       <div>
         <label class="mb-1 block text-[12px] font-medium text-slate-400">Company <span class="text-slate-600">(optional)</span></label>
@@ -971,6 +991,11 @@
       <div>
         <label class="mb-1 block text-[12px] font-medium text-slate-400">Login Email</label>
         <input type="email" id="convertOutsiderEmail" required placeholder="e.g. f.adeyemi@corp.io"
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+      </div>
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Phone Number (optional)</label>
+        <input type="tel" id="convertOutsiderPhone" placeholder="e.g. +234 801 234 5678"
           class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
       </div>
       <div class="grid grid-cols-2 gap-3">
@@ -1028,10 +1053,17 @@
       <p class="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-[12px] text-amber-300/90">
         This account will no longer be able to log in. Every checkout (active and past) and quotation assignment currently under it will move to a new Ad-Hoc profile -- the login itself is retired, not deleted, and its history stays intact.
       </p>
-      <div>
-        <label class="mb-1 block text-[12px] font-medium text-slate-400">Contact Details</label>
-        <input type="text" id="revokeUserContact" placeholder="Defaults to their current login email"
-          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+      <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">Email</label>
+          <input type="email" id="revokeUserEmail" placeholder="Defaults to their current login email"
+            class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+        </div>
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">Phone Number (optional)</label>
+          <input type="tel" id="revokeUserPhone" placeholder="e.g. +234 801 234 5678"
+            class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+        </div>
       </div>
       <div>
         <label class="mb-1 block text-[12px] font-medium text-slate-400">Company (optional)</label>
@@ -1418,7 +1450,8 @@
           <div id="quoteAssignAdhocNewFields" class="space-y-2 rounded-lg border border-border bg-card2/50 p-3">
             <input type="text" id="quoteAssignAdhocName" placeholder="Full name" class="w-full rounded-md border border-border bg-card2 px-3 py-2 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
             <input type="text" id="quoteAssignAdhocCompany" placeholder="Company" class="w-full rounded-md border border-border bg-card2 px-3 py-2 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
-            <input type="text" id="quoteAssignAdhocContact" placeholder="Contact (email or phone)" class="w-full rounded-md border border-border bg-card2 px-3 py-2 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+            <input type="email" id="quoteAssignAdhocEmail" placeholder="Email (at least one of email/phone required)" class="w-full rounded-md border border-border bg-card2 px-3 py-2 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+            <input type="tel" id="quoteAssignAdhocPhone" placeholder="Phone number" class="w-full rounded-md border border-border bg-card2 px-3 py-2 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
           </div>
           <button type="button" data-action="submit-quote-assign-adhoc" class="w-full rounded-md bg-blue-600 px-3 py-1.5 text-[12px] font-semibold text-white transition hover:bg-blue-500">
             Assign to Ad-Hoc Individual
@@ -1496,7 +1529,8 @@
           <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Unlinked Profile Details</p>
           <input type="text" id="quoteAdhocName" placeholder="Full name" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
           <input type="text" id="quoteAdhocCompany" placeholder="Company" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
-          <input type="text" id="quoteAdhocContact" placeholder="Contact (email or phone)" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          <input type="email" id="quoteAdhocEmail" placeholder="Email (at least one of email/phone required)" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          <input type="tel" id="quoteAdhocPhone" placeholder="Phone number" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
         </div>
       </div>
 

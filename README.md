@@ -881,12 +881,16 @@ for local dev — see [Environment Variables Reference](#environment-variables-r
 
 Login accepts **either** the email or the username in the same field.
 
-**Super Admin** isn't seeded here — it's the hardcoded root identity
-described in [Roles & Permissions Model](#roles--permissions-model). For
-local Docker Compose, `.env.example`'s defaults let you log in with
-username `superadmin` / password `change-this-super-admin-password`; set
-your own `SUPER_ADMIN_USERNAME`/`SUPER_ADMIN_PASSWORD` before deploying
-anywhere real.
+**Super Admin** isn't in the table above because it's provisioned
+separately from the other demo accounts — see [The root admin
+account](#the-root-admin-account). For local Docker Compose
+(`AUTO_SEED_DEMO_DATA=true` by default), `database.py`'s `seed_db()` seeds
+it with the same well-known-demo-password convention as every other
+account: username `superadmin` / password `RootAdmin123!`. Rotate it (via
+"My Profile" → Change Password, once logged in) before using this
+anywhere real — see [The root admin account](#the-root-admin-account) for
+how a real production deployment bootstraps it differently, with a
+randomly generated password instead.
 
 ## Deploying Across Environments (nginx Reverse Proxy)
 
@@ -960,10 +964,17 @@ whole app fits on a single free Web Service.
       about to create — `snipeit-lite-db` (free Postgres),
       `snipeit-lite-redis` (free Key Value), and `snipeit-lite-web` (free
       Web Service) — then provisions them on **Deploy Blueprint**.
-- [ ] That's it — no manual hostname copy-pasting. `JWT_SECRET_KEY` and
-      `SUPER_ADMIN_PASSWORD` are auto-generated (`generateValue: true`);
-      find the generated Super Admin password in the Render dashboard's
-      Environment tab if you need to log in as that account.
+- [ ] That's it — no manual hostname copy-pasting. `JWT_SECRET_KEY` is
+      auto-generated (`generateValue: true`). The root admin account is
+      seeded by `AUTO_SEED_DEMO_DATA=true` (this Blueprint's default) with
+      the same well-known demo password as every other seeded account --
+      username `superadmin` / password `RootAdmin123!` (see [The root
+      admin account](#the-root-admin-account) and `database.py`'s
+      `seed_db()`) -- log in and rotate it immediately via "My Profile" →
+      Change Password. For a real deployment, set `AUTO_SEED_DEMO_DATA` to
+      `false` in the dashboard's Environment tab instead and bootstrap the
+      root admin via `alembic upgrade head` (see below), which generates
+      a random password instead of using the well-known demo one.
 - [ ] Verify: load `snipeit-lite-web`'s public Render URL (expect a ~1
       minute cold start the first time, or after any 15-minute idle period
       — see the free-plan limitations below), log in, and confirm `/api/*`
@@ -1324,6 +1335,62 @@ from `models.py` (so autogenerate can see your tables) and pulls the real
 `DATABASE_URL` from `backend/config.py`'s `settings` object instead of a
 hardcoded connection string.
 
+**Viewing the one-time-generated root admin password:** in production
+(`ENVIRONMENT=production`), `alembic upgrade head`'s first run bootstraps
+the root admin via `0002_bootstrap_root_admin.py`, which prints a randomly
+generated password to **stderr, exactly once** (see that file's docstring)
+-- it is never written to the database in plaintext, never logged again
+afterward, and there's no "view it later" endpoint or dashboard field,
+so you need to actually be watching when the command runs:
+- **Local / Docker Compose:** just run the command from a terminal you're
+  watching -- `docker compose exec backend alembic upgrade head` (or
+  `alembic upgrade head` directly if running the backend without Docker)
+  prints straight to that terminal's stderr, which most terminals render
+  inline with stdout.
+- **Render (free plan):** there's no Background Worker/Job type to run a
+  one-off command against, so use the **Shell** tab on the
+  `snipeit-lite-web` service in the Render dashboard -- it drops you into
+  a live shell inside the running container. Run `cd backend && alembic
+  upgrade head` there; the password prints directly in that Shell session
+  (not the Logs tab), so keep it open and copy the password immediately --
+  it won't reappear if you close the tab before copying it.
+- **Other clouds (ECS, Cloud Run, an Azure/GCP VM, etc.):** run it as a
+  one-off task/exec against the running container (e.g. `az container exec`,
+  `gcloud run jobs execute`, `kubectl exec`) with your terminal attached, so
+  stderr streams to you interactively rather than only to a log aggregator
+  you'd have to search through afterward (log aggregators sometimes scrub
+  or truncate lines that look like secrets, which this one does).
+- **This repo's own Azure deployment (`infra/main.bicep`):** the `migrate`
+  Container Apps Job runs `alembic upgrade head` for you, and its
+  `rootAdminBootstrapPassword` parameter defaults to empty (see
+  `infra/main.parameters.example.json`), so the random-password path is
+  what runs by default there too. Its console output -- including that
+  one-time password -- flows into the shared Log Analytics workspace like
+  every other container (see `DEPLOYMENT.md`'s "Monitoring" section):
+  ```bash
+  az containerapp job execution list --name migrate --resource-group rg-snipeit-lite-prod
+  az monitor log-analytics query --workspace <workspace-id> \
+    --analytics-query "ContainerAppConsoleLogs_CL | where ContainerAppName_s == 'migrate' | order by TimeGenerated desc | take 100"
+  ```
+  Log Analytics ingestion can lag a minute or two behind the job actually
+  running, so if you need it immediately, pass `rootAdminBootstrapPassword`
+  as an explicit parameter to `az deployment group create` instead (see
+  `infra/main.bicep`'s top-of-file `USAGE` comment) so you choose the
+  password yourself rather than reading it back out of logs at all.
+
+**If you missed it (closed the terminal too soon, etc.):** the migration
+only inserts the root admin row once -- re-running `alembic upgrade head`
+against the same database is a no-op and won't print a new password (see
+that file's `already_bootstrapped` guard). Recovery options instead: (1)
+if you already have any other Admin/Super Admin account, use its
+`POST /users/{id}/reset-password` (Admin-issued reset, no old password
+needed -- see `services/user_service.py`'s `reset_user_password()`) once
+you know the root admin's user id, or (2) as a last resort, connect
+directly to the database and update that row's `password_hash` column to
+a fresh Argon2id hash you generate yourself (e.g. `python3 -c "from
+security import hash_password; print(hash_password('your-new-password'))"`
+from inside the `backend/` folder).
+
 `init_db()` (`Base.metadata.create_all()`) is still safe to leave enabled
 for local development — it only creates tables that don't exist yet and
 never alters existing ones, so it won't fight with Alembic. In production,
@@ -1357,7 +1424,7 @@ table that's missing a new column.
 ## Backups
 
 Everything lives in `backend/services/backup_service.py` (the logic),
-`backend/api/backup.py` (the `/api/backup/*` routes, Super Admin/Admin
+`backend/api/backup_api.py` (the `/api/backup/*` routes, Super Admin/Admin
 only), and the **System Backups** panel at the bottom of `admin.html`.
 
 **What happens automatically:** once a day at each hour listed in
@@ -1634,10 +1701,10 @@ the actual logic lives. Use this section as a map when you need to find
 - `Settings.is_production` — `True` when `ENVIRONMENT=production`.
 - `Settings._enforce_prod_jwt_secret()` — validator that **refuses to
   start** if running in production with a placeholder/weak
-  `JWT_SECRET_KEY`.
-- `Settings._enforce_prod_super_admin_password()` — same idea, for
-  `SUPER_ADMIN_PASSWORD` (the hardcoded Super Admin's password — see
-  Roles & Permissions Model).
+  `JWT_SECRET_KEY`. There is no equivalent Super Admin check anymore --
+  its password lives in the database as a normal hash, not an env var
+  (see [The root admin account](#the-root-admin-account)), so there's
+  nothing here to validate at startup.
 
 #### `backend/database.py`
 - `init_db()` — `Base.metadata.create_all()`; creates any tables that
@@ -1645,9 +1712,11 @@ the actual logic lives. Use this section as a map when you need to find
 - `get_db()` — FastAPI dependency that yields a SQLAlchemy `Session` and
   always closes it afterwards.
 - `seed_db()` — inserts demo accounts/asset pools **only if the database
-  is empty**. Note there's no `super_admin` row seeded here — that
-  identity is hardcoded via environment variables (see Roles &
-  Permissions Model); the seeded top-privilege demo account is `admin`.
+  is empty**, including a local/dev/test root admin row (`_root_admin_demo_row()`,
+  well-known demo password -- see [The root admin
+  account](#the-root-admin-account); production gets its root admin from
+  the `0002_bootstrap_root_admin.py` migration instead, with a randomly
+  generated password).
 
 #### `backend/models.py`
 - `utc_now()` — the one place "the current time" is generated app-wide,
@@ -1705,12 +1774,14 @@ the actual logic lives. Use this section as a map when you need to find
 - `create_access_token(user)` — issues a signed JWT for a logged-in user.
 - `decode_access_token(token)` — verifies signature + expiry and returns
   the token's claims.
-- `SUPER_ADMIN_ID` / `SUPER_ADMIN_ROLE` — constants identifying the
-  hardcoded Super Admin's JWT `sub`/`role` claims.
-- `super_admin_password_hash()` / `SUPER_ADMIN_PASSWORD_HASH` — hashes
-  `settings.SUPER_ADMIN_PASSWORD` once at startup (`None` if unset).
-- `super_admin_principal()` — a `User`-shaped stand-in for the Super Admin
-  so `create_access_token()` can issue it a token like any other account.
+- `SUPER_ADMIN_ROLE` — the reserved `role` string (`"super_admin"`)
+  identifying the root admin's real `users` row (see [The root admin
+  account](#the-root-admin-account)). `SUPER_ADMIN_EMAIL` is its derived
+  placeholder email (`{SUPER_ADMIN_USERNAME}@local`), used only to build
+  the seed/bootstrap row -- there's no `SUPER_ADMIN_ID`,
+  `SUPER_ADMIN_PASSWORD_HASH`, or `super_admin_principal()` anymore: the
+  root admin logs in through the exact same database lookup as any other
+  account, so it needs no JWT-issuing stand-in of its own.
 
 #### `backend/deps.py`
 - `get_current_user(...)` — FastAPI dependency: decodes the bearer token
@@ -1751,28 +1822,28 @@ the actual logic lives. Use this section as a map when you need to find
 
 ### Backend — API Routes (`backend/api/`)
 
-- **`api/auth.py`** — `login`, `get_my_profile`, `update_password`.
-- **`api/assets.py`** — `create_asset_type`, `list_assets`,
+- **`api/auth_api.py`** — `login`, `get_my_profile`, `update_password`.
+- **`api/assets_api.py`** — `create_asset_type`, `list_assets`,
   `get_asset_details`, `update_asset_quantity`, `delete_asset_type`,
   `flag_asset_exception`, `recall_asset_exception`, `checkin_asset`,
   `checkout_advanced`, `import_assets_from_csv`.
-- **`api/users.py`** — `create_user`, `get_users`, `get_deleted_users`,
+- **`api/users_api.py`** — `create_user`, `get_users`, `get_deleted_users`,
   `get_my_assigned_items`, `export_my_assigned_items`,
   `export_all_users`, `get_user_assigned_items`,
   `export_user_assigned_items`, `delete_user`, `reset_user_password`,
   `restore_user`.
-- **`api/outsiders.py`** — `get_outsiders`, `export_all_outsiders`,
+- **`api/outsiders_api.py`** — `get_outsiders`, `export_all_outsiders`,
   `get_outsider_assigned_items`, `export_outsider_assigned_items`.
-- **`api/checkouts.py`** — `return_checkout`, `get_overdue_checkouts`,
+- **`api/checkouts_api.py`** — `return_checkout`, `get_overdue_checkouts`,
   `get_due_soon_checkouts`, `request_extension`, `get_extension_requests`,
   `decide_extension_request`, `extend_checkout`.
-- **`api/audit.py`** — `get_audit_logs`, `export_audit_logs`.
-- **`api/backup.py`** — `backup_status`, `list_backups`,
+- **`api/audit_api.py`** — `get_audit_logs`, `export_audit_logs`.
+- **`api/backup_api.py`** — `backup_status`, `list_backups`,
   `create_backup_now`, `download_backup`, `delete_backup`,
   `restore_backup`, `restore_backup_upload`. Thin router — see
   `services/backup_service.py` for the actual `pg_dump`/`psql`/Google
   Drive implementation.
-- **`api/quotations.py`** — `get_public_config`, `get_asset_catalog`;
+- **`api/quotations_api.py`** — `get_public_config`, `get_asset_catalog`;
   self-service cart routes (`get_my_quotation`,
   `get_my_quotation_history`, `add_quotation_item`,
   `update_quotation_item`, `remove_quotation_item`, `submit_quotation`,
@@ -1784,7 +1855,7 @@ the actual logic lives. Use this section as a map when you need to find
   `export_quotation_admin`); and the global `get_vat_setting`/
   `update_vat_setting`. See [Equipment
   Quotations](#equipment-quotations-quote-to-checkout).
-- **`api/notifications.py`** — `get_digest_recipients`/
+- **`api/notifications_api.py`** — `get_digest_recipients`/
   `update_digest_recipients` (the daily digest's admin-editable recipient
   list, Super Admin/Admin only).
 
@@ -1796,16 +1867,14 @@ the actual logic lives. Use this section as a map when you need to find
   `delete_asset_type`, `flag_asset_exception`, `recall_asset_exception`,
   `checkin_asset`, `checkout_advanced`, `import_assets_from_csv`.
   `MAX_CSV_UPLOAD_BYTES` caps upload size.
-- **`services/auth_service.py`** — `login(db, req)` checks the hardcoded
-  Super Admin identifier/password FIRST, before ever querying `users`;
-  otherwise verifies credentials against the database, enforces
+- **`services/auth_service.py`** — `login(db, req)` verifies credentials
+  against the database (the root admin is a real row like anyone else --
+  see [The root admin account](#the-root-admin-account)), enforces
   per-account lockout, and issues a JWT. `_DUMMY_PASSWORD_HASH` keeps the
   "no such account" response timing-consistent with "wrong password";
-  `get_profile(db, current_user)` backs `GET /auth/me` (rehydrated
-  straight from JWT claims for the Super Admin, since it has no row to
-  query); `update_password` changes a password and clears any lockout as a
-  side effect, and rejects any attempt to target the Super Admin (whose
-  password only lives in `SUPER_ADMIN_PASSWORD`).
+  `get_profile(db, current_user)` backs `GET /auth/me`; `update_password`
+  changes a password and clears any lockout as a side effect, and works
+  for the root admin exactly the same way as any other account.
 - **`services/checkout_service.py`** — `return_checkout` processes a
   partial/full return (and records who the equipment came from in the
   audit entry); `list_overdue_checkouts` backs the overdue alert feed;
@@ -1938,29 +2007,29 @@ them, completely out-of-band from any HTTP request.
 ### Backend — Schemas (`backend/schemas/`)
 
 Pure Pydantic request/response models, no logic:
-- **`schemas/auth.py`** — `LoginRequest`, `PasswordUpdateRequest`
+- **`schemas/auth_schema.py`** — `LoginRequest`, `PasswordUpdateRequest`
   (enforces password strength via a `field_validator`).
-- **`schemas/assets.py`** — asset/checkout request bodies, including the
-  server-side due-date min/max check.
-- **`schemas/users.py`** — `UserCreateRequest` (also enforces password
-  strength); `UserPasswordResetRequest` (the admin-reset body — just
-  `new_password`, same strength `field_validator`, no `current_password`
-  since the whole point is not needing the old one).
-- **`schemas/checkouts.py`** — `ReturnRequest`; `ExtensionRequestCreate`
-  (self-service or on-behalf-of-Outsider request body);
-  `ExtensionDecisionRequest` (approve/deny, with an optional
+- **`schemas/assets_schema.py`** — asset/checkout request bodies, including
+  the server-side due-date min/max check.
+- **`schemas/users_schema.py`** — `UserCreateRequest` (also enforces
+  password strength); `UserPasswordResetRequest` (the admin-reset body —
+  just `new_password`, same strength `field_validator`, no
+  `current_password` since the whole point is not needing the old one).
+- **`schemas/checkouts_schema.py`** — `ReturnRequest`;
+  `ExtensionRequestCreate` (self-service or on-behalf-of-Outsider request
+  body); `ExtensionDecisionRequest` (approve/deny, with an optional
   `override_due_date`/`note`); `DirectExtensionRequest` (the "Extend"
   button's request body — same shape as `ExtensionRequestCreate`, but
   skips the request/approval workflow entirely).
-- **`schemas/quotations.py`** — `QuotationItemCreate`/
+- **`schemas/quotations_schema.py`** — `QuotationItemCreate`/
   `QuotationItemQuantityUpdate` (self-service cart line bodies);
   `QuotationOutsourcedItemCreate` (Admin/Manager not-in-inventory line);
   `QuotationCreateRequest`/`QuotationMetaUpdate`/`QuotationAssignRequest`
   (the "Quotes" tab); `VatUpdateRequest` (the global VAT setting).
-- **`schemas/notifications.py`** — `DigestRecipientsUpdateRequest` (the
-  daily digest's admin-editable recipient list; validates/normalizes each
-  address without an `email-validator` dependency — see the file's own
-  comments).
+- **`schemas/notifications_schema.py`** — `DigestRecipientsUpdateRequest`
+  (the daily digest's admin-editable recipient list; validates/normalizes
+  each address without an `email-validator` dependency — see the file's
+  own comments).
 
 ### Backend — Scripts (`backend/scripts/`)
 
@@ -2135,13 +2204,13 @@ them, do them **in this order**, and test after each layer if you can
 2. **Migration** — `alembic revision --autogenerate -m "add notes to asset_types"`,
    then check the generated file actually looks right before running
    `alembic upgrade head`.
-3. **`schemas/assets.py`** — add `notes: Optional[str] = None` to whichever
-   request model creates/updates a pool.
+3. **`schemas/assets_schema.py`** — add `notes: Optional[str] = None` to
+   whichever request model creates/updates a pool.
 4. **`services/asset_service.py`** — read `payload.notes` and set it on
    the `AssetType` row in `create_asset_type()`/`update_asset_quantity()`
    (or wherever makes sense).
-5. **`api/assets.py`** — usually needs NO change at all, since routes just
-   pass the whole validated `payload` object through to the service.
+5. **`api/assets_api.py`** — usually needs NO change at all, since routes
+   just pass the whole validated `payload` object through to the service.
 6. **`frontend/js/components/assets.js`** — include `notes` in whatever
    object `submitCreatePoolForm()` sends, and display it in
    `renderAssetsTable()`/`openPropsModal()`.
@@ -2305,7 +2374,7 @@ main.app.dependency_overrides[database.get_db] = lambda: database.SessionLocal()
 client = TestClient(main.app)
 
 # Log in as the demo Super Admin -- POST /auth/login sets the JWT as an
-# HttpOnly cookie (see api/auth.py), not a "token" field in the response
+# HttpOnly cookie (see api/auth_api.py), not a "token" field in the response
 # body, so `client` (which keeps its own cookie jar) is already
 # authenticated for every request after this one; no headers= needed.
 r = client.post("/api/auth/login", json={"identifier": "r.adeyemi@corp.io", "password": "Admin123!"})
@@ -2426,13 +2495,16 @@ A checklist before you deploy this anywhere real:
 - [ ] `ENVIRONMENT=production` in your `.env` (this alone makes the
       backend **refuse to start** if `JWT_SECRET_KEY` is still a
       placeholder or too short — see `config.py`).
-- [ ] Generate and set a real `JWT_SECRET_KEY`, `POSTGRES_PASSWORD`, and
-      `SUPER_ADMIN_PASSWORD` (this alone makes the backend **refuse to
-      start** if `SUPER_ADMIN_PASSWORD` is still empty/placeholder or too
-      short — see `config.py`).
+- [ ] Generate and set a real `JWT_SECRET_KEY` and `POSTGRES_PASSWORD`
+      (the former alone makes the backend **refuse to start** if
+      `JWT_SECRET_KEY` is still empty/placeholder or too short — see
+      `config.py`).
 - [ ] `AUTO_INIT_DB=false` and `AUTO_SEED_DEMO_DATA=false` — run
-      `alembic upgrade head` as its own explicit deploy step instead, and
-      never create the public demo accounts against a real database.
+      `alembic upgrade head` as its own explicit deploy step instead
+      (this also bootstraps the root admin with a randomly generated
+      password, printed to stderr once — see "Viewing the
+      one-time-generated root admin password" above), and never create
+      the public demo accounts against a real database.
 - [ ] Set `CORS_ORIGINS` to your real frontend domain(s) only.
 - [ ] Decide on email: leave `NOTIFICATIONS_ENABLED=false` if you don't
       want extension-request/overdue/due-soon-checkout emails yet, or set

@@ -359,7 +359,9 @@ export async function submitDispatchForm(event) {
     } else {
       payload.outsider_name = document.getElementById('adhocName').value;
       payload.outsider_company = document.getElementById('adhocCompany').value;
-      payload.outsider_contact = document.getElementById('adhocContact').value;
+      payload.outsider_email = document.getElementById('adhocEmail').value || null;
+      const phoneInput = document.getElementById('adhocPhone');
+      payload.outsider_phone = phoneInput ? (phoneInput.value || null) : null;
     }
   }
 

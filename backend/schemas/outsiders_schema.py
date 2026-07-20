@@ -14,31 +14,36 @@ from security import validate_password_strength
 class OutsiderUpdateRequest(BaseModel):
     """
     Body for PATCH /outsiders/{outsider_id} -- edits an ad-hoc individual's
-    name, contact details, and/or company. Every field is optional so a
+    name, email, phone number, and/or company. Every field is optional so a
     caller only needs to send the ones that actually changed --
     services/outsider_service.py -> update_outsider() uses Pydantic's
     `exclude_unset` to leave anything omitted exactly as it was.
     """
     name: Optional[str] = None
-    contact_details: Optional[str] = None
+    email: Optional[str] = None
+    phone_number: Optional[str] = None
     company: Optional[str] = None
 
-    # name/contact_details are both `nullable=False` on models.Outsider --
-    # a present-but-blank value would silently violate that, so reject it
-    # the same way UserUpdateRequest does for name/username/email.
-    @field_validator("name", "contact_details")
+    # `name` is `nullable=False` on models.Outsider -- a present-but-blank
+    # value would silently violate that, so reject it the same way
+    # UserUpdateRequest does for name/username/email.
+    @field_validator("name")
     @classmethod
     def _reject_blank(cls, value: Optional[str]) -> Optional[str]:
         if value is not None and not value.strip():
             raise ValueError("This field cannot be blank.")
         return value.strip() if value is not None else value
 
-    # Company IS nullable on the model -- an explicit empty string here is
-    # treated as "clear the company" by update_outsider() below, same as
-    # leaving it blank at ad-hoc dispatch time.
-    @field_validator("company")
+    # email/phone_number/company are ALL nullable on the model -- an
+    # explicit empty string on any of them is treated as "clear this
+    # field" by update_outsider() below, same as leaving it blank at
+    # ad-hoc dispatch/quote-assignment time. update_outsider() itself
+    # additionally guards against clearing BOTH email and phone at once
+    # (a profile needs at least one way to be reached), so that check
+    # isn't duplicated here where only one field is visible at a time.
+    @field_validator("email", "phone_number", "company")
     @classmethod
-    def _strip_company(cls, value: Optional[str]) -> Optional[str]:
+    def _strip_optional(cls, value: Optional[str]) -> Optional[str]:
         return value.strip() if value is not None else value
 
 
@@ -60,6 +65,7 @@ class OutsiderConvertToUserRequest(BaseModel):
     login, not a chance to rename them mid-conversion.
     """
     email: str
+    phone_number: Optional[str] = None
     password: str
     role: str
     department: Optional[str] = None
@@ -75,6 +81,11 @@ class OutsiderConvertToUserRequest(BaseModel):
         if not value.strip():
             raise ValueError("This field cannot be blank.")
         return value.strip()
+
+    @field_validator("phone_number")
+    @classmethod
+    def _strip_phone(cls, value: Optional[str]) -> Optional[str]:
+        return value.strip() if value is not None else value
 
     # Same policy as UserCreateRequest.password -- an account created via
     # conversion must meet the exact same complexity/length rules as any

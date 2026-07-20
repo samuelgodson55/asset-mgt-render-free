@@ -295,7 +295,7 @@ disk, under `settings.EXPORT_RESULT_DIR` (a directory on the shared
 (filename, content type, and the file's path) as the actual Celery/Redis
 result. Redis goes back to holding kilobytes instead of megabytes per
 export. `GET /audit-logs/export/{task_id}/download` (see
-`backend/api/audit.py`) now streams the file straight off disk via
+`backend/api/audit_api.py`) now streams the file straight off disk via
 FastAPI's `FileResponse` instead of base64-decoding it out of a Redis
 blob.
 

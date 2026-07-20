@@ -30,7 +30,7 @@ def _dispatch_new_outsider(client, headers, asset_id, name="Femi Adeyemi", quant
         f"/api/assets/{asset_id}/checkout_advanced", headers=headers,
         json={
             "assignee_type": "outsider", "quantity": quantity, "due_date": due_date,
-            "outsider_name": name, "outsider_contact": "femi@example.com", "outsider_company": "Lagos Fintech Ltd.",
+            "outsider_name": name, "outsider_email": "femi@example.com", "outsider_company": "Lagos Fintech Ltd.",
         },
     )
     assert response.status_code == 200, response.text

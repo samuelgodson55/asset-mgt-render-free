@@ -42,7 +42,7 @@ import {
   openEditUserModal, submitEditUserForm,
   openRevokeUserModal, submitRevokeUserForm,
 } from './components/users.js';
-import { exportAuditLogs, changeAuditPage, setAuditPerPage } from './components/audit.js';
+import { openAuditExportModal, submitAuditExportForm, changeAuditPage, setAuditPerPage } from './components/audit.js';
 import { loadMyItems } from './components/myitems.js';
 import {
   setOutsidersSearch, setOutsidersPerPage, changeOutsidersPage,
@@ -556,10 +556,13 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   const exportBtn = document.getElementById('exportAuditBtn');
-  if (exportBtn) exportBtn.addEventListener('click', () => exportAuditLogs('csv'));
+  if (exportBtn) exportBtn.addEventListener('click', () => openAuditExportModal('csv'));
 
   const exportPdfBtn = document.getElementById('exportAuditPdfBtn');
-  if (exportPdfBtn) exportPdfBtn.addEventListener('click', () => exportAuditLogs('pdf'));
+  if (exportPdfBtn) exportPdfBtn.addEventListener('click', () => openAuditExportModal('pdf'));
+
+  const auditExportForm = document.getElementById('auditExportForm');
+  if (auditExportForm) auditExportForm.addEventListener('submit', submitAuditExportForm);
 
   // --- Search boxes / rows-per-page selects on whichever tables exist ---
   wireTableControls();

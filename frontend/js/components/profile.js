@@ -111,7 +111,7 @@ export async function submitChangePasswordForm(event) {
     const result = await apiRequest('/auth/update-password', {
       method: 'POST',
       body: JSON.stringify({
-        user_id: parseInt(session.sub, 10),
+        user_id: parseInt(session.user_id, 10),
         current_password: currentPassword,
         new_password: newPassword,
       }),

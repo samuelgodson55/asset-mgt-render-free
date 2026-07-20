@@ -105,7 +105,9 @@ jobs:
           docker push ${{ steps.img.outputs.name }}:latest
 
       - name: Trivy scan (blocking on CRITICAL -- same bar as production always had)
-        uses: aquasecurity/trivy-action@0.24.0
+        # Pinned to the commit SHA behind the verified-safe v0.35.0 release,
+        # not a mutable tag -- see ci.yml's backend Trivy step for why.
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
         with:
           image-ref: ${{ steps.img.outputs.name }}:${{ env.VERSION }}
           severity: 'CRITICAL'

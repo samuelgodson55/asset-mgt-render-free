@@ -141,7 +141,14 @@ jobs:
             -t snipeit-frontend:ci .
 
       - name: Trivy scan -- backend
-        uses: aquasecurity/trivy-action@v0.24.0
+        # Pinned to the commit SHA behind the verified-safe v0.35.0 release,
+        # not a mutable tag: aquasecurity/trivy-action had 76 of 77 version
+        # tags (including 0.24.0/v0.24.0) force-pushed to credential-stealing
+        # malware in a March 2026 supply-chain compromise (CVE-2026-33634).
+        # v0.35.0 predates the compromise and is protected by GitHub's
+        # immutable-releases feature. See
+        # https://github.com/advisories/GHSA-69fq-xp46-6x23
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
         with:
           image-ref: snipeit-backend:ci
           severity: 'CRITICAL,HIGH'
@@ -149,7 +156,8 @@ jobs:
           format: 'table'
 
       - name: Trivy scan -- frontend
-        uses: aquasecurity/trivy-action@v0.24.0
+        # See the backend Trivy step above for why this is pinned to a SHA.
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
         with:
           image-ref: snipeit-frontend:ci
           severity: 'CRITICAL,HIGH'

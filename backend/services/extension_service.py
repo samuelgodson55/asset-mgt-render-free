@@ -394,9 +394,10 @@ def decide_extension_request(db: Session, request_id: int, decision: ExtensionDe
 
     # Notify the requester back, if they're a linked User with an email
     # address. (Ad-Hoc Individuals recorded via `requested_by_label` have
-    # no account/inbox this app knows about -- see Outsider.contact_details
-    # for their phone/email, which isn't necessarily an email at all, so we
-    # deliberately don't try to guess-parse it here.)
+    # no account/inbox this app knows about -- see Outsider.email/
+    # Outsider.phone_number for their contact details, neither of which is
+    # guaranteed to be present, so we deliberately don't try to notify them
+    # here.)
     if checkout.user and checkout.user.email:
         if decision.approve:
             subject = f"[Snipe-IT Lite] Extension approved: {asset_name}"

@@ -202,6 +202,8 @@ export function openEditUserModal(userId) {
   document.getElementById('editUserName').value = u.name || '';
   document.getElementById('editUserUsername').value = u.username || '';
   document.getElementById('editUserEmail').value = u.email || '';
+  const phoneInput = document.getElementById('editUserPhone');
+  if (phoneInput) phoneInput.value = u.phone_number || '';
   setEditUserMessage('', false);
   openModal('editUserModal');
 }
@@ -211,10 +213,12 @@ export async function submitEditUserForm(event) {
   if (!pendingEditUserId) return;
   setEditUserMessage('', false);
 
+  const phoneInput = document.getElementById('editUserPhone');
   const payload = {
     name: document.getElementById('editUserName').value,
     username: document.getElementById('editUserUsername').value,
     email: document.getElementById('editUserEmail').value,
+    phone_number: phoneInput ? (phoneInput.value || null) : null,
   };
 
   try {
@@ -267,7 +271,9 @@ export function openRevokeUserModal(userId, userName) {
   const u = usersById[userId];
   pendingRevokeUserId = userId;
   document.getElementById('revokeUserTargetName').textContent = userName || (u && u.name) || '';
-  document.getElementById('revokeUserContact').value = (u && u.email) || '';
+  document.getElementById('revokeUserEmail').value = (u && u.email) || '';
+  const phoneInput = document.getElementById('revokeUserPhone');
+  if (phoneInput) phoneInput.value = (u && u.phone_number) || '';
   document.getElementById('revokeUserCompany').value = '';
   setRevokeUserMessage('', false);
   openModal('revokeUserModal');
@@ -278,8 +284,10 @@ export async function submitRevokeUserForm(event) {
   if (!pendingRevokeUserId) return;
   setRevokeUserMessage('', false);
 
+  const phoneInput = document.getElementById('revokeUserPhone');
   const payload = {
-    contact_details: document.getElementById('revokeUserContact').value || null,
+    email: document.getElementById('revokeUserEmail').value || null,
+    phone_number: phoneInput ? (phoneInput.value || null) : null,
     company: document.getElementById('revokeUserCompany').value || null,
   };
 
@@ -481,9 +489,11 @@ export async function purgeUser(userId, userName) {
 export async function submitCreateUserForm(event) {
   event.preventDefault();
   const passwordInput = document.getElementById('newUserPassword');
+  const phoneInput = document.getElementById('newUserPhone');
   const payload = {
     name: document.getElementById('newUserName').value,
     email: document.getElementById('newUserEmail').value,
+    phone_number: phoneInput ? (phoneInput.value || null) : null,
     role: document.getElementById('newUserRole').value,
     password: passwordInput.value,
     department: document.getElementById('newUserDepartment').value || null,

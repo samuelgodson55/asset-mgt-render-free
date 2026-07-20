@@ -103,7 +103,7 @@ def _derive_username(db: Session, email: str) -> str:
 
 
 def _provision_user_row(
-    db: Session, *, name: str, email: str, role: str, password: str,
+    db: Session, *, name: str, email: str, phone_number: Optional[str], role: str, password: str,
     department: Optional[str], department_role: Optional[str], actor: dict,
 ) -> "models.User":
     """
@@ -171,7 +171,7 @@ def _provision_user_row(
         department_value = department
 
     new_user = models.User(
-        name=name, email=email, role=requested_role,
+        name=name, email=email, phone_number=phone_number, role=requested_role,
         username=_derive_username(db, email),
         password_hash=hash_password(password),
         department=department_value, department_role=department_role,
@@ -190,7 +190,7 @@ def create_user(db: Session, req: UserCreateRequest, user: dict) -> dict:
     permission model this delegates to.
     """
     new_user = _provision_user_row(
-        db, name=req.name, email=req.email, role=req.role, password=req.password,
+        db, name=req.name, email=req.email, phone_number=req.phone_number, role=req.role, password=req.password,
         department=req.department, department_role=req.department_role, actor=user,
     )
 
@@ -266,6 +266,9 @@ def update_user(db: Session, user_id: int, req: UserUpdateRequest, user: dict) -
     if "name" in updates:
         target.name = updates["name"]
 
+    if "phone_number" in updates:
+        target.phone_number = updates["phone_number"] or None
+
     db.add(models.AuditLog(
         operator=user["email"], action="USER_UPDATED", target_type="User", target_id=target.id,
         details=f"Updated account details for {target.name}.",
@@ -275,6 +278,7 @@ def update_user(db: Session, user_id: int, req: UserUpdateRequest, user: dict) -
     return {
         "message": f"User {target.name} updated successfully.",
         "id": target.id, "name": target.name, "username": target.username, "email": target.email,
+        "phone_number": target.phone_number,
     }
 
 
@@ -313,7 +317,7 @@ def list_users(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offset: int 
     # see _visible_users_query()'s docstring.
     query = _visible_users_query(db)
     query = apply_search_filter(query, search, [
-        models.User.name, models.User.email, models.User.role,
+        models.User.name, models.User.email, models.User.phone_number, models.User.role,
         models.User.department, models.User.department_role,
     ])
 
@@ -340,6 +344,7 @@ def list_users(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offset: int 
             "id": u.id,
             "name": u.name,
             "email": u.email,
+            "phone_number": u.phone_number,
             "username": u.username,
             "role": u.role,
             "department": u.department,
@@ -732,22 +737,37 @@ def convert_user_to_outsider(db: Session, user_id: int, req: UserConvertToOutsid
         )
 
     # `name` is always carried over from the account's existing profile
-    # (never re-typed) -- see docstring point above. contact_details
-    # defaults to the account's existing login email when not supplied;
-    # company has no automatic default (see schemas.users.
-    # UserConvertToOutsiderRequest's docstring).
-    contact_details = req.contact_details or target.email
-    new_outsider = models.Outsider(name=target.name, contact_details=contact_details, company=req.company)
+    # (never re-typed) -- see docstring point above. `email` defaults to
+    # the account's existing login email, and `phone_number` to its
+    # existing phone_number, when not supplied; company has no automatic
+    # default (see schemas.users.UserConvertToOutsiderRequest's docstring).
+    outsider_email = req.email or target.email
+    outsider_phone = req.phone_number or target.phone_number
+    new_outsider = models.Outsider(name=target.name, email=outsider_email, phone_number=outsider_phone, company=req.company)
     db.add(new_outsider)
     db.flush()  # assigns new_outsider.id without ending this function's single commit
 
     # Move every checkout (active AND historical) over to the new ad-hoc
-    # profile in one bulk UPDATE -- see docstring point #3.
+    # profile in one bulk UPDATE -- see docstring point #3. We separately
+    # count how many of those were *active* (still outstanding) before the
+    # bulk UPDATE runs, purely for the confirmation message below: the
+    # profile drawer's "Custody" line only ever counts active checkouts
+    # (see get_users_list()'s `outstanding` aggregation above), so a
+    # message that just said "N checkout(s) ... moved" -- with N including
+    # long-since-returned history -- could read as contradicting a "0
+    # items checked out" custody line the caller had just seen, even
+    # though both numbers are correct for what each one measures.
+    active_checkouts_migrated = (
+        db.query(models.AssetCheckout)
+        .filter(models.AssetCheckout.user_id == target.id, models.AssetCheckout.status == "active")
+        .count()
+    )
     checkouts_migrated = (
         db.query(models.AssetCheckout)
         .filter(models.AssetCheckout.user_id == target.id)
         .update({"user_id": None, "outsider_id": new_outsider.id}, synchronize_session=False)
     )
+    historical_checkouts_migrated = checkouts_migrated - active_checkouts_migrated
 
     # Same treatment for any Quotation this account was the assignee of --
     # see docstring point #4.
@@ -768,7 +788,8 @@ def convert_user_to_outsider(db: Session, user_id: int, req: UserConvertToOutsid
         details=(
             f"Revoked login access for {target.name} and converted their account into an "
             f"ad-hoc profile (outsider #{new_outsider.id}). Migrated {checkouts_migrated} "
-            f"checkout(s) and {quotations_migrated} quotation assignment(s)."
+            f"checkout(s) ({active_checkouts_migrated} active, {historical_checkouts_migrated} "
+            f"past) and {quotations_migrated} quotation assignment(s)."
         ),
     ))
     db.add(models.AuditLog(
@@ -778,18 +799,33 @@ def convert_user_to_outsider(db: Session, user_id: int, req: UserConvertToOutsid
     db.commit()
     db.refresh(new_outsider)
 
+    # Build the confirmation message piece by piece so it never implies
+    # outstanding items were involved when there were none (e.g. "0 active
+    # checkout(s)" reads as a non-sequitur) -- only mention the active
+    # count at all when it's actually nonzero, and always spell out that
+    # the rest is past/returned history, not something still checked out.
+    checkout_bits = []
+    if active_checkouts_migrated:
+        checkout_bits.append(f"{active_checkouts_migrated} currently checked-out item(s)")
+    if historical_checkouts_migrated:
+        checkout_bits.append(f"{historical_checkouts_migrated} past (already-returned) checkout record(s)")
+    checkout_summary = " and ".join(checkout_bits) if checkout_bits else "no checkout history"
+
     return {
         "message": (
             f"{target.name}'s login access has been revoked. "
-            f"{checkouts_migrated} checkout(s) and {quotations_migrated} quotation "
+            f"{checkout_summary} and {quotations_migrated} quotation "
             f"assignment(s) were moved to their new ad-hoc profile."
         ),
         "user_id": target.id,
         "outsider_id": new_outsider.id,
         "name": new_outsider.name,
-        "contact_details": new_outsider.contact_details,
+        "email": new_outsider.email,
+        "phone_number": new_outsider.phone_number,
         "company": new_outsider.company,
         "checkouts_migrated": checkouts_migrated,
+        "active_checkouts_migrated": active_checkouts_migrated,
+        "historical_checkouts_migrated": historical_checkouts_migrated,
         "quotations_migrated": quotations_migrated,
     }
 
@@ -894,7 +930,7 @@ def list_deleted_users(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offs
         models.User.purged_at.is_(None),
     )
     query = apply_search_filter(query, search, [
-        models.User.name, models.User.email, models.User.role,
+        models.User.name, models.User.email, models.User.phone_number, models.User.role,
         models.User.department, models.User.department_role,
     ])
 
