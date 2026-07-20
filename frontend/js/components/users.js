@@ -243,7 +243,7 @@ export async function deleteProfile(userId, userName) {
     alert("You cannot delete your own account while logged in as it.");
     return;
   }
-  if (!confirm(`Delete profile for ${userName}? This cannot be undone.`)) return;
+  if (!confirm(`Delete profile for ${userName}? It will be removed from active users, but can be restored later from the Restore Deleted Users panel. Only Users with no outstanding checkouts can be deleted..`)) return;
   try {
     await apiRequest(`/users/${userId}`, { method: 'DELETE' });
     refreshDashboard();
