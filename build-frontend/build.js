@@ -213,6 +213,18 @@ async function processHtml(code, relPath) {
       collapseWhitespace: true,
       conservativeCollapse: false,
       removeComments: true,
+      // html-minifier-terser's removeComments:true does NOT mean "remove
+      // every comment" -- it defaults ignoreCustomComments to
+      // [/^!/, /^\s*#/], protecting "important" (<!--! ... -->) comments
+      // and anything shaped like a Server-Side-Include directive
+      // (<!--#include file="..." -->). This app has neither -- every
+      // comment in frontend/*.html is plain developer documentation, some
+      // of which (e.g. "<!-- #swipeArea wraps... -->") happens to start
+      // with "#" as a way of naming the element it's describing, which
+      // matched that SSI-shaped default and was silently surviving every
+      // build (dev AND prod) even though removeComments was already on.
+      // Empty array means "no exceptions -- strip every comment".
+      ignoreCustomComments: [],
       removeRedundantAttributes: false,
       removeAttributeQuotes: false,
       minifyJS: false,

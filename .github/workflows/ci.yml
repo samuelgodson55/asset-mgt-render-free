@@ -27,6 +27,44 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  frontend:
+    name: Frontend parsing/rendering tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: |
+            frontend/tests/package-lock.json
+            build-frontend/package-lock.json
+
+      # build-pipeline.test.mjs runs the REAL build-frontend/build.js for
+      # BUILD_ENV=local/development/production and checks the OUTPUT (not
+      # just frontend/ source) -- it needs build-frontend's own deps
+      # (terser, javascript-obfuscator, html-minifier-terser) installed to
+      # do that. It skips itself gracefully if this step is ever removed,
+      # but it shouldn't be: this is the one job that would have caught a
+      # bug the minify/obfuscate step itself introduces.
+      - name: Install build-frontend dependencies
+        run: cd build-frontend && npm ci --no-audit --no-fund
+
+      - name: Install frontend test dependencies
+        run: cd frontend/tests && npm ci --no-audit --no-fund
+
+      # pages-load.test.mjs, module-exports-integrity.test.mjs, and
+      # login-form-wiring.test.mjs check the real frontend/ source tree
+      # (HTML validity, no duplicate ids, every local asset reference
+      # resolves, every import/export lines up, and the login form's
+      # submit is actually intercepted by JS). build-pipeline.test.mjs
+      # re-runs the load/submit checks against the built output of every
+      # BUILD_ENV mode -- see that file's own header comment for why both
+      # layers are needed.
+      - name: Run frontend tests
+        run: cd frontend/tests && npm test
+
   backend:
     name: Backend lint, test, dependency audit
     runs-on: ubuntu-latest
@@ -128,7 +166,7 @@ jobs:
   build-and-scan-images:
     name: Build images + Trivy scan
     runs-on: ubuntu-latest
-    needs: [backend]
+    needs: [backend, frontend]
     steps:
       - uses: actions/checkout@v4
 
