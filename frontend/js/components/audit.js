@@ -155,6 +155,12 @@ export async function exportAuditLogs(format = 'csv') {
     const endDate = document.getElementById('auditExportEndDate')?.value || '';
     closeModal('auditExportModal');
 
+  closeModal('auditExportModal');
+  await exportAuditLogs(pendingExportFormat, startDate, endDate);
+}
+
+export async function exportAuditLogs(format = 'csv', startDate = '', endDate = '') {
+  try {
     const params = new URLSearchParams();
     if (startDate) params.set('start_date', startDate);
     if (endDate) params.set('end_date', endDate);
