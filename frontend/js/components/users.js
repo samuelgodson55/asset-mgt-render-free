@@ -127,7 +127,7 @@ function renderUsersTable(users) {
     // renderAssetsTable() for the full explanation of this pattern.
     return `
     <tr ${rowDetailsTrigger(escapeHtml(u.name), [
-      [isManagerView ? 'Department Role' : 'Privilege Tier', escapeHtml(isManagerView ? (u.department_role || 'Team Member') : u.role.replace('_', ' '))],
+      ['Privilege Tier', escapeHtml(u.role.replace('_', ' '))],
       ['Custody', custodyLabel],
       ['', `<div class="flex flex-wrap gap-2">${actionButtons}</div>`],
     ])} class="cursor-pointer transition hover:bg-card2/40 active:bg-card2/60 sm:cursor-default">
@@ -145,7 +145,7 @@ function renderUsersTable(users) {
       </td>
       <td class="hidden px-5 py-3.5 sm:table-cell">
         <span class="inline-flex items-center gap-1 rounded-full bg-blue-500/10 px-2.5 py-1 text-[11px] font-semibold text-blue-400 ring-1 ring-blue-500/30">
-          <span class="h-1.5 w-1.5 rounded-full bg-blue-500"></span> ${escapeHtml(isManagerView ? (u.department_role || 'Team Member') : u.role.replace('_', ' '))}
+          <span class="h-1.5 w-1.5 rounded-full bg-blue-500"></span> ${escapeHtml(u.role.replace('_', ' '))}
         </span>
       </td>
       <td class="hidden px-5 py-3.5 tag-mono text-slate-300 sm:table-cell">${custodyLabel}</td>

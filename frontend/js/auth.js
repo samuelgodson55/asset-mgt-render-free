@@ -105,6 +105,72 @@ export async function login(identifier, password) {
   const data = await response.json();
   if (!response.ok) throw new Error(data.detail || 'Invalid email/username or password');
 
+  // SECURITY: an account that requires 2FA (currently just super_admin --
+  // see backend/services/auth_service.py's login()) does NOT get a real
+  // session from this call alone -- the backend hasn't set the auth
+  // cookie yet either. `data` here is either `mfa_setup_required` (never
+  // enrolled yet: carries a fresh secret + otpauth URI to enroll with) or
+  // `mfa_required` (already enrolled: needs a live code). Callers
+  // (js/main.js's login form handler) must check for these BEFORE
+  // treating a successful response as "logged in", and complete the
+  // matching flow via confirmMfaSetup()/verifyMfa() below.
+  if (data.mfa_setup_required || data.mfa_required) {
+    return data;
+  }
+
+  persistSession({
+    user_id: data.user_id,
+    name: data.name,
+    username: data.username,
+    role: data.role,
+    department: data.department,
+    expires_at: data.expires_at,
+    needs_password_reset: data.needs_password_reset,
+  });
+  return data;
+}
+
+// Completes FIRST-time 2FA enrollment: `mfaSetupToken`/`code` come from the
+// mfa_setup_required response above and the code the person typed in after
+// scanning/typing the secret into their authenticator app. On success this
+// is the call that actually grants the session (the backend sets the real
+// auth cookie here, not in login() above) -- see api/auth_api.py.
+export async function confirmMfaSetup(mfaSetupToken, code) {
+  const response = await fetch(`${API_URL}/auth/mfa/setup/confirm`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mfa_setup_token: mfaSetupToken, code }),
+    credentials: 'include',
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.detail || 'Incorrect code. Please try again.');
+
+  persistSession({
+    user_id: data.user_id,
+    name: data.name,
+    username: data.username,
+    role: data.role,
+    department: data.department,
+    expires_at: data.expires_at,
+    needs_password_reset: data.needs_password_reset,
+  });
+  return data;
+}
+
+// Completes login for an ALREADY-enrolled account: `mfaPendingToken` comes
+// from the mfa_required response above, `code` is the 6-digit code from
+// the person's authenticator app. Same session-granting shape as
+// confirmMfaSetup() above.
+export async function verifyMfa(mfaPendingToken, code) {
+  const response = await fetch(`${API_URL}/auth/mfa/verify`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mfa_pending_token: mfaPendingToken, code }),
+    credentials: 'include',
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.detail || 'Incorrect code. Please try again.');
+
   persistSession({
     user_id: data.user_id,
     name: data.name,

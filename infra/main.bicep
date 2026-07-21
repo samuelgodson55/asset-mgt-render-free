@@ -136,7 +136,15 @@
 //                  postgresPassword=$(openssl rand -hex 16) \
 //                  redisPassword=$(openssl rand -hex 16) \
 //                  jwtSecretKey=$(openssl rand -hex 32) \
-//                  rootAdminBootstrapPassword=... (optional -- omit to let the migrate Job generate one)
+//                  rootAdminBootstrapPassword=$(openssl rand -base64 24)
+//                  # ^ optional -- omit (or leave "") to let the migrate Job
+//                  # generate one instead and print it to stderr once (see
+//                  # DEPLOYMENT.md's Monitoring section for how to read that
+//                  # back out of Log Analytics if you go that route). Passing
+//                  # it explicitly here, as above, means you already have it
+//                  # in your own shell instead. Either way it's a no-op on
+//                  # every deploy after the first -- the migrate Job only
+//                  # ever bootstraps the root admin row once.
 //
 // Re-run the same command any time to update the environment idempotently --
 // this file does NOT set `backend`/`frontend`/`migrate`'s image tags on

@@ -1299,6 +1299,85 @@ renamed, given a new password through the app, and soft-deleted like any
 other user — see the seeded demo `admin` account in [Demo Login
 Credentials](#demo-login-credentials).
 
+#### Two-factor authentication (2FA)
+
+`super_admin` — and, structurally, only `super_admin` today — additionally
+requires TOTP (Google Authenticator/Authy/1Password-compatible) 2FA to log
+in. `services/auth_service.py`'s `login()` checks `user.role ==
+SUPER_ADMIN_ROLE` right after password verification and, instead of
+issuing a session, returns one of two challenges:
+
+- **`mfa_setup_required`** (this account has never confirmed a code) — a
+  freshly generated secret plus its `otpauth://` provisioning URI, shown
+  in the login response body **exactly once**. `POST
+  /auth/mfa/setup/confirm` only flips `totp_enabled` to `True` (and
+  finally issues the session cookie) once a live code generated from that
+  secret is actually verified — see `models.py`'s `User.totp_enabled`
+  docstring for why a generated-but-never-confirmed secret deliberately
+  doesn't count as "protected yet".
+- **`mfa_required`** (already enrolled) — a short-lived, single-purpose
+  token; `POST /auth/mfa/verify` exchanges a correct code for the real
+  session cookie.
+
+Both challenge tokens are ordinary JWTs signed with the same
+`JWT_SECRET_KEY`, just with a `purpose` claim (`mfa_setup` / `mfa_pending`)
+and a 5-minute expiry — see `security.py`'s `create_mfa_token()` /
+`decode_mfa_token()`. The secret itself is Fernet-encrypted at rest
+(`security.py`'s `encrypt_totp_secret()`, key derived from
+`JWT_SECRET_KEY`) — never stored in plaintext, and never retrievable again
+through any endpoint once the setup screen has shown it once. Wrong 2FA
+codes count against the exact same `failed_login_attempts`/`locked_until`
+lockout columns a wrong password does, so guessing the 6-digit code is
+throttled the same way guessing a password already is, and both `/auth/
+mfa/verify` and `/auth/mfa/setup/confirm` sit behind the same IP rate
+limiter as `/auth/login` (`main.py`'s `RateLimitMiddleware`).
+
+Because every test's database is freshly seeded, `super_admin` starts
+unenrolled in every test run too — see `tests/conftest.py`'s
+`auth_headers()` for how the test suite transparently completes
+enrollment using `pyotp` so every other fixture didn't need to change, and
+`tests/test_mfa.py` for the dedicated coverage (enrollment, wrong codes,
+lockout, recovery codes, and that no other role is ever asked for 2FA).
+
+**Recovery (backup) codes.** The moment enrollment is confirmed,
+`mfa_setup_confirm()` also issues a batch of 10 single-use recovery codes
+(`security.py`'s `generate_recovery_codes()`, format `XXXXX-XXXXX` from a
+32-symbol alphabet that excludes easily-confused characters like `0`/`O`
+and `1`/`I`), returned in that same response's `recovery_codes` field —
+also shown **exactly once**, same as the TOTP secret. The frontend's
+`#mfa-recovery-codes-screen` (`index.html`/`js/main.js`) displays them
+with a "Download as .txt" option before finally continuing to the
+dashboard.
+
+`POST /auth/mfa/verify`'s `code` field accepts EITHER a live TOTP code OR
+one of these recovery codes interchangeably —
+`security.py`'s `is_recovery_code_format()` tells them apart by shape, so
+the frontend never needs to ask which kind the person is submitting. A
+matched recovery code is stamped `used_at` (`models.py`'s `RecoveryCode`)
+and can never be replayed; the response also carries
+`recovery_codes_remaining` so the frontend can eventually surface a
+"running low" nudge. Wrong recovery-code attempts count against the same
+lockout counters wrong TOTP/password attempts do.
+
+Lost your authenticator app AND used up your recovery codes? There's
+deliberately no self-service reset for that combination — it would defeat
+the point of requiring a second factor at all. Recovery means direct
+database access: clear that row's `totp_secret_encrypted` and
+`totp_enabled` (and its `recovery_codes` rows, via the cascade delete on
+`User.recovery_codes` — deleting the `User` row itself isn't needed, just
+those columns), which re-triggers a normal `mfa_setup_required` enrollment
+on the next login.
+
+An already-logged-in, already-enrolled `super_admin` can invalidate every
+existing recovery code and get a fresh batch via `POST
+/auth/mfa/recovery-codes/regenerate` (`auth_service.py`'s
+`regenerate_recovery_codes()`) — covers "I used most of them" or routine
+hygiene. It requires re-entering the current password first (same
+pattern as `update_password()`), since it's a sensitive action taken from
+inside an already-authenticated session rather than a login step. This
+endpoint isn't wired into the "My Profile" UI yet — call it directly (or
+build that button next) if you need to regenerate codes today.
+
 ## Database & Migrations (Alembic)
 
 `backend/models.py` is the source of truth for table *shape*; Alembic

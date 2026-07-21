@@ -757,7 +757,7 @@
        (visible no matter which tab was active), which crowded the page on
        mobile in particular. Grouped into their own tab instead -- manager.html
        doesn't get this same tab since its own Audit Trail section has no
-       System Backups panel next to it (backups are Super Admin/Admin-only,
+       System Backups panel next to it (backups are Super Admin-only,
        see that section's own comment below). -->
   <section id="auditBackupsSection" class="hidden space-y-6 sm:space-y-8">
 
@@ -781,16 +781,15 @@
         <!-- Exports now run on a background worker instead of inline in
              the request (see js/components/audit.js) -- this span shows
              that job's queued/generating/ready progress next to the
-             buttons instead of leaving them looking frozen while the
+             button instead of leaving it looking frozen while the
              worker builds the file. -->
         <span id="auditExportStatus" class="text-[12px] text-slate-500"></span>
-        <button id="exportAuditBtn" data-format="csv" class="flex items-center gap-1.5 rounded-md border border-border bg-card2 px-3 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
+        <!-- Opens #auditExportModal (date range + CSV/PDF picker) instead
+             of the browser's native prompt() dialogs -- see
+             js/components/audit.js's openAuditExportModal(). -->
+        <button data-action="open-audit-export" class="flex items-center gap-1.5 rounded-md border border-border bg-card2 px-3 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
           <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
-          Export Ledger (.CSV)
-        </button>
-        <button id="exportAuditPdfBtn" data-format="pdf" class="flex items-center gap-1.5 rounded-md border border-border bg-card2 px-3 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
-          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
-          Export Ledger (.PDF)
+          Export Ledger
         </button>
       </div>
     </div>
@@ -821,15 +820,19 @@
   </section>
 
   <!-- ================= SYSTEM BACKUPS ================= -->
-  <!-- Super Admin/Admin only on the backend (deps.require_super_admin) --
-       see js/components/backups.js and backend/api/backup.py. Daily
+  <!-- Super Admin ONLY, both on the backend (deps.require_true_super_admin,
+       every /backup/* route) and here in the UI -- main.js hides this
+       whole section for a plain `admin` session (see its DOMContentLoaded
+       handler) rather than just disabling the buttons inside it, since an
+       `admin` has no access to any of this panel now, not just Restore.
+       See js/components/backups.js and backend/api/backup_api.py. Daily
        scheduled backup + optional Google Drive sync run automatically;
        this panel is for manual "Backup Now", downloading a copy, and
        restoring the database from a backup (either one already on local
        disk, or one you upload -- e.g. after downloading it back from
        Google Drive once local disk has been wiped by a Render
        redeploy/spin-down). -->
-  <section class="overflow-hidden rounded-xl border border-border bg-card">
+  <section id="systemBackupsSection" class="overflow-hidden rounded-xl border border-border bg-card">
     <div class="flex flex-col gap-3 border-b border-border px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
       <div>
         <h2 class="text-[14px] font-bold text-slate-100">System Backups</h2>
@@ -1197,46 +1200,6 @@
       <div class="flex gap-3 pt-1">
         <button type="button" data-action="close-modal" data-modal="denyReasonModal" class="flex-1 rounded-lg border border-border py-2.5 text-[13px] font-semibold text-slate-300 transition hover:border-slate-500">Cancel</button>
         <button type="submit" class="flex-1 rounded-lg bg-rose-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-rose-500">Deny Request</button>
-      </div>
-    </form>
-  </div>
-</div>
-
-<!-- ================= EXPORT AUDIT LEDGER -- DATE RANGE (MODAL) =================
-     Replaces the pair of bare window.prompt() calls that used to ask for a
-     start/end date before running the export -- see
-     js/components/audit.js's openAuditExportModal()/submitAuditExportForm().
-     Same reasoning as denyReasonModal above: a stacked pair of prompt()
-     dialogs is cramped, gives no room to label which date is which, and
-     looks nothing like the rest of this app's forms. Real <input
-     type="date"> fields also mean the browser handles format/validity
-     (no more hand-typing "YYYY-MM-DD" and hoping it parses). -->
-<div id="auditExportModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
-  <div class="absolute inset-0 bg-black/70 backdrop"></div>
-  <div class="relative w-full max-w-sm overflow-y-auto sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl shadow-2xl">
-    <div class="flex items-start justify-between border-b border-border px-6 py-5">
-      <div>
-        <p class="text-[11px] font-semibold uppercase tracking-wide text-blue-400">Export Ledger</p>
-        <h3 id="auditExportModalTitle" class="text-[16px] font-bold text-slate-50">Choose a Date Range</h3>
-      </div>
-      <button data-action="close-modal" data-modal="auditExportModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
-        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
-      </button>
-    </div>
-
-    <form id="auditExportForm" class="space-y-4 px-6 py-5">
-      <p class="text-[12px] text-slate-500">Leave either field blank to leave that side of the range open.</p>
-      <div>
-        <label class="mb-1 block text-[12px] font-medium text-slate-400">From</label>
-        <input id="auditExportStartDate" type="date" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60">
-      </div>
-      <div>
-        <label class="mb-1 block text-[12px] font-medium text-slate-400">To</label>
-        <input id="auditExportEndDate" type="date" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60">
-      </div>
-      <div class="flex gap-3 pt-1">
-        <button type="button" data-action="close-modal" data-modal="auditExportModal" class="flex-1 rounded-lg border border-border py-2.5 text-[13px] font-semibold text-slate-300 transition hover:border-slate-500">Cancel</button>
-        <button type="submit" class="flex-1 rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500">Export</button>
       </div>
     </form>
   </div>
@@ -1704,6 +1667,22 @@
         </div>
       </div>
 
+      <!-- Two-Factor Authentication -- populated/shown only for
+           role === 'super_admin' by profile.js's openProfileModal(); 2FA
+           doesn't apply to any other role today (see
+           backend/services/auth_service.py's login() SECURITY note). -->
+      <div id="profileMfaSection" class="hidden border-t border-border pt-4">
+        <h4 class="mb-1 text-[13px] font-semibold text-slate-100">Two-Factor Authentication</h4>
+        <p class="mb-3 text-[12px] text-slate-500">Enabled for this account. If you're running low on recovery codes, or think yours may have leaked, regenerate them below -- this invalidates every existing code.</p>
+        <button
+          type="button"
+          data-action="open-regenerate-recovery-codes"
+          class="w-full rounded-lg border border-border py-2 text-[13px] font-medium text-slate-300 transition hover:bg-card2"
+        >
+          Regenerate Recovery Codes
+        </button>
+      </div>
+
       <div class="border-t border-border pt-4">
         <h4 class="mb-1 text-[13px] font-semibold text-slate-100">Change Password</h4>
         <p class="mb-3 text-[12px] text-slate-500">Requires your current password -- for security reasons</p>
@@ -1730,6 +1709,85 @@
             Update Password
           </button>
         </form>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= REGENERATE 2FA RECOVERY CODES: password confirm =================
+     Opened from #profileModal's "Regenerate Recovery Codes" button
+     (data-action="open-regenerate-recovery-codes" -- see js/main.js /
+     js/components/profile.js's openRegenerateRecoveryCodesModal()).
+     Re-confirms the CURRENT password before calling POST
+     /auth/mfa/recovery-codes/regenerate -- same re-confirmation pattern
+     #profileModal's own Change Password form above already uses. -->
+<div id="regenerateRecoveryCodesModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative max-h-[90vh] w-full max-w-md overflow-y-auto sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl shadow-2xl">
+    <div class="flex items-start justify-between border-b border-border px-6 py-5">
+      <div>
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Two-Factor Authentication</p>
+        <h3 class="text-[16px] font-bold text-slate-50">Regenerate Recovery Codes</h3>
+      </div>
+      <button data-action="close-modal" data-modal="regenerateRecoveryCodesModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="space-y-4 px-6 py-5">
+      <p class="text-[12px] text-slate-500">This invalidates every recovery code you currently have and issues 10 new ones. Enter your current password to confirm.</p>
+      <form id="regenerateRecoveryCodesForm" class="space-y-3">
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">Current Password</label>
+          <input type="password" id="regenerateCodesPasswordInput" required autocomplete="current-password"
+            class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
+        </div>
+        <p id="regenerateCodesFormMessage" class="hidden text-[12px] font-medium"></p>
+        <div class="flex gap-2">
+          <button type="button" data-action="close-modal" data-modal="regenerateRecoveryCodesModal"
+            class="flex-1 rounded-lg border border-border py-2 text-[13px] font-medium text-slate-300 transition hover:bg-card2">
+            Cancel
+          </button>
+          <button type="submit"
+            class="flex-1 rounded-lg bg-amber-600 py-2 text-[13px] font-semibold text-white transition hover:bg-amber-500 active:bg-amber-700">
+            Regenerate
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- ================= REGENERATE 2FA RECOVERY CODES: result =================
+     Opened automatically the moment the form above succeeds (see
+     profile.js's submitRegenerateRecoveryCodesForm()). Shows the fresh
+     batch of 10 codes EXACTLY ONCE -- there is no way to view them again
+     after this modal is closed (see backend/models.py's RecoveryCode
+     docstring) -- with the same Download-as-.txt option the login-page
+     enrollment screen offers (index.html's #mfa-recovery-codes-screen). -->
+<div id="recoveryCodesResultModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative max-h-[90vh] w-full max-w-lg overflow-y-auto sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl shadow-2xl">
+    <div class="flex items-start justify-between border-b border-border px-6 py-5">
+      <div>
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Two-Factor Authentication</p>
+        <h3 class="text-[16px] font-bold text-slate-50">New Recovery Codes</h3>
+      </div>
+    </div>
+    <div class="space-y-4 px-6 py-5">
+      <p class="text-[12px] text-slate-500">
+        Each code works once. Store them somewhere safe (a password manager is ideal) --
+        <span class="font-medium text-amber-400">they will not be shown again.</span> Every previous code has been invalidated.
+      </p>
+      <div id="regeneratedRecoveryCodesList" class="tag-mono grid grid-cols-2 gap-x-4 gap-y-2 rounded-lg border border-border bg-card2/50 p-4 text-[13px] text-slate-200"></div>
+      <div class="flex flex-col gap-2 sm:flex-row">
+        <button type="button" data-action="download-regenerated-recovery-codes"
+          class="flex-1 rounded-lg border border-border py-2.5 text-[12px] font-medium text-slate-300 transition hover:bg-card2">
+          Download as .txt
+        </button>
+        <button type="button" data-action="close-recovery-codes-result"
+          class="flex-1 rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500 active:bg-blue-700 shadow-lg shadow-blue-600/10">
+          Done
+        </button>
       </div>
     </div>
   </div>
@@ -1771,6 +1829,57 @@
           .CSV
         </button>
         <button data-action="export-assets-inventory" data-format="pdf"
+          class="flex-1 flex items-center justify-center gap-1.5 rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+          .PDF
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= AUDIT LEDGER EXPORT (MODAL) =================
+     Opened by the Audit Trail's "Export Ledger" button (data-action=
+     "open-audit-export" -- see js/components/audit.js's
+     openAuditExportModal()). Replaces the old back-to-back prompt()
+     dialogs (one for start date, one for end date) with a normal date-
+     range form -- prompt() blocks the whole tab, can't be styled,
+     silently truncates on some browsers, and gives no room to explain
+     what "blank" means for either field the way this modal's helper
+     text can. Submitting either format button enqueues the same
+     background export job as before (see exportAuditLogs() in
+     js/components/audit.js). -->
+<div id="auditExportModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative w-full max-w-sm overflow-y-auto sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl shadow-2xl">
+    <div class="flex items-start justify-between border-b border-border px-6 py-5">
+      <div>
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Audit & Backups</p>
+        <h3 class="text-[16px] font-bold text-slate-50">Export Ledger</h3>
+      </div>
+      <button data-action="close-modal" data-modal="auditExportModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="space-y-4 px-6 py-5">
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">From</label>
+          <input type="date" id="auditExportStartDate" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60" />
+        </div>
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">To</label>
+          <input type="date" id="auditExportEndDate" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60" />
+        </div>
+      </div>
+      <p class="text-[11px] text-slate-500">Leave either field blank for no start/end limit. Exports the full ledger by default.</p>
+      <div class="flex gap-3 pt-1">
+        <button data-action="export-audit-logs" data-format="csv"
+          class="flex-1 flex items-center justify-center gap-1.5 rounded-lg border border-border py-2.5 text-[13px] font-semibold text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+          .CSV
+        </button>
+        <button data-action="export-audit-logs" data-format="pdf"
           class="flex-1 flex items-center justify-center gap-1.5 rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500">
           <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
           .PDF

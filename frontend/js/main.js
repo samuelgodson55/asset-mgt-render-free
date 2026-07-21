@@ -22,8 +22,9 @@
 // string, and add `'my-thing': (el) => ...` to the relevant registry.
 // =============================================================================
 
-import { checkAccess, startIdleWatchdog, login, redirectByUserRole, logout, getSession } from './auth.js';
-import { closeModal, switchTab, toggleRoute, toggleAdhocExisting, toggleCapacityEdit, toggleNameEdit, toggleCategoryEdit, togglePriceEdit, changePage, setSearch, setPerPage, openRowDetailsFromElement, initSwipeNav, initModalBackdropDismiss, switchDashboardTab, initDashSwipeNav, initSearchClearButtons } from './ui.js';
+import { checkAccess, startIdleWatchdog, login, confirmMfaSetup, verifyMfa, redirectByUserRole, logout, getSession } from './auth.js';
+import { qrcode } from './vendor/qrcode.js';
+import { closeModal, switchTab, toggleRoute, toggleAdhocExisting, toggleCapacityEdit, toggleNameEdit, toggleCategoryEdit, togglePriceEdit, changePage, setSearch, setPerPage, openRowDetailsFromElement, initSwipeNav, initModalBackdropDismiss, switchDashboardTab, initDashSwipeNav, initSearchClearButtons, downloadTextFile } from './ui.js';
 import { toggleTheme, initThemeToggle } from './theme.js';
 import { refreshDashboard } from './dashboard.js';
 import { initNotificationBell, toggleNotificationDropdown, closeNotificationDropdown, refreshNotifications } from './components/notifications.js';
@@ -42,7 +43,7 @@ import {
   openEditUserModal, submitEditUserForm,
   openRevokeUserModal, submitRevokeUserForm,
 } from './components/users.js';
-import { openAuditExportModal, submitAuditExportForm, changeAuditPage, setAuditPerPage } from './components/audit.js';
+import { exportAuditLogs, openAuditExportModal, changeAuditPage, setAuditPerPage } from './components/audit.js';
 import { loadMyItems } from './components/myitems.js';
 import {
   setOutsidersSearch, setOutsidersPerPage, changeOutsidersPage,
@@ -53,7 +54,7 @@ import {
   openCustodyModal, processReturn, updateCustodySelection, toggleSelectAllCustody,
   processAllReturns, bulkProcessReturns, openBulkExtendModal, submitBulkExtendForm,
 } from './components/custody.js';
-import { openProfileModal, submitChangePasswordForm, ROLE_LABELS } from './components/profile.js';
+import { openProfileModal, submitChangePasswordForm, ROLE_LABELS, openRegenerateRecoveryCodesModal, submitRegenerateRecoveryCodesForm, downloadRegeneratedRecoveryCodes, closeRecoveryCodesResultModal } from './components/profile.js';
 import { exportMyItems, exportCustodyItems, exportAllUsers, exportAllOutsiders, exportAssetsInventory, exportQuotation, exportQuoteDetail, exportMyQuoteDetail } from './components/exports.js';
 import {
   initQuotationPage, addAssetToOrder, updateOrderItemQuantity, removeOrderItem,
@@ -107,11 +108,129 @@ const SERVER_PAGE_CHANGERS = {
   quotes: changeQuotesPage,
 };
 
+// --- Login page 2FA state (index.html only) ---------------------------------
+// SECURITY: an account that requires 2FA (currently just super_admin --
+// see backend/services/auth_service.py's login()) doesn't get a session
+// from the plain email+password form alone -- auth.js's login() returns
+// either mfa_setup_required or mfa_required instead of redirecting, and
+// the login-form handler below swaps in the matching screen. The
+// short-lived setup/pending token that comes back lives ONLY in this
+// module-scope variable (never localStorage, never a cookie the backend
+// didn't set itself) -- it's gone the moment the tab is closed/refreshed,
+// same as it would be if this were a multi-step server-rendered form.
+// Module-scope (not inside the DOMContentLoaded closure below) because
+// CLICK_ACTIONS' 'cancel-mfa' entry needs to reach cancelMfaFlow() too.
+let pendingMfaToken = null;
+
+// Set the moment enrollment (or a later regeneration -- see profile.js)
+// hands back a fresh recovery-code batch; read by the two click actions
+// below and cleared the moment the person moves on.
+let pendingRecoveryCodes = null;
+let pendingRedirectRole = null;
+
+function showAuthScreen(screenId) {
+  ['auth-screen', 'mfa-verify-screen', 'mfa-setup-screen', 'mfa-recovery-codes-screen'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle('hidden', id !== screenId);
+  });
+}
+
+// Renders `otpauthUri` (login()'s mfa_setup_required response -- see
+// auth.js) as a scannable QR code, using the vendored qrcode-generator
+// library (js/vendor/qrcode.mjs -- see that file's header for provenance).
+// typeNumber=0 lets the library auto-pick the smallest QR version that
+// fits the data; 'M' is standard ~15% error-correction, matching what
+// most authenticator apps' own QR codes use. createSvgTag() returns a
+// plain, self-contained SVG string built purely from the module grid (no
+// user-controlled text is interpolated into it here), so setting it via
+// innerHTML is the same trust level as any other markup this app
+// generates itself.
+function renderMfaSetupQr(otpauthUri) {
+  const container = document.getElementById('mfa-setup-qr');
+  if (!container) return;
+  try {
+    const qr = qrcode(0, 'M');
+    qr.addData(otpauthUri);
+    qr.make();
+    container.innerHTML = qr.createSvgTag({ cellSize: 4, margin: 8, scalable: true });
+  } catch (e) {
+    // Never block enrollment on the QR rendering itself -- the manual-
+    // entry key and otpauth URI text below are always shown too, so
+    // enrollment still works via either of those if this fails for any
+    // reason (e.g. an unexpectedly long otpauth_uri overflowing the
+    // library's max QR version).
+    container.textContent = 'QR code unavailable -- use the manual entry key below instead.';
+  }
+}
+
+function showRecoveryCodesScreen(codes, redirectRole) {
+  pendingRecoveryCodes = codes;
+  pendingRedirectRole = redirectRole;
+  const list = document.getElementById('mfa-recovery-codes-list');
+  if (list) {
+    // Plain text nodes, not innerHTML -- codes are server-generated
+    // (see security.py's generate_recovery_code()) from a fixed
+    // alphabet, but there's no reason to risk it either way.
+    list.replaceChildren(
+      ...codes.map((code) => {
+        const span = document.createElement('span');
+        span.textContent = code;
+        return span;
+      }),
+    );
+  }
+  showAuthScreen('mfa-recovery-codes-screen');
+}
+
+function downloadRecoveryCodes() {
+  if (!pendingRecoveryCodes) return;
+  const text = [
+    'Snipe-IT Lite -- 2FA recovery codes',
+    'Each code works ONCE. Store this file somewhere safe (a password manager, not your Downloads folder long-term).',
+    '',
+    ...pendingRecoveryCodes,
+    '',
+  ].join('\n');
+  downloadTextFile('snipeit-lite-recovery-codes.txt', text);
+}
+
+function continuePastRecoveryCodes() {
+  const role = pendingRedirectRole;
+  pendingRecoveryCodes = null;
+  pendingRedirectRole = null;
+  redirectByUserRole(role);
+}
+
+function cancelMfaFlow() {
+  pendingMfaToken = null;
+  const verifyCode = document.getElementById('mfa-verify-code');
+  const setupCode = document.getElementById('mfa-setup-code');
+  const qrContainer = document.getElementById('mfa-setup-qr');
+  if (verifyCode) verifyCode.value = '';
+  if (setupCode) setupCode.value = '';
+  if (qrContainer) qrContainer.innerHTML = '';
+  showAuthScreen('auth-screen');
+}
+
 const CLICK_ACTIONS = {
   'switch-tab': (el) => switchTab(el.dataset.tab),
   'switch-dash-tab': (el) => switchDashboardTab(el.dataset.tab),
   'close-modal': (el) => closeModal(el.dataset.modal),
   'toggle-theme': () => toggleTheme(),
+  // Login page only -- steps back from either 2FA screen (verify code /
+  // enroll) to the plain email+password form, discarding the in-memory
+  // mfa_setup_token / mfa_pending_token (see the login-form handler
+  // below) since neither is good for anything once abandoned.
+  'cancel-mfa': () => cancelMfaFlow(),
+  'download-recovery-codes': () => downloadRecoveryCodes(),
+  'continue-past-recovery-codes': () => continuePastRecoveryCodes(),
+  // "My Profile" -> Two-Factor Authentication (super_admin only -- see
+  // profile.js's openProfileModal()) -- regenerate/re-view recovery codes
+  // from an already-logged-in session, distinct from the login-page
+  // enrollment flow above.
+  'open-regenerate-recovery-codes': () => openRegenerateRecoveryCodesModal(),
+  'download-regenerated-recovery-codes': () => downloadRegeneratedRecoveryCodes(),
+  'close-recovery-codes-result': () => closeRecoveryCodesResultModal(),
   // Mobile-only "Details" button rendered by every table's component file
   // (see ui.js's rowDetailsTrigger()/openRowDetailsFromElement()) -- shows
   // whatever columns that table hides below the `sm` breakpoint.
@@ -144,6 +263,8 @@ const CLICK_ACTIONS = {
   'restore-asset-pool': (el) => restoreAssetPool(parseInt(el.dataset.assetId, 10), el.dataset.assetName),
   'purge-asset-pool': (el) => purgeAssetPool(parseInt(el.dataset.assetId, 10), el.dataset.assetName),
   'open-asset-export': () => openAssetExportModal(),
+  'open-audit-export': () => openAuditExportModal(),
+  'export-audit-logs': (el) => exportAuditLogs(el.dataset.format),
   'download-csv-template': () => downloadCsvImportTemplate(),
   'change-page': (el) => {
     const key = el.dataset.key;
@@ -466,7 +587,10 @@ document.addEventListener('DOMContentLoaded', () => {
   // backdrop behind any modal close it, same as its Cancel/X button.
   initModalBackdropDismiss();
 
-  // --- Login form (index.html) ---
+  // --- Login form + 2FA screens (index.html) ---
+  // See the module-scope pendingMfaToken/showAuthScreen/cancelMfaFlow
+  // declarations near CLICK_ACTIONS above for the shared 2FA state this
+  // handler and the 'cancel-mfa' click action both use.
   const loginForm = document.getElementById('login-form');
   if (loginForm) {
     loginForm.addEventListener('submit', async (e) => {
@@ -478,9 +602,65 @@ document.addEventListener('DOMContentLoaded', () => {
       const password = document.getElementById('login-password').value;
       try {
         const data = await login(identifier, password);
+        if (data.mfa_required) {
+          pendingMfaToken = data.mfa_pending_token;
+          showAuthScreen('mfa-verify-screen');
+          document.getElementById('mfa-verify-code')?.focus();
+          return;
+        }
+        if (data.mfa_setup_required) {
+          pendingMfaToken = data.mfa_setup_token;
+          document.getElementById('mfa-setup-secret').textContent = data.totp_secret;
+          document.getElementById('mfa-setup-uri').textContent = data.otpauth_uri;
+          renderMfaSetupQr(data.otpauth_uri);
+          showAuthScreen('mfa-setup-screen');
+          document.getElementById('mfa-setup-code')?.focus();
+          return;
+        }
         redirectByUserRole(data.role);
       } catch (error) {
         alert(error.message);
+      }
+    });
+  }
+
+  const mfaVerifyForm = document.getElementById('mfa-verify-form');
+  if (mfaVerifyForm) {
+    mfaVerifyForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const code = document.getElementById('mfa-verify-code').value;
+      try {
+        const data = await verifyMfa(pendingMfaToken, code);
+        pendingMfaToken = null;
+        redirectByUserRole(data.role);
+      } catch (error) {
+        alert(error.message);
+        document.getElementById('mfa-verify-code').value = '';
+        document.getElementById('mfa-verify-code')?.focus();
+      }
+    });
+  }
+
+  const mfaSetupForm = document.getElementById('mfa-setup-form');
+  if (mfaSetupForm) {
+    mfaSetupForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const code = document.getElementById('mfa-setup-code').value;
+      try {
+        const data = await confirmMfaSetup(pendingMfaToken, code);
+        pendingMfaToken = null;
+        // recovery_codes is only present on THIS response -- see
+        // backend/services/auth_service.py's mfa_setup_confirm() -- show
+        // them once before finally continuing to the dashboard.
+        if (data.recovery_codes) {
+          showRecoveryCodesScreen(data.recovery_codes, data.role);
+          return;
+        }
+        redirectByUserRole(data.role);
+      } catch (error) {
+        alert(error.message);
+        document.getElementById('mfa-setup-code').value = '';
+        document.getElementById('mfa-setup-code')?.focus();
       }
     });
   }
@@ -511,6 +691,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const changePasswordForm = document.getElementById('changePasswordForm');
   if (changePasswordForm) changePasswordForm.addEventListener('submit', submitChangePasswordForm);
+
+  const regenerateRecoveryCodesForm = document.getElementById('regenerateRecoveryCodesForm');
+  if (regenerateRecoveryCodesForm) regenerateRecoveryCodesForm.addEventListener('submit', submitRegenerateRecoveryCodesForm);
 
   const resetPasswordForm = document.getElementById('resetPasswordForm');
   if (resetPasswordForm) resetPasswordForm.addEventListener('submit', submitResetPasswordForm);
@@ -554,15 +737,6 @@ document.addEventListener('DOMContentLoaded', () => {
     digestRecipientAddForm.addEventListener('submit', submitDigestRecipientAddForm);
     loadDigestRecipients();
   }
-
-  const exportBtn = document.getElementById('exportAuditBtn');
-  if (exportBtn) exportBtn.addEventListener('click', () => openAuditExportModal('csv'));
-
-  const exportPdfBtn = document.getElementById('exportAuditPdfBtn');
-  if (exportPdfBtn) exportPdfBtn.addEventListener('click', () => openAuditExportModal('pdf'));
-
-  const auditExportForm = document.getElementById('auditExportForm');
-  if (auditExportForm) auditExportForm.addEventListener('submit', submitAuditExportForm);
 
   // --- Search boxes / rows-per-page selects on whichever tables exist ---
   wireTableControls();
@@ -612,7 +786,17 @@ document.addEventListener('DOMContentLoaded', () => {
       initQuotationPage();
     }
     if (document.getElementById('backupTableBody')) {
-      refreshBackupsPanel();
+      // Super Admin ONLY (see admin.html's #systemBackupsSection comment
+      // and backend/deps.require_true_super_admin) -- a plain `admin`
+      // session gets the whole panel hidden rather than a disabled/greyed
+      // version of it, since `admin` has zero access to any of
+      // /backup/*, not just Restore.
+      const backupsSection = document.getElementById('systemBackupsSection');
+      if (session.role === 'super_admin') {
+        refreshBackupsPanel();
+      } else if (backupsSection) {
+        backupsSection.remove();
+      }
     }
     // Admin/Manager "Quotes" tab -- see components/quotation.js. Loads
     // lazily/independently of the Asset Inventory/User Directory tables

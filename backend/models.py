@@ -328,6 +328,30 @@ class User(Base):
     failed_login_attempts = Column(Integer, default=0, nullable=False)
     locked_until = Column(DateTime(timezone=True), nullable=True)
 
+    # --- Two-factor authentication (TOTP) -- SECURITY -----------------------
+    # Currently enforced ONLY for role == SUPER_ADMIN_ROLE (see
+    # services/auth_service.py's login()) -- the single highest-privilege,
+    # non-deletable account in the system, and the one an attacker who
+    # somehow obtained its password stands to gain the most from. The
+    # columns are on every User row (not a separate table) so the same
+    # mechanism can be extended to other roles later without another
+    # migration.
+    #
+    # `totp_secret_encrypted` is NEVER stored in plaintext -- see
+    # security.py's encrypt_totp_secret()/decrypt_totp_secret(),
+    # Fernet-encrypted with a key derived from JWT_SECRET_KEY (same trust
+    # boundary as the JWT signing key already: whoever can read
+    # JWT_SECRET_KEY can already forge a session for any account, so this
+    # adds no new single point of failure without needing its own separate
+    # secret/rotation story). `totp_enabled` stays False until the person
+    # actually confirms a live code during enrollment (see
+    # auth_service.py's mfa_setup_confirm()) -- a secret that's merely been
+    # generated and shown once but never confirmed doesn't count as "2FA is
+    # protecting this account yet", so login() re-generates it on the next
+    # attempt rather than trusting an unconfirmed one.
+    totp_secret_encrypted = Column(String, nullable=True)
+    totp_enabled = Column(Boolean, default=False, nullable=False)
+
     # --- Soft delete ------------------------------------------------------
     # We NEVER hard-delete a user row from the database. Deleting the row
     # would either cascade-delete their entire checkout history (destroying
@@ -394,6 +418,7 @@ class User(Base):
 
     checkouts = relationship("AssetCheckout", back_populates="user")
     converted_to_outsider = relationship("Outsider", foreign_keys=[converted_to_outsider_id])
+    recovery_codes = relationship("RecoveryCode", back_populates="user", cascade="all, delete-orphan")
 
 
 class Outsider(Base):
@@ -848,3 +873,43 @@ class QuotationOutsourcedItem(Base):
 
     quotation = relationship("Quotation", back_populates="outsourced_items")
     added_by = relationship("User", foreign_keys=[added_by_id])
+
+
+class RecoveryCode(Base):
+    """
+    2FA backup/recovery codes -- see models.py's User.totp_enabled
+    docstring for the enrollment side of this feature, and
+    services/auth_service.py's login()'s SECURITY note for why 2FA is
+    currently required for role == SUPER_ADMIN_ROLE specifically.
+
+    A fresh batch (see security.py's generate_recovery_codes(), 10 codes
+    by default) is issued -- and every previously-issued code for that
+    user invalidated -- at two points: (1) the moment 2FA enrollment is
+    first confirmed (auth_service.py's mfa_setup_confirm()), and (2)
+    whenever the account holder explicitly regenerates them
+    (auth_service.py's regenerate_recovery_codes(), which requires
+    re-entering the current password first -- see that function). Each
+    row is ONE single-use code: `mfa_verify()` accepts a correct,
+    still-unused code as a full substitute for a TOTP code (e.g. "I lost
+    my phone but still have the codes I saved"), and immediately stamps
+    `used_at` so it can never be replayed.
+
+    `code_hash` is never the plaintext code -- hashed with the exact same
+    Argon2id `hash_password()`/`verify_password()` pair used for account
+    passwords (security.py), not reversibly encrypted like
+    User.totp_secret_encrypted, because nothing ever needs to read a
+    recovery code back out -- only verify a guess against it, same as a
+    password.
+    """
+    __tablename__ = "recovery_codes"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    code_hash = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+    # NULL == still valid/unused. Rows are never deleted on use (only
+    # stamped) so there's an audit trail of when each one was consumed;
+    # they're deleted wholesale only when a fresh batch replaces them
+    # (mfa_setup_confirm() / regenerate_recovery_codes() above).
+    used_at = Column(DateTime(timezone=True), nullable=True)
+
+    user = relationship("User", back_populates="recovery_codes")
