@@ -73,7 +73,15 @@ def get_audit_logs(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offset: 
     return {"items": logs, "total": total, "limit": limit, "offset": offset}
 
 
-_EXPORT_HEADERS = ["ID", "Timestamp", "Operator", "Action", "Target Type", "Target ID", "Details"]
+# Both exports mirror exactly what the Audit Trail table itself shows
+# (Timestamp/Operator/Action/Detail -- see frontend/js/components/
+# audit.js's loadAuditLogs()) rather than every raw column on the
+# `audit_logs` row. `ID`/`Target Type`/`Target ID` are internal
+# bookkeeping fields -- useful for direct DB access, not for a file a
+# person requested specifically to match what's on screen -- so neither
+# export includes them; a person who needs those can already reach them
+# straight from the database.
+_EXPORT_HEADERS = ["Timestamp", "Operator", "Action", "Details"]
 
 
 def _filtered_audit_logs_query(db: Session, user: dict, start_date: Optional[datetime.date], end_date: Optional[datetime.date]):
@@ -133,13 +141,11 @@ def export_audit_logs_csv(db: Session, user: dict, start_date: Optional[datetime
         output.truncate(0)
 
         for log in logs:
-            # `id`/`target_id` are always plain integers (never
-            # attacker/user-controlled text), so they're written as-is.
-            # Every free-text column goes through `_csv_safe_cell()` first.
+            # Every free-text column goes through `_csv_safe_cell()` first
+            # -- see the CSV-injection note above.
             writer.writerow([
-                log.id, export_service.format_export_datetime(log.timestamp),
-                _csv_safe_cell(log.operator), _csv_safe_cell(log.action),
-                _csv_safe_cell(log.target_type), log.target_id, _csv_safe_cell(log.details),
+                export_service.format_export_datetime(log.timestamp),
+                _csv_safe_cell(log.operator), _csv_safe_cell(log.action), _csv_safe_cell(log.details),
             ])
             yield output.getvalue()
             output.seek(0)
@@ -160,7 +166,7 @@ def export_audit_logs_pdf(db: Session, user: dict, start_date: Optional[datetime
     """
     logs = _filtered_audit_logs_query(db, user, start_date, end_date).all()
     rows = [
-        [log.id, export_service.format_export_datetime(log.timestamp), log.operator, log.action, log.target_type, log.target_id, log.details]
+        [export_service.format_export_datetime(log.timestamp), log.operator, log.action, log.details]
         for log in logs
     ]
 

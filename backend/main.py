@@ -225,7 +225,22 @@ app.add_middleware(
     # without the IP-based limiter ever stepping in first to slow them
     # down, which is exactly the scenario the two layers together were
     # supposed to prevent.
-    limited_paths={"/api/auth/login"},
+    # SECURITY: the two 2FA endpoints (mfa/verify checks a 6-digit TOTP
+    # code, mfa/setup/confirm checks one during enrollment) are exactly as
+    # IP-guessable as a password -- a 6-digit code is actually a SMALLER
+    # search space than most passwords -- so they get the same outer,
+    # cross-replica IP throttle as /auth/login itself, on top of the
+    # per-account lockout counter mfa_verify() already reuses from
+    # services/auth_service.py's password path (see that function's
+    # docstring).
+    limited_paths={
+        "/api/auth/login", "/api/auth/mfa/verify", "/api/auth/mfa/setup/confirm",
+        # Requires an already-valid session to reach at all (unlike the
+        # three above), but still checks a password guess against the
+        # account -- worth the same outer IP throttle in case a session
+        # cookie were ever compromised without the password itself.
+        "/api/auth/mfa/recovery-codes/regenerate",
+    },
     max_requests=settings.LOGIN_RATE_LIMIT_MAX,
     window_seconds=settings.LOGIN_RATE_LIMIT_WINDOW_SECONDS,
 )

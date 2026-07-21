@@ -13,6 +13,7 @@ import datetime
 from typing import Optional
 
 from fastapi import HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 import models
@@ -377,11 +378,45 @@ def convert_outsider_to_user(db: Session, outsider_id: int, req: OutsiderConvert
     # without loading them all into memory first; `synchronize_session`
     # is safe to skip here since nothing later in this function re-reads
     # any individual AssetCheckout object.
+    #
+    # We separately count how many of those were *active* (still
+    # outstanding) before the bulk UPDATE runs, purely for the
+    # confirmation/audit message below -- see services/user_service.py's
+    # convert_user_to_outsider() for the mirror-image fix this borrows:
+    # a flat "Migrated N checkout(s)" reads as "N items were in this
+    # person's custody", which is wrong whenever some (or all) of those N
+    # rows are long-since-returned history rather than anything currently
+    # checked out -- e.g. a profile with zero items in hand at the moment
+    # of conversion, but one closed-out checkout from months ago, used to
+    # get an audit entry that looked exactly like an active handover.
+    #
+    # SEPARATELY, "checkout(s)" here always means CHECKOUT ROWS, not
+    # physical units -- a single row can cover `quantity` > 1 (e.g. "5
+    # units of Dell UltraSharp Monitor" is ONE row). Every other place in
+    # this app that shows a person's custody (the "N items checked out"
+    # column on the User/Ad-Hoc Directory, the outstanding-items delete
+    # guard, etc.) counts UNITS, i.e. sum(quantity - quantity_returned),
+    # not rows. Reporting only the row count here reads as contradicting
+    # that unit count (a profile showing "5 items checked out" would get
+    # an audit entry saying "Migrated 1 checkout(s)"), so we additionally
+    # surface the unit total and label the row count explicitly as
+    # "checkout record(s)" rather than the ambiguous "checkout(s)".
+    active_checkouts_migrated = (
+        db.query(models.AssetCheckout)
+        .filter(models.AssetCheckout.outsider_id == target.id, models.AssetCheckout.status == "active")
+        .count()
+    )
+    active_units_migrated = (
+        db.query(func.coalesce(func.sum(models.AssetCheckout.quantity - models.AssetCheckout.quantity_returned), 0))
+        .filter(models.AssetCheckout.outsider_id == target.id, models.AssetCheckout.status == "active")
+        .scalar()
+    )
     checkouts_migrated = (
         db.query(models.AssetCheckout)
         .filter(models.AssetCheckout.outsider_id == target.id)
         .update({"outsider_id": None, "user_id": new_user.id}, synchronize_session=False)
     )
+    historical_checkouts_migrated = checkouts_migrated - active_checkouts_migrated
 
     # Human-readable breakdown used in both the audit log detail and the
     # response message below -- "1 checkout(s)" alone reads as "they had
@@ -412,7 +447,10 @@ def convert_outsider_to_user(db: Session, outsider_id: int, req: OutsiderConvert
         operator=user["email"], action="OUTSIDER_CONVERTED_TO_USER", target_type="Outsider", target_id=target.id,
         details=(
             f"Converted ad-hoc profile for {target.name} into a real login "
-            f"(user #{new_user.id}, {new_user.email}). Migrated {checkout_detail} "
+            f"(user #{new_user.id}, {new_user.email}). Migrated {checkouts_migrated} "
+            f"checkout record(s) -- {active_checkouts_migrated} active "
+            f"({active_units_migrated} unit(s) currently in custody), "
+            f"{historical_checkouts_migrated} past (already-returned) -- "
             f"and {quotations_migrated} quotation assignment(s)."
         ),
     ))
@@ -423,10 +461,22 @@ def convert_outsider_to_user(db: Session, outsider_id: int, req: OutsiderConvert
     db.commit()
     db.refresh(new_user)
 
+    # Build the confirmation message piece by piece so it never implies
+    # outstanding items were involved when there were none (e.g. "0 active
+    # checkout(s)" reads as a non-sequitur) -- only mention the active
+    # count at all when it's actually nonzero, and always spell out that
+    # the rest is past/returned history, not something still checked out.
+    checkout_bits = []
+    if active_checkouts_migrated:
+        checkout_bits.append(f"{active_units_migrated} currently checked-out item(s)")
+    if historical_checkouts_migrated:
+        checkout_bits.append(f"{historical_checkouts_migrated} past (already-returned) checkout record(s)")
+    checkout_summary = " and ".join(checkout_bits) if checkout_bits else "no checkout history"
+
     return {
         "message": (
             f"{target.name} now has a real login ({new_user.email}). "
-            f"{checkout_detail} and {quotations_migrated} quotation "
+            f"{checkout_summary} and {quotations_migrated} quotation "
             f"assignment(s) were moved to their new account."
         ),
         "outsider_id": target.id,
@@ -436,6 +486,9 @@ def convert_outsider_to_user(db: Session, outsider_id: int, req: OutsiderConvert
         "username": new_user.username,
         "role": new_user.role,
         "checkouts_migrated": checkouts_migrated,
+        "active_checkouts_migrated": active_checkouts_migrated,
+        "active_units_migrated": active_units_migrated,
+        "historical_checkouts_migrated": historical_checkouts_migrated,
         "quotations_migrated": quotations_migrated,
     }
 

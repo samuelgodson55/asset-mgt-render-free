@@ -757,10 +757,27 @@ def convert_user_to_outsider(db: Session, user_id: int, req: UserConvertToOutsid
     # long-since-returned history -- could read as contradicting a "0
     # items checked out" custody line the caller had just seen, even
     # though both numbers are correct for what each one measures.
+    #
+    # SEPARATELY, "checkout(s)" here always means CHECKOUT ROWS, not
+    # physical units -- a single row can cover `quantity` > 1 (e.g. "5
+    # units of Dell UltraSharp Monitor" is ONE row). The "N items checked
+    # out" custody column elsewhere counts UNITS, i.e. sum(quantity -
+    # quantity_returned), not rows -- so reporting only the row count here
+    # reads as contradicting that unit count (a profile showing "5 items
+    # checked out" would get an audit entry saying "Migrated 1
+    # checkout(s)"). We additionally surface the unit total and label the
+    # row count explicitly as "checkout record(s)" rather than the
+    # ambiguous "checkout(s)" -- see services/outsider_service.py's
+    # convert_to_user() for the mirror-image version of this same fix.
     active_checkouts_migrated = (
         db.query(models.AssetCheckout)
         .filter(models.AssetCheckout.user_id == target.id, models.AssetCheckout.status == "active")
         .count()
+    )
+    active_units_migrated = (
+        db.query(func.coalesce(func.sum(models.AssetCheckout.quantity - models.AssetCheckout.quantity_returned), 0))
+        .filter(models.AssetCheckout.user_id == target.id, models.AssetCheckout.status == "active")
+        .scalar()
     )
     checkouts_migrated = (
         db.query(models.AssetCheckout)
@@ -788,8 +805,10 @@ def convert_user_to_outsider(db: Session, user_id: int, req: UserConvertToOutsid
         details=(
             f"Revoked login access for {target.name} and converted their account into an "
             f"ad-hoc profile (outsider #{new_outsider.id}). Migrated {checkouts_migrated} "
-            f"checkout(s) ({active_checkouts_migrated} active, {historical_checkouts_migrated} "
-            f"past) and {quotations_migrated} quotation assignment(s)."
+            f"checkout record(s) -- {active_checkouts_migrated} active "
+            f"({active_units_migrated} unit(s) currently in custody), "
+            f"{historical_checkouts_migrated} past (already-returned) -- "
+            f"and {quotations_migrated} quotation assignment(s)."
         ),
     ))
     db.add(models.AuditLog(
@@ -806,7 +825,7 @@ def convert_user_to_outsider(db: Session, user_id: int, req: UserConvertToOutsid
     # the rest is past/returned history, not something still checked out.
     checkout_bits = []
     if active_checkouts_migrated:
-        checkout_bits.append(f"{active_checkouts_migrated} currently checked-out item(s)")
+        checkout_bits.append(f"{active_units_migrated} currently checked-out item(s)")
     if historical_checkouts_migrated:
         checkout_bits.append(f"{historical_checkouts_migrated} past (already-returned) checkout record(s)")
     checkout_summary = " and ".join(checkout_bits) if checkout_bits else "no checkout history"
@@ -825,6 +844,7 @@ def convert_user_to_outsider(db: Session, user_id: int, req: UserConvertToOutsid
         "company": new_outsider.company,
         "checkouts_migrated": checkouts_migrated,
         "active_checkouts_migrated": active_checkouts_migrated,
+        "active_units_migrated": active_units_migrated,
         "historical_checkouts_migrated": historical_checkouts_migrated,
         "quotations_migrated": quotations_migrated,
     }

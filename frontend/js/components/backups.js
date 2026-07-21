@@ -1,8 +1,12 @@
 // =============================================================================
 // js/components/backups.js
 // -----------------------------------------------------------------------------
-// "System Backups" panel (admin.html only -- Super Admin/Admin gated on the
-// backend by deps.require_super_admin, same as every /api/backup/* route).
+// "System Backups" panel (admin.html only -- Super Admin ONLY on the
+// backend, every /api/backup/* route gated on deps.require_true_super_admin.
+// A plain `admin` session never even reaches this module: main.js's
+// DOMContentLoaded handler removes #systemBackupsSection from the DOM
+// entirely for any non-super_admin session before any of these functions
+// would run).
 //
 // Covers: showing the daily-schedule/Google-Drive status, listing local
 // backup files with Download/Restore/Delete actions, the "Backup Now"
@@ -15,6 +19,11 @@
 // restore paths require typing the exact word RESTORE into a confirmation
 // modal before the request fires -- a plain confirm() dialog felt too easy
 // to click through by habit for an action this size.
+//
+// isTrueSuperAdmin() below is belt-and-suspenders on top of main.js
+// removing the section: it mirrors deps.require_true_super_admin so that
+// even if this module somehow runs without that removal happening first,
+// the row-level Restore control still won't render as usable.
 // =============================================================================
 
 import { apiRequest, API_URL } from '../api.js';
@@ -22,6 +31,16 @@ import { getSession } from '../auth.js';
 import { escapeHtml, openModal, closeModal, showToast, showFieldError, clearFieldError } from '../ui.js';
 
 let pendingRestore = null; // { mode: 'local' | 'upload', filename?: string, file?: File }
+
+// Mirrors deps.require_true_super_admin on the backend: restore (and, as
+// of this panel's latest gating, the whole System Backups panel) is
+// restricted to the root Super Admin account, not the broader
+// Super-Admin-equivalent `admin` role this app otherwise treats as
+// identical.
+function isTrueSuperAdmin() {
+  const session = getSession();
+  return !!session && session.role === 'super_admin';
+}
 
 function formatBytes(bytes) {
   if (bytes < 1024) return `${bytes} B`;
@@ -119,9 +138,12 @@ export async function loadBackupList() {
     // popup.
     tbody.innerHTML = entries.map((entry) => {
       const metaLine = `${formatWhen(entry.created_at)} · ${formatBytes(entry.size_bytes)} · ${TRIGGER_LABELS[entry.triggered_by] || entry.triggered_by}`;
+      const restoreBtn = isTrueSuperAdmin()
+        ? `<button data-action="restore-local-backup" data-filename="${escapeHtml(entry.filename)}" title="Restore the database from this backup" class="rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-[12px] font-medium text-amber-400 transition hover:bg-amber-500/20">Restore</button>`
+        : `<button disabled title="Restore is restricted to the Super Admin account" class="cursor-not-allowed rounded-md border border-border bg-card2 px-2.5 py-1 text-[12px] font-medium text-slate-600">Restore</button>`;
       const actionButtons = `
         <button data-action="download-backup" data-filename="${escapeHtml(entry.filename)}" title="Download" class="rounded-md border border-border bg-card2 px-2.5 py-1 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">Download</button>
-        <button data-action="restore-local-backup" data-filename="${escapeHtml(entry.filename)}" title="Restore the database from this backup" class="rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-[12px] font-medium text-amber-400 transition hover:bg-amber-500/20">Restore</button>
+        ${restoreBtn}
         <button data-action="delete-backup" data-filename="${escapeHtml(entry.filename)}" title="Delete this local backup file" class="rounded-md border border-border bg-card2 px-2.5 py-1 text-[12px] font-medium text-slate-400 transition hover:border-rose-500/50 hover:text-rose-400">Delete</button>`;
 
       return `
@@ -204,6 +226,10 @@ export async function deleteBackup(el) {
 
 // ---- Restore (local file already on disk) ----
 export function openRestoreLocalModal(el) {
+  if (!isTrueSuperAdmin()) {
+    alert('Restore is restricted to the Super Admin account.');
+    return;
+  }
   pendingRestore = { mode: 'local', filename: el.dataset.filename };
   const label = document.getElementById('restoreModalTarget');
   if (label) label.textContent = el.dataset.filename;
@@ -216,6 +242,10 @@ export function openRestoreLocalModal(el) {
 
 // ---- Restore (upload a file -- e.g. downloaded from Google Drive) ----
 export function openRestoreUploadModal() {
+  if (!isTrueSuperAdmin()) {
+    alert('Restore is restricted to the Super Admin account.');
+    return;
+  }
   pendingRestore = { mode: 'upload' };
   const label = document.getElementById('restoreModalTarget');
   if (label) label.textContent = 'the file you upload below';

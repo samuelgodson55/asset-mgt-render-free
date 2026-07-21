@@ -13,7 +13,7 @@
 // =============================================================================
 
 import { apiRequest } from '../api.js';
-import { openModal, closeModal } from '../ui.js';
+import { openModal, closeModal, downloadTextFile } from '../ui.js';
 import { getSession } from '../auth.js';
 
 // Human-friendly labels for the raw role strings the backend uses.
@@ -78,6 +78,16 @@ export async function openProfileModal() {
       deptRow.classList.add('hidden');
       deptRow.classList.remove('flex');
     }
+
+    // Two-factor authentication is currently required for (and thus only
+    // ever relevant to) role == super_admin -- see
+    // backend/services/auth_service.py's login() SECURITY note. Reaching
+    // this dashboard at all already implies totp_enabled is True for a
+    // super_admin (login() won't issue a session otherwise -- see that
+    // same function), so there's no "set up 2FA from here" case to
+    // handle, only "regenerate my recovery codes".
+    const mfaSection = document.getElementById('profileMfaSection');
+    if (mfaSection) mfaSection.classList.toggle('hidden', profile.role !== 'super_admin');
   } catch (err) {
     setProfileFormMessage(`Could not load profile: ${err.message}`, true);
   }
@@ -121,4 +131,87 @@ export async function submitChangePasswordForm(event) {
   } catch (err) {
     setProfileFormMessage(err.message, true);
   }
+}
+
+// -----------------------------------------------------------------------------
+// 2FA RECOVERY CODE REGENERATION
+// -----------------------------------------------------------------------------
+// Two-step flow, mirroring the two modals in admin.html:
+//   1. #regenerateRecoveryCodesModal -- re-confirm the current password
+//      (same re-confirmation pattern Change Password above already uses),
+//      then POST /auth/mfa/recovery-codes/regenerate
+//      (backend/services/auth_service.py's regenerate_recovery_codes()).
+//   2. #recoveryCodesResultModal -- shows the fresh batch EXACTLY ONCE,
+//      same "no view-again anywhere" rule as initial enrollment (see
+//      backend/models.py's RecoveryCode docstring) -- with the same
+//      Download-as-.txt option js/main.js's login-page equivalent has.
+// Held in module scope (not a DOM data attribute) for the same reason
+// js/main.js's pendingRecoveryCodes is: it's sensitive, single-use data
+// that shouldn't linger anywhere more persistent than "this tab, right
+// now" -- cleared the moment the result modal closes.
+let pendingRegeneratedCodes = null;
+
+function setRegenerateCodesFormMessage(text, isError) {
+  const msgEl = document.getElementById('regenerateCodesFormMessage');
+  if (!msgEl) return;
+  msgEl.textContent = text || '';
+  msgEl.classList.toggle('hidden', !text);
+  msgEl.classList.toggle('text-rose-400', !!isError);
+  msgEl.classList.toggle('text-emerald-400', !isError);
+}
+
+export function openRegenerateRecoveryCodesModal() {
+  const form = document.getElementById('regenerateRecoveryCodesForm');
+  if (form) form.reset();
+  setRegenerateCodesFormMessage('', false);
+  openModal('regenerateRecoveryCodesModal');
+}
+
+export async function submitRegenerateRecoveryCodesForm(event) {
+  event.preventDefault();
+  setRegenerateCodesFormMessage('', false);
+  const password = document.getElementById('regenerateCodesPasswordInput').value;
+
+  try {
+    const result = await apiRequest('/auth/mfa/recovery-codes/regenerate', {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    });
+    closeModal('regenerateRecoveryCodesModal');
+    pendingRegeneratedCodes = result.recovery_codes;
+    const list = document.getElementById('regeneratedRecoveryCodesList');
+    if (list) {
+      // Plain text nodes, not innerHTML -- same reasoning as
+      // js/main.js's showRecoveryCodesScreen(): these are
+      // server-generated from a fixed alphabet, but there's no reason
+      // to risk it either way.
+      list.replaceChildren(
+        ...pendingRegeneratedCodes.map((code) => {
+          const span = document.createElement('span');
+          span.textContent = code;
+          return span;
+        }),
+      );
+    }
+    openModal('recoveryCodesResultModal');
+  } catch (err) {
+    setRegenerateCodesFormMessage(err.message, true);
+  }
+}
+
+export function downloadRegeneratedRecoveryCodes() {
+  if (!pendingRegeneratedCodes) return;
+  const text = [
+    'Snipe-IT Lite -- 2FA recovery codes',
+    'Each code works ONCE. Store this file somewhere safe (a password manager, not your Downloads folder long-term).',
+    '',
+    ...pendingRegeneratedCodes,
+    '',
+  ].join('\n');
+  downloadTextFile('snipeit-lite-recovery-codes.txt', text);
+}
+
+export function closeRecoveryCodesResultModal() {
+  pendingRegeneratedCodes = null;
+  closeModal('recoveryCodesResultModal');
 }

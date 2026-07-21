@@ -1056,3 +1056,24 @@ export function initSearchClearButtons() {
     });
   });
 }
+
+// -----------------------------------------------------------------------------
+// DOWNLOAD-AS-TEXT-FILE (shared)
+// -----------------------------------------------------------------------------
+// Client-side "download as .txt" for anything that's just a list of lines --
+// currently used for 2FA recovery codes both right after enrollment
+// (js/main.js's downloadRecoveryCodes(), on the login page) and after a
+// later regeneration from an already-logged-in session
+// (js/components/profile.js's downloadRegeneratedRecoveryCodes()). Pulled
+// out here, in the one module both of those already import from, instead
+// of duplicated in each -- main.js imports FROM profile.js already, so
+// profile.js can't import back from main.js without a circular dependency.
+export function downloadTextFile(filename, text) {
+  const blob = new Blob([text], { type: 'text/plain' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}

@@ -319,7 +319,7 @@
         <thead>
           <tr class="border-b border-border bg-card2/60 text-[11px] uppercase tracking-wide text-slate-500">
             <th class="px-5 py-3 font-semibold">User</th>
-            <th class="hidden px-5 py-3 font-semibold sm:table-cell">Department Role</th>
+            <th class="hidden px-5 py-3 font-semibold sm:table-cell">Privilege Tier</th>
             <th class="hidden px-5 py-3 font-semibold sm:table-cell">Custody</th>
             <th class="hidden px-5 py-3 font-semibold text-right sm:table-cell">Actions</th>
           </tr>
@@ -577,16 +577,15 @@
         <!-- Exports now run on a background worker instead of inline in
              the request (see js/components/audit.js) -- this span shows
              that job's queued/generating/ready progress next to the
-             buttons instead of leaving them looking frozen while the
+             button instead of leaving it looking frozen while the
              worker builds the file. -->
         <span id="auditExportStatus" class="text-[12px] text-slate-500"></span>
-        <button id="exportAuditBtn" class="flex items-center gap-1.5 rounded-md border border-border bg-card2 px-3 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
+        <!-- Opens #auditExportModal (date range + CSV/PDF picker) instead
+             of the browser's native prompt() dialogs -- see
+             js/components/audit.js's openAuditExportModal(). -->
+        <button data-action="open-audit-export" class="flex items-center gap-1.5 rounded-md border border-border bg-card2 px-3 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
           <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
-          Export Ledger (.CSV)
-        </button>
-        <button id="exportAuditPdfBtn" class="flex items-center gap-1.5 rounded-md border border-border bg-card2 px-3 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
-          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
-          Export Ledger (.PDF)
+          Export Ledger
         </button>
       </div>
     </div>
@@ -1236,6 +1235,56 @@
           .CSV
         </button>
         <button data-action="export-assets-inventory" data-format="pdf"
+          class="flex-1 flex items-center justify-center gap-1.5 rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+          .PDF
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= AUDIT LEDGER EXPORT (MODAL) =================
+     Opened by the Audit Trail's "Export Ledger" button (data-action=
+     "open-audit-export" -- see js/components/audit.js's
+     openAuditExportModal()). Replaces the old back-to-back prompt()
+     dialogs (one for start date, one for end date) with a normal date-
+     range form -- prompt() blocks the whole tab, can't be styled, and
+     gives no room to explain what "blank" means for either field the
+     way this modal's helper text can. Submitting either format button
+     enqueues the same background export job as before (see
+     exportAuditLogs() in js/components/audit.js). -->
+<div id="auditExportModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative w-full max-w-sm overflow-y-auto sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl shadow-2xl">
+    <div class="flex items-start justify-between border-b border-border px-6 py-5">
+      <div>
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Audit Logs</p>
+        <h3 class="text-[16px] font-bold text-slate-50">Export Ledger</h3>
+      </div>
+      <button data-action="close-modal" data-modal="auditExportModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="space-y-4 px-6 py-5">
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">From</label>
+          <input type="date" id="auditExportStartDate" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60" />
+        </div>
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">To</label>
+          <input type="date" id="auditExportEndDate" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60" />
+        </div>
+      </div>
+      <p class="text-[11px] text-slate-500">Leave either field blank for no start/end limit. Exports the full ledger by default.</p>
+      <div class="flex gap-3 pt-1">
+        <button data-action="export-audit-logs" data-format="csv"
+          class="flex-1 flex items-center justify-center gap-1.5 rounded-lg border border-border py-2.5 text-[13px] font-semibold text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+          .CSV
+        </button>
+        <button data-action="export-audit-logs" data-format="pdf"
           class="flex-1 flex items-center justify-center gap-1.5 rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500">
           <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
           .PDF

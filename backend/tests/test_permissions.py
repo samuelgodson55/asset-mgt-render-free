@@ -70,3 +70,35 @@ def test_own_self_service_dashboard_route_does_not_require_privilege(as_customer
     client, headers = as_customer
     response = client.get("/api/users/me/items", headers=headers)
     assert response.status_code == 200
+
+
+def test_admin_cannot_reach_any_backup_route(as_admin):
+    """
+    /backup/* is gated on require_true_super_admin (root Super Admin only,
+    see deps.py), NOT require_super_admin -- unlike almost every other
+    admin-only route in this app, a regular `admin` account is explicitly
+    excluded here, including from read-only routes like /status and
+    /list, not just Restore. See api/backup_api.py's module docstring.
+    """
+    client, headers = as_admin
+    for method, path in [
+        ("GET", "/api/backup/status"),
+        ("GET", "/api/backup/list"),
+        ("POST", "/api/backup/create"),
+        ("GET", "/api/backup/download/whatever.sql.gz"),
+        ("DELETE", "/api/backup/whatever.sql.gz"),
+        ("POST", "/api/backup/restore/whatever.sql.gz"),
+        ("POST", "/api/backup/restore-upload"),
+    ]:
+        response = client.request(method, path, headers=headers)
+        assert response.status_code == 403, f"admin {method} {path} should be forbidden, got {response.status_code}"
+
+
+def test_super_admin_can_view_backup_status_and_list(as_super_admin):
+    """Sanity check that the tightened gate doesn't also lock out the root Super Admin it's meant for."""
+    client, headers = as_super_admin
+    status = client.get("/api/backup/status", headers=headers)
+    assert status.status_code == 200
+
+    listing = client.get("/api/backup/list", headers=headers)
+    assert listing.status_code == 200
