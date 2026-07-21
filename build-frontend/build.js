@@ -118,13 +118,26 @@ async function processJs(code, relPath) {
     return code;
   }
 
-  const minified = await minify(code, {
-    compress: true,
-    mangle: true,
-    format: { comments: false },
-  });
+  let minified;
+  try {
+    minified = await minify(code, {
+      compress: true,
+      mangle: true,
+      format: { comments: false },
+    });
+  } catch (err) {
+    // Newer terser versions REJECT the promise (throw) on a hard parse
+    // failure instead of resolving with `.error` set -- the `if
+    // (minified.error)` check below only ever caught the latter case, so
+    // a rejection used to propagate terser's own internal stack trace
+    // (bundle.min.js:NNNN) all the way up to main().catch() with nothing
+    // in the log identifying which of OUR files caused it. Re-throwing
+    // here with relPath prefixed makes that always show up regardless of
+    // which failure mode terser used.
+    throw new Error(`terser failed on ${relPath}: ${err && err.message ? err.message : err}`, { cause: err });
+  }
   if (minified.error) {
-    throw new Error(`terser failed on ${relPath}: ${minified.error}`);
+    throw new Error(`terser failed on ${relPath}: ${minified.error}`, { cause: minified.error });
   }
   let output = minified.code || "";
 

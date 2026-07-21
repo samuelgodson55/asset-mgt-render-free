@@ -68,7 +68,7 @@ WORKDIR /build
 # this layer stays cached and is only re-run when build-frontend/package.json
 # actually changes -- not every time an application JS/HTML file changes.
 COPY build-frontend/package.json build-frontend/package-lock.json* /build/build-frontend/
-RUN cd build-frontend && npm install --no-audit --no-fund && npm cache clean --force
+RUN cd build-frontend && npm ci --no-audit --no-fund && npm cache clean --force
 
 COPY build-frontend/build.js /build/build-frontend/build.js
 
