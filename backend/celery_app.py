@@ -45,7 +45,7 @@ celery_app = Celery(
     "snipeit_lite",
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
-    include=["tasks.export_tasks", "tasks.notification_tasks"],
+    include=["tasks.export_tasks", "tasks.notification_tasks", "tasks.audit_partition_tasks"],
 )
 
 celery_app.conf.update(
@@ -142,8 +142,11 @@ celery_app.conf.update(
 # ---------------------------------------------------------------------------
 # CELERY BEAT SCHEDULE -- Email + Dashboard Notifications requirement
 # ---------------------------------------------------------------------------
-# Fires two independent, recurring jobs (both in
-# backend/tasks/notification_tasks.py):
+# Fires three independent, recurring jobs -- two in
+# backend/tasks/notification_tasks.py, plus
+# backend/tasks/audit_partition_tasks.py's partition-maintenance check
+# (see its own docstring, and services/audit_partition_service.py's, for
+# why that one exists and why it's safe to run this often):
 #   - `tasks.send_overdue_notifications`, every
 #     `settings.OVERDUE_NOTIFICATION_INTERVAL_HOURS` (24 by default) --
 #     checkouts that have ALREADY gone overdue.
@@ -190,5 +193,15 @@ celery_app.conf.beat_schedule = {
     "send-due-soon-checkout-reminders": {
         "task": "tasks.send_due_soon_reminders",
         "schedule": datetime.timedelta(hours=settings.DUE_SOON_NOTIFICATION_INTERVAL_HOURS),
+    },
+    # Keeps `audit_logs`'s future yearly Postgres partitions pre-created --
+    # see tasks/audit_partition_tasks.py and
+    # services/audit_partition_service.py's module docstrings. Cheap and
+    # idempotent (a no-op almost every run), and a no-op entirely against
+    # a non-Postgres database, so this is safe to leave in every
+    # deployment shape.
+    "ensure-audit-log-partitions": {
+        "task": "tasks.ensure_audit_log_partitions",
+        "schedule": datetime.timedelta(hours=settings.AUDIT_PARTITION_CHECK_INTERVAL_HOURS),
     },
 }

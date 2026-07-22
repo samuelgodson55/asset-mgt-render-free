@@ -8,12 +8,19 @@ picks up where those leave off: what to actually *do*, on a schedule,
 using what's already built.
 
 **Starting point worth naming:** this app already has more reliability
-plumbing than most projects this size — `/healthz` + `/readyz` split,
-Redis-backed rate limiting that's replica-safe, RedBeat so `beat` never
-double-fires across replicas, a migrate → deploy → smoke-test →
-auto-rollback pipeline, structured JSON logs with a correlation ID, and
-both local + off-box (Google Drive) backups. The strategy below is mostly
-about **using that machinery on a schedule**. Both gaps this document
+plumbing than most projects this size — `/healthz` + `/readyz` split
+(now backed by real Docker-level `HEALTHCHECK` instructions on the
+`backend` and `frontend` images too, not just Container Apps' own
+probes — see DEPLOYMENT.md's **Health Checks & Monitoring**), a global
+unhandled-exception safety net (`middleware/error_handling.py`) that
+guarantees every 500 — not just the ones a route explicitly raises
+itself — logs a full traceback tagged with that request's correlation
+ID and hands the caller back that same ID to report, Redis-backed rate
+limiting that's replica-safe, RedBeat so `beat` never double-fires
+across replicas, a migrate → deploy → smoke-test → auto-rollback
+pipeline, structured JSON logs with a correlation ID, and both local +
+off-box (Google Drive) backups. The strategy below is mostly about
+**using that machinery on a schedule**. Both gaps this document
 originally flagged are now closed at the code level: alerting on top of
 the Log Analytics data you're already paying for is implemented in
 `infra/main.bicep`, opt-in behind one secret (see §2), and automated
@@ -64,6 +71,14 @@ ContainerAppConsoleLogs_CL
 | summarize ErrorCount = count() by bin(TimeGenerated, 5m)
 | where ErrorCount > 10
 ```
+Every one of those `ERROR` lines now carries a `request_id` field —
+including for a genuinely unhandled exception, thanks to
+`middleware/error_handling.py`'s global safety net (see that file's
+docstring) — so once this alert fires, add `| project TimeGenerated,
+Log_s` and grep the matching `request_id` values straight out of the
+JSON; if a user or support ticket already has one (it's in the error
+response body they saw), you can jump directly to their specific
+request instead of scanning every ERROR line in the window.
 
 **b) `/readyz` failing** (schema/code mismatch or DB unreachable — the
 case a liveness-only check would miss):
@@ -129,6 +144,18 @@ put it in a recurring calendar block or a lightweight ticket template.
   actual observed traffic from the past month.
 - [ ] Check for pending Trivy CRITICAL findings that were allowed through
   as non-blocking, if any accumulated.
+
+### Annual (once a year, or whenever disk space actually requires it)
+- [ ] **Audit log partition retirement**: check `audit_logs` partition
+  sizes (`docker compose exec backend python scripts/audit_partition_status.py`
+  on a VM/docker-compose deployment, or `az containerapp exec --name backend
+  --resource-group <rg> --command "python scripts/audit_partition_status.py"`
+  on Azure Container Apps) and, for any year that's safe to let go of,
+  follow §7's runbook below in full — verify the Drive backup restores
+  cleanly in a scratch setup BEFORE dropping anything. This is the only
+  place in the whole cadence that permanently discards data, so it's
+  deliberately its own once-a-year item, not folded into the
+  monthly/quarterly lists above.
 
 ### Quarterly (~half a day)
 - [ ] **Dependency sweep**: bump `backend/requirements.txt` and the two
@@ -205,6 +232,24 @@ at 2am without reasoning from scratch:
   design, per DEPLOYMENT.md — "use a managed/clustered Redis for real
   HA"); if this graduates beyond a small internal tool, this is the
   first thing to move to Azure Cache for Redis.
+- **A user/support ticket reports "an unexpected error occurred" with a
+  request ID** → that ID (and the generic message itself) comes from
+  `middleware/error_handling.py`'s global handler — grep it directly
+  against Log Analytics (`Log_s has "<request_id>"`) or `docker compose
+  logs backend | grep <request_id>` locally; the matching log line has
+  the full traceback, `exc_info` included, because it's the SAME line
+  the handler wrote when the exception happened.
+- **`docker compose ps` shows `worker` or `beat` as constantly
+  restarting, but `backend` looks fine** → check `docker compose logs
+  worker`/`beat` first, not the container's health status column:
+  `worker`'s healthcheck is a real Celery `inspect ping` (a genuine
+  liveness signal), but `beat` deliberately has its Docker healthcheck
+  disabled (see `docker-compose.yml`'s comment on that service — there's
+  no reliable liveness probe for a RedBeat-scheduled process), so a
+  restart loop there means the container is actually exiting/crashing,
+  not failing a health probe — check for the RedBeat
+  lock-contention/`LockNotOwnedError` case documented in
+  `celery_app.py`'s comments first.
 - **Need to roll back a bad release** → `workflow_dispatch` on
   `deploy-azure-production.yml` with the previous `image_tag`, per
   DEPLOYMENT.md's Rollback section. Don't hand-run `az containerapp
@@ -217,7 +262,136 @@ value is almost entirely in the "did we do the follow-up action" part.
 
 ---
 
-## 6. What to deliberately *not* do
+## 7. Audit log partitioning & annual archive
+
+**What changed:** `audit_logs` is an append-only ledger — nothing is
+ever deleted from it by the running app — which made it the one table
+guaranteed to grow forever. It's now a native Postgres table
+**PARTITIONED BY RANGE on `timestamp`, one partition per calendar year**
+(`alembic/versions/0010_partition_audit_logs.py`; the full "why" —
+query pruning on every existing date-filtered query, plus an
+instant, VACUUM-free way to retire an old year instead of a slow bulk
+`DELETE` — is in that migration's module docstring, and in
+`models.py`'s `AuditLog` docstring). A `audit_logs_default` catch-all
+partition exists so a write can never hard-fail even if the automation
+below has a gap.
+
+**What's automated (and what deliberately isn't):** a Celery Beat job
+(`tasks.ensure_audit_log_partitions`, `celery_app.py`'s `beat_schedule`,
+default every 24h — see `AUDIT_PARTITION_CHECK_INTERVAL_HOURS`) keeps the
+next `AUDIT_PARTITION_YEARS_AHEAD` (default 2) years' partitions
+pre-created, so nothing ever falls through to the default partition in
+normal operation. **Retiring an old year is never automated.** That's a
+deliberate, once-a-year (or "whenever disk space actually requires it")
+human decision, made with a real backup in hand — the runbook below.
+
+### The annual retirement runbook
+
+This repo actually ships two deployment models — a plain
+docker-compose/VM setup (`docker-compose.yml`, what `DEPLOYMENT.md`'s main
+body assumes) and the cost-optimized Azure Container Apps architecture
+(`infra/main.bicep`, `DEPLOYMENT.md`'s
+**Azure Container Apps Production Deployment** section). The retirement
+*decision* and the SQL are identical either way — what differs is only how
+you get a shell. Every step below gives both; run the one that matches
+where `db` is actually running, and skip the other.
+
+**Step 0 — see what exists.** From inside the `backend` container:
+```bash
+# docker compose (VM/server)
+docker compose exec backend python scripts/audit_partition_status.py
+
+# Azure Container Apps
+az containerapp exec --name backend --resource-group rg-snipeit-lite-prod \
+  --command "python scripts/audit_partition_status.py"
+```
+This prints every partition's row count, on-disk size, and actual
+oldest/newest entry — read-only, changes nothing. Use it to decide which
+year (if any) is actually worth retiring; a partition sitting at a few
+hundred KB isn't costing you anything, so don't drop one just because it's
+old — drop one because disk space actually requires it.
+
+**Azure caveat:** `backend` is a scale-to-zero Container App by default
+(`backendMinReplicas`, `infra/main.bicep`) — `az containerapp exec` needs a
+*running* replica to attach to, and won't itself trigger a cold start.
+If `az containerapp replica list --name backend --resource-group
+rg-snipeit-lite-prod` comes back empty, hit any `/api/*` endpoint first
+(e.g. `curl https://<frontend-fqdn>/api/health`) to wake one up, wait for
+it to show `Running`, then retry the `exec`. `db` itself is pinned to
+exactly 1 replica always (never scale-to-zero — see `main.bicep`'s
+`dbApp` comment), so it's never the one that's asleep.
+
+**Step 1 — confirm the backup for that year is genuinely restorable,
+*before* touching production.** This step is identical for both
+deployment models — it always happens on your own machine, against a
+throwaway local Postgres, never against the live `db` (docker-compose
+container or Container App) directly. Don't trust "the file exists in
+Drive" — prove it restores:
+```bash
+# On your own machine, NOT against production, regardless of how
+# production itself is hosted:
+# 1. Pull the relevant backup file down from Google Drive (BACKUP_GDRIVE_FOLDER_ID,
+#    per services/backup_service.py) — whichever backup covers the year
+#    you're about to retire. Same backup job, same Drive folder, for
+#    either deployment model.
+# 2. Stand up a throwaway docker compose Postgres locally (a plain
+#    `docker compose up -d db` against an empty volume is enough — you
+#    do not need the whole app running for this, and you do not need
+#    Azure credentials for this step at all).
+docker compose up -d db
+# 3. Restore the downloaded dump into it and confirm it comes back clean
+#    (no errors, and the audit_logs partition for that year has the row
+#    count you expect from Step 0):
+cat that_backup_file.sql | docker compose exec -T db psql -U "${POSTGRES_USER:-admin}" -d "${POSTGRES_DB:-asset_db}"
+```
+If this restore fails, is truncated, or the row counts don't line up —
+**stop here.** Don't drop anything in production; that backup can't
+currently do its one job. Go figure out why (a bad upload, a corrupted
+file, a backup job that silently failed) before proceeding, and re-run
+this step once you have a backup you trust.
+
+**Step 2 — only once Step 1 has actually passed, drop the partition in
+production:**
+```bash
+# docker compose (VM/server) -- get a psql session against the live db
+# (defaults shown -- match POSTGRES_USER/POSTGRES_DB to your real .env):
+docker compose exec db psql -U "${POSTGRES_USER:-admin}" -d "${POSTGRES_DB:-asset_db}"
+
+# Azure Container Apps -- db is internal-only TCP ingress (no public
+# endpoint by design, see main.bicep's dbApp comment), so the only way
+# in is a shell inside the Container App itself, then psql from there.
+# Note: main.bicep's `postgresUsername` param defaults to 'snipeit' (NOT
+# docker-compose's 'admin' default) -- $POSTGRES_USER is already set
+# correctly inside this container's own environment either way:
+az containerapp exec --name db --resource-group rg-snipeit-lite-prod --command /bin/sh
+# then, inside that session (bicep's dbApp always uses asset_db):
+psql -U "$POSTGRES_USER" -d asset_db
+```
+```sql
+DROP TABLE audit_logs_y2021;
+```
+This is instant and reclaims the disk immediately — it's a separate
+physical file, not a bulk `DELETE`, so there's no `VACUUM` to wait on and
+no lock contention with the live table. Re-run Step 0's
+`scripts/audit_partition_status.py` (again via `docker compose exec` or
+`az containerapp exec`, whichever applies) afterward to confirm it's gone
+and the disk space came back.
+
+**Step 3 — if an old, already-retired year is ever needed again** (an
+audit request, a legal hold, "what happened in 2021"): you already have
+exactly what you need from Step 1 — pull that year's backup from Drive,
+restore it into the same kind of scratch local docker compose setup
+(never production, and this part is the same regardless of which
+deployment model production actually runs), and export whatever's
+actually being asked for (the existing CSV/PDF audit-ledger export in the
+app, run against that scratch restore) before tearing the scratch setup
+back down. The retired partition being gone from production doesn't mean
+the data is gone — it means production doesn't have to carry the weight
+of it day-to-day anymore.
+
+---
+
+## 8. What to deliberately *not* do
 
 Worth saying explicitly, since over-building ops tooling is its own
 failure mode for an app this size:

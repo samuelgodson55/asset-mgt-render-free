@@ -32,6 +32,14 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # NOTE: `user_id` is declared with index=True below, so Alembic's
+    # create_table() already emits `CREATE INDEX ix_recovery_codes_user_id`
+    # right after the table DDL (it walks table.indexes internally --
+    # see alembic/ddl/impl.py's create_table()). Do NOT also call
+    # op.create_index() for this same column here -- a previous revision
+    # of this migration did both, and the second, explicit create_index()
+    # call collided with the one Alembic had just auto-created, failing
+    # with psycopg2.errors.DuplicateTable on `ix_recovery_codes_user_id`.
     op.create_table(
         "recovery_codes",
         sa.Column("id", sa.Integer(), primary_key=True, index=True),
@@ -40,9 +48,10 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.Column("used_at", sa.DateTime(timezone=True), nullable=True),
     )
-    op.create_index("ix_recovery_codes_user_id", "recovery_codes", ["user_id"])
 
 
 def downgrade() -> None:
-    op.drop_index("ix_recovery_codes_user_id", table_name="recovery_codes")
+    # drop_table() removes the table's indexes (including
+    # ix_recovery_codes_user_id) along with it -- no separate
+    # drop_index() call needed/wanted.
     op.drop_table("recovery_codes")
