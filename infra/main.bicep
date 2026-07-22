@@ -193,7 +193,7 @@ param redisPassword string
 @secure()
 param jwtSecretKey string
 
-@description('OPTIONAL. One-time root admin bootstrap password, read directly by the migrate Job the first time it runs (see backend/alembic/versions/0002_bootstrap_root_admin.py). Never read by the running backend/frontend apps. Leave empty to have that migration generate and print a random password to the Job''s logs exactly once instead.')
+@description('OPTIONAL. One-time root admin bootstrap password, read directly by the migrate Job the first time it runs (see backend/alembic/versions/0002_bootstrap_root_admin.py). Never read by the running backend/frontend apps. Leave empty to have that migration generate and print a random password to the Job\'s logs exactly once instead.')
 @secure()
 param rootAdminBootstrapPassword string = ''
 
@@ -203,7 +203,7 @@ param backendMinReplicas int = 0
 @description('Maximum `backend` replicas under load. NOTE: `backend` embeds Celery worker+beat in-process (see RUN_EMBEDDED_WORKER below) since there is no separate worker/beat Container App in this cost-optimized layout. That is safe at any replica count: celery_app.py configures RedBeat as the Beat scheduler, which keeps a distributed lock in Redis so only one replica is ever the active scheduler at a time (automatic failover if that replica dies) -- no per-replica configuration needed here.')
 param backendMaxReplicas int = 3
 
-@description('Minimum `frontend` replicas. 0 = scale-to-zero. Usually safe to leave at 0 even in production -- static-file + proxy responses are fast, so a cold start here is much shorter than `backend`''s.')
+@description('Minimum `frontend` replicas. 0 = scale-to-zero. Usually safe to leave at 0 even in production -- static-file + proxy responses are fast, so a cold start here is much shorter than `backend`\'s.')
 param frontendMinReplicas int = 0
 
 @description('Maximum `frontend` replicas under load.')
@@ -224,7 +224,7 @@ param smtpPassword string = ''
 param smtpFromEmail string = ''
 param adminNotificationEmails string = ''
 
-@description('Gate for FastAPI''s interactive API docs (Swagger/ReDoc) AND nginx''s matching passthrough route -- see nginx/default.conf.template. Keep false in any environment reachable from the public internet unless you specifically need it.')
+@description('Gate for FastAPI\'s interactive API docs (Swagger/ReDoc) AND nginx\'s matching passthrough route -- see nginx/default.conf.template. Keep false in any environment reachable from the public internet unless you specifically need it.')
 param enableApiDocs bool = false
 
 @description('Email address to page on the three Azure Monitor scheduled query alerts below (backend error-rate spike, /readyz failing, daily backup missing) -- see SRE_STRATEGY.md section 2. Leave empty (the default) to skip creating the action group/alert rules entirely -- no alerting, no extra cost, same as before this parameter existed.')
