@@ -56,15 +56,24 @@ because they're the ones most likely to bite you specifically in a
 multi-instance/production setup.
 
 - **`ENVIRONMENT=production`** in your real `.env`. This isn't cosmetic —
-  `config.py` uses it to refuse to boot at all if `JWT_SECRET_KEY` or
-  `SUPER_ADMIN_PASSWORD` are still placeholder/weak values. Treat a
-  startup crash here as the app protecting you, not a bug.
+  `config.py` uses it to refuse to boot at all if `JWT_SECRET_KEY` is
+  still a placeholder/weak value. Treat a startup crash here as the app
+  protecting you, not a bug.
 - **Generate real secrets.** `JWT_SECRET_KEY`, `POSTGRES_PASSWORD`,
-  `SUPER_ADMIN_PASSWORD` — none of these should be the values shipped in
-  `.env.example`. Generate a real JWT secret with:
+  and (optionally) `ROOT_ADMIN_BOOTSTRAP_PASSWORD` — none of these should
+  be the values shipped in `.env.example`. Generate a real JWT secret
+  with:
   ```bash
   python3 -c "import secrets; print(secrets.token_hex(32))"
   ```
+  There is deliberately no standing `SUPER_ADMIN_PASSWORD` env var —
+  `config.py`'s comment on `SUPER_ADMIN_USERNAME`/`SUPER_ADMIN_NAME`
+  explains why: the root admin's password is a normal database-backed
+  hash, set once by `alembic/versions/0002_bootstrap_root_admin.py`
+  (either from `ROOT_ADMIN_BOOTSTRAP_PASSWORD` if you set it, or a
+  randomly generated one printed to stderr exactly once if you don't —
+  see README's "Viewing the one-time-generated root admin password"),
+  then rotated afterward the same way any other account's password is.
   Every `backend`, `worker`, and `beat` replica must be given the exact
   SAME `JWT_SECRET_KEY` — if they ever drift apart, tokens issued by one
   replica will fail to verify against another, which (with a load
@@ -315,8 +324,23 @@ rather than the same Docker Compose network.
 ## Health Checks & Monitoring
 
 - `GET /healthz` (see `backend/main.py`) returns a simple liveness check —
-  point your orchestrator's health check / load balancer target group at
-  it for each `backend` replica.
+  no DB dependency, just "is the process up and answering HTTP." Point
+  your orchestrator's *liveness* health check / load balancer target
+  group at it for each `backend` replica.
+- `GET /readyz` (see `backend/main.py` and `database.py`'s
+  `get_schema_status()`) is the separate *readiness* check — it queries
+  the database and compares its current Alembic revision against what
+  this build of the code expects, returning `503` (not `500`) until they
+  match. Point your orchestrator's *readiness* probe here instead of
+  `/healthz` — a liveness failure kills and restarts the container, which
+  is the wrong response to "migrations haven't finished yet" or "the DB
+  had a brief blip," while a readiness failure just holds traffic back
+  from that replica until the next poll succeeds. `infra/main.bicep`
+  wires these up exactly this way for `backend` on Azure Container Apps
+  (`Liveness` → `/healthz`, `Readiness` → `/readyz`), which is what lets
+  a rolling deploy hold traffic back from a new revision until it's
+  actually ready, not just alive — see [Zero-downtime rollout
+  mechanics](#zero-downtime-rollout-mechanics).
 - `db` and `redis` already have `healthcheck:` blocks in
   `docker-compose.yml` that `backend`/`worker`/`beat` all `depends_on:
   condition: service_healthy` — a fresh `docker compose up` won't start
@@ -517,8 +541,9 @@ not you ever push an image).
    | `POSTGRES_PASSWORD` | per-environment | Generate with `openssl rand -hex 16`, different per environment |
    | `REDIS_PASSWORD` | per-environment | Same, different per environment |
    | `JWT_SECRET_KEY` | per-environment | Generate with `openssl rand -hex 32` |
-   | `SUPER_ADMIN_PASSWORD` | per-environment | The initial Super Admin login |
+   | `ROOT_ADMIN_BOOTSTRAP_PASSWORD` | per-environment | Optional — the root admin's initial password. Leave unset to have `0002_bootstrap_root_admin.py` generate a random one and print it once instead (see README's "Viewing the one-time-generated root admin password"). Note: the root admin's username/display name (`SUPER_ADMIN_USERNAME`/`SUPER_ADMIN_NAME`) aren't wired as GitHub secrets at all here — `infra/main.bicep` hardcodes them to `superadmin`/`Super Admin`; edit the bicep file directly if you want different values. |
    | `CUSTOM_DOMAIN` | per-environment | Optional — leave unset to use the generated `*.azurecontainerapps.io` FQDN |
+   | `ALERT_EMAIL_ADDRESS` | per-environment | Optional — leave unset to skip creating any alerting resources (no cost, no action group). Set it to wire up the three Azure Monitor scheduled query alerts (backend error-rate spike, `/readyz` failing, daily backup missing) from `infra/main.bicep` to that address — see [SRE_STRATEGY.md](SRE_STRATEGY.md) section 2. |
 
 6. **Run `infra-deploy.yml` manually once per environment** (Actions tab →
    "Deploy Azure Infrastructure" → Run workflow → choose `staging`, then run
@@ -838,13 +863,14 @@ shared across all four apps).
 ### Managing Environment Variables & Secrets Safely
 
 There is no Key Vault in this architecture. Sensitive values
-(`JWT_SECRET_KEY`, `SUPER_ADMIN_PASSWORD`, `DATABASE_URL`, `REDIS_URL`,
-`SMTP_PASSWORD`, and the Docker Hub token if using a private repo) are
-stored as **Container Apps secrets** on `backend`/`migrate` — encrypted at
-rest, referenced by `secretRef`, never shown in `az containerapp show`'s
-output or GitHub Actions logs. `frontend` carries no secrets at all — it
-never touches the database, Redis, JWTs, or SMTP directly, only
-`BACKEND_HOST`/`BACKEND_PORT`/`ENABLE_API_DOCS` as plain env vars.
+(`JWT_SECRET_KEY`, `ROOT_ADMIN_BOOTSTRAP_PASSWORD`, `DATABASE_URL`,
+`REDIS_URL`, `SMTP_PASSWORD`, and the Docker Hub token if using a private
+repo) are stored as **Container Apps secrets** on `backend`/`migrate` —
+encrypted at rest, referenced by `secretRef`, never shown in
+`az containerapp show`'s output or GitHub Actions logs. `frontend` carries
+no secrets at all — it never touches the database, Redis, JWTs, or SMTP
+directly, only `BACKEND_HOST`/`BACKEND_PORT`/`ENABLE_API_DOCS` as plain
+env vars.
 
 To rotate a secret (e.g. `POSTGRES_PASSWORD`): update the corresponding
 GitHub secret, then re-run `infra-deploy.yml` for that environment — Bicep

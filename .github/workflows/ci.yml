@@ -163,10 +163,35 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  nginx-config:
+    name: nginx config validation (clean URLs)
+    runs-on: ubuntu-latest
+    # WHY THIS JOB EXISTS: `docker build` (see build-and-scan-images below)
+    # only compiles the frontend image -- it never actually STARTS the
+    # container, so envsubst/nginx config errors in
+    # nginx/default.conf.template don't fail the build; they only show up
+    # once someone runs `docker compose up` or deploys for real and gets a
+    # crash-looping container. This job renders the template exactly like
+    # the real container's docker-entrypoint.d does, `nginx -t`s it, then
+    # actually boots it and curls every clean-URL/redirect/static-asset
+    # path the frontend depends on -- see nginx/test-config.sh's own header
+    # comment for the full story (including the specific past bug --
+    # "nginx: [emerg] unknown "1" variable" -- this exists to catch).
+    # Runs in ~10 seconds, well ahead of build-and-scan-images' multi-minute
+    # Docker build, so a broken nginx config fails fast.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nginx + gettext (envsubst)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq nginx-light gettext-base
+
+      - name: Render + validate + boot-test nginx/default.conf.template
+        run: ./nginx/test-config.sh
+
   build-and-scan-images:
     name: Build images + Trivy scan
     runs-on: ubuntu-latest
-    needs: [backend, frontend]
+    needs: [backend, frontend, nginx-config]
     steps:
       - uses: actions/checkout@v4
 

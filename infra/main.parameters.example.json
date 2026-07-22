@@ -21,6 +21,7 @@
     "frontendMaxReplicas": { "value": 3 },
     "postgresVolumeQuotaGb": { "value": 20 },
     "notificationsEnabled": { "value": false },
-    "enableApiDocs": { "value": false }
+    "enableApiDocs": { "value": false },
+    "alertEmailAddress": { "value": "" }
   }
 }

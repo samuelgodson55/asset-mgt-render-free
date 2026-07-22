@@ -110,6 +110,33 @@ celery_app.conf.update(
     # time, short enough that a crashed leader's replacement takes over
     # within a reasonable window rather than leaving the schedule stalled.
     redbeat_lock_timeout=90,
+    # BUG FIX (LockNotOwnedError crash-loop): RedBeat only renews its lock
+    # when Beat wakes up to check the schedule -- and Celery's own default
+    # `beat_max_loop_interval` is 300s. With nothing due sooner than that
+    # (this app's notification tasks run every 24h -- see beat_schedule
+    # below), Beat can legitimately sleep the full 300s, which is >3x
+    # longer than the 90s lock above. Redis expires the lock key mid-sleep,
+    # so the next wake-up's `lock.extend()` raises LockNotOwnedError,
+    # crashing the process (Compose/Container Apps then restart it, which
+    # re-acquires the lock cleanly -- confusing but not data-lossy, since
+    # only one replica ever holds the lock at a time either way). Forcing
+    # Beat to wake well inside the lock's TTL, regardless of how far away
+    # the next scheduled task is, is what actually prevents this.
+    beat_max_loop_interval=30,
+    # BUG FIX (fragmented/inconsistent log lines from worker & beat):
+    # Celery's own `worker`/`beat` CLI commands reconfigure the root
+    # logger themselves once they start (`worker_hijack_root_logger`
+    # defaults to True), which clobbers `logging_config.py`'s
+    # `configure_logging()` setup that already ran at import time above.
+    # In practice this meant `worker`/`beat` output didn't consistently
+    # use our JSON/text formatter, and multi-line output (like a
+    # traceback) could come out as several separate, disjointed log
+    # lines instead of one coherent record -- confusing to read and
+    # awkward to alert on in a log aggregator. Setting this to False
+    # leaves OUR logging config in charge for every process that imports
+    # this module (`backend`, `worker`, `beat` alike), same as the
+    # embedded-worker deployment shapes already get for free.
+    worker_hijack_root_logger=False,
 )
 
 # ---------------------------------------------------------------------------

@@ -92,6 +92,12 @@ jobs:
           fi
           echo "frontend_min=0" >> "$GITHUB_OUTPUT"
 
+      # ALERT_EMAIL_ADDRESS is optional -- leave the GitHub secret unset and
+      # this resolves to an empty string, which keeps main.bicep's alerting
+      # section (action group + 3 scheduled query alerts) undeployed
+      # entirely, same as before this parameter existed. Set it once you
+      # want backend error-rate/`/readyz`/backup alerts paging someone --
+      # see SRE_STRATEGY.md section 2.
       - name: Deploy Bicep
         run: |
           az deployment group create \
@@ -110,7 +116,8 @@ jobs:
               redisPassword="${{ secrets.REDIS_PASSWORD }}" \
               jwtSecretKey="${{ secrets.JWT_SECRET_KEY }}" \
               rootAdminBootstrapPassword="${{ secrets.ROOT_ADMIN_BOOTSTRAP_PASSWORD }}" \
-              customDomain="${{ secrets.CUSTOM_DOMAIN }}"
+              customDomain="${{ secrets.CUSTOM_DOMAIN }}" \
+              alertEmailAddress="${{ secrets.ALERT_EMAIL_ADDRESS }}"
 
       - name: Show outputs
         run: |

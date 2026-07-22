@@ -227,6 +227,9 @@ param adminNotificationEmails string = ''
 @description('Gate for FastAPI''s interactive API docs (Swagger/ReDoc) AND nginx''s matching passthrough route -- see nginx/default.conf.template. Keep false in any environment reachable from the public internet unless you specifically need it.')
 param enableApiDocs bool = false
 
+@description('Email address to page on the three Azure Monitor scheduled query alerts below (backend error-rate spike, /readyz failing, daily backup missing) -- see SRE_STRATEGY.md section 2. Leave empty (the default) to skip creating the action group/alert rules entirely -- no alerting, no extra cost, same as before this parameter existed.')
+param alertEmailAddress string = ''
+
 var namePrefix = '${appBaseName}-${environmentName}'
 var suffix = uniqueString(resourceGroup().id, environmentName)
 var storageAccountName = take(replace('${appBaseName}${environmentName}st${take(suffix, 6)}', '-', ''), 24)
@@ -245,6 +248,164 @@ resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
   properties: {
     sku: { name: 'PerGB2018' }
     retentionInDays: 30 // shortest retention Log Analytics allows -- cheapest option; console logs are also always live-streamable via `az containerapp logs show` regardless of this setting
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Alerting -- closes the gap SRE_STRATEGY.md section 2 originally flagged:
+// `logAnalytics` above collects console logs, but nothing was watching them
+// and paging anyone. These three Azure Monitor scheduled query alerts are
+// the exact three failure modes that document calls out, as code instead of
+// portal clicks. Billed per-rule (cents/month), no Application Insights
+// required -- consistent with this file's cost-optimized design elsewhere.
+//
+// Entirely OPT-IN: every resource below only deploys if `alertEmailAddress`
+// is set (see that param's description). Leave it empty and this section
+// costs nothing and creates nothing, same as before it existed.
+// ---------------------------------------------------------------------------
+var alertingEnabled = !empty(alertEmailAddress)
+
+resource alertActionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = if (alertingEnabled) {
+  name: '${namePrefix}-alerts'
+  location: 'global' // action groups are always global, regardless of the alert rules' own region
+  properties: {
+    groupShortName: take('${environmentName}alerts', 12) // Azure caps this at 12 chars
+    enabled: true
+    emailReceivers: [
+      {
+        name: 'primary'
+        emailAddress: alertEmailAddress
+        useCommonAlertSchema: true
+      }
+    ]
+  }
+}
+
+// a) Backend error-rate spike -- more than 10 ERROR/5xx lines in a 5-minute
+// window. Same KQL as SRE_STRATEGY.md section 2a; the alert rule itself
+// just fires when the query returns any rows, since the >10 threshold is
+// already baked into the query.
+resource alertBackendErrorRate 'Microsoft.Insights/scheduledQueryRules@2022-06-15' = if (alertingEnabled) {
+  name: '${namePrefix}-alert-backend-error-rate'
+  location: location
+  properties: {
+    displayName: 'Backend error-rate spike'
+    description: 'More than 10 ERROR/5xx log lines from `backend` in a 5-minute window.'
+    severity: 2
+    enabled: true
+    scopes: [logAnalytics.id]
+    evaluationFrequency: 'PT5M'
+    windowSize: 'PT5M'
+    criteria: {
+      allOf: [
+        {
+          query: '''
+ContainerAppConsoleLogs_CL
+| where ContainerAppName_s == "backend"
+| where Log_s has "ERROR" or Log_s has "\"status_code\":5"
+| summarize ErrorCount = count() by bin(TimeGenerated, 5m)
+| where ErrorCount > 10
+'''
+          timeAggregation: 'Count'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    actions: {
+      actionGroups: [alertActionGroup.id]
+    }
+    autoMitigate: true
+  }
+}
+
+// b) `/readyz` failing -- schema/code mismatch or DB unreachable; the case
+// a liveness-only check would miss. Same KQL as SRE_STRATEGY.md section 2b.
+resource alertReadyzFailing 'Microsoft.Insights/scheduledQueryRules@2022-06-15' = if (alertingEnabled) {
+  name: '${namePrefix}-alert-readyz-failing'
+  location: location
+  properties: {
+    displayName: '/readyz failing'
+    description: 'backend reported {"ready": false} at least once in a 5-minute window -- schema/code mismatch or DB unreachable.'
+    severity: 1
+    enabled: true
+    scopes: [logAnalytics.id]
+    evaluationFrequency: 'PT5M'
+    windowSize: 'PT5M'
+    criteria: {
+      allOf: [
+        {
+          query: '''
+ContainerAppConsoleLogs_CL
+| where ContainerAppName_s == "backend"
+| where Log_s has "readyz" and Log_s has "\"ready\": false"
+| summarize count() by bin(TimeGenerated, 5m)
+'''
+          timeAggregation: 'Count'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    actions: {
+      actionGroups: [alertActionGroup.id]
+    }
+    autoMitigate: true
+  }
+}
+
+// c) Daily backup didn't run -- an absence-of-signal alert: fires if the
+// success log line is MISSING in a 26-hour window, not if a failure line
+// appears. Same KQL as SRE_STRATEGY.md section 2c. windowSize is 48h (wider
+// than the 26h the query itself checks) so the query's own `max(TimeGenerated)`
+// can actually see a success line from up to ~26h ago -- scheduledQueryRules
+// only ever hands the query data from within its own windowSize, so a
+// windowSize equal to or narrower than 26h would make this alert fire
+// constantly regardless of whether a backup actually ran.
+resource alertBackupMissing 'Microsoft.Insights/scheduledQueryRules@2022-06-15' = if (alertingEnabled) {
+  name: '${namePrefix}-alert-backup-missing'
+  location: location
+  properties: {
+    displayName: 'Daily backup did not run'
+    description: 'No successful backup log line from `backend` in the last 26 hours.'
+    severity: 1
+    enabled: true
+    scopes: [logAnalytics.id]
+    evaluationFrequency: 'PT1H'
+    windowSize: 'PT48H'
+    criteria: {
+      allOf: [
+        {
+          query: '''
+ContainerAppConsoleLogs_CL
+| where ContainerAppName_s == "backend"
+| where Log_s has "backup" and Log_s has "success"
+| summarize LastSuccess = max(TimeGenerated)
+| extend HoursSinceSuccess = datetime_diff('hour', now(), LastSuccess)
+| where HoursSinceSuccess > 26
+'''
+          timeAggregation: 'Count'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    actions: {
+      actionGroups: [alertActionGroup.id]
+    }
+    autoMitigate: true
   }
 }
 

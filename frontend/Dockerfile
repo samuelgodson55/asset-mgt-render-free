@@ -159,6 +159,26 @@ ENV ENABLE_API_DOCS=true
 
 EXPOSE 80
 
+# ZERO-DOWNTIME: same reasoning as backend/Dockerfile's HEALTHCHECK -- lets
+# `docker compose ps`/any orchestrator detect "nginx is running but not
+# actually answering" (a bad envsubst render, a config nginx -t would have
+# caught but didn't get run, etc.), not just "the process crashed" (which
+# `restart: unless-stopped` in docker-compose.yml already covers on its
+# own). Hits "/" -- served by the `location /` block in
+# nginx/default.conf.template, which resolves to index.html and needs no
+# backend connectivity at all, so this stays a pure LIVENESS check for
+# THIS container, mirroring the backend's own /healthz-not-/readyz split
+# (see main.py's health_check() docstring) -- nginx being unable to reach
+# the backend container is a separate, already-handled failure mode (the
+# backend's own healthcheck/restart policy), not a reason to also kill and
+# restart nginx.
+#
+# nginx:alpine ships BusyBox wget (no curl) -- shell form (not exec form)
+# so `$PORT` expands; defaults to 80 to match this Dockerfile's own
+# ENV PORT=80 above if a platform never overrides it.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD wget --quiet --tries=1 --spider "http://127.0.0.1:${PORT:-80}/" || exit 1
+
 # nginx:alpine's base image already defines the correct ENTRYPOINT
 # (docker-entrypoint.sh, which runs the envsubst templating step and then
 # execs nginx) and CMD (["nginx", "-g", "daemon off;"]) -- nothing to add.
