@@ -444,6 +444,12 @@ Click your name in the navbar on any dashboard to:
   their token to naturally expire.
 - An idle dashboard automatically logs you out after a period of
   inactivity.
+- **Super Admin accounts additionally require TOTP two-factor
+  authentication** (Google Authenticator/Authy/1Password-compatible) to
+  log in, with one-time-use recovery codes as a backup if the
+  authenticator device is unavailable — see [Two-factor authentication
+  (2FA)](#two-factor-authentication-2fa) below for the full enrollment,
+  verification, and recovery-code flow.
 
 ## Tech Stack
 
@@ -498,12 +504,20 @@ one CSS file — see that folder's README for the one-line command.
 snipe-it-lite/
 ├── .github/
 │   └── workflows/
-│       ├── ci.yml                     # Lint/syntax/dependency-audit checks on
-│       │                                # every push + PR (no full test suite
-│       │                                # yet -- see "Suggested Future
-│       │                                # Features"); reusable (workflow_call)
-│       │                                # -- also gates deploy-azure-staging.yml
-│       │                                # and release.yml below
+│       ├── ci.yml                     # Runs on every push + PR: ruff lint,
+│       │                                # the real `pytest backend/tests`
+│       │                                # suite (against real Postgres/Redis
+│       │                                # service containers, not mocks --
+│       │                                # see "Automated test suite" below),
+│       │                                # pip-audit, a Gitleaks secret scan,
+│       │                                # frontend build/rendering tests,
+│       │                                # a boot-tested nginx clean-URL
+│       │                                # config check, image build + Trivy
+│       │                                # scan, and `infra/main.bicep`
+│       │                                # validation;
+│       │                                # reusable (workflow_call) -- also
+│       │                                # gates deploy-azure-staging.yml and
+│       │                                # release.yml below
 │       ├── deploy-azure-staging.yml    # Push-to-deploy on `develop` --
 │       │                                # builds, scans, migrates, then rolls
 │       │                                # out to the staging Container Apps
@@ -681,10 +695,24 @@ snipe-it-lite/
 │   │
 │   └── alembic/                    # Database migration scripts
 │       ├── env.py
-│       └── versions/
-│           └── 0001_baseline_schema.py   # the ONLY migration -- see "Database &
-│                                           # Migrations" below for why there's no
-│                                           # 0002/0003/... chain
+│       └── versions/                 # 9 migrations, each additive-only --
+│           │                          # see "Database & Migrations" below
+│           ├── 0001_baseline_schema.py         # starting schema
+│           ├── 0002_bootstrap_root_admin.py    # inserts the one root
+│           │                                     # `super_admin` row
+│           ├── 0003_outsider_soft_delete.py    # soft-delete columns on
+│           │                                     # outsiders
+│           ├── 0004_outsider_convert_to_user.py  # Outsider -> real User
+│           ├── 0005_user_convert_to_outsider.py  # User -> Outsider (revoke
+│           │                                        # login)
+│           ├── 0006_purge_deleted_users_and_assets.py  # `purged_at` for
+│           │                                              # Purge Deleted
+│           ├── 0007_split_contact_details.py   # outsider contact_details ->
+│           │                                     # email/phone_number
+│           ├── 0008_super_admin_totp.py        # TOTP secret/enabled columns
+│           │                                     # (2FA)
+│           └── 0009_recovery_codes.py          # recovery_codes table (2FA
+│                                                  # backup codes)
 │
 ├── build-tailwind/              # Build tooling ONLY -- never shipped/run in
 │   │                              # Docker. Compiles frontend/css/tailwind.css.
@@ -1137,6 +1165,7 @@ see `.gitignore`) and are read by `backend/config.py` into a single typed
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `ENVIRONMENT` | `development` | `production` enables the startup JWT-secret strength check. |
+| `LEAN_MODE` | `true` if `ENVIRONMENT=production`, else `false` | Rarely set directly — it's a convenience switch that only changes the *defaults* of five other flags below (`ENABLE_API_DOCS`, `AUTO_INIT_DB`, `AUTO_SEED_DEMO_DATA`, `ENABLE_AUTO_BACKUP`, `LOG_LEVEL`) so a plain `ENVIRONMENT=production` alone already lands on sane production values for all five, without listing each one in `.env`. Any of those five still overrides `LEAN_MODE`'s default the moment you set it explicitly — see `config.py`'s `apply_environment_defaults()`. |
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | see `.env.example` | Postgres credentials, shared by the `db` and `backend` services. |
 | `DATABASE_URL` | built from the above | Full SQLAlchemy connection string. |
 | `REDIS_URL` | `redis://redis:6379/0` | Celery broker **and** result backend, shared by `backend` (producer) and `worker` (consumer) — used for async audit-ledger exports and every email notification (see [Due-Date Extensions & Notifications](#due-date-extensions--notifications)). |
@@ -1476,24 +1505,34 @@ never alters existing ones, so it won't fight with Alembic. In production,
 disable it (`AUTO_INIT_DB=false`) and let `alembic upgrade head` be the
 only thing that ever changes your schema.
 
-**Current migrations:**
-> **If your database was already migrated with an old 0001–0005 chain**
-> (check with `alembic current` — if it shows anything other than
-> `0001_baseline_schema`), do **not** just run `alembic upgrade head`;
-> Alembic will look for migration files that no longer exist and error
-> out. Since your tables already match the new baseline's schema exactly,
-> just re-point Alembic's bookkeeping at it instead, without touching any
-> table:
-> ```bash
-> alembic stamp 0001_baseline_schema
-> ```
-> Fresh installs (empty/nonexistent database) don't need this — just run
-> `alembic upgrade head` as normal.
+**Current migrations** (`backend/alembic/versions/`, applied in order by
+`alembic upgrade head`) — nine so far, each one additive-only (see the
+"migrate first, only ever ADD" rule in the CI/CD section below):
+
+| Revision | What it does |
+|----------|--------------|
+| `0001_baseline_schema` | Starting schema — every table this app began with. |
+| `0002_bootstrap_root_admin` | Inserts the one hidden `super_admin` row (see [The root admin account](#the-root-admin-account)) — a no-op if it already exists. |
+| `0003_outsider_soft_delete` | Adds soft-delete columns to `outsiders`. |
+| `0004_outsider_convert_to_user` | Adds `converted_to_user_id`, backing the Outsider → real User conversion flow. |
+| `0005_user_convert_to_outsider` | Adds `converted_to_outsider_id`, backing the User → Outsider (revoke login) flow. |
+| `0006_purge_deleted` | Adds `purged_at` to `users` and `asset_types` for the Purge Deleted Users/Assets feature. |
+| `0007_split_contact_details` | Splits outsider `contact_details` into `email`/`phone_number`; adds `users.phone_number`. |
+| `0008_super_admin_totp` | Adds `users.totp_secret_encrypted` / `users.totp_enabled` — see [Two-factor authentication (2FA)](#two-factor-authentication-2fa). |
+| `0009_recovery_codes` | Adds the `recovery_codes` table (2FA backup codes). |
+
+A fresh install just runs `alembic upgrade head` and applies all nine in
+order — nothing special to do. `backend/tests/test_migrations.py` runs
+this exact `upgrade head` → `downgrade` chain against a throwaway Postgres
+database in CI on every push (see `.github/workflows/ci.yml`), so a
+migration that doesn't apply or reverse cleanly fails CI before it ever
+reaches a real database.
 
 **Going forward, every schema change should be its own NEW migration**
 (via `alembic revision --autogenerate -m "description"`) layered on top of
-`0001_baseline_schema.py` — don't keep hand-editing the baseline itself
-once any real data exists anywhere.
+`0009_recovery_codes.py` — don't hand-edit an already-applied migration
+file once any real data exists anywhere; write a new one instead, even for
+a one-line fix.
 
 **When you add a new column to `models.py`, always write a migration for
 it** (either by hand or via `alembic revision --autogenerate`) — don't
@@ -1744,7 +1783,8 @@ once the backend is running. This table is the high-level map:
 | `PUT /settings/vat` | Super Admin / Admin | Change the global VAT percentage applied to every Quotation immediately. |
 | `GET /settings/digest-recipients` | Super Admin / Admin | The current list of email addresses that receive the daily overdue/due-soon digest (see [Due-Date Extensions & Notifications](#due-date-extensions--notifications)). |
 | `PUT /settings/digest-recipients` | Super Admin / Admin | Replace the entire digest recipients list. Takes effect on the next scheduled digest run — no restart needed. |
-| `GET /healthz` | anyone | Trivial liveness check for Docker/orchestrators. |
+| `GET /healthz` | anyone | Liveness check — process is up and answering HTTP, no DB dependency. Point Docker/orchestrator liveness probes here. |
+| `GET /readyz` | anyone | Readiness check — queries the DB and compares its Alembic revision against what this build expects; `200` + `{"ready": true, ...}` once the schema matches, `503` + `{"ready": false, "reason": "..."}` otherwise. Point orchestrator readiness probes (e.g. Azure Container Apps' `Readiness` probe) here, not at `/healthz`. |
 
 **Every export endpoint** accepts `?format=csv` or `?format=pdf` and
 responds with a real file download (`Content-Disposition: attachment`) —
@@ -1765,7 +1805,12 @@ the actual logic lives. Use this section as a map when you need to find
   their `AUTO_*` settings flags are enabled.
 - `custom_openapi()` — customizes the generated OpenAPI schema (used by
   `/docs`).
-- `health_check()` — `GET /healthz`.
+- `health_check()` — `GET /healthz`. Liveness only; no DB dependency.
+- `readiness_check()` — `GET /readyz`. Readiness; calls
+  `database.py`'s `get_schema_status()` to confirm the live DB's Alembic
+  revision matches this build's code before reporting `200`. This is
+  what Azure Container Apps' readiness probe (see `infra/main.bicep`)
+  actually polls before shifting traffic to a new replica.
 - Also where the middleware stack (`RateLimitMiddleware`,
   `RequestContextMiddleware`, `CORSMiddleware`, `SecurityHeadersMiddleware`)
   and all API routers are registered — if you add a new `api/*.py` file,
@@ -2583,7 +2628,13 @@ A checklist before you deploy this anywhere real:
       (this also bootstraps the root admin with a randomly generated
       password, printed to stderr once — see "Viewing the
       one-time-generated root admin password" above), and never create
-      the public demo accounts against a real database.
+      the public demo accounts against a real database. **Already the
+      default** the moment `ENVIRONMENT=production` is set — `config.py`'s
+      `LEAN_MODE` (see the Environment Variables Reference above)
+      auto-flips this, `ENABLE_API_DOCS`, and `ENABLE_AUTO_BACKUP` to
+      production-safe values for you. Setting these explicitly in `.env`
+      anyway is still recommended (explicit beats implicit for a
+      deployment's actual config), but nothing breaks if you forget.
 - [ ] Set `CORS_ORIGINS` to your real frontend domain(s) only.
 - [ ] Decide on email: leave `NOTIFICATIONS_ENABLED=false` if you don't
       want extension-request/overdue/due-soon-checkout emails yet, or set
@@ -2596,7 +2647,10 @@ A checklist before you deploy this anywhere real:
       emails silently never leave the enqueue step.
 - [ ] Set `ENABLE_API_DOCS=false` for **both** the backend and frontend
       services (same `.env` key drives both locally; `render.yaml` already
-      sets `false` for both services in Render). Confirm it worked by
+      sets `false` for both services in Render; `LEAN_MODE` — see above —
+      also defaults the backend's copy to `false` under
+      `ENVIRONMENT=production`, but the frontend/nginx copy has no such
+      auto-default, so set it explicitly for both). Confirm it worked by
       requesting `/docs` on your deployed URL and `/openapi.json` directly
       against the backend if it's ever reachable from anywhere but
       nginx — both should return a plain `404`, not a docs page or schema.
@@ -2636,11 +2690,19 @@ A checklist before you deploy this anywhere real:
 ## Safely Updating An Existing Production Deployment (CI/CD)
 
 **This repo ships five GitHub Actions workflows** in `.github/workflows/`:
-[`ci.yml`](.github/workflows/ci.yml) (lint, dependency audit, image build +
-Trivy scan, `infra/main.bicep` validation — runs on every push/PR, and is
-also invoked as a reusable `workflow_call` by the deploy workflows below;
-there's no full pytest suite yet, see
-[Suggested Future Features](#suggested-future-features)),
+[`ci.yml`](.github/workflows/ci.yml) (ruff lint, the real
+`pytest backend/tests` suite against real Postgres/Redis service
+containers — including the actual `alembic upgrade head`/`downgrade` chain
+and the RedBeat distributed-lock test, see [Automated test
+suite](#automated-test-suite-backendtests) — a `pip-audit` dependency
+scan, a Gitleaks secret scan, frontend build/rendering tests, an nginx
+config job that renders `nginx/default.conf.template`, `nginx -t`s it,
+then actually boots it and curls every clean-URL/redirect/static-asset
+path (see `nginx/test-config.sh`), image build + Trivy scan, and
+`infra/main.bicep` validation — runs on every push/PR, and
+is also invoked as a reusable `workflow_call` by the deploy workflows
+below; coverage isn't 100% of the app yet, see [Suggested Future
+Features](#suggested-future-features) for what's still missing),
 [`deploy-azure-staging.yml`](.github/workflows/deploy-azure-staging.yml)
 (push-to-deploy on `develop`),
 [`release.yml`](.github/workflows/release.yml) (triggered by pushing a
@@ -2707,6 +2769,32 @@ platform, but `deploy-azure-production.yml` (build → scan → migrate →
 roll out → smoke test → rollback) is a reasonable template to adapt if
 your platform doesn't have a closer native equivalent.
 
+### Automated Dependency Updates (Dependabot)
+
+[`.github/dependabot.yml`](.github/dependabot.yml) opens a PR once a week
+for every package manifest in this repo — `backend/requirements.txt`,
+all three `package.json`s (`build-frontend`, `build-tailwind`,
+`frontend/tests`), both Dockerfiles' base images (`backend`, `frontend`),
+and the GitHub Actions themselves (`actions/checkout`, `trivy-action`,
+etc.) — rather than dependency drift being something you have to remember
+to go check for.
+
+This is complementary to `ci.yml`'s existing `pip-audit` step, not a
+duplicate of it: `pip-audit` is a point-in-time check ("are any CURRENTLY
+pinned versions known-vulnerable right now?") that runs on every push.
+Dependabot instead proactively proposes version bumps on a schedule —
+including plain staleness with no CVE attached — so upgrades land as
+small, individually-reviewable PRs instead of a single "everything is two
+years behind" PR later. Every Dependabot PR runs through the exact same
+`ci.yml` gate as a human-authored one (`ci.yml` already declares
+`workflow_call` and triggers on any push/PR), so reviewing and merging one
+is no riskier than merging your own PR.
+
+You still own the merge decision — Dependabot opens the PR, it doesn't
+auto-merge. `SRE_STRATEGY.md`'s quarterly checklist is where "actually
+merge the accumulated PRs, run the full suite, ship it as its own release"
+lives, so bumps don't quietly pile up unreviewed either.
+
 ---
 
 ## Suggested Future Features
@@ -2746,17 +2834,25 @@ Small, well-scoped follow-ups if you want to keep extending this project:
   Allowed`, and the response body is just `{"detail": "Method Not
   Allowed"}`** — this means nginx is forwarding requests to the backend
   with the wrong path (commonly, every request collapsing down to just
-  `/`, which only has a `GET` handler). This is a well-known nginx
-  gotcha: `proxy_pass`'s usual "trailing slash strips the matched
-  `location` prefix" behavior **only works when the upstream address is a
-  static string** — it silently stops working the moment that address is
-  a *variable* (which `nginx/default.conf.template`'s `/api/` block uses,
-  so nginx re-resolves `BACKEND_HOST` on every request instead of caching
-  a possibly-stale IP). The fix already in this repo uses an explicit
-  `rewrite ^/api/(.*)$ /$1 break;` before `proxy_pass` instead of relying
-  on that trick — if you ever edit that `location /api/` block, keep the
-  `rewrite` line, or `/api/*` requests will start silently arriving at the
-  backend as just `/` again. Rebuild the frontend image after any nginx
+  `/`, which only has a `GET` handler). This is a well-known nginx gotcha:
+  `proxy_pass`'s usual "trailing slash strips the matched `location`
+  prefix" behavior **only works when the upstream address is a static
+  string** — it silently stops working the moment that address is a
+  *variable* (which `nginx/default.conf.template`'s `/api/` block uses, so
+  nginx re-resolves `BACKEND_HOST` on every request instead of caching a
+  possibly-stale IP). The fix already in this repo sidesteps that trick
+  entirely instead of relying on it: `proxy_pass http://$backend_upstream
+  $request_uri;` forwards the request's full original path — `/api/...`
+  prefix included — and every FastAPI router is mounted with
+  `app.include_router(..., prefix="/api")` in `backend/main.py` to match
+  (see that file's `BUG FIX` comment above the router-mounting block for
+  the concrete brute-force-throttle bug this exact mismatch caused before
+  it was fixed). If you ever edit `nginx/default.conf.template`'s
+  `location /api/` block, keep the `$request_uri` variable in `proxy_pass`
+  (don't swap in a bare `$uri`, which drops the query string, or a
+  hardcoded path) — and if you ever change a backend router's prefix,
+  nginx needs no changes at all, since it never strips or rewrites the
+  path in the first place. Rebuild the frontend image after any nginx
   config change: `docker compose build --no-cache frontend && docker
   compose up -d --force-recreate frontend`.
 - **"Refusing to start: ENVIRONMENT=production but JWT_SECRET_KEY is

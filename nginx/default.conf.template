@@ -255,12 +255,60 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
+    # ---- clean URLs ---------------------------------------------------------
+    # Canonicalize any lingering "/admin.html"-style link (an old bookmark,
+    # a search result, a link pasted before this change) onto the clean,
+    # extension-less URL instead -- "/admin", not "/admin.html". A 301 (not
+    # 302) so browsers/search engines update their own stored copy of the
+    # link rather than re-requesting the old one forever.
+    #
+    # "/index.html" is special-cased to "/" (the site root) via its own
+    # exact-match location, ahead of the general rule below. NGINX GOTCHA:
+    # this is NOT just a style choice -- a location's regex capture group
+    # ($1 below) can only be read directly by `set`/`return` in that SAME
+    # location block; referencing it again inside a nested `if` block (as
+    # in `if ($1 = "index") { ... }`) fails config validation with
+    # "nginx: [emerg] unknown "1" variable", because `if` opens its own
+    # separate rewrite-phase context that doesn't inherit the enclosing
+    # location's captures. Keeping the index-vs-everything-else decision as
+    # two separate locations (no `if` involved at all) sidesteps that
+    # entirely -- see nginx's own "IfIsEvil" wiki page for other cases
+    # where `if` inside a location block misbehaves like this.
+    location = /index.html {
+        return 301 /$is_args$args;
+    }
+
+    # Placed ahead of the generic `location /` block below on purpose: nginx
+    # picks the first matching *regex* location (this one) over a plain
+    # prefix location (`location /`) regardless of declaration order between
+    # the two types, but SEVERAL regex locations can still match the same
+    # request -- when they do, nginx uses whichever regex was declared
+    # first in the file, which is why this sits above the docs/asset regex
+    # blocks.
+    location ~ ^/(.+)\.html$ {
+        return 301 /$1$is_args$args;
+    }
+
     # ---- static frontend ---------------------------------------------------
-    # Everything that isn't /api/* or the docs routes above is a plain static
-    # file from the frontend/ folder (index.html, admin.html, staff.html,
-    # manager.html, customer.html, js/*).
+    # Everything that isn't /api/*, the docs routes, or an *.html request
+    # (all handled above) is a plain static file from the frontend/ folder.
+    # `try_files` tries, in order: the URI exactly as requested (so real
+    # files like js/main.js or css/theme.css still work unchanged) -- then
+    # the URI with ".html" appended (so a clean URL like "/admin" silently
+    # serves frontend/admin.html without a redirect or a URL change) --
+    # then, for "/" itself, index.html directly as a FILE (deliberately
+    # spelled out here instead of leaning on the server-level `index
+    # index.html;` directive above: that directive's own fallback does an
+    # internal URI-level redirect from "/" to "/index.html", which would
+    # re-enter location matching and get caught by this file's
+    # `location = /index.html` redirect-to-"/" rule above, turning every
+    # single visit to "/" into a pointless redirect loop-that-isn't-quite-
+    # a-loop. Resolving "$uri/index.html" here instead is a plain
+    # filesystem lookup, not a URI rewrite, so it never re-triggers
+    # location matching at all) -- then the URI as a directory, and
+    # finally 404.
     location / {
-        try_files $uri $uri/ =404;
+        try_files $uri $uri.html $uri/index.html $uri/ =404;
     }
 
     # Long-lived caching for hashed/static assets. If you later add a build
