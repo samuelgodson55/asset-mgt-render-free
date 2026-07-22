@@ -345,6 +345,43 @@ rather than the same Docker Compose network.
   `docker-compose.yml` that `backend`/`worker`/`beat` all `depends_on:
   condition: service_healthy` — a fresh `docker compose up` won't start
   the app tier racing against a Postgres/Redis that isn't ready yet.
+- `backend/Dockerfile` and `frontend/Dockerfile` now each carry their own
+  image-level `HEALTHCHECK` instruction (`backend` hits `GET /healthz`
+  via Python's stdlib — no curl/wget in that slim image; `frontend` hits
+  `GET /` via BusyBox `wget` — nginx:alpine ships it). Docker Compose
+  automatically uses a service's image `HEALTHCHECK` unless the service
+  overrides it, so `docker compose ps`/`docker ps` now report `backend`
+  and `frontend` as `healthy`/`unhealthy`, not just `running` — the same
+  signal `db`/`redis` always had, extended to the rest of the stack.
+  `frontend`'s own `depends_on: backend: condition: service_healthy`
+  relies on this: nginx won't start proxying `/api/*` until `/healthz`
+  is genuinely answering `200`, not merely until the backend process has
+  started.
+  - `worker` and `beat` build from the SAME image as `backend`
+    (`build: ./backend`) and would otherwise inherit that same
+    HTTP-based check — but neither serves HTTP on port 8000, so
+    `docker-compose.yml` overrides it per-service: `worker` gets the
+    standard `celery -A celery_app inspect ping` (round-trips a real
+    control command through the same Redis broker it consumes from);
+    `beat` explicitly disables the inherited check (`healthcheck:
+    disable: true`) — there's no equivalent liveness probe for a
+    RedBeat-scheduled Beat process (its schedule lives in Redis, not a
+    local `celerybeat-schedule` file to watch), so it correctly falls
+    back to `restart: unless-stopped` for crash recovery, same as it
+    always has.
+- A global "unhandled exception" safety net
+  (`backend/middleware/error_handling.py`) now catches anything that
+  isn't already a deliberate `HTTPException` anywhere in the app,
+  guaranteeing every 500 — not just the ones an endpoint explicitly
+  raises itself — gets a full traceback in the logs (tagged with
+  `request_id`, same as every other log line — see the structured
+  logging bullet below) AND a `{"detail": ..., "request_id": ...}`
+  response body the frontend/support agent can actually correlate back
+  to that log line. Registered as the innermost middleware layer
+  (deliberately NOT `@app.exception_handler(Exception)` — see that
+  file's module docstring for why that alternative would have silently
+  dropped CORS headers from every unhandled 500) so CORS/security
+  headers still apply exactly as they would to any other response.
 - Structured JSON logging is already wired up (`LOG_LEVEL`/`LOG_FORMAT` —
   see `backend/logging_config.py`) with a correlation ID
   (`X-Request-ID`) threaded from nginx through to every backend log line

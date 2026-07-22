@@ -647,7 +647,16 @@ snipe-it-lite/
 │   ├── middleware/                # ASGI middleware, one concern per file
 │   │   ├── request_context.py       # Request Correlation ID (X-Request-ID)
 │   │   ├── rate_limit.py             # Per-IP login rate limiting
-│   │   └── security_headers.py       # Standard defensive response headers
+│   │   ├── security_headers.py       # Standard defensive response headers
+│   │   ├── error_handling.py         # Global unhandled-exception safety net
+│   │   │                                # -- logs full traceback + request_id,
+│   │   │                                # returns a safe {"detail", "request_id"}
+│   │   │                                # JSON body instead of a bare 500
+│   │   └── clean_urls.py             # Render single-service mode only --
+│   │                                    # rewrites /admin -> admin.html etc.
+│   │                                    # before StaticFiles, 301s old *.html
+│   │                                    # links (see main.py's SERVE_FRONTEND
+│   │                                    # block for why this is conditional)
 │   │
 │   ├── api/                       # Thin FastAPI routers (HTTP layer only)
 │   │   ├── auth.py, assets.py, users.py, outsiders.py, checkouts.py, audit.py
@@ -1693,11 +1702,15 @@ once the backend is running. This table is the high-level map:
 
 | Method & Path | Who | Purpose |
 |---|---|---|
-| `POST /auth/login` | anyone | Exchange email/username + password for a JWT. Matches the submitted identifier against EITHER field, case-insensitively (`"T.Okafor@corp.io"` and `"t.okafor@corp.io"` both work — see `services/auth_service.py`'s `login()`). Rate-limited by IP; also enforces per-account lockout after repeated failures. |
+| `POST /auth/login` | anyone | Exchange email/username + password for a JWT. Matches the submitted identifier against EITHER field, case-insensitively (`"T.Okafor@corp.io"` and `"t.okafor@corp.io"` both work — see `services/auth_service.py`'s `login()`). Rate-limited by IP; also enforces per-account lockout after repeated failures. For the Super Admin account specifically, returns `mfa_setup_required`/`mfa_setup_token` (first login ever, no session cookie yet) or `mfa_required`/`mfa_pending_token` (already enrolled) instead of a session — no other role uses 2FA at all. |
+| `POST /auth/mfa/setup/confirm` | Super Admin, mid-enrollment | Completes first-time 2FA enrollment: exchanges the `mfa_setup_token` from `POST /auth/login` above plus a valid TOTP code for the real session cookie. |
+| `POST /auth/mfa/verify` | Super Admin, already enrolled | Exchanges the `mfa_pending_token` from `POST /auth/login` above plus a valid TOTP code for the real session cookie. Wrong codes are rejected and repeated failures lock the account out, same as a wrong password would. |
+| `POST /auth/mfa/recovery-codes/regenerate` | Super Admin (self) | Invalidates every existing one-time recovery code and issues ten brand-new ones — requires re-confirming the current password first. |
 | `POST /auth/logout` | logged in | Clears the `HttpOnly` session cookie set at login (see [Security Model](#security-model)). |
 | `GET /auth/me` | logged in | "Who am I?" — fresh profile data for the "My Profile" window. |
 | `POST /auth/update-password` | self or Super Admin/Admin | Change a password (self-service requires the current password; a Super Admin resetting someone else's does not). |
 | `GET /assets` | logged in | List asset pools. TRUE server-side pagination + search — `?limit=&offset=&search=` (searches pool name). |
+| `GET /assets/deleted` | Super Admin / Admin | List soft-deleted asset pools, so one can be found to restore or purge. TRUE server-side pagination + search, same as `GET /assets`. |
 | `POST /assets` | Super Admin / Admin | Create a new pool. |
 | `GET /assets/{id}/details` | logged in | Full pool detail: stock breakdown, active checkouts, isolated units. |
 | `PUT /assets/{id}/quantity` | Super Admin / Admin | Adjust total capacity. |
@@ -1705,6 +1718,8 @@ once the backend is running. This table is the high-level map:
 | `PUT /assets/{id}/category` | Super Admin / Admin | Change a pool's category. |
 | `PUT /assets/{id}/price` | Super Admin / Admin | Change a pool's per-unit price (see `CURRENCY_CODE`). |
 | `DELETE /assets/{id}` | Super Admin / Admin | Soft-delete a pool. |
+| `POST /assets/{id}/restore` | Super Admin / Admin | Reverses a soft delete: returns the pool to active inventory. |
+| `POST /assets/{id}/purge` | Super Admin / Admin | Permanently anonymizes a soft-deleted pool's name so it's free to be reused by a new pool. Irreversible — unlike restore, there's no undo. |
 | `POST /assets/{id}/exception` | Super Admin / Admin | Flag a serial as under repair/stolen. |
 | `POST /assets/{id}/exception/{eid}/recall` | Super Admin / Admin | Return an isolated unit to service. |
 | `POST /assets/{id}/checkin` | Super Admin / Admin | Reconcile newly-found stock. |
@@ -1721,12 +1736,16 @@ once the backend is running. This table is the high-level map:
 | `PATCH /users/{id}` | Super Admin / Admin / Manager | Edit an account's name/username/email (a Manager may only target Staff/Customer accounts — enforced server-side). |
 | `GET /users/export` | Super Admin / Admin / Manager | Bulk download of every active checkout across every user, system-wide, for both roles (CSV/PDF). |
 | `DELETE /users/{id}` | Super Admin / Admin | Soft-delete an account. |
+| `POST /users/{id}/convert-to-outsider` | Super Admin / Admin / Manager | Revoke an account's login access and turn it into an Ad-Hoc (no-login) profile instead — the reverse of `POST /outsiders/{id}/convert-to-user` below. A Manager may only target Staff/Customer accounts, same ceiling as account provisioning. |
 | `POST /users/{id}/reset-password` | Super Admin / Admin | "Forgot password" recovery: set a brand-new password for another user's account, no current password required. |
 | `GET /users/deleted` | Super Admin / Admin | List soft-deleted accounts. TRUE server-side pagination + search — `?limit=&offset=&search=`, same fields as `GET /users`. |
 | `POST /users/{id}/restore` | Super Admin / Admin | Undo a soft-delete: re-enables login and returns the account to the User Directory. |
+| `POST /users/{id}/purge` | Super Admin / Admin | Permanently anonymizes a soft-deleted account's email/username so they're free to be reused by a new account. Irreversible — unlike restore, there's no undo. |
 | `GET /outsiders` | Super Admin / Admin / Manager | Ad-Hoc directory listing. TRUE server-side pagination + search — `?limit=&offset=&search=` (searches name, contact details, company). |
 | `GET /outsiders/{id}/items` | Super Admin / Admin / Manager | An outsider's custody ledger. |
 | `PATCH /outsiders/{id}` | Super Admin / Admin / Manager | Edit an ad-hoc individual's name/contact details/company. |
+| `DELETE /outsiders/{id}` | Super Admin / Admin / Manager | Soft-delete an ad-hoc individual's profile; blocked while it still has items in active custody. |
+| `POST /outsiders/{id}/convert-to-user` | Super Admin / Admin / Manager | Turn an ad-hoc individual into a real, log-in-capable user account — migrates their active/returned checkouts and any Quotation assignment along with them (see `test_outsider_convert_to_user.py` under [Testing Your Changes](#testing-your-changes)). Subject to the same Manager role ceiling as provisioning any other new account. |
 | `GET /outsiders/{id}/items/export` | Super Admin / Admin / Manager | Download one specific outsider's custody ledger (CSV/PDF). |
 | `GET /outsiders/export` | Super Admin / Admin / Manager | Bulk download of every active checkout across every ad-hoc individual (CSV/PDF). |
 | `POST /checkouts/{id}/return` | Super Admin / Admin / Manager | Process a (partial or full) return. |
@@ -1783,7 +1802,7 @@ once the backend is running. This table is the high-level map:
 | `PUT /settings/vat` | Super Admin / Admin | Change the global VAT percentage applied to every Quotation immediately. |
 | `GET /settings/digest-recipients` | Super Admin / Admin | The current list of email addresses that receive the daily overdue/due-soon digest (see [Due-Date Extensions & Notifications](#due-date-extensions--notifications)). |
 | `PUT /settings/digest-recipients` | Super Admin / Admin | Replace the entire digest recipients list. Takes effect on the next scheduled digest run — no restart needed. |
-| `GET /healthz` | anyone | Liveness check — process is up and answering HTTP, no DB dependency. Point Docker/orchestrator liveness probes here. |
+| `GET /healthz` | anyone | Liveness check — process is up and answering HTTP, no DB dependency. `backend/Dockerfile`'s own `HEALTHCHECK` instruction already points here (so plain `docker compose ps`/`docker ps` report it too), and `infra/main.bicep` points Azure Container Apps' liveness probe here as well. |
 | `GET /readyz` | anyone | Readiness check — queries the DB and compares its Alembic revision against what this build expects; `200` + `{"ready": true, ...}` once the schema matches, `503` + `{"ready": false, "reason": "..."}` otherwise. Point orchestrator readiness probes (e.g. Azure Container Apps' `Readiness` probe) here, not at `/healthz`. |
 
 **Every export endpoint** accepts `?format=csv` or `?format=pdf` and
@@ -1811,8 +1830,9 @@ the actual logic lives. Use this section as a map when you need to find
   revision matches this build's code before reporting `200`. This is
   what Azure Container Apps' readiness probe (see `infra/main.bicep`)
   actually polls before shifting traffic to a new replica.
-- Also where the middleware stack (`RateLimitMiddleware`,
-  `RequestContextMiddleware`, `CORSMiddleware`, `SecurityHeadersMiddleware`)
+- Also where the middleware stack (`UnhandledExceptionMiddleware`,
+  `RateLimitMiddleware`, `RequestContextMiddleware`, `CORSMiddleware`,
+  `SecurityHeadersMiddleware`)
   and all API routers are registered — if you add a new `api/*.py` file,
   you register its router here.
 
@@ -1943,6 +1963,35 @@ the actual logic lives. Use this section as a map when you need to find
 - **`security_headers.py`** — `class SecurityHeadersMiddleware` stamps
   `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, and a
   restrictive `Permissions-Policy` onto every response.
+- **`error_handling.py`** — `class UnhandledExceptionMiddleware`, the
+  last-resort safety net for a genuinely unanticipated exception (a bug,
+  an unexpected third-party error, anything nothing else already caught
+  with its own `try/except`). Logs the full traceback — automatically
+  tagged with that request's correlation ID, same as every other log
+  line (see `request_context.py` above) — and returns the SAME
+  `{"detail": ...}` JSON shape every other error in this API uses, plus
+  a `request_id` field so a user/support agent can hand back an ID that
+  maps straight to the matching log line. Registered as the *innermost*
+  middleware layer (see `main.py`'s "MIDDLEWARE STACK" comment) rather
+  than as `@app.exception_handler(Exception)` — that alternative gets
+  routed by Starlette to the outermost `ServerErrorMiddleware`, *outside*
+  `CORSMiddleware`, which would silently strip CORS headers from every
+  unhandled 500 and leave the browser reporting an opaque network error
+  instead. See that file's own module docstring for the full mechanism.
+- **`clean_urls.py`** — `class CleanUrlsMiddleware`, only registered when
+  `settings.SERVE_FRONTEND` is on (the free-tier Render single-service
+  deployment shape — see `Dockerfile.render`/`render-start.sh` — where
+  FastAPI itself serves the built frontend via a `StaticFiles(html=True)`
+  mount, not nginx). Rewrites clean URLs like `/admin` to the actual
+  `admin.html` file *before* that mount ever sees the request (no redirect,
+  no URL flash in the address bar), and 301-redirects anyone still hitting
+  an old `/admin.html`-style link to its clean equivalent. In the
+  nginx-fronted deployment shape (`docker-compose.yml` / most cloud
+  deployments), this middleware isn't loaded at all — the identical
+  rewrite/redirect behavior lives in `nginx/default.conf.template`'s
+  `location /` and `location ~ ^/(.+)\.html$` blocks instead, so both
+  deployment shapes present identical URLs to the browser either way. See
+  that file's own module docstring for the full explicit `CLEAN_URL_MAP`.
 
 ### Backend — API Routes (`backend/api/`)
 
@@ -2428,6 +2477,10 @@ pytest tests -v
 
 Runs in CI on every push/PR too (`.github/workflows/ci.yml`'s `Pytest`
 step) — a failing test now fails the build, not just gets logged.
+`backend/pytest.ini` is what makes both `cd backend && pytest tests` above
+and CI's own `pytest backend/tests` (run from the repo root) behave
+identically regardless of which directory pytest was started from —
+`tests/conftest.py` handles putting `backend/` on `sys.path` either way.
 
 What's covered today:
 - `test_auth.py` — login for every seeded role (including the hardcoded
@@ -2445,10 +2498,74 @@ What's covered today:
   (see [Due-Date Extensions & Notifications](#due-date-extensions--notifications)).
 - `test_permissions.py` — spot-checks of `deps.py`'s role gates across
   several routers.
+- `test_error_handling.py` — forces a genuinely unanticipated exception
+  (via monkeypatch, not a route's own `try/except`) and confirms
+  `middleware/error_handling.py`'s global safety net: a 500 with the
+  same `{"detail": ...}` shape every other error uses, a `request_id`
+  in the body that matches the `X-Request-ID` response header, the full
+  traceback actually reaching the logger, CORS headers still present on
+  the error response, and ordinary `HTTPException` paths (e.g. a plain
+  401) staying completely unaffected.
+- `test_health.py` — `/healthz` never touches the database even when the
+  schema is missing/broken (pure liveness), and `/readyz` correctly
+  reports not-ready when the `alembic_version` table is missing or its
+  revision is stale, and ready once it matches this build's expected head.
+- `test_mfa.py` — the Super Admin-only TOTP enrollment/verification
+  flow: regular roles never get prompted for 2FA, first-login forces
+  setup vs. later logins requiring verify, wrong codes are rejected and
+  lock out repeated attempts, expired/garbage tokens are rejected, and
+  enrollment issues exactly ten distinct one-time recovery codes.
+- `test_clean_urls_middleware.py` — `middleware/clean_urls.py`'s clean-URL
+  rewriting (`/admin` → `admin.html`) and old-link 301 redirects
+  (`/admin.html` → `/admin`, query string preserved), confirms `/api/*`
+  routes are never touched by it, and an unrecognized clean-looking path
+  404s rather than guessing at a filename.
+- `test_csv_import.py` — bulk asset-pool CSV import: only a Super Admin
+  can import, a file with a mix of valid/invalid rows partially succeeds
+  (valid rows saved, invalid ones rejected, never silently merged/
+  duplicated), and missing required columns are rejected before any row
+  is processed at all.
+- `test_outsiders.py` — Outsider (non-employee borrower) lifecycle:
+  soft-delete blocked while items are in active custody, role gating on
+  who can delete an Outsider, 404s on an already-deleted or nonexistent
+  Outsider ID, and dispatching a checkout/quote to an existing vs. brand
+  new Outsider profile.
+- `test_outsider_convert_to_user.py` / `test_user_convert_to_outsider.py`
+  — the two-way "convert an Outsider into a logged-in User" (and back)
+  flow: active/returned checkouts and any Quotation assignment migrate
+  along with the record, a Manager can't promote someone into an Admin
+  account or revoke an Admin/Manager account, Staff can't perform the
+  conversion at all, and converting an already-converted record 404s
+  instead of double-converting.
+- `test_quotation_workflow.py` — the full Equipment Quotation lifecycle
+  (draft → submit → approve → fulfill/checkout), discount-then-VAT
+  calculation order, per-line rental-day subtotals on a multi-line cart,
+  and the guardrails against approving/checking-out a Quotation twice or
+  checking one out before it's approved.
+- `test_redbeat_scheduling.py` — confirms Celery is actually configured
+  with `RedBeatScheduler` (not the default file-based one — see
+  `celery_app.py`), and that only one replica can hold the Beat lock at
+  a time, including the lock expiring and failing over if the active
+  replica dies, and two replicas racing to dispatch the same scheduled
+  task only ever resulting in one actual dispatch.
+- `test_migrations.py` — runs real `alembic upgrade head`/`downgrade`
+  round-trips against a throwaway database (not the SQLite fixtures the
+  rest of the suite uses): full schema creation, the root-admin bootstrap
+  migration behaving correctly in development (never auto-created) vs.
+  production (created exactly once, with a generated password if none
+  was supplied), re-running the upgrade never duplicating that row, and
+  a downgrade-by-one-step removing only what it added.
 
-This is intentionally not exhaustive (no coverage yet of CSV import,
-exports, backups, quotations, or Outsiders, for instance) — extend it the
-same way: add a new `test_*.py` file under `backend/tests/`, reuse the
+Two of the above (`test_migrations.py`, `test_redbeat_scheduling.py`)
+need a real Postgres/Redis, not just the SQLite fixtures — see each
+file's own module docstring for how to point them at a scratch instance;
+`ci.yml` runs them against real service containers, so `pytest tests -v`
+locally without those services up will show them failing for
+environment reasons, not a real regression.
+
+Not everything has dedicated tests yet — audit-log/export-related
+service functions and the Backups panel's create/restore paths are the
+current gaps — extend it the same way: add a new `test_*.py` file under `backend/tests/`, reuse the
 `client`/`db_session`/`as_admin`/`as_manager`/`as_staff`/`as_customer`/
 `as_super_admin` fixtures from `conftest.py` rather than hand-rolling a
 new database/login setup per file.
@@ -2801,13 +2918,16 @@ lives, so bumps don't quietly pile up unreviewed either.
 
 Small, well-scoped follow-ups if you want to keep extending this project:
 
-- **Broader automated test coverage** — `backend/tests/` now covers auth,
-  asset pools, checkouts/extensions, notification-recipient audience, and
-  role permission gates (see [Testing Your
-  Changes](#testing-your-changes)), but CSV import, exports, backups,
-  quotations, and Outsiders don't have test files yet — a good first PR
-  for getting familiar with the `client`/`db_session`/`as_*` fixtures in
-  `backend/tests/conftest.py`.
+- **Broader automated test coverage** — `backend/tests/` now covers a lot
+  of ground (auth/MFA, asset pools, checkouts/extensions, CSV import,
+  Outsiders and both conversion directions, the full Quotation workflow,
+  clean URLs, health/readiness, RedBeat scheduling, migrations, the
+  global error handler, and role permission gates — see [Testing Your
+  Changes](#testing-your-changes) for the full file-by-file breakdown),
+  but audit-log/export service functions and the Backups panel's
+  create/restore paths still don't have dedicated test files — a good
+  first PR for getting familiar with the `client`/`db_session`/`as_*`
+  fixtures in `backend/tests/conftest.py`.
 - **A `deleted_by` column** recording which admin performed a given
   soft-delete (good first Alembic migration exercise) — `restore_user()`
   itself (undoing a soft-delete) already shipped; see [Directories](#directories-super-admin--manager).
