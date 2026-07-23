@@ -701,6 +701,15 @@ resource dbApp 'Microsoft.App/containerApps@2024-03-01' = {
       }
     }
   }
+  // `volumes[].storageName` above is a plain string, not a symbolic
+  // reference to `postgresStorage` -- Bicep only infers dependencies from
+  // symbolic references, so without this explicit dependsOn, ARM has no
+  // reason to wait for the `postgres-data` Managed Environment storage
+  // resource to finish provisioning before creating `db`, and can (and did)
+  // race them: "ManagedEnvironment Storage 'postgres-data' was not found."
+  dependsOn: [
+    postgresStorage
+  ]
 }
 
 // ---------------------------------------------------------------------------
@@ -908,9 +917,16 @@ resource backendApp 'Microsoft.App/containerApps@2024-03-01' = {
       }
     }
   }
+  // `dbApp`/`redisApp` because `backend` needs them reachable at boot; the
+  // volumes above have the same missing-implicit-dependency issue as
+  // `dbApp`'s `postgres-data` volume (see that resource's comment) --
+  // `backupStorage`/`exportStorage` are referenced by plain string, so
+  // Bicep won't otherwise wait for them before creating `backend`.
   dependsOn: [
     dbApp
     redisApp
+    backupStorage
+    exportStorage
   ]
 }
 
