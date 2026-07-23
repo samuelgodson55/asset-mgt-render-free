@@ -202,13 +202,28 @@ jobs:
 
       - name: Wait for backend readiness
         run: |
+          # BUG FIX: this loop used to just `break` (or fall out the
+          # bottom after 30 iterations) with no success/failure check at
+          # all -- unlike the near-identical "Wait for frontend readiness"
+          # step below it, which correctly `exit 1`s on timeout. That
+          # meant a `backend` revision that NEVER became Healthy (e.g. the
+          # exact readyz-never-passes scenario database.py's
+          # get_schema_status() exists to catch) didn't stop this job --
+          # it silently proceeded straight to "Update frontend" and rolled
+          # THAT out too, against a backend that was never actually ready,
+          # with the first real signal only showing up several steps later
+          # at the smoke test (or not at all, if the smoke test's own
+          # timeout/retry budget happened to mask it). Matching the
+          # frontend step's own pattern here closes that gap.
           for i in $(seq 1 30); do
             READY=$(az containerapp revision list --name backend --resource-group "$RESOURCE_GROUP" \
                       --query "[?properties.active].properties.healthState | [0]" -o tsv)
             echo "backend health state: $READY"
-            [ "$READY" = "Healthy" ] && break
+            [ "$READY" = "Healthy" ] && exit 0
             sleep 10
           done
+          echo "::error::backend did not become healthy in time"
+          exit 1
 
       - name: Update frontend
         run: |
@@ -249,6 +264,55 @@ jobs:
           # /api/ location block is actually reaching `backend` internally,
           # not just that frontend serves static files.
           curl -f -s -S --connect-timeout 30 --max-time 60 "https://$FQDN/api/auth/me" -o /dev/null -w "%{http_code}" | grep -qE "200|401" || exit 1
+
+      # BUG FIX: production previously had NO equivalent of
+      # deploy-azure-staging.yml's "Dump backend/frontend logs" step --
+      # a failed smoke test here went straight to rollback with nothing
+      # captured anywhere, so the only way to learn WHY it failed was to
+      # separately go run `az containerapp logs show`/a manual Log
+      # Analytics query against a revision that, by the time anyone looked,
+      # had likely already been rolled back and replaced. Runs the same
+      # live-tail-then-Log-Analytics-fallback as staging's (now-fixed) step
+      # -- see that file's comment for the full "why both, not just one"
+      # reasoning -- BEFORE rollback below, so the failing revision's own
+      # logs are captured while they still exist.
+      - name: Dump backend/frontend logs (on smoke test failure)
+        if: failure() && steps.smoke.outcome == 'failure'
+        run: |
+          ENV_NAME=$(az containerapp env list --resource-group "$RESOURCE_GROUP" \
+                       --query "[0].name" -o tsv)
+          WORKSPACE_ID=$(az containerapp env show --name "$ENV_NAME" --resource-group "$RESOURCE_GROUP" \
+                            --query "properties.appLogsConfiguration.logAnalyticsConfiguration.customerId" -o tsv)
+
+          for APP in backend frontend; do
+            echo "::group::$APP container logs (live tail, last 200 lines)"
+            az containerapp logs show --name "$APP" --resource-group "$RESOURCE_GROUP" --tail 200 || \
+              echo "Could not fetch logs via 'az containerapp logs show' -- no live replica. Falling through to the Log Analytics query below."
+            echo "::endgroup::"
+          done
+
+          if [ -n "$WORKSPACE_ID" ]; then
+            for APP in backend frontend; do
+              echo "::group::$APP console logs from Log Analytics (last 15 minutes)"
+              az monitor log-analytics query --workspace "$WORKSPACE_ID" \
+                --analytics-query "ContainerAppConsoleLogs_CL | where ContainerAppName_s == '$APP' | where TimeGenerated > ago(15m) | project TimeGenerated, Log_s | order by TimeGenerated desc | take 100" \
+                --output table || echo "Log Analytics query failed for $APP -- check the '$ENV_NAME' Container Apps Environment's Log Analytics workspace directly in the Azure Portal."
+              echo "::endgroup::"
+            done
+          else
+            echo "::warning::Could not resolve the Log Analytics workspace customerId for environment '$ENV_NAME' -- check the Azure Portal's Container Apps Environment > Log stream directly."
+          fi
+
+          echo "::group::backend revision status"
+          az containerapp revision list --name backend --resource-group "$RESOURCE_GROUP" \
+            --query "[].{name:name, active:properties.active, healthState:properties.healthState, runningState:properties.runningState, replicas:properties.replicas}" \
+            -o table || true
+          echo "::endgroup::"
+          echo "::group::frontend revision status"
+          az containerapp revision list --name frontend --resource-group "$RESOURCE_GROUP" \
+            --query "[].{name:name, active:properties.active, healthState:properties.healthState, runningState:properties.runningState, replicas:properties.replicas}" \
+            -o table || true
+          echo "::endgroup::"
 
       - name: Roll back on smoke test failure
         if: failure() && steps.smoke.outcome == 'failure'
