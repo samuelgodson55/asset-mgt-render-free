@@ -233,11 +233,22 @@ jobs:
           FQDN=$(az containerapp show --name frontend --resource-group "$RESOURCE_GROUP" \
                    --query "properties.configuration.ingress.fqdn" -o tsv)
           echo "Testing https://$FQDN"
-          curl -f -o /dev/null -w "%{http_code}" "https://$FQDN/" | grep -q 200 || exit 1
+          # See deploy-azure-staging.yml's matching step for the full
+          # explanation -- `curl` has no timeout by default, so a request
+          # that connects but then just never gets a response (as opposed
+          # to an outright connection failure) hangs indefinitely instead
+          # of failing. This job's "Wait for backend/frontend readiness"
+          # steps above make that scenario less likely here than in
+          # staging (which has no such gate, since both its apps scale to
+          # zero), but not impossible -- a revision can report Healthy and
+          # then become unhealthy again in the gap before this step runs.
+          # Bounding both calls here the same way keeps this job's own
+          # worst-case runtime finite either way.
+          curl -f -s -S --connect-timeout 30 --max-time 60 -o /dev/null -w "%{http_code}" "https://$FQDN/" | grep -q 200 || exit 1
           # Hits backend THROUGH frontend's reverse proxy -- proves nginx's
           # /api/ location block is actually reaching `backend` internally,
           # not just that frontend serves static files.
-          curl -f "https://$FQDN/api/auth/me" -o /dev/null -w "%{http_code}" | grep -qE "200|401" || exit 1
+          curl -f -s -S --connect-timeout 30 --max-time 60 "https://$FQDN/api/auth/me" -o /dev/null -w "%{http_code}" | grep -qE "200|401" || exit 1
 
       - name: Roll back on smoke test failure
         if: failure() && steps.smoke.outcome == 'failure'
