@@ -48,6 +48,7 @@ call time, so they transparently pick up the swap.
 
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 # --- Make `backend/` importable regardless of pytest's rootdir/cwd --------
@@ -75,6 +76,18 @@ os.environ.setdefault("ENABLE_AUTO_BACKUP", "false")
 os.environ.setdefault("ENABLE_API_DOCS", "false")
 os.environ.setdefault("AUTO_INIT_DB", "true")
 os.environ.setdefault("AUTO_SEED_DEMO_DATA", "true")
+# config.py's default BACKUP_DIR ("/app/backups") assumes the production
+# container's filesystem layout, where /app is the app's own WORKDIR and
+# already owned by the container's runtime user. This test suite runs
+# directly on the CI runner (or a developer's machine) as a normal,
+# non-root user with no /app directory at all, so
+# services/backup_service.py's os.makedirs(settings.BACKUP_DIR) raises a
+# bare PermissionError there -- which api/backup_api.py's GET routes (by
+# design, see that module's docstring: thin wrappers, no try/except) let
+# propagate straight into a 500. Point BACKUP_DIR at a throwaway temp
+# directory instead, exactly the kind of location this process can always
+# write to regardless of who/where it's running.
+os.environ.setdefault("BACKUP_DIR", tempfile.mkdtemp(prefix="snipeit-test-backups-"))
 # Deliberately unreachable/fast-failing rather than pointed at a real Redis
 # -- see middleware/rate_limit.py's "FAIL-OPEN ON REDIS ERRORS" section:
 # login/rate-limiting still works correctly (just fails open) without a

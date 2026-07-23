@@ -186,7 +186,17 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq nginx-light gettext-base
 
       - name: Render + validate + boot-test nginx/default.conf.template
-        run: ./nginx/test-config.sh
+        # Invoked via `bash` rather than `./nginx/test-config.sh` so this
+        # doesn't depend on the executable bit surviving git (a file
+        # committed/checked out without +x, e.g. from certain zip exports
+        # or a Windows checkout, fails with "Permission denied" / exit
+        # code 126 when run directly, even though the script itself is
+        # fine). `chmod` first anyway so the script still works if anyone
+        # runs it directly outside CI (e.g. locally, or from
+        # docker-entrypoint.d).
+        run: |
+          chmod +x ./nginx/test-config.sh
+          bash ./nginx/test-config.sh
 
   build-and-scan-images:
     name: Build images + Trivy scan
