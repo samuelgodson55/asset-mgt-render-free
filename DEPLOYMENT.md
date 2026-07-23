@@ -729,10 +729,11 @@ new apps' images.
   `frontend`'s `/` AND `/api/auth/me` (proving the whole chain — nginx's
   reverse proxy actually reaching `backend` — works, not just that
   `frontend` serves static files) — a failure triggers automatic rollback
-  of both apps to their previously-deployed images. `backend` runs with min
-  replicas 1 in production by default; `frontend` still scales to zero even
-  in production (a cold start on static/proxy responses is much shorter
-  than on `backend`'s Python process). `deploy-azure-production.yml` itself
+  of both apps to their previously-deployed images. Both `backend` AND
+  `frontend` run with min replicas 1 in production by default (see
+  `infra-deploy.yml`'s "Resolve replica floors" step) — zero cold starts
+  anywhere in the production request path, at the cost of two always-on
+  replicas instead of one. `deploy-azure-production.yml` itself
   has no `push` trigger of its own anymore — it only runs when `release.yml`
   calls it, or via manual `workflow_dispatch` (see [Rollback](#rollback)).
 - **`db` and `redis` are never touched by either pipeline** — fixed
@@ -987,10 +988,16 @@ out of sync.
   `az containerapp job start` for exactly this reason; if you're triggering
   the job manually, do the same.
 - **First request of the day is slow** — expected on staging (both apps
-  default to min replicas 0) and, for `frontend` specifically, even on
-  production (it defaults to min replicas 0 there too — its cold start is
-  short). If `backend`'s cold start is the slow part on production, confirm
-  `backendMinReplicas` is actually `1` there (small extra cost, see the
+  default to min replicas 0, pure cold-start-on-idle tradeoff). Should NOT
+  happen on production — both `backendMinReplicas` and `frontendMinReplicas`
+  default to `1` there (see `infra-deploy.yml`'s "Resolve replica floors"
+  step), so neither app should ever scale to zero. If you're seeing a slow
+  first request on production anyway, confirm both of those actually show
+  `1` in the deployed environment (`az containerapp show --name backend
+  --query properties.template.scale.minReplicas`, same for `frontend`) —
+  a manual `az deployment group create` that skips `infra-deploy.yml` and
+  its defaults, or a bicep default left as-is, would silently reintroduce
+  a cold start (small extra cost either way to keep both warm, see the
   Cost section above).
 - **`/docs` (Swagger UI) 404s even with `ENABLE_API_DOCS=true`** — this
   flag has to match on BOTH `backend` (gates FastAPI's own docs routes) and

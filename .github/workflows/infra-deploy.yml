@@ -101,21 +101,28 @@ jobs:
       # COST LEVER: staging has no real users waiting on it, so `backend`
       # AND `frontend` both scale to zero when idle (min replicas 0 -- pure
       # cold-start-on-first-request tradeoff, ~$0 idle compute). Production
-      # keeps `backend` warm (min 1) so the first real visitor of the day
-      # never eats a cold start on the API; `frontend` still scales to zero
-      # even in production, since static/proxy responses have a much
-      # shorter cold start than backend's Python process. `db`/`redis`
-      # always run at exactly 1 replica regardless -- see
-      # infra/main.bicep, they're stateful and can't scale to zero.
+      # now keeps BOTH `backend` AND `frontend` warm (min 1) -- zero cold
+      # starts anywhere in the production request path, at the cost of two
+      # always-on replicas instead of one. (Previously only `backend` was
+      # floored at 1; `frontend` stayed at 0 even in production, so the
+      # first visitor after any idle period still ate a cold start on the
+      # static/proxy tier -- short, but not zero.) `db`/`redis` always run
+      # at exactly 1 replica regardless, in every environment -- see
+      # infra/main.bicep, they're stateful and can't scale to zero. The
+      # `migrate` Container Apps Job is deliberately NOT part of this --
+      # jobs have no "warm" concept; every execution is a fresh cold start
+      # by design, and that's fine since it only runs once per deploy, not
+      # per user request.
       - name: Resolve replica floors for this environment
         id: replicas
         run: |
           if [ "$ENV_NAME" = "prod" ]; then
             echo "backend_min=1" >> "$GITHUB_OUTPUT"
+            echo "frontend_min=1" >> "$GITHUB_OUTPUT"
           else
             echo "backend_min=0" >> "$GITHUB_OUTPUT"
+            echo "frontend_min=0" >> "$GITHUB_OUTPUT"
           fi
-          echo "frontend_min=0" >> "$GITHUB_OUTPUT"
 
       # ALERT_EMAIL_ADDRESS is optional -- leave the GitHub secret unset and
       # this resolves to an empty string, which keeps main.bicep's alerting
