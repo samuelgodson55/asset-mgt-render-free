@@ -1,0 +1,247 @@
+# .github/workflows/ci.yml
+# -----------------------------------------------------------------------------
+# Runs on every push and PR, to every branch -- the fast, no-deploy gate that
+# has to pass before anything is even eligible for the Azure deploy workflows
+# (deploy-azure-staging.yml on `develop`, release.yml on `git tag v*.*.*`).
+# Nothing here talks to Azure or requires any Azure secrets.
+#
+# `workflow_call` is what makes this reusable: deploy-azure-staging.yml and
+# release.yml both invoke it with `uses: ./.github/workflows/ci.yml` as their
+# own `ci` job, rather than copy-pasting these steps. Without `workflow_call`
+# declared here, every one of those `uses:` references fails at trigger time
+# ("workflow was not reusable, as it is missing a `workflow_call` trigger") --
+# that was a pre-existing bug in this file that would have silently broken
+# every deploy the first time either caller workflow actually ran.
+# -----------------------------------------------------------------------------
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [main, develop]
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend parsing/rendering tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: |
+            frontend/tests/package-lock.json
+            build-frontend/package-lock.json
+
+      # build-pipeline.test.mjs runs the REAL build-frontend/build.js for
+      # BUILD_ENV=local/development/production and checks the OUTPUT (not
+      # just frontend/ source) -- it needs build-frontend's own deps
+      # (terser, javascript-obfuscator, html-minifier-terser) installed to
+      # do that. It skips itself gracefully if this step is ever removed,
+      # but it shouldn't be: this is the one job that would have caught a
+      # bug the minify/obfuscate step itself introduces.
+      - name: Install build-frontend dependencies
+        run: cd build-frontend && npm ci --no-audit --no-fund
+
+      - name: Install frontend test dependencies
+        run: cd frontend/tests && npm ci --no-audit --no-fund
+
+      # pages-load.test.mjs, module-exports-integrity.test.mjs, and
+      # login-form-wiring.test.mjs check the real frontend/ source tree
+      # (HTML validity, no duplicate ids, every local asset reference
+      # resolves, every import/export lines up, and the login form's
+      # submit is actually intercepted by JS). build-pipeline.test.mjs
+      # re-runs the load/submit checks against the built output of every
+      # BUILD_ENV mode -- see that file's own header comment for why both
+      # layers are needed.
+      - name: Run frontend tests
+        run: cd frontend/tests && npm test
+
+  backend:
+    name: Backend lint, test, dependency audit
+    runs-on: ubuntu-latest
+    # tests/test_migrations.py runs the REAL `alembic upgrade head`/
+    # `downgrade` chain (including 0002_bootstrap_root_admin.py) against a
+    # throwaway database it creates/drops itself -- unlike every other test
+    # in this suite, it can't use SQLite (0001_baseline_schema.py adds
+    # foreign keys via ALTER TABLE, which SQLite's Alembic dialect can't do
+    # at all), so this job needs a real Postgres server available. GitHub
+    # Actions service containers are the standard way to get one without a
+    # docker-compose file: this starts, health-checks, and tears down
+    # automatically, scoped to just this job run, and costs nothing beyond
+    # the job's own runtime.
+    #
+    # tests/test_redbeat_scheduling.py needs the same treatment for a
+    # different reason: it verifies the real distributed lock (RedBeat,
+    # backed by redis-py's own Redis.lock(...)) that makes it safe to embed
+    # Celery worker+beat in every backend replica (see celery_app.py's
+    # `beat_scheduler`/`redbeat_redis_url` config) -- there's no in-memory
+    # fake for that lock in this project's dependencies worth trusting, so
+    # it needs a real Redis to test against too.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install ruff pytest pytest-asyncio httpx pip-audit
+
+      - name: Ruff lint
+        run: ruff check backend/
+
+      # backend/tests/ has real coverage (auth, asset pools, checkouts,
+      # extension requests, notification-recipient audience, role
+      # permission gates, the actual `alembic upgrade head`/downgrade
+      # chain against the Postgres service container above (including the
+      # root admin bootstrap migration) via test_migrations.py, and the
+      # RedBeat distributed lock that keeps scheduled tasks from firing
+      # once per replica against the Redis service container above via
+      # test_redbeat_scheduling.py. See backend/tests/conftest.py's module
+      # docstring for the SQLite-per-test pattern most files use, and
+      # those two files' own docstrings for why they're the exceptions.
+      # No longer `|| true`: a real test failure now fails CI.
+      - name: Pytest
+        env:
+          TEST_POSTGRES_HOST: localhost
+          TEST_POSTGRES_PORT: 5432
+          TEST_POSTGRES_USER: postgres
+          TEST_POSTGRES_PASSWORD: postgres
+          TEST_REDIS_HOST: localhost
+          TEST_REDIS_PORT: 6379
+        run: pytest backend/tests -v
+
+      - name: pip-audit (dependency vulnerability scan)
+        run: pip-audit -r backend/requirements.txt --desc || true
+
+  secret-scan:
+    name: Gitleaks secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  nginx-config:
+    name: nginx config validation (clean URLs)
+    runs-on: ubuntu-latest
+    # WHY THIS JOB EXISTS: `docker build` (see build-and-scan-images below)
+    # only compiles the frontend image -- it never actually STARTS the
+    # container, so envsubst/nginx config errors in
+    # nginx/default.conf.template don't fail the build; they only show up
+    # once someone runs `docker compose up` or deploys for real and gets a
+    # crash-looping container. This job renders the template exactly like
+    # the real container's docker-entrypoint.d does, `nginx -t`s it, then
+    # actually boots it and curls every clean-URL/redirect/static-asset
+    # path the frontend depends on -- see nginx/test-config.sh's own header
+    # comment for the full story (including the specific past bug --
+    # "nginx: [emerg] unknown "1" variable" -- this exists to catch).
+    # Runs in ~10 seconds, well ahead of build-and-scan-images' multi-minute
+    # Docker build, so a broken nginx config fails fast.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nginx + gettext (envsubst)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq nginx-light gettext-base
+
+      - name: Render + validate + boot-test nginx/default.conf.template
+        # Invoked via `bash` rather than `./nginx/test-config.sh` so this
+        # doesn't depend on the executable bit surviving git (a file
+        # committed/checked out without +x, e.g. from certain zip exports
+        # or a Windows checkout, fails with "Permission denied" / exit
+        # code 126 when run directly, even though the script itself is
+        # fine). `chmod` first anyway so the script still works if anyone
+        # runs it directly outside CI (e.g. locally, or from
+        # docker-entrypoint.d).
+        run: |
+          chmod +x ./nginx/test-config.sh
+          bash ./nginx/test-config.sh
+
+  build-and-scan-images:
+    name: Build images + Trivy scan
+    runs-on: ubuntu-latest
+    needs: [backend, frontend, nginx-config]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build backend image
+        run: docker build -t snipeit-backend:ci ./backend
+
+      - name: Build frontend image (staging profile -- bundled+minified, not obfuscated)
+        run: |
+          docker build -f frontend/Dockerfile --build-arg BUILD_ENV=development \
+            -t snipeit-frontend:ci .
+
+      - name: Trivy scan -- backend
+        # Pinned to the commit SHA behind the verified-safe v0.35.0 release,
+        # not a mutable tag: aquasecurity/trivy-action had 76 of 77 version
+        # tags (including 0.24.0/v0.24.0) force-pushed to credential-stealing
+        # malware in a March 2026 supply-chain compromise (CVE-2026-33634).
+        # v0.35.0 predates the compromise and is protected by GitHub's
+        # immutable-releases feature. See
+        # https://github.com/advisories/GHSA-69fq-xp46-6x23
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          image-ref: snipeit-backend:ci
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0' # report, don't hard-fail CI on findings -- tighten to '1' once the backlog is triaged
+          format: 'table'
+
+      - name: Trivy scan -- frontend
+        # See the backend Trivy step above for why this is pinned to a SHA.
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          image-ref: snipeit-frontend:ci
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
+          format: 'table'
+
+  bicep-lint:
+    name: Validate infra/main.bicep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: az bicep build (syntax + type check)
+        run: |
+          az bicep build --file infra/main.bicep --stdout > /dev/null
