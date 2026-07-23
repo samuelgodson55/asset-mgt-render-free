@@ -73,6 +73,18 @@ jobs:
   migrate:
     name: Run database migrations
     runs-on: ubuntu-latest
+    # AZURE_CLIENT_ID/AZURE_TENANT_ID/AZURE_SUBSCRIPTION_ID are configured
+    # as per-environment secrets (see DEPLOYMENT.md step 5's table --
+    # deliberately per-environment since staging and production use
+    # separate Azure AD App Registrations/federated credentials). GitHub
+    # only injects an Environment's secrets into a job that declares
+    # `environment:` -- without this, those three `secrets.AZURE_*`
+    # references silently resolve to empty strings, and azure/login@v2
+    # fails at runtime with "Not all values are present. Ensure
+    # 'client-id' and 'tenant-id' are supplied" even though the secrets
+    # exist and are correctly named. See deploy-azure-staging.yml's
+    # matching jobs for the same fix.
+    environment: production
     steps:
       - name: Validate image_tag looks like a version tag
         run: |
@@ -116,6 +128,10 @@ jobs:
     name: Roll out new revisions
     needs: [migrate]
     runs-on: ubuntu-latest
+    # See the `migrate` job's comment above -- same per-environment
+    # AZURE_CLIENT_ID/AZURE_TENANT_ID/AZURE_SUBSCRIPTION_ID secrets, same
+    # requirement to declare `environment:` to actually receive them.
+    environment: production
     steps:
       - uses: azure/login@v2
         with:

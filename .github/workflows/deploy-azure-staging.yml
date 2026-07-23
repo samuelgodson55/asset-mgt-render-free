@@ -82,6 +82,20 @@ jobs:
     name: Run database migrations
     needs: [build-push]
     runs-on: ubuntu-latest
+    # AZURE_CLIENT_ID/AZURE_TENANT_ID/AZURE_SUBSCRIPTION_ID are configured
+    # as per-environment secrets (see DEPLOYMENT.md step 5's table --
+    # deliberately per-environment since staging and production use
+    # separate Azure AD App Registrations/federated credentials, never the
+    # same one). GitHub only injects an Environment's secrets into a job
+    # that actually declares `environment:` -- without this, those three
+    # `secrets.AZURE_*` references silently resolve to empty strings (not
+    # an error at parse time), and azure/login@v2 fails at runtime with
+    # "Not all values are present. Ensure 'client-id' and 'tenant-id' are
+    # supplied" even though the secrets exist and are correctly named.
+    # infra-deploy.yml already gets this right (`environment:
+    # ${{ github.event.inputs.target }}`) -- this brings the two per-push
+    # deploy jobs below (migrate, deploy) in line with it.
+    environment: staging
     steps:
       - uses: azure/login@v2
         with:
@@ -119,6 +133,10 @@ jobs:
     name: Roll out new revisions
     needs: [build-push, migrate]
     runs-on: ubuntu-latest
+    # See the `migrate` job's comment above -- same per-environment
+    # AZURE_CLIENT_ID/AZURE_TENANT_ID/AZURE_SUBSCRIPTION_ID secrets, same
+    # requirement to declare `environment:` to actually receive them.
+    environment: staging
     steps:
       - uses: azure/login@v2
         with:
