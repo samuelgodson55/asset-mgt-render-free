@@ -71,8 +71,21 @@ jobs:
       # Registering an already-registered provider is a fast no-op, so this
       # runs unconditionally rather than trying to mirror bicep's
       # ALERT_EMAIL_ADDRESS-gated condition here in bash.
+      #
+      # NOT hard-failed on error: `az provider register` is a
+      # SUBSCRIPTION-scoped operation, but this workflow's OIDC service
+      # principal may only have Contributor at the RESOURCE GROUP scope (a
+      # reasonable, more-locked-down setup) -- in that case this call 403s.
+      # If alerting isn't enabled (ALERT_EMAIL_ADDRESS unset), that 403
+      # doesn't matter at all, so don't block the whole infra deploy over
+      # it; if alerting IS enabled and registration genuinely never
+      # happened, the "Deploy Bicep" step below still fails with a clear
+      # MissingSubscriptionRegistration error either way -- this is just an
+      # attempt to pre-empt that with a faster, more actionable warning.
       - name: Register Microsoft.Insights resource provider (required for alerting)
-        run: az provider register --namespace Microsoft.Insights --wait
+        run: |
+          az provider register --namespace Microsoft.Insights --wait || \
+            echo "::warning::Could not register the Microsoft.Insights provider (likely a permissions issue -- this is a subscription-scoped operation and the deploy service principal may only have resource-group-scoped access). Harmless if ALERT_EMAIL_ADDRESS is unset. If it IS set, either grant this SP 'Microsoft.Insights/register/action' at the subscription scope, or have a subscription Owner/Contributor run 'az provider register --namespace Microsoft.Insights' once."
 
       # First deploy ever: this `az containerapp show` call fails (backend
       # doesn't exist yet) -- fall back to "latest", which is fine, since
