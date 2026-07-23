@@ -669,7 +669,23 @@ resource dbApp 'Microsoft.App/containerApps@2024-03-01' = {
         {
           name: 'db'
           image: 'postgres:16-alpine'
-          resources: { cpu: json('0.25'), memory: '0.5Gi' }
+          // Was 0.25 vCPU / 0.5Gi -- the smallest possible Container Apps
+          // allocation. That's fine for steady-state CRUD traffic, but
+          // 0010_partition_audit_logs.py (the audit-log partitioning
+          // migration) creates one PK index per yearly partition AND bulk
+          // `INSERT`s every existing row across all of them in a single
+          // statement -- exactly the kind of maintenance-heavy operation
+          // whose index-build/sort memory (maintenance_work_mem/work_mem)
+          // spikes past a 0.5Gi cgroup limit. When that happens the
+          // container runtime OOM-kills the Postgres backend, and the
+          // client sees exactly "server closed the connection
+          // unexpectedly" -- not an application bug, a resource ceiling.
+          // Doubled to 0.5 vCPU / 1Gi (next valid Container Apps
+          // CPU/memory combo) to give schema migrations like this enough
+          // headroom; small extra always-on cost (`db` runs fixed at 1
+          // replica regardless -- see its `scale` block below) but it's
+          // the actual database, not a wide margin to spare it.
+          resources: { cpu: json('0.5'), memory: '1Gi' }
           env: [
             { name: 'POSTGRES_USER', value: postgresUsername }
             { name: 'POSTGRES_DB', value: 'asset_db' }
