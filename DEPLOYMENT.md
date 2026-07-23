@@ -597,9 +597,20 @@ not you ever push an image).
 3. **Create the two resource groups** (or let `infra-deploy.yml` create them
    on first run):
    ```bash
-   az group create --name rg-snipeit-lite-staging --location eastus
-   az group create --name rg-snipeit-lite-prod --location eastus
+   az group create --name rg-snipeit-lite-staging --location eastus2
+   az group create --name rg-snipeit-lite-prod --location eastus2
    ```
+   (`eastus2` is used here instead of `eastus` because brand-new/Free Trial
+   subscriptions are frequently hit with `LocationIsOfferRestricted` on
+   `eastus` specifically for Azure Database for PostgreSQL Flexible Server —
+   `eastus2` and `centralus` are the two regions that most consistently work
+   on Free Trial/Pay-As-You-Go subscriptions. If `eastus2` also gets
+   restricted for your subscription, try `centralus` next — there's no way
+   to know in advance which region a given subscription is cleared for, so
+   this is trial and error. Whatever you pick, use the same region for both
+   commands above and for the `AZURE_LOCATION` secret in step 5, and keep
+   `POSTGRES_SKU_NAME` on a `Standard_B*` (Burstable) tier — Burstable has
+   the widest regional availability of the three Flexible Server tiers.)
 
 4. **Set up OIDC federated login** for GitHub Actions: an Azure AD App
    Registration, Contributor on both resource groups, a federated
@@ -613,7 +624,7 @@ not you ever push an image).
    | Secret | Scope | Notes |
    |---|---|---|
    | `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` | per-environment | From the App Registration in step 4 |
-   | `AZURE_LOCATION` | repo | e.g. `eastus` |
+   | `AZURE_LOCATION` | repo | e.g. `eastus2` — see the note on region restrictions in step 3 above; `centralus` is the fallback if `eastus2` is also restricted on your subscription |
    | `STAGING_RESOURCE_GROUP` / `PROD_RESOURCE_GROUP` | repo | The two resource group names from step 3 |
    | `DOCKERHUB_USERNAME` | repo | From step 1 |
    | `DOCKERHUB_TOKEN` | repo | From step 1 |
@@ -622,7 +633,7 @@ not you ever push an image).
    | `JWT_SECRET_KEY` | per-environment | Generate with `openssl rand -hex 32` |
    | `ROOT_ADMIN_BOOTSTRAP_PASSWORD` | per-environment | Optional — the root admin's initial password. Leave unset to have `0002_bootstrap_root_admin.py` generate a random one and print it once instead (see README's "Viewing the one-time-generated root admin password"). Note: the root admin's username/display name (`SUPER_ADMIN_USERNAME`/`SUPER_ADMIN_NAME`) aren't wired as GitHub secrets at all here — `infra/main.bicep` hardcodes them to `superadmin`/`Super Admin`; edit the bicep file directly if you want different values. |
    | `CUSTOM_DOMAIN` | per-environment | Optional — leave unset to use the generated `*.azurecontainerapps.io` FQDN |
-   | `ALERT_EMAIL_ADDRESS` | per-environment | Optional — leave unset to skip creating any alerting resources (no cost, no action group). Set it to wire up the three Azure Monitor scheduled query alerts (backend error-rate spike, `/readyz` failing, daily backup missing) from `infra/main.bicep` to that address — see [SRE_STRATEGY.md](SRE_STRATEGY.md) section 2. |
+   | `ALERT_EMAIL_ADDRESS` | per-environment | Optional — leave unset to skip creating any alerting resources (no cost, no action group). Set it to wire up the three Azure Monitor scheduled query alerts (backend error-rate spike, `/readyz` failing, daily backup missing) from `infra/main.bicep` to that address — see [SRE_STRATEGY.md](SRE_STRATEGY.md) section 2. **Leave this unset on a brand-new environment's first-ever `infra-deploy.yml` run.** The three alert rules query the `ContainerAppConsoleLogs_CL` table, which Azure only creates once a log line has actually been ingested — on a fresh Log Analytics workspace it doesn't exist yet, and the deployment fails with `Failed to resolve table or column expression named 'ContainerAppConsoleLogs_CL'` if you try to create the rules first. Deploy once with this unset, let `backend`/`frontend` run for a few minutes (or serve one request), then set this secret and re-run `infra-deploy.yml` for the same environment to add the alert rules on top of the already-running infra. |
 
    Optionally, also set two repo-level **Variables** (Settings → Secrets
    and variables → Actions → **Variables** tab, not Secrets — these aren't
@@ -974,7 +985,7 @@ az monitor metrics list --resource <postgresServer resource ID> \
 
 ### Cost
 
-East US pricing, ballpark — always check the
+East US 2 pricing, ballpark — always check the
 [Azure Pricing Calculator](https://azure.microsoft.com/pricing/calculator/)
 before committing:
 

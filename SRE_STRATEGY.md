@@ -109,6 +109,17 @@ user. This was a couple hours of one-time Azure Portal work; it's now
 `alertReadyzFailing`/`alertBackupMissing` resources instead, gated behind
 the `alertEmailAddress` parameter.
 
+**First-deploy ordering gotcha:** don't set `alertEmailAddress` /
+`ALERT_EMAIL_ADDRESS` on a brand-new environment's very first deploy. All
+three queries above read `ContainerAppConsoleLogs_CL`, which Azure only
+creates the first time a log line actually lands in it — on a fresh Log
+Analytics workspace it doesn't exist yet, and `scheduledQueryRules`
+validates its KQL against the live schema at deploy time, so the deploy
+fails outright. Deploy once with the alerting parameter unset, let the apps
+run briefly so the table materializes, then set it and re-run infra-deploy
+to layer the alert rules on afterward. See `infra/main.bicep`'s
+`alertEmailAddress` parameter description for the same note.
+
 ---
 
 ## 3. The continuous cadence

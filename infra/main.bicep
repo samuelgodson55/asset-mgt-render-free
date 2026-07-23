@@ -369,7 +369,7 @@ param adminNotificationEmails string = ''
 @description('Gate for FastAPI\'s interactive API docs (Swagger/ReDoc) AND nginx\'s matching passthrough route -- see nginx/default.conf.template. Keep false in any environment reachable from the public internet unless you specifically need it.')
 param enableApiDocs bool = false
 
-@description('Email address to page on the three Azure Monitor scheduled query alerts below (backend error-rate spike, /readyz failing, daily backup missing) -- see SRE_STRATEGY.md section 2. Leave empty (the default) to skip creating the action group/alert rules entirely -- no alerting, no extra cost, same as before this parameter existed.')
+@description('Email address to page on the three Azure Monitor scheduled query alerts below (backend error-rate spike, /readyz failing, daily backup missing) -- see SRE_STRATEGY.md section 2. Leave empty (the default) to skip creating the action group/alert rules entirely -- no alerting, no extra cost, same as before this parameter existed. IMPORTANT ordering requirement: leave this EMPTY on the very first deploy of a brand-new environment. The three alert rules below query the `ContainerAppConsoleLogs_CL` table, which Azure only materializes the first time a log line actually lands in it -- on a fresh Log Analytics workspace that table does not exist yet, and Microsoft.Insights/scheduledQueryRules validates its KQL against the workspace schema at deploy time, so creating the rules before any logs have been ingested fails deployment with "Failed to resolve table or column expression named \'ContainerAppConsoleLogs_CL\'". Deploy once with this empty, let `backend`/`frontend` serve at least one request (or just sit running for a few minutes) so the table gets created, confirm it under the Log Analytics workspace\'s Logs > Tables blade, THEN set this and re-run infra-deploy.yml for the same environment to add the alert rules on top of the already-running infra.')
 param alertEmailAddress string = ''
 
 var namePrefix = '${appBaseName}-${environmentName}'
@@ -404,6 +404,21 @@ resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
 // Entirely OPT-IN: every resource below only deploys if `alertEmailAddress`
 // is set (see that param's description). Leave it empty and this section
 // costs nothing and creates nothing, same as before it existed.
+//
+// ORDERING REQUIREMENT -- read before setting ALERT_EMAIL_ADDRESS on a new
+// environment: alertBackendErrorRate/alertReadyzFailing/alertBackupMissing
+// below all query `ContainerAppConsoleLogs_CL`, a table Azure only creates
+// once the FIRST log line is actually ingested into it. On a brand-new
+// `logAnalytics` workspace that table doesn't exist yet, and
+// scheduledQueryRules validates its KQL against the live workspace schema
+// at deploy time -- so deploying these three rules before `backend`/
+// `frontend` have produced any console output fails with "Failed to
+// resolve table or column expression named 'ContainerAppConsoleLogs_CL'".
+// Leave `alertEmailAddress` empty on an environment's first-ever deploy,
+// let the apps run for a few minutes (or serve one request) so the table
+// materializes, then set it and re-run this workflow to layer the alert
+// rules on top of the already-running infra. See `alertEmailAddress`'s
+// @description above for the same note.
 // ---------------------------------------------------------------------------
 var alertingEnabled = !empty(alertEmailAddress)
 
