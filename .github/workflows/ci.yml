@@ -122,7 +122,18 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -r backend/requirements.txt
-          pip install ruff pytest pytest-asyncio httpx pip-audit
+          # ruff is pinned -- an unpinned install silently picks up whatever
+          # is newest on the day CI runs, and ruff has broadened its own
+          # *default* rule selection between releases before (adding entire
+          # new categories like flake8-datetimez/DTZ, flake8-2020/YTT,
+          # isort/I, ...). backend/ruff.toml already pins the rule
+          # *selection* explicitly for the same reason; this pins the tool
+          # *version* too, as a second, independent safeguard, so a bump to
+          # either one only ever happens on purpose in a reviewed PR instead
+          # of silently failing the next `git push`. Bump this deliberately
+          # (and re-run `ruff check backend/` locally first) when you want a
+          # newer ruff.
+          pip install ruff==0.15.22 pytest pytest-asyncio httpx pip-audit
 
       - name: Ruff lint
         run: ruff check backend/
