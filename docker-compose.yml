@@ -1,0 +1,536 @@
+# docker-compose.yml
+# -----------------------------------------------------------------------------
+# Spins up the whole Snipe-IT Lite stack with one command:
+#     docker compose up --build
+#
+# SECRETS (requirement #1): every value that used to be hardcoded here
+# (POSTGRES_PASSWORD, JWT_SECRET_KEY, etc.) is now read from a git-ignored
+# ".env" file in this same folder via the ${VARIABLE_NAME} syntax. Docker
+# Compose automatically loads ".env" with NO extra configuration needed --
+# it just has to sit next to this file. See .env.example for the template
+# and copy it to ".env" before running `docker compose up` for the first
+# time:
+#     cp .env.example .env
+#
+# Six services:
+#   db       - PostgreSQL database that stores everything
+#   redis    - Celery broker/result backend (async exports + email), the
+#              cross-replica login rate limiter, and the scheduled-backup
+#              leader lock -- see middleware/rate_limit.py and
+#              services/backup_service.py's docstrings
+#   backend  - FastAPI app (main.py) talking to the db (not published to the
+#              host anymore -- see the "frontend" service below)
+#   worker   - Celery worker (backend/Dockerfile, unmodified) consuming the
+#              queue `backend` produces to: CSV/PDF export generation and
+#              every outbound notification email
+#   beat     - Celery Beat (same image as `worker`, different command) --
+#              fires the scheduled overdue/due-soon digest jobs on a timer.
+#              Split from `worker` so `worker` can be scaled to multiple
+#              replicas without duplicating the scheduled jobs.
+#   frontend - the static site (index.html/admin.html/js/*) PLUS an nginx
+#              reverse proxy in front of it, built from frontend/Dockerfile.
+#              nginx serves the frontend directly and transparently forwards
+#              every /api/* request to the backend container over Docker's
+#              internal network -- see nginx/default.conf.template for the
+#              full explanation. This is also the ONLY multi-tier-portable
+#              piece: the exact same image runs on Render/cloud too, just
+#              with different BACKEND_HOST/BACKEND_PORT env vars.
+#
+# Once running, everything is served from ONE origin:
+#   App + API:        http://localhost:8080          (nginx)
+#   API docs:          http://localhost:8080/docs     (proxied by nginx)
+# -----------------------------------------------------------------------------
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: snipeit_lite_db
+    restart: unless-stopped
+    environment:
+      # ${VARIABLE_NAME} pulls its value from the ".env" file at compose-up
+      # time. If ".env" is missing or a key isn't set, Compose falls back to
+      # the value after the colon (kept here only as a last-resort default
+      # so the project doesn't hard-crash with zero configuration).
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supersecret}
+      POSTGRES_DB: ${POSTGRES_DB:-asset_db}
+    volumes:
+      # Named volume (requirement #7) so your data survives `docker compose
+      # down` and container restarts -- only `docker compose down -v` wipes it.
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # Requirement #7: the backend won't even try to start until this
+      # reports healthy (see backend's `depends_on: condition:
+      # service_healthy` below), which prevents the classic "backend
+      # crash-loops because Postgres wasn't ready yet" race condition.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-admin} -d ${POSTGRES_DB:-asset_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------
+  # redis (Celery broker + result backend for async exports)
+  # ---------------------------------------------------------------------
+  # Two jobs: (1) the queue the `backend` container drops export jobs
+  # into, and (2) where the `worker` container stashes a finished job's
+  # file bytes until the frontend downloads them (see
+  # backend/celery_app.py's module docstring for the full picture, and
+  # config.py's EXPORT_RESULT_TTL_SECONDS for how long results live here
+  # before expiring). Not published to the host -- like `db`, it's only
+  # ever reached over Compose's internal network, by service name.
+  redis:
+    image: redis:7-alpine
+    container_name: snipeit_lite_redis
+    restart: unless-stopped
+    volumes:
+      # Named volume so queued-but-not-yet-processed jobs and any
+      # not-yet-downloaded export results survive a `docker compose
+      # restart`. Redis's default persistence (RDB snapshots) is enabled
+      # out of the box in this image, which is all this workload needs --
+      # a lost job here just means re-clicking "export", not lost data.
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: ./backend
+    # NOTE: no `container_name` here (unlike the single-instance `db` and
+    # `redis` services above) -- a fixed container name can only ever be
+    # used by ONE running container at a time, which blocks `docker
+    # compose up --scale backend=N` from starting a second replica at all.
+    # See DEPLOYMENT.md's load balancing section for how/why to scale this
+    # service; Compose auto-generates unique names per replica instead
+    # (snipeit-lite-backend-1, -2, ...).
+    restart: unless-stopped
+    volumes:
+      # Local backup files (see backend/services/backup_service.py) --
+      # named volume so they survive `docker compose restart`/`down`
+      # (only `docker compose down -v` wipes it), same pattern as `db`'s
+      # `pgdata` volume above. This is purely a local-dev convenience;
+      # Render's Free plan has no equivalent persistent volume, which is
+      # exactly why BACKUP_GDRIVE_ENABLED exists for production. When
+      # scaled to multiple replicas, every replica mounts this SAME named
+      # volume (Compose does this automatically), which is what lets any
+      # replica see/download a backup created by any other -- and why
+      # backup_service.py's index.json writes and the scheduled-backup
+      # Redis lock both exist (see that file) to keep concurrent replicas
+      # from corrupting each other's writes to it.
+      - backup_data:/app/backups
+      # Finished CSV/PDF exports (see backend/tasks/export_tasks.py) --
+      # written by the `worker` container below, served back out by
+      # whichever `backend` replica happens to receive the download
+      # request, which only works because they share this SAME volume.
+      - export_data:/app/export_results
+    environment:
+      # "development" or "production" -- gates the startup JWT-secret check
+      # in backend/config.py (requirement #5). Defaults to "development" so
+      # local `docker compose up` keeps working with the placeholder secret.
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      # How many uvicorn worker processes backend/start.sh launches when
+      # ENVIRONMENT=production (ignored otherwise -- development/local
+      # always run a single worker with --reload instead). Set this to
+      # roughly the number of CPU cores available to the container; more
+      # workers use more memory and take slightly longer to all finish
+      # starting, so don't set it higher than you actually need.
+      UVICORN_WORKERS: ${UVICORN_WORKERS:-2}
+      # Must match the postgres credentials above -- built from the SAME
+      # .env variables so they can never silently drift apart. The hostname
+      # "db" works because Docker Compose puts every service on the same
+      # network and lets them reach each other by service name.
+      DATABASE_URL: ${DATABASE_URL:-postgresql://admin:supersecret@db:5432/asset_db}
+      # Broker + result backend for the async export job system (see
+      # backend/celery_app.py) -- "redis" is the service name below,
+      # resolved by Compose's internal DNS the same way "db" is for
+      # Postgres.
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      # Where finished CSV/PDF export files land on disk (see
+      # backend/tasks/export_tasks.py) -- must match the `export_data`
+      # volume's mount path above, and the SAME value the `worker` service
+      # below is given, since one container writes here and the other
+      # reads from it.
+      EXPORT_RESULT_DIR: ${EXPORT_RESULT_DIR:-/app/export_results}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in your .env file -- see .env.example}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      JWT_EXPIRY_HOURS: ${JWT_EXPIRY_HOURS:-12}
+      # Now mostly defense-in-depth: since the browser always calls the
+      # SAME origin that served the page (nginx proxies /api/* under the
+      # hood -- see nginx/default.conf.template), this almost never matters
+      # for same-origin requests anymore. It still matters if you ever hit
+      # this backend directly (bypassing nginx) or from a genuinely
+      # different origin, so it stays here rather than being removed.
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080,http://localhost,http://127.0.0.1}
+      # Brand name printed on the Quotation/Checkout Receipt PDF letterhead
+      # (see backend/config.py's SITE_NAME docstring). Change this to
+      # rebrand every future PDF export at once.
+      SITE_NAME: ${SITE_NAME:-Snipe-IT Lite}
+      # Operations & Observability requirement #1: gate the startup
+      # init_db()/seed_db() calls instead of always running them. Leave
+      # both "true" for local docker-compose demo use; set both "false" in
+      # a real production .env and run `alembic upgrade head` separately.
+      LEAN_MODE: ${LEAN_MODE:-}
+      # Operations & Observability requirement #2: structured logging.
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      # Operations & Observability requirement #3: login rate limiting.
+      LOGIN_RATE_LIMIT_MAX: ${LOGIN_RATE_LIMIT_MAX:-5}
+      LOGIN_RATE_LIMIT_WINDOW_SECONDS: ${LOGIN_RATE_LIMIT_WINDOW_SECONDS:-60}
+      # Per-account brute-force lockout (see config.py and
+      # services/auth_service.py's login()) -- a second, finer-grained
+      # layer on top of the IP-based limiter above. Only read by `backend`
+      # (login only happens there), so `worker` doesn't need these two.
+      ACCOUNT_LOCKOUT_MAX_ATTEMPTS: ${ACCOUNT_LOCKOUT_MAX_ATTEMPTS:-5}
+      ACCOUNT_LOCKOUT_DURATION_MINUTES: ${ACCOUNT_LOCKOUT_DURATION_MINUTES:-15}
+      # SECURITY: exposes/hides /docs, /redoc, /openapi.json -- see
+      # config.py's ENABLE_API_DOCS docstring. Defaults to "true" for local
+      # dev convenience; set "false" in a real production .env. Must be
+      # kept in sync with the frontend service's own ENABLE_API_DOCS below
+      # (same .env key drives both, so this happens automatically as long
+      # as you don't override just one of the two services individually).
+      ENABLE_API_DOCS: ${ENABLE_API_DOCS:-}
+      # Root Administrator identity (root account) -- see .env.example and
+      # backend/config.py's SUPER_ADMIN_* docstring. These two are just the
+      # fixed identity (not a secret); the password lives in the database
+      # now, seeded by `alembic upgrade head` in production (see
+      # backend/alembic/versions/0002_bootstrap_root_admin.py) -- that
+      # migration reads ROOT_ADMIN_BOOTSTRAP_PASSWORD directly from the
+      # environment, ONCE, the very first time it runs, so it's passed
+      # through here too even though the running app never reads it itself.
+      SUPER_ADMIN_USERNAME: ${SUPER_ADMIN_USERNAME:-superadmin}
+      SUPER_ADMIN_NAME: ${SUPER_ADMIN_NAME:-Super Admin}
+      ROOT_ADMIN_BOOTSTRAP_PASSWORD: ${ROOT_ADMIN_BOOTSTRAP_PASSWORD:-}
+      # Email notifications (extension requests + overdue-checkout digest)
+      # -- see backend/config.py's NOTIFICATIONS_ENABLED docstring. Leave
+      # disabled for local dev with no mail server; the app works fine
+      # without it, it just logs what it would have sent instead.
+      NOTIFICATIONS_ENABLED: ${NOTIFICATIONS_ENABLED:-false}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
+      SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-}
+      ADMIN_NOTIFICATION_EMAILS: ${ADMIN_NOTIFICATION_EMAILS:-}
+      OVERDUE_NOTIFICATION_INTERVAL_HOURS: ${OVERDUE_NOTIFICATION_INTERVAL_HOURS:-24}
+      # "A reminder before something goes overdue" -- see
+      # backend/config.py's DUE_SOON_REMINDER_DAYS docstring.
+      DUE_SOON_REMINDER_DAYS: ${DUE_SOON_REMINDER_DAYS:-2}
+      DUE_SOON_NOTIFICATION_INTERVAL_HOURS: ${DUE_SOON_NOTIFICATION_INTERVAL_HOURS:-24}
+      SEND_INDIVIDUAL_HOLDER_REMINDERS: ${SEND_INDIVIDUAL_HOLDER_REMINDERS:-true}
+      # Database backups -- see backend/config.py's BACKUP_* docstring.
+      ENABLE_AUTO_BACKUP: ${ENABLE_AUTO_BACKUP:-}
+      BACKUP_HOURS_UTC: ${BACKUP_HOURS_UTC:-3}
+      # Deprecated single-value override -- see config.py's docstring. Left
+      # unset by default so BACKUP_HOURS_UTC above is what actually applies.
+      BACKUP_HOUR_UTC: ${BACKUP_HOUR_UTC:-}
+      BACKUP_DIR: ${BACKUP_DIR:-/app/backups}
+      BACKUP_RETENTION_COUNT: ${BACKUP_RETENTION_COUNT:-7}
+      BACKUP_GDRIVE_ENABLED: ${BACKUP_GDRIVE_ENABLED:-false}
+      # Mode 1 -- personal Google account (see backend/config.py's
+      # BACKUP_GDRIVE_* docstring and backend/scripts/gdrive_oauth_setup.py).
+      BACKUP_GDRIVE_OAUTH_CLIENT_ID: ${BACKUP_GDRIVE_OAUTH_CLIENT_ID:-}
+      BACKUP_GDRIVE_OAUTH_CLIENT_SECRET: ${BACKUP_GDRIVE_OAUTH_CLIENT_SECRET:-}
+      BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN: ${BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN:-}
+      # Mode 2 -- Google Workspace service account + Shared Drive.
+      BACKUP_GDRIVE_CREDENTIALS_JSON: ${BACKUP_GDRIVE_CREDENTIALS_JSON:-}
+      BACKUP_GDRIVE_FOLDER_ID: ${BACKUP_GDRIVE_FOLDER_ID:-}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # ZERO-DOWNTIME: no explicit `healthcheck:` block needed here -- this
+    # service's image (backend/Dockerfile) now bakes in its own
+    # HEALTHCHECK instruction (GET /healthz -- see that Dockerfile's own
+    # comment for the full reasoning), and Compose automatically uses an
+    # image's built-in HEALTHCHECK for any service that doesn't override
+    # it with one of its own. That's what makes `condition:
+    # service_healthy` below (on the `frontend` service's `depends_on`)
+    # meaningful: Compose won't consider this container healthy -- and
+    # therefore won't start `frontend` -- until GET /healthz is actually
+    # answering 200, not merely until the process has started.
+    # NOTE: no host `ports:` mapping here anymore -- see nginx reverse-proxy
+    # comment block below for why. The backend is still fully reachable by
+    # the frontend container over Compose's internal network at
+    # "backend:8000"; it's just no longer directly exposed to the host/
+    # public internet. If you need to hit it directly for debugging (e.g.
+    # curling it, or Postman), temporarily add back:
+    #     ports:
+    #       - "8000:8000"
+
+  # ---------------------------------------------------------------------
+  # worker (Celery consumer -- generates audit ledger CSV/PDF exports)
+  # ---------------------------------------------------------------------
+  # Same image/build context as `backend` (identical requirements.txt, so
+  # it has reportlab/celery/redis/SQLAlchemy available and can import
+  # services/audit_service.py directly) -- the only thing that differs is
+  # the `command:` below, which runs a Celery worker process instead of
+  # uvicorn. This is what actually executes `tasks.generate_audit_export`
+  # jobs the `backend` container enqueues via POST /audit-logs/export
+  # (backend/tasks/export_tasks.py) AND the scheduled
+  # `tasks.send_overdue_notifications` digest (backend/tasks/
+  # notification_tasks.py); see backend/celery_app.py for both.
+  #
+  # `-B` embeds Celery BEAT (the periodic-task scheduler) directly inside
+  # this same worker process, rather than running it as its own container
+  # -- see celery_app.py's `beat_schedule` comment for the full reasoning
+  # and its "don't scale this to >1 replica without splitting Beat back
+  # out" caveat.
+  #
+  # Talks to the SAME Postgres database as `backend` (it needs to query
+  # the audit_logs table itself) and the SAME Redis instance (as the
+  # queue it consumes from and where it stashes finished results) -- so it
+  # gets an almost-identical environment block. Not published to the host
+  # at all: nothing outside this Compose network ever talks to a worker
+  # directly, only via the job queue.
+  worker:
+    build: ./backend
+    # No `container_name` here either (see `backend` service's comment
+    # above) -- this is what lets you run
+    # `docker compose up --scale worker=3` during peak load (see
+    # DEPLOYMENT.md) to process more CSV/PDF export jobs in parallel.
+    restart: unless-stopped
+    # LOAD BALANCING FIX: this used to run `celery ... worker -B`, embedding
+    # Celery BEAT (the periodic-task scheduler) directly inside the worker
+    # process. celery_app.py's beat_schedule comment already flagged this
+    # as NOT safe to scale past one replica: every replica would run its
+    # own Beat and fire the overdue/due-soon notification digests once per
+    # replica, sending duplicate emails. The `-B` flag is gone from this
+    # command -- Beat now runs in its own single-replica `beat` service
+    # below, so `worker` itself can be freely scaled to handle more
+    # concurrent export jobs during peak use without that risk.
+    command: ["celery", "-A", "celery_app", "worker", "--loglevel=info", "--concurrency=2"]
+    volumes:
+      # Shares the SAME volume as the `backend` service's own mount of
+      # this path -- `worker` is what actually writes finished export
+      # files here (see backend/tasks/export_tasks.py), `backend` is what
+      # reads them back out for download.
+      - export_data:/app/export_results
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://admin:supersecret@db:5432/asset_db}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      EXPORT_RESULT_DIR: ${EXPORT_RESULT_DIR:-/app/export_results}
+      # The worker never issues/verifies JWTs itself (export jobs are
+      # enqueued with an already-validated user's role/email baked in --
+      # see api/audit.py), but Settings() still requires a JWT_SECRET_KEY
+      # value to construct without error since it shares config.py with
+      # the backend, so it needs the same one set here.
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in your .env file -- see .env.example}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      # The worker never logs anyone in with the Super Admin/root account,
+      # and unlike before, config.py's Settings() no longer has a startup
+      # validator that requires a password value here at all -- the root
+      # admin's password lives only in the database now (see
+      # backend/security.py's module docstring). SUPER_ADMIN_USERNAME/NAME
+      # are harmless non-secret defaults baked into Settings() itself, so
+      # this service doesn't need to pass any of the three through anymore.
+      # The worker never runs its own DB migrations/seeding -- `backend`
+      # already owns that on its startup hook -- so these stay disabled
+      # here regardless of the .env values used for `backend`.
+      AUTO_INIT_DB: "false"
+      AUTO_SEED_DEMO_DATA: "false"
+      # Same notification settings as `backend` above -- the overdue-digest
+      # task (which runs HERE, in the worker/beat process, not in backend)
+      # needs them too. Kept identical/copy-pasted rather than factored out
+      # since docker-compose.yml has no "shared env block" feature without
+      # YAML anchors, which this project avoids for beginner-readability.
+      NOTIFICATIONS_ENABLED: ${NOTIFICATIONS_ENABLED:-false}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
+      SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-}
+      ADMIN_NOTIFICATION_EMAILS: ${ADMIN_NOTIFICATION_EMAILS:-}
+      OVERDUE_NOTIFICATION_INTERVAL_HOURS: ${OVERDUE_NOTIFICATION_INTERVAL_HOURS:-24}
+      DUE_SOON_REMINDER_DAYS: ${DUE_SOON_REMINDER_DAYS:-2}
+      DUE_SOON_NOTIFICATION_INTERVAL_HOURS: ${DUE_SOON_NOTIFICATION_INTERVAL_HOURS:-24}
+      SEND_INDIVIDUAL_HOLDER_REMINDERS: ${SEND_INDIVIDUAL_HOLDER_REMINDERS:-true}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # ZERO-DOWNTIME / BUG FIX: this service shares backend/Dockerfile's
+    # image with `backend` above (`build: ./backend`, no separate
+    # Dockerfile) -- which means it also inherits that image's baked-in
+    # HEALTHCHECK instruction (GET /healthz over HTTP) UNLESS overridden
+    # here. This container runs `celery ... worker`, not uvicorn -- there
+    # is no HTTP server listening on port 8000 in this process at all, so
+    # the inherited check would connection-refuse every single time and
+    # Compose would report this container permanently "unhealthy" despite
+    # it working perfectly correctly. Override with the standard Celery
+    # liveness check instead: `celery inspect ping` round-trips a real
+    # message through the SAME broker this worker actually consumes from
+    # (settings.REDIS_URL), so it only reports healthy if the worker
+    # process is both alive AND actually able to receive/answer control
+    # commands -- not just "the process didn't exit".
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A celery_app inspect ping --destination celery@$$HOSTNAME --timeout 10 | grep -q OK"]
+      interval: 30s
+      timeout: 15s
+      start_period: 20s
+      retries: 3
+
+  # ---------------------------------------------------------------------
+  # beat (Celery periodic-task scheduler -- fires the overdue/due-soon
+  # notification digests on a schedule; see celery_app.py's beat_schedule)
+  # ---------------------------------------------------------------------
+  # Split out into its own service, deliberately with NO `deploy.replicas`
+  # or `--scale` usage, EVER: Celery Beat firing more than once for the
+  # same scheduled task, from more than one process, sends duplicate
+  # notification emails. Keeping Beat as this one dedicated, never-scaled
+  # service (instead of the old `-B` flag embedded in `worker`, which
+  # WOULD duplicate if `worker` were scaled) is what makes `worker` itself
+  # safe to scale to N replicas above.
+  beat:
+    build: ./backend
+    restart: unless-stopped
+    command: ["celery", "-A", "celery_app", "beat", "--loglevel=info"]
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://admin:supersecret@db:5432/asset_db}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in your .env file -- see .env.example}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      # Same reasoning as the `worker` service above: no startup validator
+      # requires these anymore, since the root admin's password lives in
+      # the database now, not in an environment variable.
+      AUTO_INIT_DB: "false"
+      AUTO_SEED_DEMO_DATA: "false"
+      NOTIFICATIONS_ENABLED: ${NOTIFICATIONS_ENABLED:-false}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
+      SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-}
+      ADMIN_NOTIFICATION_EMAILS: ${ADMIN_NOTIFICATION_EMAILS:-}
+      OVERDUE_NOTIFICATION_INTERVAL_HOURS: ${OVERDUE_NOTIFICATION_INTERVAL_HOURS:-24}
+      DUE_SOON_REMINDER_DAYS: ${DUE_SOON_REMINDER_DAYS:-2}
+      DUE_SOON_NOTIFICATION_INTERVAL_HOURS: ${DUE_SOON_NOTIFICATION_INTERVAL_HOURS:-24}
+      SEND_INDIVIDUAL_HOLDER_REMINDERS: ${SEND_INDIVIDUAL_HOLDER_REMINDERS:-true}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # BUG FIX: same image-sharing issue as `worker` above (see that
+    # service's own `healthcheck:` comment for the full "why this needs
+    # overriding at all" explanation) -- this container also inherits
+    # backend/Dockerfile's HTTP-based HEALTHCHECK otherwise, and `celery
+    # ... beat` serves no HTTP endpoint to satisfy it either.
+    #
+    # Unlike `worker`, there's no equivalent "round-trip a real command
+    # through the broker" check available here: `celery inspect ping`
+    # only targets WORKER processes (the ones consuming task queues) --
+    # Beat doesn't run that consumer loop, so it never answers control
+    # commands at all, healthy or not. And because this app's Beat
+    # scheduler is RedBeat (celery_app.py's `beat_scheduler=
+    # "redbeat.RedBeatScheduler"`), the schedule itself lives in Redis,
+    # not in a local `celerybeat-schedule` file on disk whose mtime a
+    # healthcheck could otherwise watch for "is it still ticking".
+    # Rather than ship a low-signal check that just re-confirms the
+    # process hasn't exited (which `restart: unless-stopped` above
+    # already handles for a genuine crash -- see celery_app.py's
+    # `redbeat_lock_timeout`/`beat_max_loop_interval` comments for the
+    # one known crash-and-clean-restart case, which is a correctly
+    # handled scenario, not a gap), explicitly disable the inherited
+    # check rather than have Compose falsely report this container
+    # unhealthy forever.
+    healthcheck:
+      disable: true
+
+  # ---------------------------------------------------------------------
+  # frontend / nginx reverse proxy (requirement: multi-tier deployment)
+  # ---------------------------------------------------------------------
+  # This is no longer a bare `nginx:alpine` + bind-mounted static files --
+  # it's now built from frontend/Dockerfile, which produces ONE
+  # self-contained image bundling both the static site AND an
+  # environment-templated nginx config (see nginx/default.conf.template).
+  # That image is what gets deployed unmodified to Render and your cloud
+  # environment too; only the environment variables below change between
+  # tiers. (backend/ owns backend/Dockerfile the same way -- each service
+  # has its own Dockerfile.)
+  #
+  # SECURITY: this is now the ONLY container with a host-published port.
+  # The browser talks exclusively to nginx; nginx is the sole thing that
+  # forwards /api/* requests on to the backend over the private Compose
+  # network (see BACKEND_HOST/BACKEND_PORT below). The backend is no longer
+  # reachable directly from outside Docker at all -- shrinking the app's
+  # public attack surface to one hardened, well-understood entry point.
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      # BUILD-TIME (not runtime) arg -- this is what actually changes what
+      # ends up inside the image, since frontend/js gets transformed once,
+      # during `docker compose build`, not on every container start. Reads
+      # the SAME ENVIRONMENT value from .env as the backend/worker services
+      # below, so there's still exactly one setting to change: local (raw
+      # source), development (minified), or production (minified +
+      # obfuscated) -- see frontend/Dockerfile's frontend-build stage and
+      # build-frontend/build.js for what each mode does.
+      #
+      # IMPORTANT: unlike the `environment:` blocks below, editing .env
+      # alone does NOT change a running container -- you must rebuild the
+      # image for a new ENVIRONMENT value to take effect:
+      #   docker compose build frontend && docker compose up -d frontend
+      # or simply:
+      #   docker compose up -d --build frontend
+      # Watch the build output when you do -- build-frontend/build.js
+      # prints a per-file size report (and total) for whichever mode just
+      # ran, so you can see exactly what changed.
+      args:
+        BUILD_ENV: ${ENVIRONMENT:-development}
+    container_name: snipeit_lite_frontend
+    restart: unless-stopped
+    environment:
+      # Which port nginx listens on INSIDE the container. Left at 80 here
+      # since we're the ones choosing the host-side port via the `ports:`
+      # mapping below; a platform like Render would instead inject its own
+      # $PORT and this line wouldn't exist in that environment at all.
+      PORT: ${FRONTEND_PORT:-80}
+      # "backend" is this Compose file's service name above -- Docker's
+      # embedded DNS resolves it automatically to that container's current
+      # IP on every request (see default.conf.template's `resolver`
+      # directive for why "every request" matters, not just "at startup").
+      BACKEND_HOST: ${BACKEND_HOST:-backend}
+      BACKEND_PORT: ${BACKEND_PORT:-8000}
+      RESOLVER_IP: ${RESOLVER_IP:-127.0.0.11}
+      # SECURITY: must match the backend service's own ENABLE_API_DOCS
+      # above -- see that line's comment and config.py's ENABLE_API_DOCS
+      # docstring. Reading from the SAME .env key here means the two
+      # services can't silently drift out of sync with each other.
+      ENABLE_API_DOCS: ${ENABLE_API_DOCS:-}
+    ports:
+      - "8080:80"
+    # ZERO-DOWNTIME: `condition: service_healthy` (not the old bare
+    # `- backend` shorthand, which only waits for the container to
+    # START, not for it to actually be ANSWERING requests) -- now that
+    # `backend` has a real HEALTHCHECK (see backend/Dockerfile), this
+    # makes Compose hold `frontend` back until GET /healthz on that
+    # container is genuinely returning 200. Without this, `docker
+    # compose up`'s first few seconds could route real traffic through
+    # nginx to a backend container that's still mid-import/mid-startup
+    # (see main.py's on_startup()) and get a connection-refused/502
+    # instead of a clean "not ready yet" -- nginx's own `resolver ...
+    # valid=10s` + per-request re-resolution (see
+    # nginx/default.conf.template) already handles the backend's IP
+    # CHANGING later during a redeploy, but it can't paper over the
+    # backend not being reachable AT ALL yet on first boot.
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  redisdata:
+  backup_data:
+  export_data:
