@@ -223,14 +223,53 @@ jobs:
       - name: Dump backend/frontend logs (on smoke test failure)
         if: failure() && steps.smoke.outcome == 'failure'
         run: |
-          echo "::group::backend container logs (last 200 lines)"
-          az containerapp logs show --name backend --resource-group "$RESOURCE_GROUP" --tail 200 || \
-            echo "Could not fetch logs via 'az containerapp logs show' -- check Log Analytics or the Azure Portal's 'backend' Container App > Log stream directly."
-          echo "::endgroup::"
-          echo "::group::frontend container logs (last 200 lines)"
-          az containerapp logs show --name frontend --resource-group "$RESOURCE_GROUP" --tail 200 || \
-            echo "Could not fetch logs via 'az containerapp logs show' -- check Log Analytics or the Azure Portal's 'frontend' Container App > Log stream directly."
-          echo "::endgroup::"
+          # BUG FIX: this step used to try ONLY `az containerapp logs show`
+          # (a live tail against a running replica) and, on failure, just
+          # echo "check Log Analytics ... directly" -- a dead end, not an
+          # actual fallback. That's a real gap specifically on staging:
+          # both `backend` and `frontend` run with min replicas 0 (see this
+          # file's top-of-file comment), so the most common failure this
+          # step exists to diagnose -- a new revision that never passes its
+          # readiness probe and gets scaled back to 0 -- is EXACTLY the
+          # case where there is no live replica for `logs show` to tail.
+          # `logs show` was therefore failing here on every single staging
+          # smoke-test failure, leaving nothing but a pointer to go run a
+          # manual `az monitor log-analytics query` by hand (see
+          # DEPLOYMENT.md/README.md's troubleshooting notes) -- exactly the
+          # extra manual step this whole job exists to avoid.
+          #
+          # Now: still attempt the live tail first (useful on the rarer
+          # "replica came up but degraded" case), then ALWAYS follow up
+          # with a real Log Analytics KQL query for the last 15 minutes of
+          # console output from both apps -- the same query a human would
+          # have to run by hand otherwise, now baked into the workflow log
+          # itself. `take 100` and last-15-minutes both err generous, since
+          # this only runs on failure and needs to be self-sufficient
+          # (nobody's watching the pipeline live to widen the window).
+          ENV_NAME=$(az containerapp env list --resource-group "$RESOURCE_GROUP" \
+                       --query "[0].name" -o tsv)
+          WORKSPACE_ID=$(az containerapp env show --name "$ENV_NAME" --resource-group "$RESOURCE_GROUP" \
+                            --query "properties.appLogsConfiguration.logAnalyticsConfiguration.customerId" -o tsv)
+
+          for APP in backend frontend; do
+            echo "::group::$APP container logs (live tail, last 200 lines)"
+            az containerapp logs show --name "$APP" --resource-group "$RESOURCE_GROUP" --tail 200 || \
+              echo "Could not fetch logs via 'az containerapp logs show' -- no live replica (expected if the revision never passed its readiness probe). Falling through to the Log Analytics query below."
+            echo "::endgroup::"
+          done
+
+          if [ -n "$WORKSPACE_ID" ]; then
+            for APP in backend frontend; do
+              echo "::group::$APP console logs from Log Analytics (last 15 minutes)"
+              az monitor log-analytics query --workspace "$WORKSPACE_ID" \
+                --analytics-query "ContainerAppConsoleLogs_CL | where ContainerAppName_s == '$APP' | where TimeGenerated > ago(15m) | project TimeGenerated, Log_s | order by TimeGenerated desc | take 100" \
+                --output table || echo "Log Analytics query failed for $APP -- check the '$ENV_NAME' Container Apps Environment's Log Analytics workspace directly in the Azure Portal."
+              echo "::endgroup::"
+            done
+          else
+            echo "::warning::Could not resolve the Log Analytics workspace customerId for environment '$ENV_NAME' -- check the Azure Portal's Container Apps Environment > Log stream directly."
+          fi
+
           echo "::group::backend revision status"
           az containerapp revision list --name backend --resource-group "$RESOURCE_GROUP" \
             --query "[].{name:name, active:properties.active, healthState:properties.healthState, runningState:properties.runningState, replicas:properties.replicas}" \
