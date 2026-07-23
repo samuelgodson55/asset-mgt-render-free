@@ -62,6 +62,18 @@ jobs:
           az group show --name "$RESOURCE_GROUP" 2>/dev/null || \
           az group create --name "$RESOURCE_GROUP" --location "${{ secrets.AZURE_LOCATION }}"
 
+      # main.bicep's alerting section (action group + 3 scheduled query
+      # alert rules, see that file's "Alerting" comment) only deploys when
+      # ALERT_EMAIL_ADDRESS is set -- both are Microsoft.Insights resource
+      # types, and a subscription that has never used Azure Monitor
+      # alerting before typically isn't registered for that namespace yet,
+      # which fails the deployment with "MissingSubscriptionRegistration".
+      # Registering an already-registered provider is a fast no-op, so this
+      # runs unconditionally rather than trying to mirror bicep's
+      # ALERT_EMAIL_ADDRESS-gated condition here in bash.
+      - name: Register Microsoft.Insights resource provider (required for alerting)
+        run: az provider register --namespace Microsoft.Insights --wait
+
       # First deploy ever: this `az containerapp show` call fails (backend
       # doesn't exist yet) -- fall back to "latest", which is fine, since
       # deploy-azure-production.yml/-staging.yml will push a real image
