@@ -548,6 +548,7 @@ not you ever push an image).
    az provider register --namespace Microsoft.App
    az provider register --namespace Microsoft.OperationalInsights
    az provider register --namespace Microsoft.Storage
+   az provider register --namespace Microsoft.Network
    ```
    (No `Microsoft.ContainerRegistry`, `Microsoft.DBforPostgreSQL`,
    `Microsoft.Cache`, or `Microsoft.KeyVault` registration needed.)

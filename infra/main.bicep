@@ -2,7 +2,9 @@
 // infra/main.bicep
 // -----------------------------------------------------------------------------
 // COST-OPTIMIZED Azure Container Apps deployment for Snipe-IT Lite --
-// FOUR Container Apps: `frontend`, `backend`, `db`, `redis`.
+// FOUR Container Apps: `frontend`, `backend`, `db`, `redis`, all inside ONE
+// Container Apps Managed Environment (see "SINGLE MANAGED ENVIRONMENT" below
+// for why this file no longer uses three).
 //
 // This is the split-services evolution of an earlier, even leaner version of
 // this file that ran ONE combined `app` container (backend + frontend +
@@ -57,6 +59,42 @@
 // their OWN actual load instead of both being sized for whichever is
 // busier. See DEPLOYMENT.md's Cost section for the full breakdown table.
 //
+// SINGLE MANAGED ENVIRONMENT (was: three, one per trust tier)
+// ---------------------------------------------------------------------------
+// This file previously gave `frontend`, `backend`, and `db`/`redis` each
+// their OWN Container Apps Managed Environment (own delegated subnet, own
+// NSG) purely for network segmentation -- see the git history for that
+// version's "SECURITY FIX" comment. In practice that hit a hard wall:
+// `Microsoft.App/managedEnvironments` is capped by a per-region,
+// per-subscription quota (`MaxNumberOfRegionalEnvironmentsInSubExceeded`),
+// and on most subscription tiers that quota is far too low to spend three
+// of it on one app. Three environments is a deploy-time failure on those
+// subscriptions, not just a theoretical concern -- this is the fix for
+// exactly that failure.
+//
+// Consolidated back to ONE environment (`env` below), one subnet, one NSG.
+// All four Container Apps + the `migrate` Job now share it. The trade-off:
+// an NSG applies at the SUBNET boundary, and every app inside one Container
+// Apps Environment shares that environment's one subnet -- Azure does not
+// let you attach per-app network rules within an environment (see
+// https://learn.microsoft.com/azure/container-apps/firewall-integration),
+// so the lateral-movement protection the three-subnet design bought (a
+// compromised `frontend` literally cannot resolve/reach `db`/`redis` on the
+// wire, regardless of application logic) is gone. What's still in place,
+// unchanged, at the APPLICATION layer:
+//   - `db`/`redis`/`backend` all still set `ingress.external: false` --
+//     none of them ever get a public FQDN, only `frontend` does.
+//   - `backend`'s API still only trusts requests proxied through
+//     `frontend` in practice (same-origin cookie auth, see the comment
+//     above), and `db`/`redis` still require their own passwords.
+// What's gone is defense-in-depth against a compromised container
+// port-scanning its neighbors directly -- if that risk matters more to you
+// than the quota/cost trade, either request an environment-quota increase
+// from Azure support and restore the three-environment version from git
+// history, or self-host a reverse proxy/service mesh inside this one
+// environment instead. For most early-stage deployments, the small
+// standing risk is an acceptable trade for "the deploy actually succeeds."
+//
 // WHAT'S UNCHANGED FROM THE COMBINED-`app` VERSION (see that version's
 // original comment, preserved in git history, for the full reasoning)
 // ---------------------------------------------------------------------------
@@ -86,8 +124,8 @@
 //   - Log Analytics workspace                    (Container Apps console/system logs)
 //   - Storage Account + 3 Azure Files shares      (Postgres data dir, backup_data, export_data --
 //                                                   billed by GB actually used, not provisioned)
-//   - VNet (3 delegated subnets + NSGs)            (frontend/backend/data isolation -- see SECURITY FIX comment below; no fixed floor)
-//   - 3 Container Apps Environments                (Consumption plan, one per subnet/trust tier -- no fixed floor)
+//   - VNet (1 delegated subnet + NSG)              (see SINGLE MANAGED ENVIRONMENT comment above; no fixed floor)
+//   - 1 Container Apps Environment                 (Consumption plan, shared by every app below -- no fixed floor; see SINGLE MANAGED ENVIRONMENT comment above for why this is 1, not 3)
 //   - 4 Container Apps:
 //       `db`       -- postgres:16-alpine, official Docker Hub image, internal-only, 1 replica always
 //       `redis`    -- redis:7-alpine, official Docker Hub image, internal-only, 1 replica always
@@ -451,65 +489,38 @@ resource exportShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023
 }
 
 // ---------------------------------------------------------------------------
-// SECURITY FIX -- Strict VNet isolation (was: no VNet at all)
+// SINGLE SUBNET, SINGLE NSG (was: three subnets/NSGs, one per trust tier)
 // ---------------------------------------------------------------------------
-// Before this change, all four container apps (`frontend`, `backend`, `db`,
-// `redis`) shared ONE Container Apps Environment on Azure's auto-generated,
-// unmanaged network. Internal-only ingress on `db`/`backend` stops the
-// PUBLIC internet from reaching them directly, but it does nothing to stop
-// LATERAL movement: any app in that same environment can already resolve
-// and reach any other app's internal DNS name on any port -- there was no
-// NSG, because there was no customer-owned subnet to attach one to. A
-// compromised `frontend` (e.g. via a dependency RCE) could port-scan and
-// query `db:5432` / `redis:6379` directly, completely bypassing `backend`.
-//
-// A single shared environment can't fix this on its own: an NSG applies at
-// the SUBNET boundary, and every app inside one Container Apps Environment
-// shares that environment's one subnet -- Azure does not let you attach
-// per-app network rules within an environment (see
-// https://learn.microsoft.com/azure/container-apps/firewall-integration).
-// The only way to get real network segmentation between these apps is to
-// give each trust tier its OWN environment (own dedicated subnet), and
-// filter the traffic *between* those subnets with NSGs. That's what this
-// section does -- three environments instead of one, still Consumption
-// plan (no extra always-on cost; environments themselves are free, you
-// only pay for app usage), all inside one VNet so internal DNS still
-// resolves environment-to-environment:
-//
-//   frontend-subnet (10.0.0.0/23)  -> `frontendEnv`  (external ingress, public)
-//   backend-subnet  (10.0.2.0/23)  -> `backendEnv`   (internal, + `migrate` job)
-//   data-subnet     (10.0.4.0/23)  -> `dataEnv`      (internal: `db`, `redis`)
-//
-// NSG allow-list (default-deny for everything else moving BETWEEN subnets):
-//   Internet         -> frontend-subnet : 443/80          (public ingress)
-//   frontend-subnet  -> backend-subnet  : 8000            (frontend's nginx -> backend API)
-//   backend-subnet   -> data-subnet     : 5432, 6379      (backend -> db, redis)
-//   (everything else inbound from VirtualNetwork is explicitly denied)
-//
-// Net effect: a compromised `frontend` container can reach `backend:8000`
-// and nothing else -- it can no longer see `db`/`redis` at all, on any
-// port, because they're on a different subnet with an NSG that doesn't
-// allow frontend-subnet traffic in. A compromised `backend` container is
-// similarly capped at 5432/6379 into data-subnet; it cannot be used to
-// pivot into frontend-subnet (nothing allows backend -> frontend inbound).
-// Required Azure platform/management traffic (health probes, image pulls,
-// Log Analytics, Azure Files mounts, DNS, etc.) is left open via the
-// `AzureCloud`/`AzureLoadBalancer`/`Storage` service tags per Microsoft's
-// documented NSG requirements for VNet-injected Consumption environments --
-// double-check that list against the current docs before tightening
-// further, since Azure has occasionally added new required ports there.
+// See the "SINGLE MANAGED ENVIRONMENT" comment at the top of this file for
+// the full story: three Managed Environments blew through this
+// subscription's per-region environment quota
+// (`MaxNumberOfRegionalEnvironmentsInSubExceeded`), so all four Container
+// Apps + the `migrate` Job now share ONE environment, and therefore one
+// delegated subnet. An NSG can only filter traffic AT a subnet boundary, so
+// with everything on one subnet there is no NSG rule that can allow
+// `frontend -> backend:8000` while denying `frontend -> db:5432` -- that
+// distinction no longer exists at the network layer. This one NSG instead
+// covers what's still true regardless of subnet layout: only the public
+// internet -> `frontend` path needs to be open at all, everything else
+// (`db`/`redis`/`backend`'s own `ingress.external: false`) already never
+// gets a public IP, so it's unreachable from outside the VNet no matter
+// what this NSG says.
 // ---------------------------------------------------------------------------
 
-var frontendSubnetPrefix = '10.0.0.0/23'
-var backendSubnetPrefix = '10.0.2.0/23'
-var dataSubnetPrefix = '10.0.4.0/23'
+var subnetPrefix = '10.0.0.0/23'
 
-resource nsgFrontend 'Microsoft.Network/networkSecurityGroups@2023-09-01' = {
-  name: '${namePrefix}-nsg-frontend'
+resource nsg 'Microsoft.Network/networkSecurityGroups@2023-09-01' = {
+  name: '${namePrefix}-nsg'
   location: location
   properties: {
     securityRules: [
       {
+        // The only public entry point into the whole environment --
+        // `frontend`'s external ingress. `backend`/`db`/`redis` all set
+        // `ingress.external: false`, so this rule being broad (whole
+        // subnet, not just frontend's IP) doesn't expose them: they simply
+        // never get a public FQDN/IP for the internet to reach in the
+        // first place, regardless of what this NSG allows.
         name: 'Allow-Internet-HTTPS-Inbound'
         properties: {
           priority: 100
@@ -535,127 +546,6 @@ resource nsgFrontend 'Microsoft.Network/networkSecurityGroups@2023-09-01' = {
           destinationPortRange: '*'
         }
       }
-      {
-        // Explicit default-deny for lateral movement FROM other subnets in
-        // this VNet into frontend-subnet -- nothing (backend, data, or a
-        // future subnet) should ever need to reach `frontend` directly.
-        name: 'Deny-VirtualNetwork-Inbound'
-        properties: {
-          priority: 4000
-          direction: 'Inbound'
-          access: 'Deny'
-          protocol: '*'
-          sourceAddressPrefix: 'VirtualNetwork'
-          sourcePortRange: '*'
-          destinationAddressPrefix: '*'
-          destinationPortRange: '*'
-        }
-      }
-    ]
-  }
-}
-
-resource nsgBackend 'Microsoft.Network/networkSecurityGroups@2023-09-01' = {
-  name: '${namePrefix}-nsg-backend'
-  location: location
-  properties: {
-    securityRules: [
-      {
-        // Only `frontend`'s nginx reverse proxy may call `backend`'s API port.
-        name: 'Allow-Frontend-To-Backend-Inbound'
-        properties: {
-          priority: 100
-          direction: 'Inbound'
-          access: 'Allow'
-          protocol: 'Tcp'
-          sourceAddressPrefix: frontendSubnetPrefix
-          sourcePortRange: '*'
-          destinationAddressPrefix: '*'
-          destinationPortRange: '8000'
-        }
-      }
-      {
-        name: 'Allow-AzureLoadBalancer-Inbound'
-        properties: {
-          priority: 110
-          direction: 'Inbound'
-          access: 'Allow'
-          protocol: '*'
-          sourceAddressPrefix: 'AzureLoadBalancer'
-          sourcePortRange: '*'
-          destinationAddressPrefix: '*'
-          destinationPortRange: '*'
-        }
-      }
-      {
-        // Blocks port-scanning/lateral movement from a compromised
-        // `frontend` (or anything else in the VNet) against backend-subnet
-        // on anything other than the one allowed port above.
-        name: 'Deny-VirtualNetwork-Inbound'
-        properties: {
-          priority: 4000
-          direction: 'Inbound'
-          access: 'Deny'
-          protocol: '*'
-          sourceAddressPrefix: 'VirtualNetwork'
-          sourcePortRange: '*'
-          destinationAddressPrefix: '*'
-          destinationPortRange: '*'
-        }
-      }
-    ]
-  }
-}
-
-resource nsgData 'Microsoft.Network/networkSecurityGroups@2023-09-01' = {
-  name: '${namePrefix}-nsg-data'
-  location: location
-  properties: {
-    securityRules: [
-      {
-        // Only `backend` (embedded Celery worker/beat included) may reach
-        // `db`/`redis` -- never `frontend`, closing the exact gap described
-        // in the threat model (compromised container port-scanning peers).
-        name: 'Allow-Backend-To-Data-Inbound'
-        properties: {
-          priority: 100
-          direction: 'Inbound'
-          access: 'Allow'
-          protocol: 'Tcp'
-          sourceAddressPrefix: backendSubnetPrefix
-          sourcePortRange: '*'
-          destinationAddressPrefix: '*'
-          destinationPortRanges: ['5432', '6379']
-        }
-      }
-      {
-        name: 'Allow-AzureLoadBalancer-Inbound'
-        properties: {
-          priority: 110
-          direction: 'Inbound'
-          access: 'Allow'
-          protocol: '*'
-          sourceAddressPrefix: 'AzureLoadBalancer'
-          sourcePortRange: '*'
-          destinationAddressPrefix: '*'
-          destinationPortRange: '*'
-        }
-      }
-      {
-        // Default-deny: `frontend` (or anything else) cannot reach `db`/
-        // `redis` at all, on any port -- this is the core of the fix.
-        name: 'Deny-VirtualNetwork-Inbound'
-        properties: {
-          priority: 4000
-          direction: 'Inbound'
-          access: 'Deny'
-          protocol: '*'
-          sourceAddressPrefix: 'VirtualNetwork'
-          sourcePortRange: '*'
-          destinationAddressPrefix: '*'
-          destinationPortRange: '*'
-        }
-      }
     ]
   }
 }
@@ -667,30 +557,10 @@ resource vnet 'Microsoft.Network/virtualNetworks@2023-09-01' = {
     addressSpace: { addressPrefixes: ['10.0.0.0/16'] }
     subnets: [
       {
-        name: 'frontend-subnet'
+        name: 'app-subnet'
         properties: {
-          addressPrefix: frontendSubnetPrefix
-          networkSecurityGroup: { id: nsgFrontend.id }
-          delegations: [
-            { name: 'Microsoft.App.environments', properties: { serviceName: 'Microsoft.App/environments' } }
-          ]
-        }
-      }
-      {
-        name: 'backend-subnet'
-        properties: {
-          addressPrefix: backendSubnetPrefix
-          networkSecurityGroup: { id: nsgBackend.id }
-          delegations: [
-            { name: 'Microsoft.App.environments', properties: { serviceName: 'Microsoft.App/environments' } }
-          ]
-        }
-      }
-      {
-        name: 'data-subnet'
-        properties: {
-          addressPrefix: dataSubnetPrefix
-          networkSecurityGroup: { id: nsgData.id }
+          addressPrefix: subnetPrefix
+          networkSecurityGroup: { id: nsg.id }
           delegations: [
             { name: 'Microsoft.App.environments', properties: { serviceName: 'Microsoft.App/environments' } }
           ]
@@ -701,13 +571,16 @@ resource vnet 'Microsoft.Network/virtualNetworks@2023-09-01' = {
 }
 
 // ---------------------------------------------------------------------------
-// Three Container Apps Environments (one per trust tier -- see the VNet
-// comment above for why one shared environment can't be NSG-segmented).
-// Each is still Consumption plan: no fixed monthly floor, same billing
-// model as before.
+// ONE Container Apps Environment shared by `frontend`, `backend`, `db`,
+// `redis`, and the `migrate` Job -- see the "SINGLE MANAGED ENVIRONMENT"
+// comment at the top of this file. Still Consumption plan: no fixed
+// monthly floor, same billing model as before. `internal: false` because
+// `frontend` needs a public FQDN; `db`/`redis`/`backend` opt out of public
+// ingress individually via their own `ingress.external: false`, same as
+// when they had a dedicated internal environment each.
 // ---------------------------------------------------------------------------
-resource frontendEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
-  name: '${namePrefix}-env-frontend'
+resource env 'Microsoft.App/managedEnvironments@2024-03-01' = {
+  name: '${namePrefix}-env'
   location: location
   properties: {
     appLogsConfiguration: {
@@ -719,49 +592,13 @@ resource frontendEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
     }
     vnetConfiguration: {
       infrastructureSubnetId: vnet.properties.subnets[0].id
-      internal: false // must stay externally reachable -- this is the one public entry point
-    }
-  }
-}
-
-resource backendEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
-  name: '${namePrefix}-env-backend'
-  location: location
-  properties: {
-    appLogsConfiguration: {
-      destination: 'log-analytics'
-      logAnalyticsConfiguration: {
-        customerId: logAnalytics.properties.customerId
-        sharedKey: logAnalytics.listKeys().primarySharedKey
-      }
-    }
-    vnetConfiguration: {
-      infrastructureSubnetId: vnet.properties.subnets[1].id
-      internal: true // no public ingress needed -- only frontend-subnet may reach it (see nsgBackend)
-    }
-  }
-}
-
-resource dataEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
-  name: '${namePrefix}-env-data'
-  location: location
-  properties: {
-    appLogsConfiguration: {
-      destination: 'log-analytics'
-      logAnalyticsConfiguration: {
-        customerId: logAnalytics.properties.customerId
-        sharedKey: logAnalytics.listKeys().primarySharedKey
-      }
-    }
-    vnetConfiguration: {
-      infrastructureSubnetId: vnet.properties.subnets[2].id
-      internal: true // no public ingress -- only backend-subnet may reach it (see nsgData)
+      internal: false // must stay externally reachable -- `frontend` is the one public entry point
     }
   }
 }
 
 resource postgresStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' = {
-  parent: dataEnv
+  parent: env
   name: 'postgres-data'
   properties: {
     azureFile: {
@@ -774,7 +611,7 @@ resource postgresStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01'
 }
 
 resource backupStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' = {
-  parent: backendEnv
+  parent: env
   name: 'backup-data'
   properties: {
     azureFile: {
@@ -787,7 +624,7 @@ resource backupStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' =
 }
 
 resource exportStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' = {
-  parent: backendEnv
+  parent: env
   name: 'export-data'
   properties: {
     azureFile: {
@@ -801,20 +638,20 @@ resource exportStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' =
 
 // ---------------------------------------------------------------------------
 // `db` -- Postgres 16, official image straight from Docker Hub (no registry
-// of your own needed for this one). Internal-only TCP ingress, in its own
-// `dataEnv`/data-subnet -- reachable ONLY from `backend`/`migrate` (both in
-// backend-subnet) via `db.${dataEnv...defaultDomain}:5432`, per nsgData's
-// allow-list; never from the public internet, and no longer reachable from
-// `frontend` either (see the VNet isolation comment above). Pinned to
-// EXACTLY 1 replica always: a
-// stateful single-writer database must never be scaled out, and Consumption
-// plan TCP-ingress apps don't support HTTP-style autoscale rules anyway.
+// of your own needed for this one). Internal-only TCP ingress (`ingress.
+// external: false`), in the shared `env` -- never gets a public FQDN, so
+// it's unreachable from the internet regardless of the NSG (see "SINGLE
+// MANAGED ENVIRONMENT"/"SINGLE SUBNET, SINGLE NSG" comments above for why
+// there's no longer a network-layer wall between `db` and `frontend`
+// specifically). Pinned to EXACTLY 1 replica always: a stateful
+// single-writer database must never be scaled out, and Consumption plan
+// TCP-ingress apps don't support HTTP-style autoscale rules anyway.
 // ---------------------------------------------------------------------------
 resource dbApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: 'db'
   location: location
   properties: {
-    managedEnvironmentId: dataEnv.id
+    managedEnvironmentId: env.id
     configuration: {
       activeRevisionsMode: 'Single'
       secrets: [
@@ -867,19 +704,18 @@ resource dbApp 'Microsoft.App/containerApps@2024-03-01' = {
 }
 
 // ---------------------------------------------------------------------------
-// `redis` -- official image from Docker Hub. Internal-only TCP ingress, in
-// `dataEnv`/data-subnet alongside `db` -- reachable ONLY from `backend` as
-// `redis.${dataEnv...defaultDomain}:6379`, per nsgData's allow-list; never
-// from `frontend` or the public internet. No persistent volume (see top-of-file comment
-// on why that's an acceptable trade for this app's Redis usage) -- an
-// in-memory cache/broker that resets on restart, exactly like Render's free
-// Key Value tier.
+// `redis` -- official image from Docker Hub. Internal-only TCP ingress
+// (`ingress.external: false`), in the shared `env` alongside `db` -- never
+// gets a public FQDN, so it's unreachable from the internet regardless of
+// the NSG. No persistent volume (see top-of-file comment on why that's an
+// acceptable trade for this app's Redis usage) -- an in-memory cache/broker
+// that resets on restart, exactly like Render's free Key Value tier.
 // ---------------------------------------------------------------------------
 resource redisApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: 'redis'
   location: location
   properties: {
-    managedEnvironmentId: dataEnv.id
+    managedEnvironmentId: env.id
     configuration: {
       activeRevisionsMode: 'Single'
       secrets: [
@@ -925,15 +761,14 @@ resource redisApp 'Microsoft.App/containerApps@2024-03-01' = {
 // Shared env vars -- reused by `backend` (the live service) and `migrate`
 // (the one-shot alembic job, same image as `backend`).
 // ---------------------------------------------------------------------------
-// `db`/`redis` now live in `dataEnv`, a DIFFERENT environment than
-// `backend` (`backendEnv`) -- the short in-environment name ("db") only
-// resolves for apps in the SAME environment, so cross-environment calls
-// need the target app's full internal FQDN instead. Both environments'
-// private DNS zones are linked to the same VNet, so this still resolves
-// fine from `backendEnv`.
-var databaseUrl = 'postgresql://${postgresUsername}:${postgresPassword}@db.${dataEnv.properties.defaultDomain}:5432/asset_db'
-var redisUrl = 'redis://:${redisPassword}@redis.${dataEnv.properties.defaultDomain}:6379/0'
-var frontendFqdn = 'frontend.${frontendEnv.properties.defaultDomain}'
+// `db`/`redis`/`backend`/`frontend` all now live in the same shared `env`
+// (see "SINGLE MANAGED ENVIRONMENT" above), so the short in-environment DNS
+// name (just the app name, e.g. "db") resolves fine for all of them -- no
+// need for the longer cross-environment FQDN form this used when `db`/
+// `redis` lived in a separate `dataEnv`.
+var databaseUrl = 'postgresql://${postgresUsername}:${postgresPassword}@db:5432/asset_db'
+var redisUrl = 'redis://:${redisPassword}@redis:6379/0'
+var frontendFqdn = 'frontend.${env.properties.defaultDomain}'
 var publicOrigin = empty(customDomain) ? 'https://${frontendFqdn}' : 'https://${customDomain}'
 
 var sharedEnv = [
@@ -1003,19 +838,19 @@ var registries = usePrivateDockerHubRepo ? [
 
 // ---------------------------------------------------------------------------
 // `backend` -- FastAPI + embedded Celery worker/beat (backend/Dockerfile,
-// RUN_EMBEDDED_WORKER=true). INTERNAL-ONLY ingress, in its own `backendEnv`/
-// backend-subnet -- nsgBackend only allows inbound from frontend-subnet on
-// port 8000, so only `frontend` can ever reach it (the public internet
-// never talks to it directly, and `migrate` runs from this same subnet).
-// It in turn is the only thing nsgData allows into data-subnet, so it's
-// the sole path to `db`/`redis` too. Scales 0-N independent of `frontend` --
-// see top-of-file comment for why Redis is what makes this safe past 1 replica.
+// RUN_EMBEDDED_WORKER=true). INTERNAL-ONLY ingress (`ingress.external:
+// false`), in the shared `env` -- never gets a public FQDN, so the public
+// internet never talks to it directly; only `frontend`'s reverse proxy and
+// the `migrate` Job ever call it (see "SINGLE MANAGED ENVIRONMENT" above
+// for why this is app-layer isolation now, not a subnet/NSG wall). Scales
+// 0-N independent of `frontend` -- see top-of-file comment for why Redis is
+// what makes this safe past 1 replica.
 // ---------------------------------------------------------------------------
 resource backendApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: 'backend'
   location: location
   properties: {
-    managedEnvironmentId: backendEnv.id
+    managedEnvironmentId: env.id
     configuration: {
       activeRevisionsMode: 'Single'
       registries: registries
@@ -1082,20 +917,20 @@ resource backendApp 'Microsoft.App/containerApps@2024-03-01' = {
 // ---------------------------------------------------------------------------
 // `frontend` -- frontend/Dockerfile, UNMODIFIED from local Docker Compose:
 // serves the static frontend build AND reverse-proxies /api/* to `backend`
-// over the VNet's shared internal DNS, now cross-environment
+// over the shared environment's internal DNS
 // (nginx/default.conf.template's BACKEND_HOST/BACKEND_PORT env vars --
 // resolver auto-detected at boot, see
-// nginx/docker-entrypoint.d/15-detect-resolver-ip.sh). In its own
-// `frontendEnv`/frontend-subnet -- the ONLY externally-reachable app, and
-// nsgFrontend denies any inbound from the rest of the VNet, so nothing
-// (including a compromised `backend`) can reach frontend-subnet either.
-// Scales 0-N independent of `backend`.
+// nginx/docker-entrypoint.d/15-detect-resolver-ip.sh). In the shared `env`
+// -- the ONLY app here with `ingress.external: true`, so it's the sole
+// externally-reachable app (see "SINGLE MANAGED ENVIRONMENT" above for why
+// that app-layer setting, not a subnet/NSG wall, is what now enforces
+// this). Scales 0-N independent of `backend`.
 // ---------------------------------------------------------------------------
 resource frontendApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: 'frontend'
   location: location
   properties: {
-    managedEnvironmentId: frontendEnv.id
+    managedEnvironmentId: env.id
     configuration: {
       activeRevisionsMode: 'Single'
       registries: registries
@@ -1117,14 +952,10 @@ resource frontendApp 'Microsoft.App/containerApps@2024-03-01' = {
           resources: { cpu: json('0.25'), memory: '0.5Gi' }
           env: [
             { name: 'PORT', value: '80' }
-            // `backend` now lives in a DIFFERENT environment (`backendEnv`)
-            // than `frontend` (`frontendEnv`) -- the short name "backend"
-            // only resolves within the same environment, so this needs
-            // backend's full internal FQDN instead. Both environments'
-            // private DNS zones are linked to the same VNet, so this
-            // resolves fine from `frontendEnv`. The NSG on backend-subnet
-            // still only allows traffic FROM frontend-subnet on 8000.
-            { name: 'BACKEND_HOST', value: 'backend.${backendEnv.properties.defaultDomain}' }
+            // `frontend` and `backend` now share the same environment (see
+            // "SINGLE MANAGED ENVIRONMENT" above), so the short
+            // in-environment DNS name resolves directly -- no FQDN needed.
+            { name: 'BACKEND_HOST', value: 'backend' }
             { name: 'BACKEND_PORT', value: '8000' }
             { name: 'ENABLE_API_DOCS', value: string(enableApiDocs) } // must match backend's own value -- see nginx/default.conf.template's /docs passthrough gating
             // RESOLVER_IP deliberately NOT set -- nginx/docker-entrypoint.d/15-detect-resolver-ip.sh
@@ -1163,10 +994,9 @@ resource migrateJob 'Microsoft.App/jobs@2024-03-01' = {
   name: 'migrate'
   location: location
   properties: {
-    // Must run from backend-subnet, not frontend-subnet or a standalone
-    // environment -- nsgData only allows inbound to data-subnet from
-    // backendSubnetPrefix (see the VNet isolation comment above).
-    environmentId: backendEnv.id
+    // Runs from the same shared `env` as `db`/`backend` so the short
+    // in-environment DNS name (used inside `databaseUrl` above) resolves.
+    environmentId: env.id
     configuration: {
       triggerType: 'Manual'
       replicaTimeout: 600
@@ -1195,9 +1025,7 @@ resource migrateJob 'Microsoft.App/jobs@2024-03-01' = {
 // ---------------------------------------------------------------------------
 // Outputs -- consumed by the GitHub Actions deploy workflows.
 // ---------------------------------------------------------------------------
-output frontendEnvName string = frontendEnv.name
-output backendEnvName string = backendEnv.name
-output dataEnvName string = dataEnv.name
+output envName string = env.name
 output frontendFqdn string = frontendApp.properties.configuration.ingress.fqdn
 output frontendAppName string = frontendApp.name
 output backendAppName string = backendApp.name
