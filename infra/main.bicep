@@ -950,6 +950,20 @@ resource frontendApp 'Microsoft.App/containerApps@2024-03-01' = {
     configuration: {
       activeRevisionsMode: 'Single'
       registries: registries
+      // `frontend` never touches the database, Redis, JWTs, or SMTP, so it
+      // gets none of `sharedSecrets` -- but Container Apps still requires
+      // any secret referenced by `registries[].passwordSecretRef` (here,
+      // 'dockerhub-token') to be declared in THIS app's own `secrets` list,
+      // not just somewhere else in the template. Without this, deploying
+      // with a private Docker Hub repo (dockerHubUsername set) fails with
+      // "ContainerAppRegistriesPasswordSecretRefNotFound: PasswordSecretRef
+      // 'dockerhub-token' defined for registry server 'index.docker.io' not
+      // found" on this app specifically -- `backendApp`/`migrateJob` never
+      // hit this because they already pass the full `sharedSecrets` (which
+      // conditionally includes 'dockerhub-token') here.
+      secrets: usePrivateDockerHubRepo ? [
+        { name: 'dockerhub-token', value: dockerHubToken }
+      ] : []
       ingress: {
         external: true
         targetPort: 80
