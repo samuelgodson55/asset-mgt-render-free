@@ -17,12 +17,14 @@
 # rollback path, reusing this same migrate -> deploy -> smoke-test ->
 # auto-rollback machinery instead of raw `az containerapp update` commands).
 #
-# COST-OPTIMIZED, 4-SERVICE SHAPE: `frontend`, `backend`, `db`, `redis` --
-# see infra/main.bicep's top-of-file comment. TWO custom images:
-# `backend` (backend/Dockerfile) and `frontend` (frontend/Dockerfile,
-# unmodified from local Docker Compose). `db`/`redis` run official
-# postgres/redis images pulled straight from Docker Hub and are never
-# rebuilt here.
+# COST-OPTIMIZED SHAPE: `frontend`, `backend`, `redis` (Container Apps) +
+# Azure Database for PostgreSQL Flexible Server (`postgresServer`, a managed
+# service, NOT a Container App) -- see infra/main.bicep's top-of-file
+# comment. TWO custom images: `backend` (backend/Dockerfile) and `frontend`
+# (frontend/Dockerfile, unmodified from local Docker Compose). `redis` runs
+# the official Redis image pulled straight from Docker Hub and is never
+# rebuilt here; Postgres has no image to rebuild at all -- it's a PaaS
+# resource, patched by Azure itself.
 #
 # Stages (given an `image_tag` that release.yml has already built & pushed):
 #   1. Run `alembic upgrade head` as a Container Apps Job, using the NEW
@@ -35,9 +37,10 @@
 #      `backend` is reachable through it -- see the /api/auth/me check)
 #   4. Roll back automatically if the smoke test fails
 #
-# `db` and `redis` are NOT touched by this pipeline -- they run fixed
-# official images and only change when infra/main.bicep itself changes
-# (see infra-deploy.yml).
+# `redis` and `postgresServer` are NOT touched by this pipeline -- `redis`
+# runs a fixed official image and only changes when infra/main.bicep itself
+# changes (see infra-deploy.yml); `postgresServer` is a managed service with
+# no image or Container App revision to roll at all.
 # -----------------------------------------------------------------------------
 name: Deploy to Azure (Production)
 
@@ -188,10 +191,10 @@ jobs:
       # Container Apps' Single revision mode replaces replicas gradually and
       # only routes traffic to new replicas once their readiness probe
       # passes (see infra/main.bicep's `probes` blocks) -- this IS the
-      # rolling update for each app; no extra orchestration needed. `db`
-      # and `redis` are never touched by this step. `backend` is updated
-      # first so `frontend`'s proxy target is already correct by the time
-      # `frontend` itself rolls out.
+      # rolling update for each app; no extra orchestration needed. `redis`
+      # and `postgresServer` are never touched by this step. `backend` is
+      # updated first so `frontend`'s proxy target is already correct by
+      # the time `frontend` itself rolls out.
       - name: Update backend
         run: |
           az containerapp update --name backend --resource-group "$RESOURCE_GROUP" \

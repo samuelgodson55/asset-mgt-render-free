@@ -2,9 +2,70 @@
 // infra/main.bicep
 // -----------------------------------------------------------------------------
 // COST-OPTIMIZED Azure Container Apps deployment for Snipe-IT Lite --
-// FOUR Container Apps: `frontend`, `backend`, `db`, `redis`, all inside ONE
+// THREE Container Apps: `frontend`, `backend`, `redis`, all inside ONE
 // Container Apps Managed Environment (see "SINGLE MANAGED ENVIRONMENT" below
-// for why this file no longer uses three).
+// for why this file uses one, not three), PLUS a managed Azure Database for
+// PostgreSQL Flexible Server (`postgresServer` below) -- NOT a fourth
+// Container App. See "WHY POSTGRES IS A MANAGED SERVICE, NOT A CONTAINER
+// APP" immediately below for why that one piece can't be a Container App at
+// all, regardless of budget.
+//
+// WHY POSTGRES IS A MANAGED SERVICE, NOT A CONTAINER APP
+// ---------------------------------------------------------------------------
+// An earlier version of this file ran Postgres as a fourth Container App
+// (`db`, official postgres:16-alpine image) on a persistent Azure Files
+// share, the same pattern still used below for `redis` and for
+// `backend`'s `backup-data`/`export-data` volumes. That is NOT a sizing
+// problem you can fix with a bigger container -- it fails at container
+// *start*, before Postgres ever gets to serve a single query:
+//
+//   F chmod: /var/lib/postgresql/data/pgdata: Operation not permitted
+//   F initdb: error: could not change permissions of directory
+//     "/var/lib/postgresql/data/pgdata": Operation not permitted
+//
+// Azure Files (an SMB/NFS share) does not implement real POSIX ownership
+// and permission bits the way a local/managed block-storage disk does --
+// `chmod`/`chown` on a mounted Azure Files share are either silently
+// ignored or rejected, depending on protocol and mount options. Postgres's
+// own `initdb` unconditionally `chmod 700`s its data directory as a
+// hard-coded safety check (refuses to run as an unprivileged process
+// otherwise) -- there is no Postgres config flag, entrypoint env var, or
+// Container Apps CPU/memory setting that makes that call succeed against
+// Azure Files. This is a documented, permanent incompatibility between
+// Azure Files and any database engine that needs POSIX file permissions on
+// its data directory (Postgres, MySQL, etc.) -- not something this app was
+// doing wrong. Every Container Apps persistent-volume option
+// (`AzureFile`, and the newer `NfsAzureFile`) is backed by Azure Files
+// under the hood, so there is no volume type inside Container Apps that
+// fixes this -- the storage layer itself is the blocker, not the
+// container.
+//
+// `redis` and `backend`'s `backup-data`/`export-data` volumes don't hit
+// this: Redis's own data files don't need `chmod`-on-boot the way
+// `initdb` does (and this app already runs `redis` with `--appendonly no`,
+// no persistence at all), and `backend`'s own files are written by the app
+// itself post-boot, not by a startup routine that hard-fails on a
+// permission-bit mismatch. Postgres is the one piece of this stack Azure
+// Files structurally cannot host.
+//
+// The fix: Azure Database for PostgreSQL Flexible Server
+// (`postgresServer` below) -- Postgres running on Microsoft-managed,
+// Postgres-aware storage (not Azure Files), so `initdb`'s `chmod` succeeds
+// the normal way. This also removes an entire category of self-inflicted
+// ops work this file used to take on for a single-instance, single-writer
+// database it was never actually a good idea to hand-roll: patching minor
+// versions, taking your own backups as the *only* backup story (this
+// app's own `pg_dump`-based backups, still available via
+// `ENABLE_AUTO_BACKUP`, are now a *convenience* layer on top of the
+// managed service's own automated backups/point-in-time-restore, not the
+// only line of defense), and reasoning about `chmod`/ownership edge cases
+// on a shared filesystem a database was never designed to run on. The
+// added cost is small (smallest Burstable SKU, see the `postgresSkuName`
+// parameter below) and, unlike the old `db` Container App, buys you
+// automated backups with point-in-time restore, engine patching, and a
+// supported upgrade path -- for a stateful single-writer database, that
+// trade is worth taking even in a cost-optimized design. See
+// DEPLOYMENT.md's Cost section for the updated numbers.
 //
 // This is the split-services evolution of an earlier, even leaner version of
 // this file that ran ONE combined `app` container (backend + frontend +
@@ -17,7 +78,7 @@
 // Celery workers) even if no API calls are actually happening, and vice
 // versa. This version decouples them.
 //
-// WHY `redis` IS STILL HERE, NOT JUST `frontend`/`backend`/`db`
+// WHY `redis` IS STILL A CONTAINER APP, NOT JUST `frontend`/`backend`
 // ---------------------------------------------------------------------------
 // `backend` runs with RUN_EMBEDDED_WORKER=true (same as before) and now
 // genuinely autoscales 0-N on its own, independent of `frontend`. Once
@@ -30,10 +91,12 @@
 //     run pg_dump at 3am simultaneously)
 // Cutting Redis would mean pinning `backend` to exactly 1 replica forever
 // (no real autoscaling) or silently breaking all three of the above the
-// first time it scales past 1. Keeping Redis as a small 4th container is
-// what makes `backend`'s autoscaling actually SAFE, not just theoretically
-// possible -- and it's cheap (same 0.25 vCPU/0.5 GiB as before, no
-// persistent volume, same acceptable "resets on restart" trade as before).
+// first time it scales past 1. Unlike Postgres (see above), Redis here
+// runs with `--appendonly no` -- no on-disk persistence at all, so it
+// never touches Azure Files and never hits the `chmod`/`initdb` problem --
+// keeping it as a small Container App (not a managed Azure Cache instance)
+// is a safe, cheap trade (0.25 vCPU/0.5 GiB, same acceptable "resets on
+// restart" trade as before).
 //
 // WHY `frontend` IS ITS OWN CONTAINER APP, NOT FOLDED INTO `backend`
 // ---------------------------------------------------------------------------
@@ -73,24 +136,31 @@
 // exactly that failure.
 //
 // Consolidated back to ONE environment (`env` below), one subnet, one NSG.
-// All four Container Apps + the `migrate` Job now share it. The trade-off:
-// an NSG applies at the SUBNET boundary, and every app inside one Container
-// Apps Environment shares that environment's one subnet -- Azure does not
-// let you attach per-app network rules within an environment (see
+// `frontend`, `backend`, `redis`, and the `migrate` Job all share it (Postgres
+// is a separate managed service outside this environment entirely -- see
+// "WHY POSTGRES IS A MANAGED SERVICE" above -- so it isn't part of this
+// quota/subnet discussion at all). The trade-off: an NSG applies at the
+// SUBNET boundary, and every app inside one Container Apps Environment
+// shares that environment's one subnet -- Azure does not let you attach
+// per-app network rules within an environment (see
 // https://learn.microsoft.com/azure/container-apps/firewall-integration),
-// so the lateral-movement protection the three-subnet design bought (a
-// compromised `frontend` literally cannot resolve/reach `db`/`redis` on the
-// wire, regardless of application logic) is gone. What's still in place,
-// unchanged, at the APPLICATION layer:
-//   - `db`/`redis`/`backend` all still set `ingress.external: false` --
-//     none of them ever get a public FQDN, only `frontend` does.
+// so the lateral-movement protection a three-subnet design would buy (a
+// compromised `frontend` literally cannot resolve/reach `redis` on the
+// wire, regardless of application logic) isn't present here. What's still
+// in place, unchanged, at the APPLICATION layer:
+//   - `redis`/`backend` both still set `ingress.external: false` -- neither
+//     ever gets a public FQDN, only `frontend` does. `postgresServer`
+//     likewise has no Container Apps ingress at all (it isn't a Container
+//     App); its own firewall rules gate who can reach it -- see that
+//     resource's comment.
 //   - `backend`'s API still only trusts requests proxied through
 //     `frontend` in practice (same-origin cookie auth, see the comment
-//     above), and `db`/`redis` still require their own passwords.
+//     above), and `redis`/`postgresServer` still require their own
+//     passwords.
 // What's gone is defense-in-depth against a compromised container
-// port-scanning its neighbors directly -- if that risk matters more to you
-// than the quota/cost trade, either request an environment-quota increase
-// from Azure support and restore the three-environment version from git
+// port-scanning `redis` directly -- if that risk matters more to you than
+// the quota/cost trade, either request an environment-quota increase from
+// Azure support and restore the three-environment version from git
 // history, or self-host a reverse proxy/service mesh inside this one
 // environment instead. For most early-stage deployments, the small
 // standing risk is an acceptable trade for "the deploy actually succeeds."
@@ -106,28 +176,35 @@
 //     public, zero registry cost/credentials either way)
 //   - No Key Vault -- plain Container Apps secrets
 //   - No managed identity, no Application Insights
-//   - `db`/`redis` unchanged: official Docker Hub images, internal-only,
-//     pinned to exactly 1 replica, `db` on a persistent Azure Files volume
+//   - `redis` unchanged: official Docker Hub image, internal-only, pinned
+//     to exactly 1 replica, no persistent volume
 // =============================================================================
-// This replaces an earlier version of this file that used Azure Database for
-// PostgreSQL Flexible Server + Azure Cache for Redis + Azure Container
-// Registry + Key Vault + a User-Assigned Managed Identity + Application
-// Insights + 4 Container Apps (backend/worker/beat/frontend). That shape is
-// a solid *scaling* story but every one of those managed extras has its own
-// monthly floor, and several of them (Flexible Server, Azure Cache, ACR
-// Basic, Key Vault) never scale to zero -- they bill 24/7 whether or not
-// anyone is using the app. For an early-stage startup that's the wrong
-// trade.
+// This replaces an earlier version of this file that ran Postgres as a
+// fourth Container App (`db`) on a persistent Azure Files share -- which
+// does not work, full stop, regardless of CPU/memory sizing (see "WHY
+// POSTGRES IS A MANAGED SERVICE" above). It also replaces the version
+// before THAT, which used Azure Database for PostgreSQL Flexible Server +
+// Azure Cache for Redis + Azure Container Registry + Key Vault + a
+// User-Assigned Managed Identity + Application Insights + 4 Container Apps
+// (backend/worker/beat/frontend) -- a solid *scaling* story, but several of
+// those managed extras (Azure Cache, ACR Basic, Key Vault) have their own
+// fixed monthly floor and never scale to zero regardless of traffic. This
+// version keeps Flexible Server (the one piece that has no working
+// Container-Apps-only substitute) and drops the rest of that list in favor
+// of Container Apps' own free/scale-to-zero equivalents.
 //
 // WHAT THIS PROVISIONS
 // ---------------------------------------------------------------------------
 //   - Log Analytics workspace                    (Container Apps console/system logs)
-//   - Storage Account + 3 Azure Files shares      (Postgres data dir, backup_data, export_data --
+//   - Storage Account + 2 Azure Files shares      (backup_data, export_data --
 //                                                   billed by GB actually used, not provisioned)
 //   - VNet (1 delegated subnet + NSG)              (see SINGLE MANAGED ENVIRONMENT comment above; no fixed floor)
 //   - 1 Container Apps Environment                 (Consumption plan, shared by every app below -- no fixed floor; see SINGLE MANAGED ENVIRONMENT comment above for why this is 1, not 3)
-//   - 4 Container Apps:
-//       `db`       -- postgres:16-alpine, official Docker Hub image, internal-only, 1 replica always
+//   - 1 Azure Database for PostgreSQL Flexible Server (`postgresServer`) -- smallest Burstable
+//                                                   SKU by default (see `postgresSkuName`), NOT inside
+//                                                   the Container Apps environment -- its own managed
+//                                                   resource, own storage, own automated backups
+//   - 3 Container Apps:
 //       `redis`    -- redis:7-alpine, official Docker Hub image, internal-only, 1 replica always
 //       `backend`  -- FastAPI + embedded Celery worker/beat (backend/Dockerfile),
 //                     internal-only ingress, scales 0-N on its own
@@ -137,18 +214,13 @@
 //   - 1 Container Apps Job: `migrate`             (runs `alembic upgrade head` against `backend`'s image, only when triggered)
 //
 // WHAT WAS REMOVED FROM THE ORIGINAL MANAGED-SERVICES DESIGN, AND WHY IT'S
-// SAFE HERE (unchanged from the combined-`app` version of this file)
+// SAFE HERE
 // ---------------------------------------------------------------------------
-//   - Azure Database for PostgreSQL Flexible Server -> `db` container app.
-//     You lose: automatic point-in-time restore, engine-managed HA/failover.
-//     You keep: the app's own pg_dump-based backup job (ENABLE_AUTO_BACKUP,
-//     already in this codebase) now writing onto a persistent Azure Files
-//     share instead of ephemeral disk, so backups survive a container
-//     restart. Turn on BACKUP_GDRIVE_ENABLED for true off-box backups.
 //   - Azure Cache for Redis -> `redis` container app, no persistent volume.
 //     Still just the Celery broker/result backend + rate-limiter/lock store
 //     (see this file's top comment) -- losing state on a restart is an
-//     acceptable trade for the cost savings.
+//     acceptable trade for the cost savings, and (unlike Postgres) Redis
+//     here never touches Azure Files in the first place.
 //   - Azure Container Registry -> Docker Hub (two images now: backend and
 //     frontend -- see top comment on the free-plan private-repo limit).
 //   - Key Vault -> plain Container Apps secrets.
@@ -156,12 +228,15 @@
 //     once ACR and Key Vault are both gone, assuming public Docker Hub repos).
 //   - Application Insights -> removed (its own ingestion cost on top of Log
 //     Analytics).
+//   Postgres itself was NOT removed/downgraded -- see "WHY POSTGRES IS A
+//   MANAGED SERVICE" at the top of this file for why that one piece stays
+//   a managed service even in an otherwise cost-optimized design.
 //
 // REALISTIC MONTHLY COST -- see DEPLOYMENT.md's Cost section for the full
-// breakdown table (this split's cost is close to the single-`app` version's
-// ~US$10-20/mo floor, since `db`/`redis` -- the two components that can't
-// scale to zero -- are unchanged; `frontend` adds one more scale-to-zero
-// container, not another always-on one).
+// breakdown table. The Flexible Server is the one component here that
+// can't scale to zero and has a real fixed floor (smallest Burstable SKU,
+// ~US$12-15/mo before storage); everything else keeps the prior design's
+// scale-to-zero/Consumption-plan cost profile.
 //
 // USAGE
 // ---------------------------------------------------------------------------
@@ -171,18 +246,25 @@
 //     --parameters environmentName=prod \
 //                  dockerHubBackendImage=yourdockerhubusername/snipeit-lite-backend \
 //                  dockerHubFrontendImage=yourdockerhubusername/snipeit-lite-frontend \
-//                  postgresPassword=$(openssl rand -hex 16) \
+//                  postgresPassword=$(openssl rand -base64 24) \
 //                  redisPassword=$(openssl rand -hex 16) \
 //                  jwtSecretKey=$(openssl rand -hex 32) \
 //                  rootAdminBootstrapPassword=$(openssl rand -base64 24)
-//                  # ^ optional -- omit (or leave "") to let the migrate Job
-//                  # generate one instead and print it to stderr once (see
-//                  # DEPLOYMENT.md's Monitoring section for how to read that
-//                  # back out of Log Analytics if you go that route). Passing
-//                  # it explicitly here, as above, means you already have it
-//                  # in your own shell instead. Either way it's a no-op on
-//                  # every deploy after the first -- the migrate Job only
-//                  # ever bootstraps the root admin row once.
+//                  # ^ postgresPassword MUST satisfy Azure Database for
+//                  # PostgreSQL Flexible Server's password complexity rule
+//                  # (8-128 chars, at least 3 of: uppercase, lowercase,
+//                  # digit, symbol) -- `openssl rand -base64 24` reliably
+//                  # produces all four; `openssl rand -hex ...` (all this
+//                  # file used pre-managed-Postgres) does NOT, since hex
+//                  # output is only digits + a-f. rootAdminBootstrapPassword
+//                  # is optional -- omit (or leave "") to let the migrate
+//                  # Job generate one instead and print it to stderr once
+//                  # (see DEPLOYMENT.md's Monitoring section for how to read
+//                  # that back out of Log Analytics if you go that route).
+//                  # Passing it explicitly here, as above, means you already
+//                  # have it in your own shell instead. Either way it's a
+//                  # no-op on every deploy after the first -- the migrate
+//                  # Job only ever bootstraps the root admin row once.
 //
 // Re-run the same command any time to update the environment idempotently --
 // this file does NOT set `backend`/`frontend`/`migrate`'s image tags on
@@ -216,12 +298,37 @@ param dockerHubUsername string = ''
 @secure()
 param dockerHubToken string = ''
 
-@description('Postgres password for the `db` container app.')
+@description('Administrator password for the Azure Database for PostgreSQL Flexible Server. MUST satisfy Azure\'s complexity rule: 8-128 characters, at least 3 of {uppercase, lowercase, digit, symbol}. Generate with `openssl rand -base64 24`, NOT `openssl rand -hex ...` (hex output is only digits + a-f -- 2 categories -- and Flexible Server will reject it).')
 @secure()
 param postgresPassword string
 
-@description('Postgres username.')
+@description('Administrator username for the Flexible Server. Avoid reserved/disallowed names (azure_superuser, azuresu, admin, administrator, root, guest, public, or anything starting with pg_).')
 param postgresUsername string = 'snipeit'
+
+@description('Flexible Server compute SKU. Standard_B1ms (1 vCore/2GiB, Burstable) is the smallest generally-available tier and the default here for cost. Standard_B2s (2 vCore/4GiB) is the next step up if B1ms\'s burst credits get exhausted under sustained load (see DEPLOYMENT.md\'s Cost section).')
+param postgresSkuName string = 'Standard_B1ms'
+
+@description('Flexible Server compute tier matching `postgresSkuName`. Keep this "Burstable" if you change the SKU to another B-series size; only change to "GeneralPurpose"/"MemoryOptimized" if you also change the SKU to a matching D/E-series name.')
+@allowed(['Burstable', 'GeneralPurpose', 'MemoryOptimized'])
+param postgresSkuTier string = 'Burstable'
+
+@description('Flexible Server storage size in GiB. 32 is the smallest size Azure currently offers for this SKU family. Storage can only be INCREASED later, never decreased, so don\'t over-provision "just in case" -- start at the minimum and grow if you actually need to.')
+@minValue(32)
+param postgresStorageGb int = 32
+
+@description('PostgreSQL major version to provision.')
+param postgresVersion string = '16'
+
+@description('Flexible Server automated backup retention, in days (7-35). These are Azure-managed backups with point-in-time restore, separate from and in addition to this app\'s own pg_dump-based ENABLE_AUTO_BACKUP job.')
+@minValue(7)
+@maxValue(35)
+param postgresBackupRetentionDays int = 7
+
+@description('Geo-redundant Flexible Server backups. Off by default to keep cost down (geo-redundancy roughly doubles backup storage cost); turn on if your recovery plan needs to survive a full regional outage, not just a single zone/server failure.')
+param postgresGeoRedundantBackup bool = false
+
+@description('OPTIONAL. Your own IP address (e.g. from `curl ifconfig.me`), added as an extra Flexible Server firewall rule so you can `psql`/pgAdmin/etc. directly against it from your machine for debugging. Leave empty (default) to skip -- `backend`/`migrate` reach the server regardless via the "Allow Azure services" firewall rule below, which this parameter does not affect.')
+param postgresAdminClientIp string = ''
 
 @description('Redis password for the `redis` container app (used with --requirepass).')
 @secure()
@@ -246,9 +353,6 @@ param frontendMinReplicas int = 0
 
 @description('Maximum `frontend` replicas under load.')
 param frontendMaxReplicas int = 3
-
-@description('Postgres data volume size in GB (billed by GB actually used, this is just the ceiling).')
-param postgresVolumeQuotaGb int = 20
 
 @description('Custom domain for `frontend`, the public entry point (leave empty to use the generated *.azurecontainerapps.io FQDN only).')
 param customDomain string = ''
@@ -448,11 +552,14 @@ ContainerAppConsoleLogs_CL
 }
 
 // ---------------------------------------------------------------------------
-// Storage Account + Azure Files -- ONE share for Postgres's data directory
-// (this is what makes `db` safe to restart/redeploy without losing data),
-// plus the app's existing backup_data/export_data shares. Standard_LRS,
-// classic pay-as-you-go share billing: you pay for GB actually stored, the
-// `shareQuota` below is just a ceiling, not a reservation.
+// Storage Account + Azure Files -- the app's backup_data/export_data
+// shares (backend/worker CSV/PDF exports and pg_dump-based backups).
+// Postgres's OWN data directory lives on `postgresServer`'s managed
+// storage below, NOT here -- see this file's top-of-file "WHY POSTGRES IS
+// A MANAGED SERVICE" comment for why Azure Files cannot host it at all.
+// Standard_LRS, classic pay-as-you-go share billing: you pay for GB
+// actually stored, the `shareQuota` below is just a ceiling, not a
+// reservation.
 // ---------------------------------------------------------------------------
 resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: storageAccountName
@@ -468,12 +575,6 @@ resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
 resource fileServices 'Microsoft.Storage/storageAccounts/fileServices@2023-05-01' = {
   parent: storage
   name: 'default'
-}
-
-resource postgresShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023-05-01' = {
-  parent: fileServices
-  name: 'postgres-data'
-  properties: { shareQuota: postgresVolumeQuotaGb }
 }
 
 resource backupShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023-05-01' = {
@@ -494,17 +595,18 @@ resource exportShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023
 // See the "SINGLE MANAGED ENVIRONMENT" comment at the top of this file for
 // the full story: three Managed Environments blew through this
 // subscription's per-region environment quota
-// (`MaxNumberOfRegionalEnvironmentsInSubExceeded`), so all four Container
-// Apps + the `migrate` Job now share ONE environment, and therefore one
-// delegated subnet. An NSG can only filter traffic AT a subnet boundary, so
-// with everything on one subnet there is no NSG rule that can allow
-// `frontend -> backend:8000` while denying `frontend -> db:5432` -- that
-// distinction no longer exists at the network layer. This one NSG instead
-// covers what's still true regardless of subnet layout: only the public
-// internet -> `frontend` path needs to be open at all, everything else
-// (`db`/`redis`/`backend`'s own `ingress.external: false`) already never
-// gets a public IP, so it's unreachable from outside the VNet no matter
-// what this NSG says.
+// (`MaxNumberOfRegionalEnvironmentsInSubExceeded`), so `frontend`/`backend`/
+// `redis` + the `migrate` Job now share ONE environment, and therefore one
+// delegated subnet (`postgresServer` isn't part of this at all -- it's a
+// standalone managed resource outside `env`, see its own comment). An NSG
+// can only filter traffic AT a subnet boundary, so with everything on one
+// subnet there is no NSG rule that can allow `frontend -> backend:8000`
+// while denying `frontend -> redis:6379` -- that distinction no longer
+// exists at the network layer. This one NSG instead covers what's still
+// true regardless of subnet layout: only the public internet -> `frontend`
+// path needs to be open at all, everything else (`redis`/`backend`'s own
+// `ingress.external: false`) already never gets a public IP, so it's
+// unreachable from outside the VNet no matter what this NSG says.
 // ---------------------------------------------------------------------------
 
 var subnetPrefix = '10.0.0.0/23'
@@ -516,11 +618,12 @@ resource nsg 'Microsoft.Network/networkSecurityGroups@2023-09-01' = {
     securityRules: [
       {
         // The only public entry point into the whole environment --
-        // `frontend`'s external ingress. `backend`/`db`/`redis` all set
+        // `frontend`'s external ingress. `backend`/`redis` both set
         // `ingress.external: false`, so this rule being broad (whole
         // subnet, not just frontend's IP) doesn't expose them: they simply
         // never get a public FQDN/IP for the internet to reach in the
-        // first place, regardless of what this NSG allows.
+        // first place, regardless of what this NSG allows. `postgresServer`
+        // isn't on this subnet at all -- see its own resource comment.
         name: 'Allow-Internet-HTTPS-Inbound'
         properties: {
           priority: 100
@@ -571,13 +674,15 @@ resource vnet 'Microsoft.Network/virtualNetworks@2023-09-01' = {
 }
 
 // ---------------------------------------------------------------------------
-// ONE Container Apps Environment shared by `frontend`, `backend`, `db`,
-// `redis`, and the `migrate` Job -- see the "SINGLE MANAGED ENVIRONMENT"
-// comment at the top of this file. Still Consumption plan: no fixed
-// monthly floor, same billing model as before. `internal: false` because
-// `frontend` needs a public FQDN; `db`/`redis`/`backend` opt out of public
-// ingress individually via their own `ingress.external: false`, same as
-// when they had a dedicated internal environment each.
+// ONE Container Apps Environment shared by `frontend`, `backend`, `redis`,
+// and the `migrate` Job -- see the "SINGLE MANAGED ENVIRONMENT" comment at
+// the top of this file. `postgresServer` deliberately is NOT in this
+// environment (it's a standalone managed resource -- see that resource's
+// comment). Still Consumption plan: no fixed monthly floor, same billing
+// model as before. `internal: false` because `frontend` needs a public
+// FQDN; `redis`/`backend` opt out of public ingress individually via their
+// own `ingress.external: false`, same as when they had a dedicated
+// internal environment each.
 // ---------------------------------------------------------------------------
 resource env 'Microsoft.App/managedEnvironments@2024-03-01' = {
   name: '${namePrefix}-env'
@@ -593,19 +698,6 @@ resource env 'Microsoft.App/managedEnvironments@2024-03-01' = {
     vnetConfiguration: {
       infrastructureSubnetId: vnet.properties.subnets[0].id
       internal: false // must stay externally reachable -- `frontend` is the one public entry point
-    }
-  }
-}
-
-resource postgresStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' = {
-  parent: env
-  name: 'postgres-data'
-  properties: {
-    azureFile: {
-      accountName: storage.name
-      accountKey: storage.listKeys().keys[0].value
-      shareName: postgresShare.name
-      accessMode: 'ReadWrite'
     }
   }
 }
@@ -637,102 +729,119 @@ resource exportStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' =
 }
 
 // ---------------------------------------------------------------------------
-// `db` -- Postgres 16, official image straight from Docker Hub (no registry
-// of your own needed for this one). Internal-only TCP ingress (`ingress.
-// external: false`), in the shared `env` -- never gets a public FQDN, so
-// it's unreachable from the internet regardless of the NSG (see "SINGLE
-// MANAGED ENVIRONMENT"/"SINGLE SUBNET, SINGLE NSG" comments above for why
-// there's no longer a network-layer wall between `db` and `frontend`
-// specifically). Pinned to EXACTLY 1 replica always: a stateful
-// single-writer database must never be scaled out, and Consumption plan
-// TCP-ingress apps don't support HTTP-style autoscale rules anyway.
+// `postgresServer` -- Azure Database for PostgreSQL Flexible Server. NOT a
+// Container App, NOT inside `env`/the VNet's delegated subnet -- its own
+// standalone managed resource with its own Microsoft-managed storage (see
+// this file's top-of-file "WHY POSTGRES IS A MANAGED SERVICE" comment for
+// why a Container-App-plus-Azure-Files `db` cannot host Postgres at all,
+// regardless of sizing).
+//
+// Public network access + firewall rules (below), not VNet-injected
+// private access: the simpler of Flexible Server's two networking modes,
+// and the one that doesn't require subnet delegation/private DNS zone
+// wiring on top of everything `env` already needs. Every byte still
+// travels over TLS (`sslmode=require` is baked into `databaseUrl` below,
+// and Flexible Server enforces SSL by default), and the firewall closes
+// the server to everything except Azure's own backbone (for
+// `backend`/`migrate`) plus, optionally, your own IP (`postgresAdminClientIp`,
+// for direct `psql` debugging) -- nothing else can reach it regardless of
+// password strength. If you later want to remove even that Azure-backbone
+// exposure, Flexible Server also supports VNet-integrated private access;
+// that's a larger change (delegated subnet + private DNS zone) intentionally
+// left out of this cost-optimized baseline -- see Microsoft's docs on
+// "Networking with private access" if you need it.
 // ---------------------------------------------------------------------------
-resource dbApp 'Microsoft.App/containerApps@2024-03-01' = {
-  name: 'db'
+resource postgresServer 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' = {
+  // Flexible Server names must be globally unique across ALL of Azure (its
+  // FQDN is `<name>.postgres.database.azure.com`) -- same constraint as
+  // `storageAccountName` above, same fix: append the same per-resource-group
+  // `suffix` so a plain `${namePrefix}-pg` (which WILL collide the moment
+  // two different people deploy this template with the same
+  // `appBaseName`/`environmentName`) doesn't cause a deployment-time naming
+  // conflict.
+  name: take('${namePrefix}-pg-${suffix}', 63)
   location: location
+  sku: {
+    name: postgresSkuName
+    tier: postgresSkuTier
+  }
   properties: {
-    managedEnvironmentId: env.id
-    configuration: {
-      activeRevisionsMode: 'Single'
-      secrets: [
-        { name: 'postgres-password', value: postgresPassword }
-      ]
-      ingress: {
-        external: false
-        transport: 'tcp'
-        targetPort: 5432
-        exposedPort: 5432
-      }
+    version: postgresVersion
+    administratorLogin: postgresUsername
+    administratorLoginPassword: postgresPassword
+    storage: {
+      storageSizeGB: postgresStorageGb
     }
-    template: {
-      containers: [
-        {
-          name: 'db'
-          image: 'postgres:16-alpine'
-          // Was 0.25 vCPU / 0.5Gi -- the smallest possible Container Apps
-          // allocation. That's fine for steady-state CRUD traffic, but
-          // 0010_partition_audit_logs.py (the audit-log partitioning
-          // migration) creates one PK index per yearly partition AND bulk
-          // `INSERT`s every existing row across all of them in a single
-          // statement -- exactly the kind of maintenance-heavy operation
-          // whose index-build/sort memory (maintenance_work_mem/work_mem)
-          // spikes past a 0.5Gi cgroup limit. When that happens the
-          // container runtime OOM-kills the Postgres backend, and the
-          // client sees exactly "server closed the connection
-          // unexpectedly" -- not an application bug, a resource ceiling.
-          // Doubled to 0.5 vCPU / 1Gi (next valid Container Apps
-          // CPU/memory combo) to give schema migrations like this enough
-          // headroom; small extra always-on cost (`db` runs fixed at 1
-          // replica regardless -- see its `scale` block below) but it's
-          // the actual database, not a wide margin to spare it.
-          resources: { cpu: json('0.5'), memory: '1Gi' }
-          env: [
-            { name: 'POSTGRES_USER', value: postgresUsername }
-            { name: 'POSTGRES_DB', value: 'asset_db' }
-            { name: 'POSTGRES_PASSWORD', secretRef: 'postgres-password' }
-            // Postgres refuses to initdb directly into a non-empty mount
-            // point that also contains the volume's own metadata -- point
-            // PGDATA at a subdirectory of the mounted share instead.
-            { name: 'PGDATA', value: '/var/lib/postgresql/data/pgdata' }
-          ]
-          volumeMounts: [
-            { volumeName: 'postgres-data', mountPath: '/var/lib/postgresql/data' }
-          ]
-          probes: [
-            {
-              type: 'Liveness'
-              tcpSocket: { port: 5432 }
-              initialDelaySeconds: 10
-              periodSeconds: 30
-            }
-          ]
-        }
-      ]
-      volumes: [
-        { name: 'postgres-data', storageType: 'AzureFile', storageName: 'postgres-data' }
-      ]
-      scale: {
-        minReplicas: 1
-        maxReplicas: 1 // NEVER raise this -- single-writer stateful database
-      }
+    backup: {
+      backupRetentionDays: postgresBackupRetentionDays
+      geoRedundantBackup: postgresGeoRedundantBackup ? 'Enabled' : 'Disabled'
+    }
+    // No high availability -- ZoneRedundant/SameZone HA roughly doubles
+    // compute cost (a hot standby replica billed the same as the primary).
+    // Single-writer, no automatic failover, matching the same trade-off
+    // the old `db` Container App made (pinned to 1 replica, no HA) -- the
+    // difference is you now get automated backups/PITR either way. Revisit
+    // if uptime requirements grow past what a cost-optimized deployment
+    // targets.
+    highAvailability: {
+      mode: 'Disabled'
+    }
+    network: {
+      publicNetworkAccess: 'Enabled'
     }
   }
-  // `volumes[].storageName` above is a plain string, not a symbolic
-  // reference to `postgresStorage` -- Bicep only infers dependencies from
-  // symbolic references, so without this explicit dependsOn, ARM has no
-  // reason to wait for the `postgres-data` Managed Environment storage
-  // resource to finish provisioning before creating `db`, and can (and did)
-  // race them: "ManagedEnvironment Storage 'postgres-data' was not found."
-  dependsOn: [
-    postgresStorage
-  ]
+}
+
+// "Allow public access from Azure services" -- the well-known 0.0.0.0/0.0.0.0
+// magic range Azure recognizes specifically for this purpose (it does NOT
+// open the server to the public internet at large; only to Azure's own
+// backbone, which is what `backend`/`migrate` connect over as Container
+// Apps). This is the simplest way for `env`'s Container Apps -- which do
+// NOT have static outbound IPs on the Consumption plan -- to reach a
+// publicly-networked Flexible Server without VNet integration.
+resource postgresFirewallAllowAzure 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2024-08-01' = {
+  parent: postgresServer
+  name: 'AllowAllAzureServicesAndResourcesWithinAzureIps'
+  properties: {
+    startIpAddress: '0.0.0.0'
+    endIpAddress: '0.0.0.0'
+  }
+}
+
+// Optional extra firewall rule for direct `psql`/pgAdmin/etc. access from
+// your own machine -- see `postgresAdminClientIp`'s param description.
+// Skipped entirely (no resource created) when that parameter is left empty.
+resource postgresFirewallAllowAdminIp 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2024-08-01' = if (!empty(postgresAdminClientIp)) {
+  parent: postgresServer
+  name: 'AllowAdminClientIp'
+  properties: {
+    startIpAddress: postgresAdminClientIp
+    endIpAddress: postgresAdminClientIp
+  }
+}
+
+// The actual application database. Flexible Server provisions a default
+// `postgres` database on create, but this app's `DATABASE_URL` (below)
+// always points at `asset_db` specifically -- same name the old `db`
+// Container App used, and same name local Docker Compose/Render use, so
+// no application code needed to change.
+resource postgresDatabase 'Microsoft.DBforPostgreSQL/flexibleServers/databases@2024-08-01' = {
+  parent: postgresServer
+  name: 'asset_db'
+  properties: {
+    charset: 'UTF8'
+    collation: 'en_US.utf8'
+  }
 }
 
 // ---------------------------------------------------------------------------
 // `redis` -- official image from Docker Hub. Internal-only TCP ingress
-// (`ingress.external: false`), in the shared `env` alongside `db` -- never
-// gets a public FQDN, so it's unreachable from the internet regardless of
-// the NSG. No persistent volume (see top-of-file comment on why that's an
+// (`ingress.external: false`), in the shared `env` -- never gets a public
+// FQDN, so it's unreachable from the internet regardless of the NSG.
+// `postgresServer` is deliberately NOT in this environment (see this
+// file's "WHY POSTGRES IS A MANAGED SERVICE" comment) -- `redis` is the
+// only stateful piece still running as a Container App here. No persistent
+// volume (see top-of-file comment on why that's an
 // acceptable trade for this app's Redis usage) -- an in-memory cache/broker
 // that resets on restart, exactly like Render's free Key Value tier.
 // ---------------------------------------------------------------------------
@@ -786,12 +895,18 @@ resource redisApp 'Microsoft.App/containerApps@2024-03-01' = {
 // Shared env vars -- reused by `backend` (the live service) and `migrate`
 // (the one-shot alembic job, same image as `backend`).
 // ---------------------------------------------------------------------------
-// `db`/`redis`/`backend`/`frontend` all now live in the same shared `env`
-// (see "SINGLE MANAGED ENVIRONMENT" above), so the short in-environment DNS
-// name (just the app name, e.g. "db") resolves fine for all of them -- no
-// need for the longer cross-environment FQDN form this used when `db`/
-// `redis` lived in a separate `dataEnv`.
-var databaseUrl = 'postgresql://${postgresUsername}:${postgresPassword}@db:5432/asset_db'
+// `redis`/`backend`/`frontend` all live in the same shared `env` (see
+// "SINGLE MANAGED ENVIRONMENT" above), so the short in-environment DNS
+// name (just the app name, e.g. "redis") resolves fine for them.
+// `postgresServer` is NOT in `env` (it's a standalone managed resource --
+// see "WHY POSTGRES IS A MANAGED SERVICE" above), so it needs its own
+// public FQDN instead, and `sslmode=require` since that FQDN is reached
+// over the public internet/Azure backbone, not an internal-only network --
+// Flexible Server also enforces SSL server-side regardless of this flag.
+// `uriComponent()` percent-encodes the password so any of the symbol
+// characters Flexible Server's complexity rule expects (see
+// `postgresPassword`'s param description) can't break the URL's syntax.
+var databaseUrl = 'postgresql://${postgresUsername}:${uriComponent(postgresPassword)}@${postgresServer.properties.fullyQualifiedDomainName}:5432/asset_db?sslmode=require'
 var redisUrl = 'redis://:${redisPassword}@redis:6379/0'
 var frontendFqdn = 'frontend.${env.properties.defaultDomain}'
 var publicOrigin = empty(customDomain) ? 'https://${frontendFqdn}' : 'https://${customDomain}'
@@ -933,13 +1048,18 @@ resource backendApp 'Microsoft.App/containerApps@2024-03-01' = {
       }
     }
   }
-  // `dbApp`/`redisApp` because `backend` needs them reachable at boot; the
-  // volumes above have the same missing-implicit-dependency issue as
-  // `dbApp`'s `postgres-data` volume (see that resource's comment) --
-  // `backupStorage`/`exportStorage` are referenced by plain string, so
-  // Bicep won't otherwise wait for them before creating `backend`.
+  // `postgresDatabase`/`redisApp` because `backend` needs them reachable
+  // at boot (Bicep already infers a dependency on `postgresServer` itself
+  // through `sharedSecrets`' symbolic reference to it inside `databaseUrl`,
+  // but `postgresDatabase` -- the `asset_db` database specifically -- is a
+  // separate child resource with no symbolic reference anywhere in
+  // `backend`'s own properties, so it needs to be listed explicitly here
+  // too). The volumes above have a similar missing-implicit-dependency
+  // issue -- `backupStorage`/`exportStorage` are referenced by plain
+  // string, so Bicep won't otherwise wait for them before creating
+  // `backend`.
   dependsOn: [
-    dbApp
+    postgresDatabase
     redisApp
     backupStorage
     exportStorage
@@ -1040,8 +1160,10 @@ resource migrateJob 'Microsoft.App/jobs@2024-03-01' = {
   name: 'migrate'
   location: location
   properties: {
-    // Runs from the same shared `env` as `db`/`backend` so the short
-    // in-environment DNS name (used inside `databaseUrl` above) resolves.
+    // Runs from the same shared `env` as `backend` (for its own short
+    // in-environment DNS resolution needs). `postgresServer` is reached
+    // over its public FQDN regardless of which environment this job runs
+    // in -- see `databaseUrl` above.
     environmentId: env.id
     configuration: {
       triggerType: 'Manual'
@@ -1064,7 +1186,7 @@ resource migrateJob 'Microsoft.App/jobs@2024-03-01' = {
     }
   }
   dependsOn: [
-    dbApp
+    postgresDatabase
   ]
 }
 
@@ -1075,7 +1197,8 @@ output envName string = env.name
 output frontendFqdn string = frontendApp.properties.configuration.ingress.fqdn
 output frontendAppName string = frontendApp.name
 output backendAppName string = backendApp.name
-output dbAppName string = dbApp.name
+output postgresServerName string = postgresServer.name
+output postgresServerFqdn string = postgresServer.properties.fullyQualifiedDomainName
 output redisAppName string = redisApp.name
 output migrateJobName string = migrateJob.name
 output logAnalyticsWorkspaceId string = logAnalytics.id

@@ -317,16 +317,18 @@ old — drop one because disk space actually requires it.
 If `az containerapp replica list --name backend --resource-group
 rg-snipeit-lite-prod` comes back empty, hit any `/api/*` endpoint first
 (e.g. `curl https://<frontend-fqdn>/api/health`) to wake one up, wait for
-it to show `Running`, then retry the `exec`. `db` itself is pinned to
-exactly 1 replica always (never scale-to-zero — see `main.bicep`'s
-`dbApp` comment), so it's never the one that's asleep.
+it to show `Running`, then retry the `exec`. Postgres itself
+(`postgresServer`, Azure Database for PostgreSQL Flexible Server) has no
+cold start either way — it's a managed service, always running, no
+Container App replica to wake up (see `main.bicep`'s `postgresServer`
+comment).
 
 **Step 1 — confirm the backup for that year is genuinely restorable,
 *before* touching production.** This step is identical for both
 deployment models — it always happens on your own machine, against a
-throwaway local Postgres, never against the live `db` (docker-compose
-container or Container App) directly. Don't trust "the file exists in
-Drive" — prove it restores:
+throwaway local Postgres, never against the live production database
+(docker-compose's `db` container, or the Azure Flexible Server) directly.
+Don't trust "the file exists in Drive" — prove it restores:
 ```bash
 # On your own machine, NOT against production, regardless of how
 # production itself is hosted:
@@ -357,15 +359,24 @@ production:**
 # (defaults shown -- match POSTGRES_USER/POSTGRES_DB to your real .env):
 docker compose exec db psql -U "${POSTGRES_USER:-admin}" -d "${POSTGRES_DB:-asset_db}"
 
-# Azure Container Apps -- db is internal-only TCP ingress (no public
-# endpoint by design, see main.bicep's dbApp comment), so the only way
-# in is a shell inside the Container App itself, then psql from there.
-# Note: main.bicep's `postgresUsername` param defaults to 'snipeit' (NOT
-# docker-compose's 'admin' default) -- $POSTGRES_USER is already set
-# correctly inside this container's own environment either way:
-az containerapp exec --name db --resource-group rg-snipeit-lite-prod --command /bin/sh
-# then, inside that session (bicep's dbApp always uses asset_db):
-psql -U "$POSTGRES_USER" -d asset_db
+# Azure Container Apps -- postgresServer (Azure Database for PostgreSQL
+# Flexible Server) is a standalone managed resource, not a Container App,
+# so there's no `az containerapp exec --name db` to fall back on and no
+# internal-only DNS name for it either -- it's reached over its own public
+# FQDN with a firewall gating who can connect (see main.bicep's
+# `postgresServer` comment). Simplest path: exec into `backend` (which
+# already has psql installed -- see backend/Dockerfile -- and already has
+# `DATABASE_URL` fully assembled, including host/user/db/sslmode, as its
+# own env var) and connect from there, reusing that connection string
+# as-is rather than reconstructing it by hand:
+az containerapp exec --name backend --resource-group rg-snipeit-lite-prod --command /bin/sh
+# then, inside that session:
+psql "$DATABASE_URL"
+# Alternative: connect directly from your own machine with `psql` or any
+# GUI client, IF you've added your IP via main.bicep's
+# `postgresAdminClientIp` parameter (redeploy after setting it) -- the
+# "Allow Azure services" firewall rule alone does not permit arbitrary
+# internet clients, only Azure's own backbone.
 ```
 ```sql
 DROP TABLE audit_logs_y2021;
