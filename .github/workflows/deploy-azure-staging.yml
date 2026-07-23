@@ -1,8 +1,9 @@
 # .github/workflows/deploy-azure-staging.yml
 # -----------------------------------------------------------------------------
 # Mirrors deploy-azure-production.yml but triggers on `develop` and targets
-# the staging resource group/environment. Same cost-optimized 4-app shape
-# (frontend/backend/db/redis, two Docker Hub images) -- see
+# the staging resource group/environment. Same cost-optimized shape (3
+# Container Apps: frontend/backend/redis, two Docker Hub images, plus a
+# standalone Azure Database for PostgreSQL Flexible Server) -- see
 # infra/main.bicep's top-of-file comment. Staging's `backend` AND `frontend`
 # are both provisioned with min replicas 0 (see infra-deploy.yml) -- pure
 # scale-to-zero, a cold start on the first request after idle, effectively

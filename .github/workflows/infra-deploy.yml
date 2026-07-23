@@ -1,15 +1,18 @@
 # .github/workflows/infra-deploy.yml
 # -----------------------------------------------------------------------------
 # Provisions/updates the Azure infrastructure in infra/main.bicep -- the
-# cost-optimized, 4-service shape: Container Apps Environment, Log
-# Analytics, Storage (Azure Files), and exactly FOUR Container Apps
-# (frontend/backend/db/redis) + one `migrate` Container Apps Job. No ACR, no
-# Key Vault, no managed identity, no Application Insights -- see
-# infra/main.bicep's top-of-file comment.
+# cost-optimized shape: Container Apps Environment, Log Analytics, Storage
+# (Azure Files for backup/export only), THREE Container Apps
+# (frontend/backend/redis) + one `migrate` Container Apps Job, PLUS a
+# standalone Azure Database for PostgreSQL Flexible Server (`postgresServer`
+# -- a managed service, not a Container App; see infra/main.bicep's
+# top-of-file comment for why Postgres specifically can't be a Container App
+# on Azure Files). No ACR, no Key Vault, no managed identity, no Application
+# Insights -- see infra/main.bicep's top-of-file comment.
 #
 # This is DELIBERATELY separate from deploy-azure-production.yml /
 # -staging.yml, which only ever push new `backend`/`frontend` images --
-# infra changes (a new env var, a Postgres volume size bump, ...) are
+# infra changes (a new env var, a Postgres storage size bump, ...) are
 # infrequent and reviewed, not something you want re-running on every
 # `git push`.
 #
@@ -62,6 +65,16 @@ jobs:
           az group show --name "$RESOURCE_GROUP" 2>/dev/null || \
           az group create --name "$RESOURCE_GROUP" --location "${{ secrets.AZURE_LOCATION }}"
 
+      # Required every time (not opt-in like Microsoft.Insights below) --
+      # infra/main.bicep's `postgresServer` resource is
+      # Microsoft.DBforPostgreSQL/flexibleServers, and a subscription that
+      # has never provisioned a Flexible Server before typically isn't
+      # registered for this namespace yet, which fails the deployment with
+      # "MissingSubscriptionRegistration". Registering an already-registered
+      # provider is a fast no-op, so this is safe to run on every invocation.
+      - name: Register Microsoft.DBforPostgreSQL resource provider
+        run: az provider register --namespace Microsoft.DBforPostgreSQL --wait
+
       # main.bicep's alerting section (action group + 3 scheduled query
       # alert rules, see that file's "Alerting" comment) only deploys when
       # ALERT_EMAIL_ADDRESS is set -- both are Microsoft.Insights resource
@@ -106,13 +119,16 @@ jobs:
       # always-on replicas instead of one. (Previously only `backend` was
       # floored at 1; `frontend` stayed at 0 even in production, so the
       # first visitor after any idle period still ate a cold start on the
-      # static/proxy tier -- short, but not zero.) `db`/`redis` always run
-      # at exactly 1 replica regardless, in every environment -- see
-      # infra/main.bicep, they're stateful and can't scale to zero. The
-      # `migrate` Container Apps Job is deliberately NOT part of this --
-      # jobs have no "warm" concept; every execution is a fresh cold start
-      # by design, and that's fine since it only runs once per deploy, not
-      # per user request.
+      # static/proxy tier -- short, but not zero.) `redis` always runs at
+      # exactly 1 replica regardless, in every environment -- see
+      # infra/main.bicep, it's stateful and can't scale to zero.
+      # `postgresServer` (Flexible Server) isn't a Container App at all and
+      # has no replica concept -- it's always on, billed by the hour
+      # regardless of traffic, same in every environment. The `migrate`
+      # Container Apps Job is deliberately NOT part of this -- jobs have no
+      # "warm" concept; every execution is a fresh cold start by design,
+      # and that's fine since it only runs once per deploy, not per user
+      # request.
       - name: Resolve replica floors for this environment
         id: replicas
         run: |
@@ -130,6 +146,13 @@ jobs:
       # entirely, same as before this parameter existed. Set it once you
       # want backend error-rate/`/readyz`/backup alerts paging someone --
       # see SRE_STRATEGY.md section 2.
+      # postgresSkuName/postgresStorageGb are read from repo-level GitHub
+      # Variables (Settings -> Secrets and variables -> Actions -> Variables
+      # tab, NOT Secrets -- these aren't sensitive) so you can size the
+      # Flexible Server per-environment without editing this workflow.
+      # Unset variables fall back to bicep's own defaults (Standard_B1ms /
+      # 32 GiB) via the `|| default` bash pattern below -- this step is safe
+      # to run even if you never set either variable.
       - name: Deploy Bicep
         run: |
           az deployment group create \
@@ -145,6 +168,8 @@ jobs:
               backendMinReplicas=${{ steps.replicas.outputs.backend_min }} \
               frontendMinReplicas=${{ steps.replicas.outputs.frontend_min }} \
               postgresPassword="${{ secrets.POSTGRES_PASSWORD }}" \
+              postgresSkuName="${{ vars.POSTGRES_SKU_NAME || 'Standard_B1ms' }}" \
+              postgresStorageGb=${{ vars.POSTGRES_STORAGE_GB || 32 }} \
               redisPassword="${{ secrets.REDIS_PASSWORD }}" \
               jwtSecretKey="${{ secrets.JWT_SECRET_KEY }}" \
               rootAdminBootstrapPassword="${{ secrets.ROOT_ADMIN_BOOTSTRAP_PASSWORD }}" \
