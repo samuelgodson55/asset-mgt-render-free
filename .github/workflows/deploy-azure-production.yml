@@ -144,6 +144,27 @@ jobs:
       # head` output (which line failed, or where it's hanging) right in
       # the workflow log instead of having to go find it in the Azure
       # Portal / `az containerapp job logs show` by hand after the fact.
+      # BUG FIX: azure/login@v2 at the top of this job exchanges a GitHub
+      # Actions OIDC token for an Azure AD access token via a client
+      # assertion that's only valid for a few minutes (observed: ~5
+      # minutes) from when it was minted -- NOT for the lifetime of the
+      # job. "Wait for migration to complete" above can poll for up to
+      # 675s (11m15s), so by the time a failure reaches this step the
+      # original assertion has commonly already expired, and every `az`
+      # call below fails with "AADSTS700024: Client assertion is not
+      # within its valid time range" -- the exact failure this diagnostic
+      # step exists to avoid. Re-running azure/login@v2 here mints a fresh
+      # GitHub OIDC token and a fresh assertion, right before it's
+      # actually used. See deploy-azure-staging.yml's matching step for
+      # the same fix.
+      - name: Re-authenticate (previous login may have expired during the wait above)
+        if: failure()
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
       - name: Dump migration job logs (on failure)
         if: failure()
         run: |
@@ -276,6 +297,29 @@ jobs:
       # -- see that file's comment for the full "why both, not just one"
       # reasoning -- BEFORE rollback below, so the failing revision's own
       # logs are captured while they still exist.
+      # BUG FIX: azure/login@v2 at the top of this job exchanges a GitHub
+      # Actions OIDC token for an Azure AD access token via a client
+      # assertion that's only valid for a few minutes (observed: ~5
+      # minutes) from when it was minted -- NOT for the lifetime of the
+      # job. "Wait for backend readiness"/"Wait for frontend
+      # readiness"/"Smoke test" above can together run for several
+      # minutes, so by the time a smoke-test failure reaches this step the
+      # original assertion is commonly already expired: every `az` call
+      # below (and in the rollback step right after it) then fails with
+      # "AADSTS700024: Client assertion is not within its valid time
+      # range" -- which, on production, means BOTH losing the diagnostic
+      # logs AND failing to roll back a bad revision. Re-running
+      # azure/login@v2 here mints a fresh GitHub OIDC token and a fresh
+      # assertion, right before it's actually used by this step and the
+      # rollback step that immediately follows it.
+      - name: Re-authenticate (previous login may have expired during the steps above)
+        if: failure() && steps.smoke.outcome == 'failure'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
       - name: Dump backend/frontend logs (on smoke test failure)
         if: failure() && steps.smoke.outcome == 'failure'
         run: |
