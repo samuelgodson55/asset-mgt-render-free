@@ -179,8 +179,65 @@ jobs:
             --image "$FRONTEND_IMAGE:$IMAGE_TAG"
 
       - name: Smoke test
+        id: smoke
         run: |
           FQDN=$(az containerapp show --name frontend --resource-group "$RESOURCE_GROUP" \
                    --query "properties.configuration.ingress.fqdn" -o tsv)
           echo "Testing https://$FQDN (cold start possible -- both apps scale from zero)"
-          curl -f --retry 5 --retry-delay 5 --retry-connrefused "https://$FQDN/" || exit 1
+          # BUG FIX: the previous version of this step
+          # (`curl -f --retry 5 --retry-delay 5 --retry-connrefused ...`)
+          # had no `-s` and no `--max-time`/`--connect-timeout`. Two
+          # separate problems, both visible in the same symptom ("Smoke
+          # test keeps looping" for 7+ minutes with a wall of
+          # "0 0 0 0 ... --:--:-- 0:03:12 --:--:-- 0" log lines):
+          #   1. No `-s` (silent) -- that wall of zeroes/timestamps IS
+          #      curl's normal transfer-progress meter, re-printed once a
+          #      second. It was never an error or a retry loop, just very
+          #      noisy default output.
+          #   2. No `--max-time`/`--connect-timeout` -- `--retry` and
+          #      `--retry-connrefused` only cover connection-REFUSED or a
+          #      completed-but-failed transfer. If the TCP connection
+          #      succeeds but the server never sends a response (exactly
+          #      what a slow scale-from-zero cold start, or a replica
+          #      that's up but not yet actually healthy, looks like from
+          #      the outside), none of `--retry*` ever kicks in and curl
+          #      -- which has no timeout by default -- waits forever. That
+          #      indefinite hang, not a bounded retry loop, is what was
+          #      actually happening here.
+          # `--connect-timeout 30`: generous for establishing the TCP/TLS
+          # connection to the Container Apps ingress itself (this part is
+          # never slow, even on a cold start -- ingress always answers,
+          # only the app behind it might not be up yet).
+          # `--max-time 90`: bounds the ENTIRE request (connect + wait for
+          # first byte + transfer) -- covers `frontend` scaling up from
+          # zero and nginx starting. `--retry 5 --retry-delay 5` on top of
+          # that gives up to 6 bounded attempts, so the worst case here is
+          # ~6 * (90 + 5) = 570s (~9.5 min) instead of unbounded, and any
+          # single stuck attempt now fails and moves to the next retry
+          # instead of hanging.
+          curl -f -s -S --connect-timeout 30 --max-time 90 \
+               --retry 5 --retry-delay 5 --retry-connrefused --retry-max-time 570 \
+               -o /dev/null -w "HTTP %{http_code} in %{time_total}s\n" \
+               "https://$FQDN/"
+
+      - name: Dump backend/frontend logs (on smoke test failure)
+        if: failure() && steps.smoke.outcome == 'failure'
+        run: |
+          echo "::group::backend container logs (last 200 lines)"
+          az containerapp logs show --name backend --resource-group "$RESOURCE_GROUP" --tail 200 || \
+            echo "Could not fetch logs via 'az containerapp logs show' -- check Log Analytics or the Azure Portal's 'backend' Container App > Log stream directly."
+          echo "::endgroup::"
+          echo "::group::frontend container logs (last 200 lines)"
+          az containerapp logs show --name frontend --resource-group "$RESOURCE_GROUP" --tail 200 || \
+            echo "Could not fetch logs via 'az containerapp logs show' -- check Log Analytics or the Azure Portal's 'frontend' Container App > Log stream directly."
+          echo "::endgroup::"
+          echo "::group::backend revision status"
+          az containerapp revision list --name backend --resource-group "$RESOURCE_GROUP" \
+            --query "[].{name:name, active:properties.active, healthState:properties.healthState, runningState:properties.runningState, replicas:properties.replicas}" \
+            -o table || true
+          echo "::endgroup::"
+          echo "::group::frontend revision status"
+          az containerapp revision list --name frontend --resource-group "$RESOURCE_GROUP" \
+            --query "[].{name:name, active:properties.active, healthState:properties.healthState, runningState:properties.runningState, replicas:properties.replicas}" \
+            -o table || true
+          echo "::endgroup::"
