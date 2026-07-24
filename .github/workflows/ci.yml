@@ -219,10 +219,65 @@ jobs:
       - name: Build backend image
         run: docker build -t snipeit-backend:ci ./backend
 
+      # REGRESSION GUARD for the "readyz: not ready ... could not open
+      # certificate file '/root/.postgresql/postgresql.crt': Permission
+      # denied" bug (backend/docker-entrypoint.sh's privilege drop leaving
+      # $HOME pointed at /root after setuid() to appuser -- see that
+      # script's own comment for the full story). Boots the real image
+      # with its real ENTRYPOINT, just overriding the final command to
+      # print who it's actually running as -- catches a regression here,
+      # in ~1 second, instead of only surfacing 5+ minutes into a staging
+      # deploy's readiness probe.
+      - name: Verify backend image resets HOME after dropping to appuser
+        run: |
+          OUT=$(docker run --rm snipeit-backend:ci sh -c 'echo "USER=$(whoami) HOME=$HOME"')
+          echo "$OUT"
+          case "$OUT" in
+            *"USER=appuser"*) ;;
+            *) echo "::error::backend image is not running its command as appuser -- privilege drop regressed"; exit 1 ;;
+          esac
+          case "$OUT" in
+            *"HOME=/home/appuser"*) ;;
+            *) echo "::error::backend image's \$HOME was not reset off /root after dropping to appuser -- this is exactly what caused 'could not open certificate file /root/.postgresql/postgresql.crt: Permission denied' against Azure Database for PostgreSQL. See docker-entrypoint.sh's own comment."; exit 1 ;;
+          esac
+
       - name: Build frontend image (staging profile -- bundled+minified, not obfuscated)
         run: |
           docker build -f frontend/Dockerfile --build-arg BUILD_ENV=development \
             -t snipeit-frontend:ci .
+
+      # REGRESSION GUARD for the "nginx: [emerg] host not found in resolver
+      # \"${RESOLVER_IP}\"" bug -- nginx/test-config.sh above deliberately
+      # hardcodes RESOLVER_IP itself before rendering the template, so it
+      # never actually exercises 15-detect-resolver-ip.envsh or the real
+      # docker-entrypoint.d executable-bit mechanics (see that script's own
+      # comment for why non-executable *.sh/*.envsh files are silently
+      # skipped, not sourced). This step boots the REAL built image with no
+      # RESOLVER_IP override at all -- the exact staging/production
+      # condition -- and fails if either the executable bit was lost (e.g.
+      # a future zip export / Windows checkout / accidental chmod) or the
+      # rendered config still contains the literal, unsubstituted
+      # "${RESOLVER_IP}" text.
+      - name: Verify frontend image auto-detects RESOLVER_IP at boot
+        run: |
+          CID=$(docker run -d -e BACKEND_HOST=backend -e BACKEND_PORT=8000 snipeit-frontend:ci)
+          for i in $(seq 1 10); do
+            docker exec "$CID" test -f /etc/nginx/conf.d/default.conf 2>/dev/null && break
+            sleep 1
+          done
+          LOGS=$(docker logs "$CID" 2>&1)
+          echo "$LOGS"
+          RENDERED=$(docker exec "$CID" cat /etc/nginx/conf.d/default.conf 2>/dev/null || echo "")
+          docker stop "$CID" >/dev/null
+          if echo "$RENDERED" | grep -q '\${RESOLVER_IP}'; then
+            echo "::error::RESOLVER_IP was never substituted -- 15-detect-resolver-ip.envsh didn't run (check its executable bit survived: 'git diff --summary' or 'ls -l nginx/docker-entrypoint.d/')."
+            exit 1
+          fi
+          if echo "$LOGS" | grep -qi "emerg"; then
+            echo "::error::nginx emitted an [emerg]-level error at boot -- see logs above."
+            exit 1
+          fi
+          echo "OK: RESOLVER_IP substituted, nginx started cleanly."
 
       - name: Trivy scan -- backend
         # Pinned to the commit SHA behind the verified-safe v0.35.0 release,
@@ -247,6 +302,7 @@ jobs:
           severity: 'CRITICAL,HIGH'
           exit-code: '0'
           format: 'table'
+
 
   bicep-lint:
     name: Validate infra/main.bicep

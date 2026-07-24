@@ -11,9 +11,35 @@
 # -----------------------------------------------------------------------------
 name: Deploy to Azure (Staging)
 
+# WHY workflow_dispatch EXISTS: a plain `push` to `develop` always runs the
+# full pipeline -- ci -> build-push -> migrate -> deploy -- even when the
+# only thing that changed was one of these workflow YAML files themselves
+# (e.g. testing a fix to the "Roll out new revisions" job below). That
+# means every iteration on the deploy logic pays for a full backend+frontend
+# CI run, two fresh Docker builds/pushes, and an `alembic upgrade head` that
+# hasn't actually changed, just to re-exercise a few `az` commands.
+#
+# workflow_dispatch with `image_tag` set lets you redeploy an image that's
+# ALREADY on Docker Hub from a prior successful `build-push` (copy the SHA
+# from that run, or use `latest`), skipping `ci` and `build-push` entirely.
+# `skip_migrate: true` additionally skips `migrate`, for when you know the
+# schema hasn't changed since that image was built. Leave `image_tag` blank
+# (or just push to `develop` normally) to get the original full-pipeline
+# behavior -- nothing changes for a normal push.
 on:
   push:
     branches: [develop]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Existing tag on Docker Hub to redeploy, e.g. a commit SHA from a prior successful "Build + push both images" run, or "latest" (skips ci + build-push). Leave blank to build fresh from this branch instead.'
+        required: false
+        type: string
+      skip_migrate:
+        description: 'Skip the migrate job too (only safe if you are certain no migration has changed since image_tag was built)'
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: deploy-staging
@@ -25,17 +51,28 @@ permissions:
 
 env:
   RESOURCE_GROUP: ${{ secrets.STAGING_RESOURCE_GROUP }}
-  IMAGE_TAG: ${{ github.sha }}
+  # Falls back to github.sha whenever image_tag isn't supplied -- a normal
+  # push, or a workflow_dispatch run with image_tag left blank.
+  IMAGE_TAG: ${{ inputs.image_tag || github.sha }}
   BACKEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend-staging
   FRONTEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-frontend-staging
+  # true only for a workflow_dispatch run that supplied an existing tag --
+  # every job below that builds/tests fresh code checks this.
+  REUSE_EXISTING_IMAGE: ${{ github.event_name == 'workflow_dispatch' && inputs.image_tag != '' }}
 
 jobs:
   ci:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.image_tag == '' }}
     uses: ./.github/workflows/ci.yml
 
   build-push:
     name: Build + push both images
     needs: [ci]
+    # `always()` because a skipped `ci` (see its own `if:` above) would
+    # otherwise skip this job too by GitHub's default needs-propagation --
+    # explicitly allow through both a real ci success AND ci being skipped
+    # for the same reason this job itself should be skipped.
+    if: ${{ always() && (needs.ci.result == 'success' || needs.ci.result == 'skipped') && (github.event_name != 'workflow_dispatch' || inputs.image_tag == '') }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -82,6 +119,11 @@ jobs:
   migrate:
     name: Run database migrations
     needs: [build-push]
+    # See build-push's `if:` comment for why `always()` + explicit
+    # success-or-skipped is needed here. Additionally skipped when
+    # `skip_migrate: true` was passed to a workflow_dispatch run reusing an
+    # existing image_tag.
+    if: ${{ always() && (needs.build-push.result == 'success' || needs.build-push.result == 'skipped') && !(github.event_name == 'workflow_dispatch' && inputs.skip_migrate) }}
     runs-on: ubuntu-latest
     # AZURE_CLIENT_ID/AZURE_TENANT_ID/AZURE_SUBSCRIPTION_ID are configured
     # as per-environment secrets (see DEPLOYMENT.md step 5's table --
@@ -135,6 +177,27 @@ jobs:
           echo "::error::Migration did not reach Succeeded/Failed within 675s (job's own replicaTimeout is 600s, so this means Azure itself hasn't resolved it yet -- check the job's execution logs, it may still be genuinely stuck)"
           exit 1
 
+      # BUG FIX: this used to jump straight to `az containerapp job logs
+      # show` on failure, reusing the azure/login@v2 session from the top
+      # of this job. That login exchanges a GitHub Actions OIDC token for
+      # an Azure AD access token via a client assertion that's only valid
+      # for a few minutes (observed: ~5 minutes) from when it was minted --
+      # NOT for the lifetime of the job. The "Wait for migration to
+      # complete" step above can poll for up to 675s (11m15s), so by the
+      # time a failure reaches this step the original assertion has
+      # commonly already expired, and every `az` call below fails with
+      # "AADSTS700024: Client assertion is not within its valid time
+      # range" -- the exact failure this diagnostic step exists to avoid.
+      # Re-running azure/login@v2 here mints a fresh GitHub OIDC token and
+      # a fresh assertion, right before it's actually used.
+      - name: Re-authenticate (previous login may have expired during the wait above)
+        if: failure()
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
       - name: Dump migration job logs (on failure)
         if: failure()
         run: |
@@ -156,6 +219,10 @@ jobs:
   deploy:
     name: Roll out new revisions
     needs: [build-push, migrate]
+    # Same pattern as migrate's `if:` above -- lets this job run whether
+    # build-push/migrate actually ran or were deliberately skipped for a
+    # workflow_dispatch redeploy of an existing image_tag.
+    if: ${{ always() && (needs.build-push.result == 'success' || needs.build-push.result == 'skipped') && (needs.migrate.result == 'success' || needs.migrate.result == 'skipped') }}
     runs-on: ubuntu-latest
     # See the `migrate` job's comment above -- same per-environment
     # AZURE_CLIENT_ID/AZURE_TENANT_ID/AZURE_SUBSCRIPTION_ID secrets, same
@@ -219,6 +286,29 @@ jobs:
                --retry 5 --retry-delay 5 --retry-connrefused --retry-max-time 570 \
                -o /dev/null -w "HTTP %{http_code} in %{time_total}s\n" \
                "https://$FQDN/"
+
+      # BUG FIX: azure/login@v2 at the top of this job exchanges a GitHub
+      # Actions OIDC token for an Azure AD access token via a client
+      # assertion that's only valid for a few minutes (observed: ~5
+      # minutes) from when it was minted -- NOT for the lifetime of the
+      # job. "Update backend"/"Update frontend"/"Smoke test" above can
+      # together run for several minutes (the smoke test's own retry
+      # budget alone is up to 570s), so by the time a smoke-test failure
+      # reaches this step the original assertion is commonly already
+      # expired: every `az` call below then fails with "AADSTS700024:
+      # Client assertion is not within its valid time range", which is
+      # exactly what was observed in practice -- both the live-tail AND
+      # the Log Analytics fallback failing back-to-back with that same
+      # error, leaving this step with nothing useful captured at all.
+      # Re-running azure/login@v2 here mints a fresh GitHub OIDC token and
+      # a fresh assertion, right before it's actually used.
+      - name: Re-authenticate (previous login may have expired during the steps above)
+        if: failure() && steps.smoke.outcome == 'failure'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Dump backend/frontend logs (on smoke test failure)
         if: failure() && steps.smoke.outcome == 'failure'

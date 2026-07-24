@@ -1,10 +1,10 @@
 #!/bin/sh
 # =============================================================================
-# nginx/docker-entrypoint.d/15-detect-resolver-ip.sh
+# nginx/docker-entrypoint.d/15-detect-resolver-ip.envsh
 # -----------------------------------------------------------------------------
-# The official nginx image automatically runs every executable *.sh script in
-# /docker-entrypoint.d/ (in lexical order) before it starts nginx -- including
-# its own bundled 20-envsubst-on-templates.sh, which is what turns
+# The official nginx image automatically runs every executable *.sh/*.envsh
+# script in /docker-entrypoint.d/ (in lexical order) before it starts nginx --
+# including its own bundled 20-envsubst-on-templates.sh, which is what turns
 # nginx/default.conf.template into the real config (see that file's own
 # comments). Naming this script "15-..." guarantees it runs BEFORE that
 # templating step, so by the time ${RESOLVER_IP} gets substituted, this
@@ -44,13 +44,34 @@
 # e.g. because you've confirmed the exact right value for your environment --
 # this script gets out of the way entirely and leaves it alone.
 #
-# IMPORTANT -- DO NOT `chmod +x` THIS FILE:
-# nginx's docker-entrypoint.sh SOURCES (`. "$f"`) any *.sh file here that
-# ISN'T executable, but EXECS (runs as a separate child process) any that
-# IS. Sourcing is required for our `export RESOLVER_IP=...` below to
-# actually stick around for the later 20-envsubst-on-templates.sh step --
-# an executable script's env changes die with that script's own process
-# and would never be seen by anything that runs after it.
+# BUG FIX -- WHY THIS IS ".envsh", NOT ".sh", AND *IS* CHMOD +X:
+# A previous version of this file used a ".sh" extension and was
+# deliberately left NON-executable, on the assumption that nginx's
+# docker-entrypoint.sh SOURCES any *.sh file that ISN'T executable and only
+# EXECS ones that are. That assumption is wrong for this (and every
+# reasonably current) version of the official nginx image: checking the
+# actual upstream entrypoint script (nginx/docker-nginx, entrypoint/
+# docker-entrypoint.sh) shows BOTH extensions require the executable bit --
+# a non-executable ".sh" OR ".envsh" file is unconditionally skipped
+# ("Ignoring $f, not executable"), never sourced. That's exactly the bug
+# this caused in practice: RESOLVER_IP was never getting exported, so
+# 20-envsubst-on-templates.sh's `envsubst` (which only substitutes variable
+# names it can see in the current environment) left the literal text
+# `${RESOLVER_IP}` in the rendered config, and nginx refused to start
+# ("host not found in resolver \"${RESOLVER_IP}\"").
+#
+# The actual, correct mechanism (added to the official image specifically
+# for this "a hook script needs to export a variable for a LATER hook
+# script to see" case): name the file ".envsh" AND make it executable.
+# nginx's entrypoint still treats ".envsh" specially -- SOURCING it (`.
+# "$f"`) into its own shell instead of exec'ing it as a child process --
+# but only does so if the executable bit is set, exactly like ".sh".
+# Sourcing is what makes our `export RESOLVER_IP=...` below actually stick
+# around for the later envsubst step; running this as a plain child process
+# would still lose that export the instant this script's own process
+# exits, whether or not the extension were ".sh" or ".envsh". Executable
+# bit is set in frontend/Dockerfile's COPY step (`--chmod=755`) -- see that
+# file's own comment.
 # =============================================================================
 
 set -e
