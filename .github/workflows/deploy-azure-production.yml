@@ -57,6 +57,11 @@ on:
         description: 'Docker image tag to deploy, e.g. v1.4.2 (must already exist on Docker Hub) -- use this for a manual redeploy or a rollback to an older version; see DEPLOYMENT.md "Rollback"'
         required: true
         type: string
+      skip_migrate:
+        description: 'Skip the migrate job (only safe if you are certain no migration has changed since image_tag was built -- e.g. re-running just the deploy/rollout logic after a workflow-file-only fix)'
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: deploy-production
@@ -76,6 +81,12 @@ jobs:
   migrate:
     name: Run database migrations
     runs-on: ubuntu-latest
+    # Skippable only via workflow_dispatch's skip_migrate input (not
+    # available on the workflow_call path release.yml uses, so a real
+    # release always runs its migration -- this is strictly a manual
+    # workflow_dispatch escape hatch for re-testing the deploy/rollout
+    # logic below without re-running an unchanged migration each time).
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.skip_migrate) }}
     # AZURE_CLIENT_ID/AZURE_TENANT_ID/AZURE_SUBSCRIPTION_ID are configured
     # as per-environment secrets (see DEPLOYMENT.md step 5's table --
     # deliberately per-environment since staging and production use
@@ -186,6 +197,10 @@ jobs:
   deploy:
     name: Roll out new revisions
     needs: [migrate]
+    # `always()` + explicit success-or-skipped so this still runs when
+    # `migrate` was deliberately skipped via skip_migrate above (by
+    # default, a skipped dependency skips everything downstream of it too).
+    if: ${{ always() && (needs.migrate.result == 'success' || needs.migrate.result == 'skipped') }}
     runs-on: ubuntu-latest
     # See the `migrate` job's comment above -- same per-environment
     # AZURE_CLIENT_ID/AZURE_TENANT_ID/AZURE_SUBSCRIPTION_ID secrets, same

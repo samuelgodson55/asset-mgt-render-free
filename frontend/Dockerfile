@@ -104,11 +104,21 @@ COPY nginx/default.conf.template /etc/nginx/templates/default.conf.template
 # boot if it isn't already set -- see the script's own header comment for
 # why (short version: not every platform publishes a fixed, documented
 # internal-DNS IP the way Docker Compose does, so guessing one into a
-# platform's config risks silently going stale). Deliberately left
-# NON-executable (do not chmod +x) so nginx's entrypoint sources it into
-# the same shell instead of running it as a throwaway subprocess -- see
-# that file's own comment for why that distinction matters here.
-COPY nginx/docker-entrypoint.d/15-detect-resolver-ip.sh /docker-entrypoint.d/15-detect-resolver-ip.sh
+# platform's config risks silently going stale).
+#
+# BUG FIX: this used to be named "*.sh" and was deliberately left
+# non-executable, on the (incorrect) assumption that nginx's entrypoint
+# sources non-executable ".sh" files. It doesn't -- it skips them
+# entirely, so RESOLVER_IP was never actually being exported, and
+# envsubst was leaving the literal "${RESOLVER_IP}" text in the rendered
+# config (nginx: "host not found in resolver \"${RESOLVER_IP}\""). Now
+# named ".envsh" (nginx's actual convention for "source this into my own
+# shell so its exports survive into later hook scripts") AND explicitly
+# made executable via --chmod, since nginx's entrypoint requires the
+# executable bit for BOTH ".sh" and ".envsh" alike -- see the script's own
+# header comment for the full explanation, including the exact upstream
+# source line that confirms this.
+COPY --chmod=755 nginx/docker-entrypoint.d/15-detect-resolver-ip.envsh /docker-entrypoint.d/15-detect-resolver-ip.envsh
 
 # The static site: index.html/admin.html/staff.html/manager.html/
 # customer.html and js/*. CSS/images pass through the frontend-build stage
