@@ -76,22 +76,50 @@
 
 set -e
 
+# BUG FIX -- DO NOT use an early `exit` in this script.
+# -----------------------------------------------------------------------
+# nginx's docker-entrypoint.sh processes every file in /docker-entrypoint.d/
+# via:
+#     find "/docker-entrypoint.d/" ... | sort -V | while read -r f; do
+#         ...
+#         . "$f"     # for *.envsh files
+#         ...
+#     done
+# Because that `while` loop is on the READING end of a pipe, POSIX shells
+# run the entire loop -- every iteration, for every file -- as ONE subshell,
+# not a fresh one per file. Calling `exit` from a script that gets SOURCED
+# (`. "$f"`) inside that loop doesn't just end this script: it terminates
+# that whole subshell immediately, which silently aborts every remaining
+# file the loop hadn't reached yet -- including this image's own
+# `15-local-resolvers.envsh`, and critically `20-envsubst-on-templates.sh`
+# (the script that actually renders default.conf.template into a real
+# /etc/nginx/conf.d/default.conf) and `30-tune-worker-processes.sh`. nginx
+# then boots with an EMPTY conf.d -- no server{} block at all, so nothing
+# ever binds to any port -- while still logging a totally clean "using the
+# epoll event method" / "start worker process N" startup with no error
+# anywhere, because nothing actually failed; the rest of the entrypoint
+# script itself just never ran. (See nginx/nginx docker-nginx#745 for the
+# same underlying subshell/export behavior biting a different symptom.)
+#
+# The fix: never call `exit` (or `return`, which errors outside a function
+# in dash/ash) here. Guard the rest of the script in an if/else instead, so
+# it always runs to completion and the loop moves on to the NEXT file
+# normally either way.
 if [ -n "$RESOLVER_IP" ]; then
     echo "15-detect-resolver-ip.sh: RESOLVER_IP already set to '$RESOLVER_IP' -- leaving it alone."
-    exit 0
-fi
-
-detected="$(awk '/^nameserver[[:space:]]/{print $2; exit}' /etc/resolv.conf 2>/dev/null || true)"
-
-if [ -z "$detected" ]; then
-    # Last-resort fallback so the container still starts with a working
-    # config instead of nginx failing to boot on a missing `resolver`
-    # value -- Docker's own embedded DNS address, which is at least a
-    # sane default in the most common case (local Docker Compose).
-    detected="127.0.0.11"
-    echo "15-detect-resolver-ip.sh: could not read a nameserver from /etc/resolv.conf -- falling back to '$detected'."
 else
-    echo "15-detect-resolver-ip.sh: auto-detected RESOLVER_IP='$detected' from /etc/resolv.conf."
-fi
+    detected="$(awk '/^nameserver[[:space:]]/{print $2; exit}' /etc/resolv.conf 2>/dev/null || true)"
 
-export RESOLVER_IP="$detected"
+    if [ -z "$detected" ]; then
+        # Last-resort fallback so the container still starts with a working
+        # config instead of nginx failing to boot on a missing `resolver`
+        # value -- Docker's own embedded DNS address, which is at least a
+        # sane default in the most common case (local Docker Compose).
+        detected="127.0.0.11"
+        echo "15-detect-resolver-ip.sh: could not read a nameserver from /etc/resolv.conf -- falling back to '$detected'."
+    else
+        echo "15-detect-resolver-ip.sh: auto-detected RESOLVER_IP='$detected' from /etc/resolv.conf."
+    fi
+
+    export RESOLVER_IP="$detected"
+fi
