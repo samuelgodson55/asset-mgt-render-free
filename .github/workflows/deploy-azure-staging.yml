@@ -287,6 +287,32 @@ jobs:
                -o /dev/null -w "HTTP %{http_code} in %{time_total}s\n" \
                "https://$FQDN/"
 
+          # BUG FIX: this step used to ONLY check "/" (the static frontend
+          # nginx serves directly, with zero backend involvement) -- it
+          # could pass, and this whole job go green, even when `backend`
+          # was completely unreachable behind nginx's /api/ proxy (wrong
+          # BACKEND_HOST/PORT, backend stuck ActivationFailed, DNS not
+          # resolving between apps, etc.). That's exactly what happened in
+          # practice: this job succeeded, but every login attempt failed
+          # with the browser's fetch() throwing "Unexpected token '<' ...
+          # is not valid JSON" -- nginx (or Container Apps' own ingress)
+          # returning an HTML error page for /api/auth/login instead of
+          # FastAPI ever seeing the request, with nothing in this pipeline
+          # ever having actually checked that path. deploy-azure-
+          # production.yml's smoke test already hits /api/auth/me for
+          # exactly this reason -- staging never got the same fix. Bringing
+          # staging in line with it here: expects 200 (a stale valid
+          # session cookie) or 401 (the normal "not logged in" response,
+          # and specifically NOT an HTML page) -- proves the request
+          # actually reached FastAPI and got a real JSON response, not
+          # just that nginx itself is up.
+          curl -f -s -S --connect-timeout 30 --max-time 60 \
+               "https://$FQDN/api/auth/me" -o /dev/null -w "HTTP %{http_code} in %{time_total}s\n" \
+               | grep -qE "200|401" || {
+                 echo "::error::GET /api/auth/me did not return 200 or 401 -- backend is unreachable through frontend's /api/ proxy (see this step's comment). Falling through to the log-dump step below."
+                 exit 1
+               }
+
       # BUG FIX: azure/login@v2 at the top of this job exchanges a GitHub
       # Actions OIDC token for an Azure AD access token via a client
       # assertion that's only valid for a few minutes (observed: ~5
