@@ -1014,6 +1014,26 @@ resource backendApp 'Microsoft.App/containerApps@2024-03-01' = {
         external: false
         targetPort: 8000
         transport: 'auto'
+        // BUG FIX -- root cause of "Roll out new revisions" smoke-test
+        // failures ("backend could not be resolved (3: Host not found)"
+        // in nginx's error log, HTTP 502 on /api/*): this was previously
+        // left unset, which defaults to `false`. With `allowInsecure:
+        // false`, Container Apps' shared Envoy proxy layer answers plain
+        // HTTP requests to `backend`'s internal FQDN/app-name with a
+        // redirect to HTTPS instead of actually proxying them -- but that
+        // was never even the request that failed, because nginx couldn't
+        // resolve the hostname AT ALL before getting that far (see
+        // `frontendApp` below for the actual DNS half of this bug and why
+        // both halves have to be fixed together). Once DNS resolution is
+        // fixed there, nginx's `proxy_pass http://$backend_upstream...`
+        // (see nginx/default.conf.template) still speaks plain HTTP, not
+        // HTTPS -- so `backend` also needs to accept plain HTTP through
+        // the proxy for that connection to actually succeed end-to-end.
+        // This only affects traffic between apps INSIDE the environment
+        // (`backend` still has `external: false`, so it's never reachable
+        // from the public internet either way) -- true e2e TLS between
+        // `frontend` and `backend` isn't in scope for this fix.
+        allowInsecure: true
       }
     }
     template: {
@@ -1133,11 +1153,52 @@ resource frontendApp 'Microsoft.App/containerApps@2024-03-01' = {
           resources: { cpu: json('0.25'), memory: '0.5Gi' }
           env: [
             { name: 'PORT', value: '80' }
-            // `frontend` and `backend` now share the same environment (see
-            // "SINGLE MANAGED ENVIRONMENT" above), so the short
-            // in-environment DNS name resolves directly -- no FQDN needed.
-            { name: 'BACKEND_HOST', value: 'backend' }
-            { name: 'BACKEND_PORT', value: '8000' }
+            // BUG FIX -- root cause of "Roll out new revisions" smoke-test
+            // failures: nginx logged "backend could not be resolved (3:
+            // Host not found)" and every /api/* request 502'd, even
+            // though `frontend` and `backend` share one environment and
+            // Azure's own docs say the bare app name (`http://backend`)
+            // "just resolves". It does -- for plain OS-level DNS clients
+            // (curl, this app's own smoke test, Python's requests, etc.),
+            // which all consult /etc/resolv.conf's `search` domain list
+            // and silently qualify an unqualified single-label name like
+            // "backend" before querying (see resolv.conf(5), "ndots"/
+            // domain search path). nginx's `resolver` directive
+            // (nginx/default.conf.template -- needed here so a stale IP
+            // from a `backend` redeploy doesn't get cached forever, see
+            // that file's own comment) does its OWN raw DNS queries and
+            // deliberately bypasses glibc entirely, so it NEVER reads or
+            // applies that search-domain list -- it queries exactly the
+            // literal string it's given, "backend", which doesn't exist
+            // as its own top-level DNS record and so comes back NXDOMAIN.
+            // This is a known, documented nginx-specific gotcha on every
+            // platform that relies on search-domain expansion for
+            // short-name service discovery (Kubernetes, DigitalOcean App
+            // Platform, and Azure Container Apps alike) -- the fix
+            // everywhere is the same: hand nginx the FULLY QUALIFIED name
+            // instead, which needs no search-list expansion at all.
+            // `backendApp.properties.configuration.ingress.fqdn` is
+            // exactly that -- `backend.internal.<env-id>.<region>.
+            // azurecontainerapps.io` -- so this also creates an explicit
+            // Bicep dependency on `backendApp` (on top of the `dependsOn`
+            // it already has for other reasons), guaranteeing `backend`'s
+            // ingress FQDN is known before `frontend` deploys.
+            { name: 'BACKEND_HOST', value: backendApp.properties.configuration.ingress.fqdn }
+            // Calls between container apps in the same environment --
+            // whether by bare app name or by FQDN -- go through the
+            // environment's shared Envoy proxy on the STANDARD web port,
+            // not the backend container's own `targetPort: 8000` (that
+            // port is an implementation detail Envoy forwards to
+            // internally; it's never exposed as a literal port number to
+            // other apps calling in). Port 8000 here was doubly wrong:
+            // even once DNS resolution above is fixed, connecting to
+            // "<backend FQDN>:8000" would still fail (nothing listens on
+            // 8000 at that address) or connect to the wrong thing.
+            // Plain port 80 (not 443) because nginx's proxy_pass speaks
+            // plain HTTP -- see `backendApp`'s `allowInsecure: true` above,
+            // which is what makes plain HTTP on this port actually work
+            // instead of getting redirected to HTTPS.
+            { name: 'BACKEND_PORT', value: '80' }
             { name: 'ENABLE_API_DOCS', value: string(enableApiDocs) } // must match backend's own value -- see nginx/default.conf.template's /docs passthrough gating
             // RESOLVER_IP deliberately NOT set -- nginx/docker-entrypoint.d/15-detect-resolver-ip.sh
             // reads it from Container Apps' own /etc/resolv.conf at boot.
