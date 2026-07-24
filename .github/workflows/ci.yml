@@ -27,8 +27,101 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ---------------------------------------------------------------------
+  # PERFORMANCE FIX: every job below used to run unconditionally on every
+  # push to every branch, regardless of which files actually changed --
+  # a one-line README edit paid for the exact same ~10 minutes (frontend
+  # npm tests, backend pytest against real Postgres/Redis service
+  # containers, two Docker builds + two Trivy scans, `az bicep build`)
+  # as a real backend or frontend change. This job figures out what
+  # actually changed and hands that down as outputs so each job below
+  # can skip itself when it has nothing to check.
+  #
+  # Deliberately a plain `git diff`, not a third-party paths-filter
+  # action: this repo already pins every third-party Action it uses to
+  # an exact commit SHA specifically because of a real supply-chain
+  # compromise (see the Trivy step below's own comment,
+  # CVE-2026-33634) -- not worth adding another external dependency
+  # here just to replace six lines of `git diff --name-only` + `grep`.
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      infra: ${{ steps.filter.outputs.infra }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need real history to diff against, not just the tip commit
+          # actions/checkout gives you by default (fetch-depth: 1).
+          fetch-depth: 0
+
+      - name: Determine changed files
+        id: filter
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          # Figure out what to diff against:
+          #  - pull_request: the PR's base commit, so a PR only ever pays
+          #    for what IT changes, not the whole base branch's history.
+          #  - push: the pre-push SHA GitHub gives us, UNLESS this is the
+          #    first push of a brand-new branch (GitHub sends all-zeros
+          #    for "before" in that case -- there's nothing to diff
+          #    against yet, so fall through to "treat everything as
+          #    changed" below instead of erroring on a bogus SHA).
+          #  - anything else (workflow_call from deploy-azure-*.yml,
+          #    manual workflow_dispatch, ...): also falls through to
+          #    "everything changed" -- these are exactly the paths that
+          #    are about to actually build+push+deploy real images, so
+          #    running the full validation suite there is the right
+          #    call, not an optimization target.
+          BASE=""
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            BASE="$PR_BASE_SHA"
+          elif [ "$EVENT_NAME" = "push" ] && [ "$PUSH_BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
+            BASE="$PUSH_BEFORE_SHA"
+          fi
+
+          if [ -z "$BASE" ]; then
+            echo "No usable base commit for a diff (new branch, or a workflow_call/dispatch that should always run everything) -- treating every path as changed."
+            echo "backend=true" >> "$GITHUB_OUTPUT"
+            echo "frontend=true" >> "$GITHUB_OUTPUT"
+            echo "infra=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          CHANGED="$(git diff --name-only "$BASE" "${{ github.sha }}")"
+          echo "Changed files vs $BASE:"
+          echo "$CHANGED"
+
+          # This workflow file itself is in every filter below: a change
+          # to ci.yml's own logic should always re-run everything it
+          # touches, not silently skip based on the OLD filter rules.
+          if echo "$CHANGED" | grep -qE '^(backend/|docker-compose\.yml|\.github/workflows/ci\.yml)'; then
+            echo "backend=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "backend=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if echo "$CHANGED" | grep -qE '^(frontend/|nginx/|build-frontend/|docker-compose\.yml|\.github/workflows/ci\.yml)'; then
+            echo "frontend=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "frontend=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if echo "$CHANGED" | grep -qE '^(infra/|\.github/workflows/ci\.yml)'; then
+            echo "infra=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "infra=false" >> "$GITHUB_OUTPUT"
+          fi
+
   frontend:
     name: Frontend parsing/rendering tests
+    needs: [changes]
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -67,6 +160,8 @@ jobs:
 
   backend:
     name: Backend lint, test, dependency audit
+    needs: [changes]
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     # tests/test_migrations.py runs the REAL `alembic upgrade head`/
     # `downgrade` chain (including 0002_bootstrap_root_admin.py) against a
@@ -176,6 +271,8 @@ jobs:
 
   nginx-config:
     name: nginx config validation (clean URLs)
+    needs: [changes]
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     # WHY THIS JOB EXISTS: `docker build` (see build-and-scan-images below)
     # only compiles the frontend image -- it never actually STARTS the
@@ -212,7 +309,18 @@ jobs:
   build-and-scan-images:
     name: Build images + Trivy scan
     runs-on: ubuntu-latest
-    needs: [backend, frontend, nginx-config]
+    needs: [changes, backend, frontend, nginx-config]
+    # `always()` because `backend`/`frontend`/`nginx-config` can now be
+    # legitimately SKIPPED (not just succeeded) depending on what changed
+    # -- GitHub's default `needs` propagation would otherwise skip this
+    # job too the moment any one of them is skipped, even when the other
+    # one actually changed and needs its image rebuilt. Runs only when at
+    # least one of backend/frontend changed, AND none of the jobs that DID
+    # run actually failed.
+    if: >-
+      always() &&
+      (needs.changes.outputs.backend == 'true' || needs.changes.outputs.frontend == 'true') &&
+      needs.backend.result != 'failure' && needs.frontend.result != 'failure' && needs.nginx-config.result != 'failure'
     steps:
       - uses: actions/checkout@v4
 
@@ -306,6 +414,8 @@ jobs:
 
   bicep-lint:
     name: Validate infra/main.bicep
+    needs: [changes]
+    if: needs.changes.outputs.infra == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
