@@ -27,7 +27,10 @@ conceptually (safety checklist, migration ordering, scaling shape, backup
 strategy) — jump straight to
 [Azure Container Apps Production Deployment (Cost-Optimized)](#azure-container-apps-production-deployment-cost-optimized)
 for the fully automated, Azure-native version of this same pipeline
-(`infra/main.bicep` + `.github/workflows/deploy-azure-*.yml`).
+(`infra/main.bicep` + `.github/workflows/deploy-azure-*.yml`). Once that's
+up and running, see [POST_DEPLOYMENT.md](POST_DEPLOYMENT.md) for the
+optional next steps: SMTP, Google Drive backup uploads, and mapping a
+custom domain.
 
 ---
 
@@ -44,6 +47,7 @@ for the fully automated, Azure-native version of this same pipeline
   - [Versioning & Cutting a Release](#versioning--cutting-a-release)
   - [Rollback](#rollback)
 - [Troubleshooting](#troubleshooting)
+- **[Post-Deployment: SMTP, Google Drive backups, custom domain →](POST_DEPLOYMENT.md)**
 
 ---
 
@@ -633,6 +637,12 @@ not you ever push an image).
    | `JWT_SECRET_KEY` | per-environment | Generate with `openssl rand -hex 32` |
    | `ROOT_ADMIN_BOOTSTRAP_PASSWORD` | per-environment | Optional — the root admin's initial password. Leave unset to have `0002_bootstrap_root_admin.py` generate a random one and print it once instead (see README's "Viewing the one-time-generated root admin password"). Note: the root admin's username/display name (`SUPER_ADMIN_USERNAME`/`SUPER_ADMIN_NAME`) aren't wired as GitHub secrets at all here — `infra/main.bicep` hardcodes them to `superadmin`/`Super Admin`; edit the bicep file directly if you want different values. |
    | `CUSTOM_DOMAIN` | per-environment | Optional — leave unset to use the generated `*.azurecontainerapps.io` FQDN |
+   | `NOTIFICATIONS_ENABLED` | per-environment | Optional, string `"true"`/`"false"` — master switch for all outbound email. Leave unset (defaults to off) until the four `SMTP_*` secrets below are set. See [POST_DEPLOYMENT.md](POST_DEPLOYMENT.md) for the full walkthrough. |
+   | `SMTP_HOST` / `SMTP_USERNAME` / `SMTP_PASSWORD` / `SMTP_FROM_EMAIL` | per-environment | Optional — required together if `NOTIFICATIONS_ENABLED=true`. Any RFC 5321 SMTP server works (your own Postfix, SendGrid, Mailgun, AWS SES's SMTP endpoint, ...) — no vendor-specific SDK. See [POST_DEPLOYMENT.md](POST_DEPLOYMENT.md). |
+   | `ADMIN_NOTIFICATION_EMAILS` | per-environment | Optional — comma-separated extra recipients for extension-request alerts, on top of Admins/Managers/the Super Admin, who are covered automatically. |
+   | `GDRIVE_BACKUP_ENABLED` | per-environment | Optional, string `"true"`/`"false"` — leave unset (defaults to off, local-disk-only backups) until the four `GDRIVE_*` secrets below are set. See [POST_DEPLOYMENT.md](POST_DEPLOYMENT.md). |
+   | `GDRIVE_OAUTH_CLIENT_ID` / `GDRIVE_OAUTH_CLIENT_SECRET` / `GDRIVE_OAUTH_REFRESH_TOKEN` | per-environment | Optional — required together if `GDRIVE_BACKUP_ENABLED=true`. Produced by running `backend/scripts/gdrive_oauth_setup.py` **once, on your own machine, not in CI** — see [POST_DEPLOYMENT.md](POST_DEPLOYMENT.md). |
+   | `GDRIVE_FOLDER_ID` | per-environment | Optional — the destination Drive folder's ID (from its URL), required alongside the three secrets above. |
    | `ALERT_EMAIL_ADDRESS` | per-environment | Optional — leave unset to skip creating any alerting resources (no cost, no action group). Set it to wire up the three Azure Monitor scheduled query alerts (backend error-rate spike, `/readyz` failing, daily backup missing) from `infra/main.bicep` to that address — see [SRE_STRATEGY.md](SRE_STRATEGY.md) section 2. **Leave this unset on a brand-new environment's first-ever `infra-deploy.yml` run.** The three alert rules query the `ContainerAppConsoleLogs_CL` table, which Azure only creates once a log line has actually been ingested — on a fresh Log Analytics workspace it doesn't exist yet, and the deployment fails with `Failed to resolve table or column expression named 'ContainerAppConsoleLogs_CL'` if you try to create the rules first. Deploy once with this unset, let `backend`/`frontend` run for a few minutes (or serve one request), then set this secret and re-run `infra-deploy.yml` for the same environment to add the alert rules on top of the already-running infra. |
 
    Optionally, also set two repo-level **Variables** (Settings → Secrets

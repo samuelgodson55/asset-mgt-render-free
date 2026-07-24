@@ -366,11 +366,88 @@ param smtpPassword string = ''
 param smtpFromEmail string = ''
 param adminNotificationEmails string = ''
 
+@description('Google Drive backup upload -- optional, off by default, matching .env.example. OAuth mode only (a personal Google account\'s own Drive quota) -- see backend/scripts/gdrive_oauth_setup.py for the one-time script that produces gdriveOauthClientId/gdriveOauthClientSecret/gdriveOauthRefreshToken, and backend/config.py\'s BACKUP_GDRIVE_* docstring for why the service-account mode that script\'s docstring also describes is deliberately NOT exposed as a bicep param here (it requires a Google Workspace Shared Drive, not applicable to this app\'s typical personal-Drive use case). Leave gdriveBackupEnabled false (the default) to keep local-disk-only backups, same as before this parameter existed.')
+param gdriveBackupEnabled bool = false
+param gdriveOauthClientId string = ''
+@secure()
+param gdriveOauthClientSecret string = ''
+@secure()
+param gdriveOauthRefreshToken string = ''
+param gdriveFolderId string = ''
+
 @description('Gate for FastAPI\'s interactive API docs (Swagger/ReDoc) AND nginx\'s matching passthrough route -- see nginx/default.conf.template. Keep false in any environment reachable from the public internet unless you specifically need it.')
 param enableApiDocs bool = false
 
 @description('Email address to page on the three Azure Monitor scheduled query alerts below (backend error-rate spike, /readyz failing, daily backup missing) -- see SRE_STRATEGY.md section 2. Leave empty (the default) to skip creating the action group/alert rules entirely -- no alerting, no extra cost, same as before this parameter existed. IMPORTANT ordering requirement: leave this EMPTY on the very first deploy of a brand-new environment. The three alert rules below query the `ContainerAppConsoleLogs_CL` table, which Azure only materializes the first time a log line actually lands in it -- on a fresh Log Analytics workspace that table does not exist yet, and Microsoft.Insights/scheduledQueryRules validates its KQL against the workspace schema at deploy time, so creating the rules before any logs have been ingested fails deployment with "Failed to resolve table or column expression named \'ContainerAppConsoleLogs_CL\'". Deploy once with this empty, let `backend`/`frontend` serve at least one request (or just sit running for a few minutes) so the table gets created, confirm it under the Log Analytics workspace\'s Logs > Tables blade, THEN set this and re-run infra-deploy.yml for the same environment to add the alert rules on top of the already-running infra.')
 param alertEmailAddress string = ''
+
+// -----------------------------------------------------------------------------
+// Previously hardcoded literals in `sharedEnv` below -- promoted to params so
+// infra-deploy.yml can set them per-environment from GitHub Variables, without
+// editing this file. All non-sensitive (no passwords/tokens among them), so
+// they're read as `vars.X` in infra-deploy.yml, the same pattern already used
+// for postgresSkuName/postgresStorageGb above -- not `secrets.X`.
+// -----------------------------------------------------------------------------
+
+@description('Brand name shown in the navbar/login header, browser tab title (GET /config/public), and the Quotation/Checkout Receipt PDF letterhead. Matches .env.example\'s SITE_NAME.')
+param siteName string = 'Snipe-IT Lite'
+
+@description('Structured logging level: DEBUG | INFO | WARNING | ERROR | CRITICAL. Matches .env.example\'s LOG_LEVEL.')
+param logLevel string = 'INFO'
+
+@description('POST /auth/login: max attempts allowed per loginRateLimitWindowSeconds from the same client IP before HTTP 429. Matches .env.example\'s LOGIN_RATE_LIMIT_MAX.')
+param loginRateLimitMax int = 5
+
+@description('POST /auth/login rate-limit window, in seconds. Matches .env.example\'s LOGIN_RATE_LIMIT_WINDOW_SECONDS.')
+param loginRateLimitWindowSeconds int = 60
+
+@description('Per-account brute-force lockout: consecutive wrong-password attempts against the SAME account before it is locked, regardless of IP. Matches .env.example\'s ACCOUNT_LOCKOUT_MAX_ATTEMPTS.')
+param accountLockoutMaxAttempts int = 5
+
+@description('Per-account lockout duration, in minutes. Matches .env.example\'s ACCOUNT_LOCKOUT_DURATION_MINUTES.')
+param accountLockoutDurationMinutes int = 15
+
+@description('Root admin account\'s username, bootstrapped once by the `migrate` Job (see backend/alembic/versions/0002_bootstrap_root_admin.py). Matches .env.example\'s SUPER_ADMIN_USERNAME.')
+param superAdminUsername string = 'superadmin'
+
+@description('Root admin account\'s display name. Matches .env.example\'s SUPER_ADMIN_NAME.')
+param superAdminName string = 'Super Admin'
+
+@description('SMTP port -- 587 for STARTTLS (pair with smtpUseTls=true) or 465 for implicit SSL (pair with smtpUseSsl=true). Matches .env.example\'s SMTP_PORT.')
+param smtpPort int = 587
+
+@description('Use STARTTLS on smtpPort. Matches .env.example\'s SMTP_USE_TLS.')
+param smtpUseTls bool = true
+
+@description('Use implicit SSL instead of STARTTLS -- takes priority over smtpUseTls if both are true; pair with smtpPort=465. Matches .env.example\'s SMTP_USE_SSL.')
+param smtpUseSsl bool = false
+
+@description('How often (in hours) the worker checks for overdue checkouts and emails the admin/manager digest. Matches .env.example\'s OVERDUE_NOTIFICATION_INTERVAL_HOURS.')
+param overdueNotificationIntervalHours int = 24
+
+@description('How many days ahead of its due_date an active checkout counts as "due soon" -- drives the dashboard banner, the My Items badge, and the due-soon reminder email. Matches .env.example\'s DUE_SOON_REMINDER_DAYS.')
+param dueSoonReminderDays int = 2
+
+@description('How often (in hours) the worker checks for checkouts about to go overdue. Matches .env.example\'s DUE_SOON_NOTIFICATION_INTERVAL_HOURS.')
+param dueSoonNotificationIntervalHours int = 24
+
+@description('Whether the individual "your item is overdue/due soon" reminder also goes to the checkout\'s own holder, in addition to the admin/manager digest. Matches .env.example\'s SEND_INDIVIDUAL_HOLDER_REMINDERS.')
+param sendIndividualHolderReminders bool = true
+
+@description('IANA timezone name (e.g. "Africa/Lagos") used to render CSV/PDF export timestamps -- data itself is always stored as UTC. Matches .env.example\'s DISPLAY_TIMEZONE.')
+param displayTimezone string = 'Africa/Lagos'
+
+@description('ISO 4217 currency code applied everywhere a price is shown or exported. Matches .env.example\'s CURRENCY_CODE.')
+param currencyCode string = 'NGN'
+
+@description('Whether a staff/customer account browsing the self-service Quotation Catalog can see each pool\'s available quantity + in-stock/out-of-stock status. Matches .env.example\'s CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER.')
+param catalogShowStockToStaffCustomer bool = false
+
+@description('Comma-separated hours of day (UTC, each 0-23) the in-process gzip pg_dump backup job runs at, e.g. "3" or "3,15,21". Matches .env.example\'s BACKUP_HOURS_UTC.')
+param backupHoursUtc string = '3'
+
+@description('How many local backup files to keep before deleting the oldest. Matches .env.example\'s BACKUP_RETENTION_COUNT.')
+param backupRetentionCount int = 7
 
 var namePrefix = '${appBaseName}-${environmentName}'
 var suffix = uniqueString(resourceGroup().id, environmentName)
@@ -931,38 +1008,40 @@ var sharedEnv = [
   { name: 'EXPORT_RESULT_DIR', value: '/app/export_results' }
   { name: 'JWT_ALGORITHM', value: 'HS256' }
   { name: 'JWT_EXPIRY_HOURS', value: '12' }
-  { name: 'SITE_NAME', value: 'Snipe-IT Lite' }
+  { name: 'SITE_NAME', value: siteName }
   { name: 'AUTO_INIT_DB', value: 'false' }
   { name: 'AUTO_SEED_DEMO_DATA', value: 'false' }
-  { name: 'LOG_LEVEL', value: 'INFO' }
+  { name: 'LOG_LEVEL', value: logLevel }
   { name: 'LOG_FORMAT', value: 'json' }
-  { name: 'LOGIN_RATE_LIMIT_MAX', value: '5' }
-  { name: 'LOGIN_RATE_LIMIT_WINDOW_SECONDS', value: '60' }
-  { name: 'ACCOUNT_LOCKOUT_MAX_ATTEMPTS', value: '5' }
-  { name: 'ACCOUNT_LOCKOUT_DURATION_MINUTES', value: '15' }
+  { name: 'LOGIN_RATE_LIMIT_MAX', value: string(loginRateLimitMax) }
+  { name: 'LOGIN_RATE_LIMIT_WINDOW_SECONDS', value: string(loginRateLimitWindowSeconds) }
+  { name: 'ACCOUNT_LOCKOUT_MAX_ATTEMPTS', value: string(accountLockoutMaxAttempts) }
+  { name: 'ACCOUNT_LOCKOUT_DURATION_MINUTES', value: string(accountLockoutDurationMinutes) }
   { name: 'ENABLE_API_DOCS', value: string(enableApiDocs) }
-  { name: 'SUPER_ADMIN_USERNAME', value: 'superadmin' }
-  { name: 'SUPER_ADMIN_NAME', value: 'Super Admin' }
+  { name: 'SUPER_ADMIN_USERNAME', value: superAdminUsername }
+  { name: 'SUPER_ADMIN_NAME', value: superAdminName }
   { name: 'NOTIFICATIONS_ENABLED', value: string(notificationsEnabled) }
   { name: 'SMTP_HOST', value: smtpHost }
-  { name: 'SMTP_PORT', value: '587' }
+  { name: 'SMTP_PORT', value: string(smtpPort) }
   { name: 'SMTP_USERNAME', value: smtpUsername }
-  { name: 'SMTP_USE_TLS', value: 'true' }
-  { name: 'SMTP_USE_SSL', value: 'false' }
+  { name: 'SMTP_USE_TLS', value: string(smtpUseTls) }
+  { name: 'SMTP_USE_SSL', value: string(smtpUseSsl) }
   { name: 'SMTP_FROM_EMAIL', value: smtpFromEmail }
   { name: 'ADMIN_NOTIFICATION_EMAILS', value: adminNotificationEmails }
-  { name: 'OVERDUE_NOTIFICATION_INTERVAL_HOURS', value: '24' }
-  { name: 'DUE_SOON_REMINDER_DAYS', value: '2' }
-  { name: 'DUE_SOON_NOTIFICATION_INTERVAL_HOURS', value: '24' }
-  { name: 'SEND_INDIVIDUAL_HOLDER_REMINDERS', value: 'true' }
-  { name: 'DISPLAY_TIMEZONE', value: 'Africa/Lagos' }
-  { name: 'CURRENCY_CODE', value: 'NGN' }
-  { name: 'CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER', value: 'false' }
+  { name: 'OVERDUE_NOTIFICATION_INTERVAL_HOURS', value: string(overdueNotificationIntervalHours) }
+  { name: 'DUE_SOON_REMINDER_DAYS', value: string(dueSoonReminderDays) }
+  { name: 'DUE_SOON_NOTIFICATION_INTERVAL_HOURS', value: string(dueSoonNotificationIntervalHours) }
+  { name: 'SEND_INDIVIDUAL_HOLDER_REMINDERS', value: string(sendIndividualHolderReminders) }
+  { name: 'DISPLAY_TIMEZONE', value: displayTimezone }
+  { name: 'CURRENCY_CODE', value: currencyCode }
+  { name: 'CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER', value: string(catalogShowStockToStaffCustomer) }
   { name: 'ENABLE_AUTO_BACKUP', value: 'true' }
-  { name: 'BACKUP_HOURS_UTC', value: '3' }
+  { name: 'BACKUP_HOURS_UTC', value: backupHoursUtc }
   { name: 'BACKUP_DIR', value: '/app/backups' }
-  { name: 'BACKUP_RETENTION_COUNT', value: '7' }
-  { name: 'BACKUP_GDRIVE_ENABLED', value: 'false' }
+  { name: 'BACKUP_RETENTION_COUNT', value: string(backupRetentionCount) }
+  { name: 'BACKUP_GDRIVE_ENABLED', value: string(gdriveBackupEnabled) }
+  { name: 'BACKUP_GDRIVE_OAUTH_CLIENT_ID', value: gdriveOauthClientId }
+  { name: 'BACKUP_GDRIVE_FOLDER_ID', value: gdriveFolderId }
 ]
 
 var sharedSecrets = concat([
@@ -971,6 +1050,8 @@ var sharedSecrets = concat([
   { name: 'database-url', value: databaseUrl }
   { name: 'redis-url', value: redisUrl }
   { name: 'smtp-password', value: empty(smtpPassword) ? 'unset' : smtpPassword }
+  { name: 'gdrive-oauth-client-secret', value: empty(gdriveOauthClientSecret) ? 'unset' : gdriveOauthClientSecret }
+  { name: 'gdrive-oauth-refresh-token', value: empty(gdriveOauthRefreshToken) ? 'unset' : gdriveOauthRefreshToken }
 ], usePrivateDockerHubRepo ? [
   { name: 'dockerhub-token', value: dockerHubToken }
 ] : [])
@@ -985,6 +1066,8 @@ var sharedSecretEnvRefs = [
   { name: 'DATABASE_URL', secretRef: 'database-url' }
   { name: 'REDIS_URL', secretRef: 'redis-url' }
   { name: 'SMTP_PASSWORD', secretRef: 'smtp-password' }
+  { name: 'BACKUP_GDRIVE_OAUTH_CLIENT_SECRET', secretRef: 'gdrive-oauth-client-secret' }
+  { name: 'BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN', secretRef: 'gdrive-oauth-refresh-token' }
 ]
 
 var registries = usePrivateDockerHubRepo ? [
