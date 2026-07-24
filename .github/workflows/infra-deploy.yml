@@ -130,6 +130,34 @@ jobs:
       # Unset variables fall back to bicep's own defaults (Standard_B1ms /
       # 32 GiB) via the `|| default` bash pattern below -- this step is safe
       # to run even if you never set either variable.
+      # SMTP (email notifications) and Google Drive (backup upload) are
+      # BOTH optional -- every secret referenced below resolves to an
+      # empty string / 'false' if you never set it in
+      # Settings -> Secrets and variables -> Actions -> Secrets, which
+      # keeps main.bicep's defaults (notifications off, gdrive off) exactly
+      # as before these lines existed. Set them once you're ready:
+      #   - SMTP_HOST / SMTP_USERNAME / SMTP_PASSWORD / SMTP_FROM_EMAIL,
+      #     then NOTIFICATIONS_ENABLED=true. ADMIN_NOTIFICATION_EMAILS is
+      #     optional on top (comma-separated).
+      #   - GDRIVE_OAUTH_CLIENT_ID / GDRIVE_OAUTH_CLIENT_SECRET /
+      #     GDRIVE_OAUTH_REFRESH_TOKEN (from backend/scripts/
+      #     gdrive_oauth_setup.py -- run that ONCE on your own machine, not
+      #     in CI) and GDRIVE_FOLDER_ID, then GDRIVE_BACKUP_ENABLED=true.
+      # `secrets.X == 'true'` (not a plain boolean secret) because GitHub
+      # Actions secrets are always strings -- this is the standard pattern
+      # for turning an unset/empty secret into bicep's `false` default
+      # without a separate Variables-tab entry.
+      # ENABLE_API_DOCS / SITE_NAME / rate-limit / lockout / super-admin
+      # identity / SMTP port+transport / notification intervals / display
+      # timezone / currency / catalog visibility / backup schedule are all
+      # non-sensitive config -- no passwords or tokens among them -- so they
+      # follow the SAME pattern as postgresSkuName/postgresStorageGb above:
+      # repo-level GitHub VARIABLES (Settings -> Secrets and variables ->
+      # Actions -> Variables tab), not Secrets, with a `|| default` fallback
+      # to main.bicep's own default so this step is safe to run even if you
+      # never set any of them. Set only the ones you want to change from
+      # their .env.example default; everything else keeps working exactly
+      # as before these lines existed.
       - name: Deploy Bicep
         run: |
           az deployment group create \
@@ -151,7 +179,39 @@ jobs:
               jwtSecretKey="${{ secrets.JWT_SECRET_KEY }}" \
               rootAdminBootstrapPassword="${{ secrets.ROOT_ADMIN_BOOTSTRAP_PASSWORD }}" \
               customDomain="${{ secrets.CUSTOM_DOMAIN }}" \
-              alertEmailAddress="${{ secrets.ALERT_EMAIL_ADDRESS }}"
+              alertEmailAddress="${{ secrets.ALERT_EMAIL_ADDRESS }}" \
+              notificationsEnabled=${{ secrets.NOTIFICATIONS_ENABLED == 'true' }} \
+              smtpHost="${{ secrets.SMTP_HOST }}" \
+              smtpUsername="${{ secrets.SMTP_USERNAME }}" \
+              smtpPassword="${{ secrets.SMTP_PASSWORD }}" \
+              smtpFromEmail="${{ secrets.SMTP_FROM_EMAIL }}" \
+              adminNotificationEmails="${{ secrets.ADMIN_NOTIFICATION_EMAILS }}" \
+              gdriveBackupEnabled=${{ secrets.GDRIVE_BACKUP_ENABLED == 'true' }} \
+              gdriveOauthClientId="${{ secrets.GDRIVE_OAUTH_CLIENT_ID }}" \
+              gdriveOauthClientSecret="${{ secrets.GDRIVE_OAUTH_CLIENT_SECRET }}" \
+              gdriveOauthRefreshToken="${{ secrets.GDRIVE_OAUTH_REFRESH_TOKEN }}" \
+              gdriveFolderId="${{ secrets.GDRIVE_FOLDER_ID }}" \
+              enableApiDocs=${{ vars.ENABLE_API_DOCS == 'true' }} \
+              siteName="${{ vars.SITE_NAME || 'Snipe-IT Lite' }}" \
+              logLevel="${{ vars.LOG_LEVEL || 'INFO' }}" \
+              loginRateLimitMax=${{ vars.LOGIN_RATE_LIMIT_MAX || 5 }} \
+              loginRateLimitWindowSeconds=${{ vars.LOGIN_RATE_LIMIT_WINDOW_SECONDS || 60 }} \
+              accountLockoutMaxAttempts=${{ vars.ACCOUNT_LOCKOUT_MAX_ATTEMPTS || 5 }} \
+              accountLockoutDurationMinutes=${{ vars.ACCOUNT_LOCKOUT_DURATION_MINUTES || 15 }} \
+              superAdminUsername="${{ vars.SUPER_ADMIN_USERNAME || 'superadmin' }}" \
+              superAdminName="${{ vars.SUPER_ADMIN_NAME || 'Super Admin' }}" \
+              smtpPort=${{ vars.SMTP_PORT || 587 }} \
+              smtpUseTls=${{ vars.SMTP_USE_TLS != 'false' }} \
+              smtpUseSsl=${{ vars.SMTP_USE_SSL == 'true' }} \
+              overdueNotificationIntervalHours=${{ vars.OVERDUE_NOTIFICATION_INTERVAL_HOURS || 24 }} \
+              dueSoonReminderDays=${{ vars.DUE_SOON_REMINDER_DAYS || 2 }} \
+              dueSoonNotificationIntervalHours=${{ vars.DUE_SOON_NOTIFICATION_INTERVAL_HOURS || 24 }} \
+              sendIndividualHolderReminders=${{ vars.SEND_INDIVIDUAL_HOLDER_REMINDERS != 'false' }} \
+              displayTimezone="${{ vars.DISPLAY_TIMEZONE || 'Africa/Lagos' }}" \
+              currencyCode="${{ vars.CURRENCY_CODE || 'NGN' }}" \
+              catalogShowStockToStaffCustomer=${{ vars.CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER == 'true' }} \
+              backupHoursUtc="${{ vars.BACKUP_HOURS_UTC || '3' }}" \
+              backupRetentionCount=${{ vars.BACKUP_RETENTION_COUNT || 7 }}
 
       - name: Show outputs
         run: |
