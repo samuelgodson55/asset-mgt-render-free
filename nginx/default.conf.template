@@ -167,7 +167,37 @@ server {
         # the caller's IP, so this isn't optional -- without it every
         # request would appear to originate from the nginx container's own
         # address, breaking per-IP login rate limiting entirely.
-        proxy_set_header Host $host;
+        #
+        # BUG FIX -- "backend is unreachable through frontend's /api/
+        # proxy" smoke-test failures, symptom: a 404 (NOT a 502/504) on
+        # every /api/* request, with literally nothing about that request
+        # showing up in backend's own uvicorn logs -- i.e. it never even
+        # reached the container. This used to be `proxy_set_header Host
+        # $host;`, which forwards the CLIENT's original Host header
+        # ("frontend.<env>.<region>.azurecontainerapps.io") straight
+        # through to backend unchanged. On plain Docker Compose that's
+        # harmless (the Host header is irrelevant to Compose's own
+        # networking). On Azure Container Apps it's actively wrong: calls
+        # between container apps in the same environment are routed by
+        # the platform's own shared Envoy proxy layer, which "identifies
+        # the target app from the [request's] hostname" (see Microsoft's
+        # own "Communicate between container apps" docs) -- i.e. Envoy
+        # reads the Host header to decide which app to forward to, the
+        # same way any name-based virtual-hosting reverse proxy would.
+        # Forwarding `frontend`'s own public hostname as the Host header
+        # on a request addressed to `backend`'s internal IP tells Envoy
+        # "route this as if it were for frontend", which has no /api/*
+        # route of its own at that layer -- hence Envoy's own 404, before
+        # FastAPI/uvicorn ever sees the request. Using $backend_upstream
+        # here (the same internal FQDN:port this location already
+        # resolves BACKEND_HOST/BACKEND_PORT into, two lines up) instead
+        # correctly identifies `backend` as the target app to Envoy.
+        # `backend`'s own code never reads the Host header for anything
+        # (checked: no CORS/redirect/URL-building logic keys off it), so
+        # this is safe -- and the original client-facing hostname is
+        # still available to backend if it's ever needed, unchanged,
+        # via X-Forwarded-Host below.
+        proxy_set_header Host $backend_upstream;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
@@ -249,7 +279,10 @@ server {
 
         set $backend_upstream ${BACKEND_HOST}:${BACKEND_PORT};
         proxy_pass http://$backend_upstream$request_uri;
-        proxy_set_header Host $host;
+        # BUG FIX: same Azure Container Apps Host-header-based routing
+        # issue as the /api/ location above -- see that location's own
+        # comment for the full explanation.
+        proxy_set_header Host $backend_upstream;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
