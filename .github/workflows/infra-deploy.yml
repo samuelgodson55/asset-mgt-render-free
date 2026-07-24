@@ -203,9 +203,9 @@ jobs:
               smtpPort=${{ vars.SMTP_PORT || 587 }} \
               smtpUseTls=${{ vars.SMTP_USE_TLS != 'false' }} \
               smtpUseSsl=${{ vars.SMTP_USE_SSL == 'true' }} \
-              overdueNotificationIntervalHours=${{ vars.OVERDUE_NOTIFICATION_INTERVAL_HOURS || 24 }} \
+              overdueNotificationIntervalHours="${{ vars.OVERDUE_NOTIFICATION_INTERVAL_HOURS || 24 }}" \
               dueSoonReminderDays=${{ vars.DUE_SOON_REMINDER_DAYS || 2 }} \
-              dueSoonNotificationIntervalHours=${{ vars.DUE_SOON_NOTIFICATION_INTERVAL_HOURS || 24 }} \
+              dueSoonNotificationIntervalHours="${{ vars.DUE_SOON_NOTIFICATION_INTERVAL_HOURS || 24 }}" \
               sendIndividualHolderReminders=${{ vars.SEND_INDIVIDUAL_HOLDER_REMINDERS != 'false' }} \
               displayTimezone="${{ vars.DISPLAY_TIMEZONE || 'Africa/Lagos' }}" \
               currencyCode="${{ vars.CURRENCY_CODE || 'NGN' }}" \

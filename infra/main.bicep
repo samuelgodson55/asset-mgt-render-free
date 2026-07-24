@@ -422,14 +422,14 @@ param smtpUseTls bool = true
 @description('Use implicit SSL instead of STARTTLS -- takes priority over smtpUseTls if both are true; pair with smtpPort=465. Matches .env.example\'s SMTP_USE_SSL.')
 param smtpUseSsl bool = false
 
-@description('How often (in hours) the worker checks for overdue checkouts and emails the admin/manager digest. Matches .env.example\'s OVERDUE_NOTIFICATION_INTERVAL_HOURS.')
-param overdueNotificationIntervalHours int = 24
+@description('How often (in hours) the worker checks for overdue checkouts and emails the admin/manager digest. Matches .env.example\'s OVERDUE_NOTIFICATION_INTERVAL_HOURS. Typed as string, not int -- ARM/Bicep has no decimal parameter type, and this value supports fractional hours (e.g. "0.05" for a 3-minute interval while testing), which int would reject.')
+param overdueNotificationIntervalHours string = '24'
 
 @description('How many days ahead of its due_date an active checkout counts as "due soon" -- drives the dashboard banner, the My Items badge, and the due-soon reminder email. Matches .env.example\'s DUE_SOON_REMINDER_DAYS.')
 param dueSoonReminderDays int = 2
 
-@description('How often (in hours) the worker checks for checkouts about to go overdue. Matches .env.example\'s DUE_SOON_NOTIFICATION_INTERVAL_HOURS.')
-param dueSoonNotificationIntervalHours int = 24
+@description('How often (in hours) the worker checks for checkouts about to go overdue. Matches .env.example\'s DUE_SOON_NOTIFICATION_INTERVAL_HOURS. Typed as string, not int -- ARM/Bicep has no decimal parameter type, and this value supports fractional hours (e.g. "0.05" for a 3-minute interval while testing), which int would reject.')
+param dueSoonNotificationIntervalHours string = '24'
 
 @description('Whether the individual "your item is overdue/due soon" reminder also goes to the checkout\'s own holder, in addition to the admin/manager digest. Matches .env.example\'s SEND_INDIVIDUAL_HOLDER_REMINDERS.')
 param sendIndividualHolderReminders bool = true
@@ -1028,9 +1028,9 @@ var sharedEnv = [
   { name: 'SMTP_USE_SSL', value: string(smtpUseSsl) }
   { name: 'SMTP_FROM_EMAIL', value: smtpFromEmail }
   { name: 'ADMIN_NOTIFICATION_EMAILS', value: adminNotificationEmails }
-  { name: 'OVERDUE_NOTIFICATION_INTERVAL_HOURS', value: string(overdueNotificationIntervalHours) }
+  { name: 'OVERDUE_NOTIFICATION_INTERVAL_HOURS', value: overdueNotificationIntervalHours }
   { name: 'DUE_SOON_REMINDER_DAYS', value: string(dueSoonReminderDays) }
-  { name: 'DUE_SOON_NOTIFICATION_INTERVAL_HOURS', value: string(dueSoonNotificationIntervalHours) }
+  { name: 'DUE_SOON_NOTIFICATION_INTERVAL_HOURS', value: dueSoonNotificationIntervalHours }
   { name: 'SEND_INDIVIDUAL_HOLDER_REMINDERS', value: string(sendIndividualHolderReminders) }
   { name: 'DISPLAY_TIMEZONE', value: displayTimezone }
   { name: 'CURRENCY_CODE', value: currencyCode }

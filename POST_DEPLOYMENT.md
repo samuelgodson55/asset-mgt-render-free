@@ -166,6 +166,8 @@ actually fits a normal use case here:
    BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN=...
    ```
 
+   Publish Your App to Production. Go to the Google Cloud Console. Select your project and navigate to APIs & Services -> OAuth consent screen ->.
+
 2. In Google Drive, create (or pick) a normal folder for backups to land
    in — no sharing step needed, since uploads happen as yourself. Grab its
    ID from the folder's URL: `https://drive.google.com/drive/folders/<THIS_PART>`.
