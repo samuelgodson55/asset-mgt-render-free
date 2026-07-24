@@ -1,0 +1,424 @@
+# .github/workflows/ci.yml
+# -----------------------------------------------------------------------------
+# Runs on every push and PR, to every branch -- the fast, no-deploy gate that
+# has to pass before anything is even eligible for the Azure deploy workflows
+# (deploy-azure-staging.yml on `develop`, release.yml on `git tag v*.*.*`).
+# Nothing here talks to Azure or requires any Azure secrets.
+#
+# `workflow_call` is what makes this reusable: deploy-azure-staging.yml and
+# release.yml both invoke it with `uses: ./.github/workflows/ci.yml` as their
+# own `ci` job, rather than copy-pasting these steps. Without `workflow_call`
+# declared here, every one of those `uses:` references fails at trigger time
+# ("workflow was not reusable, as it is missing a `workflow_call` trigger") --
+# that was a pre-existing bug in this file that would have silently broken
+# every deploy the first time either caller workflow actually ran.
+# -----------------------------------------------------------------------------
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [main, develop]
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------
+  # PERFORMANCE FIX: every job below used to run unconditionally on every
+  # push to every branch, regardless of which files actually changed --
+  # a one-line README edit paid for the exact same ~10 minutes (frontend
+  # npm tests, backend pytest against real Postgres/Redis service
+  # containers, two Docker builds + two Trivy scans, `az bicep build`)
+  # as a real backend or frontend change. This job figures out what
+  # actually changed and hands that down as outputs so each job below
+  # can skip itself when it has nothing to check.
+  #
+  # Deliberately a plain `git diff`, not a third-party paths-filter
+  # action: this repo already pins every third-party Action it uses to
+  # an exact commit SHA specifically because of a real supply-chain
+  # compromise (see the Trivy step below's own comment,
+  # CVE-2026-33634) -- not worth adding another external dependency
+  # here just to replace six lines of `git diff --name-only` + `grep`.
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      infra: ${{ steps.filter.outputs.infra }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need real history to diff against, not just the tip commit
+          # actions/checkout gives you by default (fetch-depth: 1).
+          fetch-depth: 0
+
+      - name: Determine changed files
+        id: filter
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          # Figure out what to diff against:
+          #  - pull_request: the PR's base commit, so a PR only ever pays
+          #    for what IT changes, not the whole base branch's history.
+          #  - push: the pre-push SHA GitHub gives us, UNLESS this is the
+          #    first push of a brand-new branch (GitHub sends all-zeros
+          #    for "before" in that case -- there's nothing to diff
+          #    against yet, so fall through to "treat everything as
+          #    changed" below instead of erroring on a bogus SHA).
+          #  - anything else (workflow_call from deploy-azure-*.yml,
+          #    manual workflow_dispatch, ...): also falls through to
+          #    "everything changed" -- these are exactly the paths that
+          #    are about to actually build+push+deploy real images, so
+          #    running the full validation suite there is the right
+          #    call, not an optimization target.
+          BASE=""
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            BASE="$PR_BASE_SHA"
+          elif [ "$EVENT_NAME" = "push" ] && [ "$PUSH_BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
+            BASE="$PUSH_BEFORE_SHA"
+          fi
+
+          if [ -z "$BASE" ]; then
+            echo "No usable base commit for a diff (new branch, or a workflow_call/dispatch that should always run everything) -- treating every path as changed."
+            echo "backend=true" >> "$GITHUB_OUTPUT"
+            echo "frontend=true" >> "$GITHUB_OUTPUT"
+            echo "infra=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          CHANGED="$(git diff --name-only "$BASE" "${{ github.sha }}")"
+          echo "Changed files vs $BASE:"
+          echo "$CHANGED"
+
+          # This workflow file itself is in every filter below: a change
+          # to ci.yml's own logic should always re-run everything it
+          # touches, not silently skip based on the OLD filter rules.
+          if echo "$CHANGED" | grep -qE '^(backend/|docker-compose\.yml|\.github/workflows/ci\.yml)'; then
+            echo "backend=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "backend=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if echo "$CHANGED" | grep -qE '^(frontend/|nginx/|build-frontend/|docker-compose\.yml|\.github/workflows/ci\.yml)'; then
+            echo "frontend=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "frontend=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if echo "$CHANGED" | grep -qE '^(infra/|\.github/workflows/ci\.yml)'; then
+            echo "infra=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "infra=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  frontend:
+    name: Frontend parsing/rendering tests
+    needs: [changes]
+    if: needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: |
+            frontend/tests/package-lock.json
+            build-frontend/package-lock.json
+
+      # build-pipeline.test.mjs runs the REAL build-frontend/build.js for
+      # BUILD_ENV=local/development/production and checks the OUTPUT (not
+      # just frontend/ source) -- it needs build-frontend's own deps
+      # (terser, javascript-obfuscator, html-minifier-terser) installed to
+      # do that. It skips itself gracefully if this step is ever removed,
+      # but it shouldn't be: this is the one job that would have caught a
+      # bug the minify/obfuscate step itself introduces.
+      - name: Install build-frontend dependencies
+        run: cd build-frontend && npm ci --no-audit --no-fund
+
+      - name: Install frontend test dependencies
+        run: cd frontend/tests && npm ci --no-audit --no-fund
+
+      # pages-load.test.mjs, module-exports-integrity.test.mjs, and
+      # login-form-wiring.test.mjs check the real frontend/ source tree
+      # (HTML validity, no duplicate ids, every local asset reference
+      # resolves, every import/export lines up, and the login form's
+      # submit is actually intercepted by JS). build-pipeline.test.mjs
+      # re-runs the load/submit checks against the built output of every
+      # BUILD_ENV mode -- see that file's own header comment for why both
+      # layers are needed.
+      - name: Run frontend tests
+        run: cd frontend/tests && npm test
+
+  backend:
+    name: Backend lint, test, dependency audit
+    needs: [changes]
+    if: needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    # tests/test_migrations.py runs the REAL `alembic upgrade head`/
+    # `downgrade` chain (including 0002_bootstrap_root_admin.py) against a
+    # throwaway database it creates/drops itself -- unlike every other test
+    # in this suite, it can't use SQLite (0001_baseline_schema.py adds
+    # foreign keys via ALTER TABLE, which SQLite's Alembic dialect can't do
+    # at all), so this job needs a real Postgres server available. GitHub
+    # Actions service containers are the standard way to get one without a
+    # docker-compose file: this starts, health-checks, and tears down
+    # automatically, scoped to just this job run, and costs nothing beyond
+    # the job's own runtime.
+    #
+    # tests/test_redbeat_scheduling.py needs the same treatment for a
+    # different reason: it verifies the real distributed lock (RedBeat,
+    # backed by redis-py's own Redis.lock(...)) that makes it safe to embed
+    # Celery worker+beat in every backend replica (see celery_app.py's
+    # `beat_scheduler`/`redbeat_redis_url` config) -- there's no in-memory
+    # fake for that lock in this project's dependencies worth trusting, so
+    # it needs a real Redis to test against too.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          # ruff is pinned -- an unpinned install silently picks up whatever
+          # is newest on the day CI runs, and ruff has broadened its own
+          # *default* rule selection between releases before (adding entire
+          # new categories like flake8-datetimez/DTZ, flake8-2020/YTT,
+          # isort/I, ...). backend/ruff.toml already pins the rule
+          # *selection* explicitly for the same reason; this pins the tool
+          # *version* too, as a second, independent safeguard, so a bump to
+          # either one only ever happens on purpose in a reviewed PR instead
+          # of silently failing the next `git push`. Bump this deliberately
+          # (and re-run `ruff check backend/` locally first) when you want a
+          # newer ruff.
+          pip install ruff==0.15.22 pytest pytest-asyncio httpx pip-audit
+
+      - name: Ruff lint
+        run: ruff check backend/
+
+      # backend/tests/ has real coverage (auth, asset pools, checkouts,
+      # extension requests, notification-recipient audience, role
+      # permission gates, the actual `alembic upgrade head`/downgrade
+      # chain against the Postgres service container above (including the
+      # root admin bootstrap migration) via test_migrations.py, and the
+      # RedBeat distributed lock that keeps scheduled tasks from firing
+      # once per replica against the Redis service container above via
+      # test_redbeat_scheduling.py. See backend/tests/conftest.py's module
+      # docstring for the SQLite-per-test pattern most files use, and
+      # those two files' own docstrings for why they're the exceptions.
+      # No longer `|| true`: a real test failure now fails CI.
+      - name: Pytest
+        env:
+          TEST_POSTGRES_HOST: localhost
+          TEST_POSTGRES_PORT: 5432
+          TEST_POSTGRES_USER: postgres
+          TEST_POSTGRES_PASSWORD: postgres
+          TEST_REDIS_HOST: localhost
+          TEST_REDIS_PORT: 6379
+        run: pytest backend/tests -v
+
+      - name: pip-audit (dependency vulnerability scan)
+        run: pip-audit -r backend/requirements.txt --desc || true
+
+  secret-scan:
+    name: Gitleaks secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  nginx-config:
+    name: nginx config validation (clean URLs)
+    needs: [changes]
+    if: needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    # WHY THIS JOB EXISTS: `docker build` (see build-and-scan-images below)
+    # only compiles the frontend image -- it never actually STARTS the
+    # container, so envsubst/nginx config errors in
+    # nginx/default.conf.template don't fail the build; they only show up
+    # once someone runs `docker compose up` or deploys for real and gets a
+    # crash-looping container. This job renders the template exactly like
+    # the real container's docker-entrypoint.d does, `nginx -t`s it, then
+    # actually boots it and curls every clean-URL/redirect/static-asset
+    # path the frontend depends on -- see nginx/test-config.sh's own header
+    # comment for the full story (including the specific past bug --
+    # "nginx: [emerg] unknown "1" variable" -- this exists to catch).
+    # Runs in ~10 seconds, well ahead of build-and-scan-images' multi-minute
+    # Docker build, so a broken nginx config fails fast.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nginx + gettext (envsubst)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq nginx-light gettext-base
+
+      - name: Render + validate + boot-test nginx/default.conf.template
+        # Invoked via `bash` rather than `./nginx/test-config.sh` so this
+        # doesn't depend on the executable bit surviving git (a file
+        # committed/checked out without +x, e.g. from certain zip exports
+        # or a Windows checkout, fails with "Permission denied" / exit
+        # code 126 when run directly, even though the script itself is
+        # fine). `chmod` first anyway so the script still works if anyone
+        # runs it directly outside CI (e.g. locally, or from
+        # docker-entrypoint.d).
+        run: |
+          chmod +x ./nginx/test-config.sh
+          bash ./nginx/test-config.sh
+
+  build-and-scan-images:
+    name: Build images + Trivy scan
+    runs-on: ubuntu-latest
+    needs: [changes, backend, frontend, nginx-config]
+    # `always()` because `backend`/`frontend`/`nginx-config` can now be
+    # legitimately SKIPPED (not just succeeded) depending on what changed
+    # -- GitHub's default `needs` propagation would otherwise skip this
+    # job too the moment any one of them is skipped, even when the other
+    # one actually changed and needs its image rebuilt. Runs only when at
+    # least one of backend/frontend changed, AND none of the jobs that DID
+    # run actually failed.
+    if: >-
+      always() &&
+      (needs.changes.outputs.backend == 'true' || needs.changes.outputs.frontend == 'true') &&
+      needs.backend.result != 'failure' && needs.frontend.result != 'failure' && needs.nginx-config.result != 'failure'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build backend image
+        run: docker build -t snipeit-backend:ci ./backend
+
+      # REGRESSION GUARD for the "readyz: not ready ... could not open
+      # certificate file '/root/.postgresql/postgresql.crt': Permission
+      # denied" bug (backend/docker-entrypoint.sh's privilege drop leaving
+      # $HOME pointed at /root after setuid() to appuser -- see that
+      # script's own comment for the full story). Boots the real image
+      # with its real ENTRYPOINT, just overriding the final command to
+      # print who it's actually running as -- catches a regression here,
+      # in ~1 second, instead of only surfacing 5+ minutes into a staging
+      # deploy's readiness probe.
+      - name: Verify backend image resets HOME after dropping to appuser
+        run: |
+          OUT=$(docker run --rm snipeit-backend:ci sh -c 'echo "USER=$(whoami) HOME=$HOME"')
+          echo "$OUT"
+          case "$OUT" in
+            *"USER=appuser"*) ;;
+            *) echo "::error::backend image is not running its command as appuser -- privilege drop regressed"; exit 1 ;;
+          esac
+          case "$OUT" in
+            *"HOME=/home/appuser"*) ;;
+            *) echo "::error::backend image's \$HOME was not reset off /root after dropping to appuser -- this is exactly what caused 'could not open certificate file /root/.postgresql/postgresql.crt: Permission denied' against Azure Database for PostgreSQL. See docker-entrypoint.sh's own comment."; exit 1 ;;
+          esac
+
+      - name: Build frontend image (staging profile -- bundled+minified, not obfuscated)
+        run: |
+          docker build -f frontend/Dockerfile --build-arg BUILD_ENV=development \
+            -t snipeit-frontend:ci .
+
+      # REGRESSION GUARD for the "nginx: [emerg] host not found in resolver
+      # \"${RESOLVER_IP}\"" bug -- nginx/test-config.sh above deliberately
+      # hardcodes RESOLVER_IP itself before rendering the template, so it
+      # never actually exercises 15-detect-resolver-ip.envsh or the real
+      # docker-entrypoint.d executable-bit mechanics (see that script's own
+      # comment for why non-executable *.sh/*.envsh files are silently
+      # skipped, not sourced). This step boots the REAL built image with no
+      # RESOLVER_IP override at all -- the exact staging/production
+      # condition -- and fails if either the executable bit was lost (e.g.
+      # a future zip export / Windows checkout / accidental chmod) or the
+      # rendered config still contains the literal, unsubstituted
+      # "${RESOLVER_IP}" text.
+      - name: Verify frontend image auto-detects RESOLVER_IP at boot
+        run: |
+          CID=$(docker run -d -e BACKEND_HOST=backend -e BACKEND_PORT=8000 snipeit-frontend:ci)
+          for i in $(seq 1 10); do
+            docker exec "$CID" test -f /etc/nginx/conf.d/default.conf 2>/dev/null && break
+            sleep 1
+          done
+          LOGS=$(docker logs "$CID" 2>&1)
+          echo "$LOGS"
+          RENDERED=$(docker exec "$CID" cat /etc/nginx/conf.d/default.conf 2>/dev/null || echo "")
+          docker stop "$CID" >/dev/null
+          if echo "$RENDERED" | grep -q '\${RESOLVER_IP}'; then
+            echo "::error::RESOLVER_IP was never substituted -- 15-detect-resolver-ip.envsh didn't run (check its executable bit survived: 'git diff --summary' or 'ls -l nginx/docker-entrypoint.d/')."
+            exit 1
+          fi
+          if echo "$LOGS" | grep -qi "emerg"; then
+            echo "::error::nginx emitted an [emerg]-level error at boot -- see logs above."
+            exit 1
+          fi
+          echo "OK: RESOLVER_IP substituted, nginx started cleanly."
+
+      - name: Trivy scan -- backend
+        # Pinned to the commit SHA behind the verified-safe v0.35.0 release,
+        # not a mutable tag: aquasecurity/trivy-action had 76 of 77 version
+        # tags (including 0.24.0/v0.24.0) force-pushed to credential-stealing
+        # malware in a March 2026 supply-chain compromise (CVE-2026-33634).
+        # v0.35.0 predates the compromise and is protected by GitHub's
+        # immutable-releases feature. See
+        # https://github.com/advisories/GHSA-69fq-xp46-6x23
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          image-ref: snipeit-backend:ci
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0' # report, don't hard-fail CI on findings -- tighten to '1' once the backlog is triaged
+          format: 'table'
+
+      - name: Trivy scan -- frontend
+        # See the backend Trivy step above for why this is pinned to a SHA.
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          image-ref: snipeit-frontend:ci
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
+          format: 'table'
+
+
+  bicep-lint:
+    name: Validate infra/main.bicep
+    needs: [changes]
+    if: needs.changes.outputs.infra == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: az bicep build (syntax + type check)
+        run: |
+          az bicep build --file infra/main.bicep --stdout > /dev/null

@@ -1,0 +1,219 @@
+# .github/workflows/infra-deploy.yml
+# -----------------------------------------------------------------------------
+# Provisions/updates the Azure infrastructure in infra/main.bicep -- the
+# cost-optimized shape: Container Apps Environment, Log Analytics, Storage
+# (Azure Files for backup/export only), THREE Container Apps
+# (frontend/backend/redis) + one `migrate` Container Apps Job, PLUS a
+# standalone Azure Database for PostgreSQL Flexible Server (`postgresServer`
+# -- a managed service, not a Container App; see infra/main.bicep's
+# top-of-file comment for why Postgres specifically can't be a Container App
+# on Azure Files). No ACR, no Key Vault, no managed identity, no Application
+# Insights -- see infra/main.bicep's top-of-file comment.
+#
+# This is DELIBERATELY separate from deploy-azure-production.yml /
+# -staging.yml, which only ever push new `backend`/`frontend` images --
+# infra changes (a new env var, a Postgres storage size bump, ...) are
+# infrequent and reviewed, not something you want re-running on every
+# `git push`.
+#
+# Run this:
+#   - once, to create a brand-new environment (staging or prod)
+#   - again, any time infra/main.bicep itself changes and you want that
+#     change applied
+#
+# SAFE TO RE-RUN: it reads whatever image tags are CURRENTLY deployed on
+# `backend`/`frontend` first and passes those back in as `initialImageTag`
+# (both apps share one tag per deploy, so this reads either one), so
+# re-applying infra changes never rolls a running environment back to a
+# placeholder image.
+# -----------------------------------------------------------------------------
+name: Deploy Azure Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Which environment to provision/update'
+        required: true
+        type: choice
+        options: [staging, production]
+
+permissions:
+  id-token: write # required for OIDC federated login (azure/login) -- no client secret stored anywhere
+  contents: read
+
+jobs:
+  deploy-infra:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.target }}
+    env:
+      RESOURCE_GROUP: ${{ github.event.inputs.target == 'production' && secrets.PROD_RESOURCE_GROUP || secrets.STAGING_RESOURCE_GROUP }}
+      ENV_NAME: ${{ github.event.inputs.target == 'production' && 'prod' || 'staging' }}
+      ENV_SUFFIX: ${{ github.event.inputs.target == 'production' && '' || '-staging' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC, no secret)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Ensure resource group exists
+        run: |
+          az group show --name "$RESOURCE_GROUP" 2>/dev/null || \
+          az group create --name "$RESOURCE_GROUP" --location "${{ secrets.AZURE_LOCATION }}"
+
+      
+      # main.bicep's alerting section (action group + 3 scheduled query
+      # alert rules, see that file's "Alerting" comment) only deploys when
+      # ALERT_EMAIL_ADDRESS is set -- both are Microsoft.Insights resource
+      # types, and a subscription that has never used Azure Monitor
+      # alerting before typically isn't registered for that namespace yet,
+      # which fails the deployment with "MissingSubscriptionRegistration".
+      # Registering an already-registered provider is a fast no-op, so this
+      # runs unconditionally rather than trying to mirror bicep's
+      # ALERT_EMAIL_ADDRESS-gated condition here in bash.
+      #
+      
+      # First deploy ever: this `az containerapp show` call fails (backend
+      # doesn't exist yet) -- fall back to "latest", which is fine, since
+      # deploy-azure-production.yml/-staging.yml will push a real image
+      # immediately after this workflow finishes anyway.
+      - name: Resolve currently-deployed image tag (so infra updates don't clobber it)
+        id: current
+        run: |
+          TAG=$(az containerapp show --name backend --resource-group "$RESOURCE_GROUP" \
+                  --query "properties.template.containers[0].image" -o tsv 2>/dev/null | awk -F: '{print $NF}') || true
+          echo "tag=${TAG:-latest}" >> "$GITHUB_OUTPUT"
+
+      # COST LEVER: staging has no real users waiting on it, so `backend`
+      # AND `frontend` both scale to zero when idle (min replicas 0 -- pure
+      # cold-start-on-first-request tradeoff, ~$0 idle compute). Production
+      # now keeps BOTH `backend` AND `frontend` warm (min 1) -- zero cold
+      # starts anywhere in the production request path, at the cost of two
+      # always-on replicas instead of one. (Previously only `backend` was
+      # floored at 1; `frontend` stayed at 0 even in production, so the
+      # first visitor after any idle period still ate a cold start on the
+      # static/proxy tier -- short, but not zero.) `redis` always runs at
+      # exactly 1 replica regardless, in every environment -- see
+      # infra/main.bicep, it's stateful and can't scale to zero.
+      # `postgresServer` (Flexible Server) isn't a Container App at all and
+      # has no replica concept -- it's always on, billed by the hour
+      # regardless of traffic, same in every environment. The `migrate`
+      # Container Apps Job is deliberately NOT part of this -- jobs have no
+      # "warm" concept; every execution is a fresh cold start by design,
+      # and that's fine since it only runs once per deploy, not per user
+      # request.
+      - name: Resolve replica floors for this environment
+        id: replicas
+        run: |
+          if [ "$ENV_NAME" = "prod" ]; then
+            echo "backend_min=1" >> "$GITHUB_OUTPUT"
+            echo "frontend_min=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "backend_min=0" >> "$GITHUB_OUTPUT"
+            echo "frontend_min=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ALERT_EMAIL_ADDRESS is optional -- leave the GitHub secret unset and
+      # this resolves to an empty string, which keeps main.bicep's alerting
+      # section (action group + 3 scheduled query alerts) undeployed
+      # entirely, same as before this parameter existed. Set it once you
+      # want backend error-rate/`/readyz`/backup alerts paging someone --
+      # see SRE_STRATEGY.md section 2.
+      # postgresSkuName/postgresStorageGb are read from repo-level GitHub
+      # Variables (Settings -> Secrets and variables -> Actions -> Variables
+      # tab, NOT Secrets -- these aren't sensitive) so you can size the
+      # Flexible Server per-environment without editing this workflow.
+      # Unset variables fall back to bicep's own defaults (Standard_B1ms /
+      # 32 GiB) via the `|| default` bash pattern below -- this step is safe
+      # to run even if you never set either variable.
+      # SMTP (email notifications) and Google Drive (backup upload) are
+      # BOTH optional -- every secret referenced below resolves to an
+      # empty string / 'false' if you never set it in
+      # Settings -> Secrets and variables -> Actions -> Secrets, which
+      # keeps main.bicep's defaults (notifications off, gdrive off) exactly
+      # as before these lines existed. Set them once you're ready:
+      #   - SMTP_HOST / SMTP_USERNAME / SMTP_PASSWORD / SMTP_FROM_EMAIL,
+      #     then NOTIFICATIONS_ENABLED=true. ADMIN_NOTIFICATION_EMAILS is
+      #     optional on top (comma-separated).
+      #   - GDRIVE_OAUTH_CLIENT_ID / GDRIVE_OAUTH_CLIENT_SECRET /
+      #     GDRIVE_OAUTH_REFRESH_TOKEN (from backend/scripts/
+      #     gdrive_oauth_setup.py -- run that ONCE on your own machine, not
+      #     in CI) and GDRIVE_FOLDER_ID, then GDRIVE_BACKUP_ENABLED=true.
+      # `secrets.X == 'true'` (not a plain boolean secret) because GitHub
+      # Actions secrets are always strings -- this is the standard pattern
+      # for turning an unset/empty secret into bicep's `false` default
+      # without a separate Variables-tab entry.
+      # ENABLE_API_DOCS / SITE_NAME / rate-limit / lockout / super-admin
+      # identity / SMTP port+transport / notification intervals / display
+      # timezone / currency / catalog visibility / backup schedule are all
+      # non-sensitive config -- no passwords or tokens among them -- so they
+      # follow the SAME pattern as postgresSkuName/postgresStorageGb above:
+      # repo-level GitHub VARIABLES (Settings -> Secrets and variables ->
+      # Actions -> Variables tab), not Secrets, with a `|| default` fallback
+      # to main.bicep's own default so this step is safe to run even if you
+      # never set any of them. Set only the ones you want to change from
+      # their .env.example default; everything else keeps working exactly
+      # as before these lines existed.
+      - name: Deploy Bicep
+        run: |
+          az deployment group create \
+            --resource-group "$RESOURCE_GROUP" \
+            --template-file infra/main.bicep \
+            --parameters \
+              environmentName="$ENV_NAME" \
+              dockerHubBackendImage="${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend$ENV_SUFFIX" \
+              dockerHubFrontendImage="${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-frontend$ENV_SUFFIX" \
+              initialImageTag="${{ steps.current.outputs.tag }}" \
+              dockerHubUsername="${{ secrets.DOCKERHUB_USERNAME }}" \
+              dockerHubToken="${{ secrets.DOCKERHUB_TOKEN }}" \
+              backendMinReplicas=${{ steps.replicas.outputs.backend_min }} \
+              frontendMinReplicas=${{ steps.replicas.outputs.frontend_min }} \
+              postgresPassword="${{ secrets.POSTGRES_PASSWORD }}" \
+              postgresSkuName="${{ vars.POSTGRES_SKU_NAME || 'Standard_B1ms' }}" \
+              postgresStorageGb=${{ vars.POSTGRES_STORAGE_GB || 32 }} \
+              redisPassword="${{ secrets.REDIS_PASSWORD }}" \
+              jwtSecretKey="${{ secrets.JWT_SECRET_KEY }}" \
+              rootAdminBootstrapPassword="${{ secrets.ROOT_ADMIN_BOOTSTRAP_PASSWORD }}" \
+              customDomain="${{ secrets.CUSTOM_DOMAIN }}" \
+              alertEmailAddress="${{ secrets.ALERT_EMAIL_ADDRESS }}" \
+              notificationsEnabled=${{ secrets.NOTIFICATIONS_ENABLED == 'true' }} \
+              smtpHost="${{ secrets.SMTP_HOST }}" \
+              smtpUsername="${{ secrets.SMTP_USERNAME }}" \
+              smtpPassword="${{ secrets.SMTP_PASSWORD }}" \
+              smtpFromEmail="${{ secrets.SMTP_FROM_EMAIL }}" \
+              adminNotificationEmails="${{ secrets.ADMIN_NOTIFICATION_EMAILS }}" \
+              gdriveBackupEnabled=${{ secrets.GDRIVE_BACKUP_ENABLED == 'true' }} \
+              gdriveOauthClientId="${{ secrets.GDRIVE_OAUTH_CLIENT_ID }}" \
+              gdriveOauthClientSecret="${{ secrets.GDRIVE_OAUTH_CLIENT_SECRET }}" \
+              gdriveOauthRefreshToken="${{ secrets.GDRIVE_OAUTH_REFRESH_TOKEN }}" \
+              gdriveFolderId="${{ secrets.GDRIVE_FOLDER_ID }}" \
+              enableApiDocs=${{ vars.ENABLE_API_DOCS == 'true' }} \
+              siteName="${{ vars.SITE_NAME || 'Snipe-IT Lite' }}" \
+              logLevel="${{ vars.LOG_LEVEL || 'INFO' }}" \
+              loginRateLimitMax=${{ vars.LOGIN_RATE_LIMIT_MAX || 5 }} \
+              loginRateLimitWindowSeconds=${{ vars.LOGIN_RATE_LIMIT_WINDOW_SECONDS || 60 }} \
+              accountLockoutMaxAttempts=${{ vars.ACCOUNT_LOCKOUT_MAX_ATTEMPTS || 5 }} \
+              accountLockoutDurationMinutes=${{ vars.ACCOUNT_LOCKOUT_DURATION_MINUTES || 15 }} \
+              superAdminUsername="${{ vars.SUPER_ADMIN_USERNAME || 'superadmin' }}" \
+              superAdminName="${{ vars.SUPER_ADMIN_NAME || 'Super Admin' }}" \
+              smtpPort=${{ vars.SMTP_PORT || 587 }} \
+              smtpUseTls=${{ vars.SMTP_USE_TLS != 'false' }} \
+              smtpUseSsl=${{ vars.SMTP_USE_SSL == 'true' }} \
+              overdueNotificationIntervalHours="${{ vars.OVERDUE_NOTIFICATION_INTERVAL_HOURS || 24 }}" \
+              dueSoonReminderDays=${{ vars.DUE_SOON_REMINDER_DAYS || 2 }} \
+              dueSoonNotificationIntervalHours="${{ vars.DUE_SOON_NOTIFICATION_INTERVAL_HOURS || 24 }}" \
+              sendIndividualHolderReminders=${{ vars.SEND_INDIVIDUAL_HOLDER_REMINDERS != 'false' }} \
+              displayTimezone="${{ vars.DISPLAY_TIMEZONE || 'Africa/Lagos' }}" \
+              currencyCode="${{ vars.CURRENCY_CODE || 'NGN' }}" \
+              catalogShowStockToStaffCustomer=${{ vars.CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER == 'true' }} \
+              backupHoursUtc="${{ vars.BACKUP_HOURS_UTC || '3' }}" \
+              backupRetentionCount=${{ vars.BACKUP_RETENTION_COUNT || 7 }}
+
+      - name: Show outputs
+        run: |
+          az deployment group show --resource-group "$RESOURCE_GROUP" --name main \
+            --query properties.outputs -o json

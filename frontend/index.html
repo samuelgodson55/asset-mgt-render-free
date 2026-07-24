@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<!-- Applies the saved (or OS-preferred) dark/light theme to <html> BEFORE
+     first paint -- see js/theme-init.js for why this has to be external
+     and synchronous instead of a module script. -->
+<script src="js/theme-init.js"></script>
+<title>Snipe-IT Lite — Login</title>
+<!-- Tailwind CSS is compiled locally at build time instead of being
+     pulled from cdn.tailwindcss.com at runtime -- see
+     build-tailwind/README.md for how to regenerate css/tailwind.css
+     after changing any class names in the HTML/JS. -->
+<link rel="stylesheet" href="css/tailwind.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/theme.css">
+</head>
+<body class="min-h-screen overflow-x-hidden font-sans text-slate-200 antialiased flex flex-col">
+
+<!-- ================= GLOBAL NAVBAR =================
+     Same sticky/bordered/bg-card header pattern used on every other page
+     (staff/manager/admin/customer.html) instead of a bare fixed-position
+     button floating over the page -- keeps the theme toggle in a
+     consistent, predictable spot everywhere in the app, login screen
+     included. -->
+<header class="sticky top-0 z-30 border-b border-border bg-card/95 backdrop-blur">
+  <div class="mx-auto max-w-[1100px] px-4 sm:px-6">
+    <div class="flex h-16 items-center justify-between gap-2">
+      <div class="flex items-center gap-3">
+        <div class="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-600/15 ring-1 ring-blue-500/30">
+          <svg class="h-5 w-5 text-blue-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M3 9h18"/><path d="M8 4v5"/></svg>
+        </div>
+        <div class="leading-tight">
+          <p id="siteBrandName" class="text-[15px] font-bold tracking-tight text-slate-50">Snipe-IT <span class="font-medium text-slate-400">Lite</span></p>
+          <p class="hidden text-[11px] text-slate-500 tag-mono sm:block">asset-registry.internal.corp</p>
+        </div>
+      </div>
+
+      <button type="button" data-action="toggle-theme" title="Switch to light / dark theme" aria-label="Toggle color theme" class="theme-toggle flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border bg-card text-slate-300 transition hover:border-blue-500/40 hover:text-blue-400 sm:h-9 sm:w-9">
+        <span class="icon-moon"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg></span>
+        <span class="icon-sun"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg></span>
+      </button>
+    </div>
+  </div>
+</header>
+
+<main class="flex flex-1 items-center justify-center p-4">
+
+  <!-- ================= AUTH SCREEN CONTAINER ================= -->
+  <div id="auth-screen" class="w-full max-w-md rounded-xl border border-border bg-card p-5 shadow-2xl space-y-5 sm:p-6 sm:space-y-6">
+
+    <!-- Login Form Header -->
+    <div>
+      <h2 class="text-[15px] font-semibold text-slate-100">Sign in to your account</h2>
+      <p class="text-[12px] text-slate-500 mt-0.5">Enter your credentials to access the asset platform.</p>
+    </div>
+
+    <!-- ================= AUTHENTICATION FORM ================= -->
+    <form id="login-form" class="space-y-4">
+      <div>
+        <label for="login-email" class="mb-1.5 block text-[12px] font-medium text-slate-400">Email or Username</label>
+        <input
+          type="text"
+          id="login-email"
+          required
+          placeholder="e.g. employee@corp.io or t.okafor"
+          autocomplete="username"
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none transition focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40"
+        />
+      </div>
+
+      <div>
+        <label for="login-password" class="mb-1.5 block text-[12px] font-medium text-slate-400">Password</label>
+        <input
+          type="password"
+          id="login-password"
+          required
+          placeholder="••••••••"
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none transition focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40"
+        />
+      </div>
+
+      <button
+        type="submit"
+        class="mt-2 w-full rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500 active:bg-blue-700 shadow-lg shadow-blue-600/10"
+      >
+        Sign In
+      </button>
+    </form>
+
+    <!-- Demo credentials helper (safe to delete once you provision your own users).
+         BUILD-STRIPPED IN PRODUCTION: everything between the two
+         BUILD:PROD-STRIP markers below is removed by
+         build-frontend/build.js when BUILD_ENV=production (wired from
+         .env's ENVIRONMENT value -- see docker-compose.yml's frontend
+         build.args and frontend/Dockerfile). It still renders normally for
+         BUILD_ENV=local and BUILD_ENV=development. Do not rely on this
+         alone to keep the seeded accounts secret -- also set
+         AUTO_SEED_DEMO_DATA=false in production (see backend/main.py /
+         database.py's seed_db()), which is the setting that actually
+         controls whether these accounts exist in the database at all. -->
+    <!-- BUILD:PROD-STRIP:START -->
+    <div class="rounded-lg border border-border bg-card2/50 p-3 text-[11px] text-slate-500 space-y-1">
+      <p class="font-semibold text-slate-400">Demo accounts (seeded on first boot):</p>
+      <p class="tag-mono">Admin — r.adeyemi@corp.io / Admin123!</p>
+      <p class="tag-mono">Manager — s.chen@corp.io / Manager123!</p>
+      <p class="tag-mono">Staff — t.okafor@corp.io / Staff123!</p>
+      <p class="tag-mono">Customer — d.martins@customer.io / Customer123!</p>
+    </div>
+    <!-- BUILD:PROD-STRIP:END -->
+
+    <!-- Footer Security Notice -->
+    <div class="border-t border-border pt-4 text-center">
+      <p class="text-[11px] text-slate-600">
+        Authorized corporate personnel only. All access attempts are securely logged to the immutable system audit trail.
+      </p>
+    </div>
+
+  </div>
+
+  <!-- ================= 2FA: ALREADY-ENROLLED ACCOUNT (verify code) =================
+       Shown instead of #auth-screen when POST /auth/login returns
+       mfa_required (currently only for role == super_admin -- see
+       backend/services/auth_service.py's login()). Hidden by default;
+       js/main.js's login form handler swaps screens via `hidden`, the same
+       pattern used everywhere else in this app. -->
+  <div id="mfa-verify-screen" class="hidden w-full max-w-md rounded-xl border border-border bg-card p-5 shadow-2xl space-y-5 sm:p-6 sm:space-y-6">
+    <div>
+      <h2 class="text-[15px] font-semibold text-slate-100">Two-factor authentication</h2>
+      <p class="text-[12px] text-slate-500 mt-0.5">Enter the 6-digit code from your authenticator app to finish signing in.</p>
+    </div>
+    <form id="mfa-verify-form" class="space-y-4">
+      <div>
+        <label for="mfa-verify-code" class="mb-1.5 block text-[12px] font-medium text-slate-400">Authentication code</label>
+        <input
+          type="text"
+          id="mfa-verify-code"
+          required
+          inputmode="numeric"
+          pattern="[0-9]*"
+          autocomplete="one-time-code"
+          maxlength="6"
+          placeholder="123456"
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-center text-[18px] tracking-[0.4em] text-slate-200 placeholder-slate-600 outline-none transition focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40"
+        />
+      </div>
+      <button
+        type="submit"
+        class="mt-2 w-full rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500 active:bg-blue-700 shadow-lg shadow-blue-600/10"
+      >
+        Verify &amp; Sign In
+      </button>
+      <button
+        type="button"
+        data-action="cancel-mfa"
+        class="w-full rounded-lg border border-border py-2 text-[12px] font-medium text-slate-400 transition hover:bg-card2"
+      >
+        Back to sign in
+      </button>
+    </form>
+  </div>
+
+  <!-- ================= 2FA: FIRST-TIME ENROLLMENT =================
+       Shown instead of #auth-screen when POST /auth/login returns
+       mfa_setup_required (this account has never confirmed a code before).
+       The secret/URI are shown here EXACTLY ONCE -- there is no "view my
+       2FA secret again" screen anywhere in the app, by design (see
+       models.py's User.totp_enabled docstring). -->
+  <div id="mfa-setup-screen" class="hidden w-full max-w-md rounded-xl border border-border bg-card p-5 shadow-2xl space-y-5 sm:p-6 sm:space-y-6">
+    <div>
+      <h2 class="text-[15px] font-semibold text-slate-100">Set up two-factor authentication</h2>
+      <p class="text-[12px] text-slate-500 mt-0.5">This account requires 2FA. Add it to an authenticator app (Google Authenticator, Authy, 1Password, etc.), then confirm the code it shows below.</p>
+    </div>
+    <div class="rounded-lg border border-border bg-card2/50 p-3 space-y-2">
+      <p class="text-[11px] font-medium text-slate-400">Scan with your authenticator app</p>
+      <div id="mfa-setup-qr" class="flex justify-center rounded-md bg-white p-2 [&>svg]:h-40 [&>svg]:w-40" aria-live="polite"></div>
+      <p class="text-[11px] font-medium text-slate-400 pt-2">Or enter this key manually</p>
+      <p id="mfa-setup-secret" class="tag-mono select-all break-all text-[13px] text-slate-200"></p>
+      <p class="text-[11px] text-slate-500 pt-1">Some authenticator apps also accept pasting this URI directly:</p>
+      <p id="mfa-setup-uri" class="tag-mono select-all break-all text-[11px] text-slate-500"></p>
+    </div>
+    <form id="mfa-setup-form" class="space-y-4">
+      <div>
+        <label for="mfa-setup-code" class="mb-1.5 block text-[12px] font-medium text-slate-400">Enter the code from your app to confirm</label>
+        <input
+          type="text"
+          id="mfa-setup-code"
+          required
+          inputmode="numeric"
+          pattern="[0-9]*"
+          autocomplete="one-time-code"
+          maxlength="6"
+          placeholder="123456"
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-center text-[18px] tracking-[0.4em] text-slate-200 placeholder-slate-600 outline-none transition focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40"
+        />
+      </div>
+      <button
+        type="submit"
+        class="mt-2 w-full rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500 active:bg-blue-700 shadow-lg shadow-blue-600/10"
+      >
+        Confirm &amp; Enable 2FA
+      </button>
+      <button
+        type="button"
+        data-action="cancel-mfa"
+        class="w-full rounded-lg border border-border py-2 text-[12px] font-medium text-slate-400 transition hover:bg-card2"
+      >
+        Back to sign in
+      </button>
+    </form>
+  </div>
+
+  <!-- ================= 2FA: RECOVERY CODES (shown once, post-enrollment) =================
+       Shown instead of #mfa-setup-screen the moment POST /auth/mfa/setup/confirm
+       succeeds -- the response carries `recovery_codes`, a batch of 10
+       single-use backup codes generated at that exact moment (see
+       backend/services/auth_service.py's mfa_setup_confirm()/
+       _issue_recovery_codes()). There is no "view these again" screen
+       anywhere else in the app, by design (see backend/models.py's
+       RecoveryCode docstring) -- the same freshly-generated list is also
+       shown here after POST /auth/mfa/recovery-codes/regenerate, wired
+       up wherever that gets triggered from (see js/main.js). -->
+  <div id="mfa-recovery-codes-screen" class="hidden w-full max-w-lg rounded-xl border border-border bg-card p-5 shadow-2xl space-y-5 sm:p-6 sm:space-y-6">
+    <div>
+      <h2 class="text-[15px] font-semibold text-slate-100">Save your recovery codes</h2>
+      <p class="text-[12px] text-slate-500 mt-0.5">
+        Each code works once, as a substitute for your authenticator app if you ever lose access to it.
+        Store them somewhere safe (a password manager is ideal) -- <span class="font-medium text-amber-400">they will not be shown again.</span>
+      </p>
+    </div>
+    <div id="mfa-recovery-codes-list" class="tag-mono grid grid-cols-2 gap-x-4 gap-y-2 rounded-lg border border-border bg-card2/50 p-4 text-[13px] text-slate-200"></div>
+    <div class="flex flex-col gap-2 sm:flex-row">
+      <button
+        type="button"
+        data-action="download-recovery-codes"
+        class="flex-1 rounded-lg border border-border py-2.5 text-[12px] font-medium text-slate-300 transition hover:bg-card2"
+      >
+        Download as .txt
+      </button>
+      <button
+        type="button"
+        data-action="continue-past-recovery-codes"
+        class="flex-1 rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500 active:bg-blue-700 shadow-lg shadow-blue-600/10"
+      >
+        I've saved these codes
+      </button>
+    </div>
+  </div>
+</main>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>

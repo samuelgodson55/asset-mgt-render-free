@@ -1,0 +1,398 @@
+# .github/workflows/deploy-azure-staging.yml
+# -----------------------------------------------------------------------------
+# Mirrors deploy-azure-production.yml but triggers on `develop` and targets
+# the staging resource group/environment. Same cost-optimized shape (3
+# Container Apps: frontend/backend/redis, two Docker Hub images, plus a
+# standalone Azure Database for PostgreSQL Flexible Server) -- see
+# infra/main.bicep's top-of-file comment. Staging's `backend` AND `frontend`
+# are both provisioned with min replicas 0 (see infra-deploy.yml) -- pure
+# scale-to-zero, a cold start on the first request after idle, effectively
+# free compute the rest of the time.
+# -----------------------------------------------------------------------------
+name: Deploy to Azure (Staging)
+
+# WHY workflow_dispatch EXISTS: a plain `push` to `develop` always runs the
+# full pipeline -- ci -> build-push -> migrate -> deploy -- even when the
+# only thing that changed was one of these workflow YAML files themselves
+# (e.g. testing a fix to the "Roll out new revisions" job below). That
+# means every iteration on the deploy logic pays for a full backend+frontend
+# CI run, two fresh Docker builds/pushes, and an `alembic upgrade head` that
+# hasn't actually changed, just to re-exercise a few `az` commands.
+#
+# workflow_dispatch with `image_tag` set lets you redeploy an image that's
+# ALREADY on Docker Hub from a prior successful `build-push` (copy the SHA
+# from that run, or use `latest`), skipping `ci` and `build-push` entirely.
+# `skip_migrate: true` additionally skips `migrate`, for when you know the
+# schema hasn't changed since that image was built. Leave `image_tag` blank
+# (or just push to `develop` normally) to get the original full-pipeline
+# behavior -- nothing changes for a normal push.
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Existing tag on Docker Hub to redeploy, e.g. a commit SHA from a prior successful "Build + push both images" run, or "latest" (skips ci + build-push). Leave blank to build fresh from this branch instead.'
+        required: false
+        type: string
+      skip_migrate:
+        description: 'Skip the migrate job too (only safe if you are certain no migration has changed since image_tag was built)'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  RESOURCE_GROUP: ${{ secrets.STAGING_RESOURCE_GROUP }}
+  # Falls back to github.sha whenever image_tag isn't supplied -- a normal
+  # push, or a workflow_dispatch run with image_tag left blank.
+  IMAGE_TAG: ${{ inputs.image_tag || github.sha }}
+  BACKEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend-staging
+  FRONTEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-frontend-staging
+  # true only for a workflow_dispatch run that supplied an existing tag --
+  # every job below that builds/tests fresh code checks this.
+  REUSE_EXISTING_IMAGE: ${{ github.event_name == 'workflow_dispatch' && inputs.image_tag != '' }}
+
+jobs:
+  ci:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.image_tag == '' }}
+    uses: ./.github/workflows/ci.yml
+
+  build-push:
+    name: Build + push both images
+    needs: [ci]
+    # `always()` because a skipped `ci` (see its own `if:` above) would
+    # otherwise skip this job too by GitHub's default needs-propagation --
+    # explicitly allow through both a real ci success AND ci being skipped
+    # for the same reason this job itself should be skipped.
+    if: ${{ always() && (needs.ci.result == 'success' || needs.ci.result == 'skipped') && (github.event_name != 'workflow_dispatch' || inputs.image_tag == '') }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - service: backend
+            dockerfile: backend/Dockerfile
+            context: backend
+            image_env: BACKEND_IMAGE
+          - service: frontend
+            dockerfile: frontend/Dockerfile
+            context: .
+            image_env: FRONTEND_IMAGE
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Docker Hub login
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Resolve image name
+        id: img
+        run: echo "name=${{ matrix.image_env == 'BACKEND_IMAGE' && env.BACKEND_IMAGE || env.FRONTEND_IMAGE }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build + push ${{ matrix.service }} image
+        run: |
+          docker build -f ${{ matrix.dockerfile }} \
+                       -t ${{ steps.img.outputs.name }}:$IMAGE_TAG \
+                       -t ${{ steps.img.outputs.name }}:latest \
+                       ${{ matrix.context }}
+          docker push ${{ steps.img.outputs.name }}:$IMAGE_TAG
+          docker push ${{ steps.img.outputs.name }}:latest
+
+      - name: Trivy scan (report-only -- staging doesn't block on findings)
+        # Pinned to the commit SHA behind the verified-safe v0.35.0 release,
+        # not a mutable tag -- see ci.yml's backend Trivy step for why.
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          image-ref: ${{ steps.img.outputs.name }}:${{ env.IMAGE_TAG }}
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
+
+  migrate:
+    name: Run database migrations
+    needs: [build-push]
+    # See build-push's `if:` comment for why `always()` + explicit
+    # success-or-skipped is needed here. Additionally skipped when
+    # `skip_migrate: true` was passed to a workflow_dispatch run reusing an
+    # existing image_tag.
+    if: ${{ always() && (needs.build-push.result == 'success' || needs.build-push.result == 'skipped') && !(github.event_name == 'workflow_dispatch' && inputs.skip_migrate) }}
+    runs-on: ubuntu-latest
+    # AZURE_CLIENT_ID/AZURE_TENANT_ID/AZURE_SUBSCRIPTION_ID are configured
+    # as per-environment secrets (see DEPLOYMENT.md step 5's table --
+    # deliberately per-environment since staging and production use
+    # separate Azure AD App Registrations/federated credentials, never the
+    # same one). GitHub only injects an Environment's secrets into a job
+    # that actually declares `environment:` -- without this, those three
+    # `secrets.AZURE_*` references silently resolve to empty strings (not
+    # an error at parse time), and azure/login@v2 fails at runtime with
+    # "Not all values are present. Ensure 'client-id' and 'tenant-id' are
+    # supplied" even though the secrets exist and are correctly named.
+    # infra-deploy.yml already gets this right (`environment:
+    # ${{ github.event.inputs.target }}`) -- this brings the two per-push
+    # deploy jobs below (migrate, deploy) in line with it.
+    environment: staging
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Point the migrate job at the new backend image
+        run: |
+          az containerapp job update \
+            --name migrate --resource-group "$RESOURCE_GROUP" \
+            --image "$BACKEND_IMAGE:$IMAGE_TAG"
+
+      - name: Run alembic upgrade head
+        run: |
+          az containerapp job start --name migrate --resource-group "$RESOURCE_GROUP" --output json > job-run.json
+          EXECUTION_NAME=$(jq -r '.name' job-run.json)
+          echo "Started migration execution: $EXECUTION_NAME"
+
+      # See deploy-azure-production.yml's matching step for why this is
+      # 45 x 15s (675s) rather than the old 30 x 10s (300s) -- the job's own
+      # `replicaTimeout` in infra/main.bicep is 600s, which is longer than
+      # the old window, so a healthy-but-slow migration could get reported
+      # as "timed out" here even though Azure hadn't actually killed it.
+      - name: Wait for migration to complete
+        run: |
+          for i in $(seq 1 45); do
+            STATUS=$(az containerapp job execution list \
+              --name migrate --resource-group "$RESOURCE_GROUP" \
+              --query "[0].properties.status" -o tsv)
+            echo "Migration status: $STATUS"
+            if [ "$STATUS" = "Succeeded" ]; then exit 0; fi
+            if [ "$STATUS" = "Failed" ]; then echo "::error::Migration failed"; exit 1; fi
+            sleep 15
+          done
+          echo "::error::Migration did not reach Succeeded/Failed within 675s (job's own replicaTimeout is 600s, so this means Azure itself hasn't resolved it yet -- check the job's execution logs, it may still be genuinely stuck)"
+          exit 1
+
+      # BUG FIX: this used to jump straight to `az containerapp job logs
+      # show` on failure, reusing the azure/login@v2 session from the top
+      # of this job. That login exchanges a GitHub Actions OIDC token for
+      # an Azure AD access token via a client assertion that's only valid
+      # for a few minutes (observed: ~5 minutes) from when it was minted --
+      # NOT for the lifetime of the job. The "Wait for migration to
+      # complete" step above can poll for up to 675s (11m15s), so by the
+      # time a failure reaches this step the original assertion has
+      # commonly already expired, and every `az` call below fails with
+      # "AADSTS700024: Client assertion is not within its valid time
+      # range" -- the exact failure this diagnostic step exists to avoid.
+      # Re-running azure/login@v2 here mints a fresh GitHub OIDC token and
+      # a fresh assertion, right before it's actually used.
+      - name: Re-authenticate (previous login may have expired during the wait above)
+        if: failure()
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Dump migration job logs (on failure)
+        if: failure()
+        run: |
+          EXECUTION_NAME=$(az containerapp job execution list \
+            --name migrate --resource-group "$RESOURCE_GROUP" \
+            --query "[0].name" -o tsv)
+          echo "::group::migrate job execution: $EXECUTION_NAME"
+          az containerapp job execution show \
+            --name migrate --resource-group "$RESOURCE_GROUP" \
+            --job-execution-name "$EXECUTION_NAME" -o json || true
+          echo "::endgroup::"
+          echo "::group::migrate container logs"
+          az containerapp job logs show \
+            --name migrate --resource-group "$RESOURCE_GROUP" \
+            --container migrate --tail 200 || \
+            echo "Could not fetch logs via 'az containerapp job logs show' -- check Log Analytics (workspace: \${namePrefix}-logs) or the Azure Portal's 'migrate' Container Apps Job > Execution history directly."
+          echo "::endgroup::"
+
+  deploy:
+    name: Roll out new revisions
+    needs: [build-push, migrate]
+    # Same pattern as migrate's `if:` above -- lets this job run whether
+    # build-push/migrate actually ran or were deliberately skipped for a
+    # workflow_dispatch redeploy of an existing image_tag.
+    if: ${{ always() && (needs.build-push.result == 'success' || needs.build-push.result == 'skipped') && (needs.migrate.result == 'success' || needs.migrate.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    # See the `migrate` job's comment above -- same per-environment
+    # AZURE_CLIENT_ID/AZURE_TENANT_ID/AZURE_SUBSCRIPTION_ID secrets, same
+    # requirement to declare `environment:` to actually receive them.
+    environment: staging
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Update backend
+        run: |
+          az containerapp update --name backend --resource-group "$RESOURCE_GROUP" \
+            --image "$BACKEND_IMAGE:$IMAGE_TAG"
+
+      - name: Update frontend
+        run: |
+          az containerapp update --name frontend --resource-group "$RESOURCE_GROUP" \
+            --image "$FRONTEND_IMAGE:$IMAGE_TAG"
+
+      - name: Smoke test
+        id: smoke
+        run: |
+          FQDN=$(az containerapp show --name frontend --resource-group "$RESOURCE_GROUP" \
+                   --query "properties.configuration.ingress.fqdn" -o tsv)
+          echo "Testing https://$FQDN (cold start possible -- both apps scale from zero)"
+          # BUG FIX: the previous version of this step
+          # (`curl -f --retry 5 --retry-delay 5 --retry-connrefused ...`)
+          # had no `-s` and no `--max-time`/`--connect-timeout`. Two
+          # separate problems, both visible in the same symptom ("Smoke
+          # test keeps looping" for 7+ minutes with a wall of
+          # "0 0 0 0 ... --:--:-- 0:03:12 --:--:-- 0" log lines):
+          #   1. No `-s` (silent) -- that wall of zeroes/timestamps IS
+          #      curl's normal transfer-progress meter, re-printed once a
+          #      second. It was never an error or a retry loop, just very
+          #      noisy default output.
+          #   2. No `--max-time`/`--connect-timeout` -- `--retry` and
+          #      `--retry-connrefused` only cover connection-REFUSED or a
+          #      completed-but-failed transfer. If the TCP connection
+          #      succeeds but the server never sends a response (exactly
+          #      what a slow scale-from-zero cold start, or a replica
+          #      that's up but not yet actually healthy, looks like from
+          #      the outside), none of `--retry*` ever kicks in and curl
+          #      -- which has no timeout by default -- waits forever. That
+          #      indefinite hang, not a bounded retry loop, is what was
+          #      actually happening here.
+          # `--connect-timeout 30`: generous for establishing the TCP/TLS
+          # connection to the Container Apps ingress itself (this part is
+          # never slow, even on a cold start -- ingress always answers,
+          # only the app behind it might not be up yet).
+          # `--max-time 90`: bounds the ENTIRE request (connect + wait for
+          # first byte + transfer) -- covers `frontend` scaling up from
+          # zero and nginx starting. `--retry 5 --retry-delay 5` on top of
+          # that gives up to 6 bounded attempts, so the worst case here is
+          # ~6 * (90 + 5) = 570s (~9.5 min) instead of unbounded, and any
+          # single stuck attempt now fails and moves to the next retry
+          # instead of hanging.
+          curl -f -s -S --connect-timeout 30 --max-time 90 \
+               --retry 5 --retry-delay 5 --retry-connrefused --retry-max-time 570 \
+               -o /dev/null -w "HTTP %{http_code} in %{time_total}s\n" \
+               "https://$FQDN/"
+
+          # BUG FIX: this step used to ONLY check "/" (the static frontend
+          # nginx serves directly, with zero backend involvement) -- it
+          # could pass, and this whole job go green, even when `backend`
+          # was completely unreachable behind nginx's /api/ proxy (wrong
+          # BACKEND_HOST/PORT, backend stuck ActivationFailed, DNS not
+          # resolving between apps, etc.). That's exactly what happened in
+          # practice: this job succeeded, but every login attempt failed
+          # with the browser's fetch() throwing "Unexpected token '<' ...
+          # is not valid JSON" -- nginx (or Container Apps' own ingress)
+          # returning an HTML error page for /api/auth/login instead of
+          # FastAPI ever seeing the request, with nothing in this pipeline
+          # ever having actually checked that path. deploy-azure-
+          # production.yml's smoke test already hits /api/auth/me for
+          # exactly this reason -- staging never got the same fix. Bringing
+          # staging in line with it here: expects 200 (a stale valid
+          # session cookie) or 401 (the normal "not logged in" response,
+          # and specifically NOT an HTML page) -- proves the request
+          # actually reached FastAPI and got a real JSON response, not
+          # just that nginx itself is up.
+          curl -f -s -S --connect-timeout 30 --max-time 60 \
+               "https://$FQDN/api/auth/me" -o /dev/null -w "HTTP %{http_code} in %{time_total}s\n" \
+               | grep -qE "200|401" || {
+                 echo "::error::GET /api/auth/me did not return 200 or 401 -- backend is unreachable through frontend's /api/ proxy (see this step's comment). Falling through to the log-dump step below."
+                 exit 1
+               }
+
+      # BUG FIX: azure/login@v2 at the top of this job exchanges a GitHub
+      # Actions OIDC token for an Azure AD access token via a client
+      # assertion that's only valid for a few minutes (observed: ~5
+      # minutes) from when it was minted -- NOT for the lifetime of the
+      # job. "Update backend"/"Update frontend"/"Smoke test" above can
+      # together run for several minutes (the smoke test's own retry
+      # budget alone is up to 570s), so by the time a smoke-test failure
+      # reaches this step the original assertion is commonly already
+      # expired: every `az` call below then fails with "AADSTS700024:
+      # Client assertion is not within its valid time range", which is
+      # exactly what was observed in practice -- both the live-tail AND
+      # the Log Analytics fallback failing back-to-back with that same
+      # error, leaving this step with nothing useful captured at all.
+      # Re-running azure/login@v2 here mints a fresh GitHub OIDC token and
+      # a fresh assertion, right before it's actually used.
+      - name: Re-authenticate (previous login may have expired during the steps above)
+        if: failure() && steps.smoke.outcome == 'failure'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Dump backend/frontend logs (on smoke test failure)
+        if: failure() && steps.smoke.outcome == 'failure'
+        run: |
+          # BUG FIX: this step used to try ONLY `az containerapp logs show`
+          # (a live tail against a running replica) and, on failure, just
+          # echo "check Log Analytics ... directly" -- a dead end, not an
+          # actual fallback. That's a real gap specifically on staging:
+          # both `backend` and `frontend` run with min replicas 0 (see this
+          # file's top-of-file comment), so the most common failure this
+          # step exists to diagnose -- a new revision that never passes its
+          # readiness probe and gets scaled back to 0 -- is EXACTLY the
+          # case where there is no live replica for `logs show` to tail.
+          # `logs show` was therefore failing here on every single staging
+          # smoke-test failure, leaving nothing but a pointer to go run a
+          # manual `az monitor log-analytics query` by hand (see
+          # DEPLOYMENT.md/README.md's troubleshooting notes) -- exactly the
+          # extra manual step this whole job exists to avoid.
+          #
+          # Now: still attempt the live tail first (useful on the rarer
+          # "replica came up but degraded" case), then ALWAYS follow up
+          # with a real Log Analytics KQL query for the last 15 minutes of
+          # console output from both apps -- the same query a human would
+          # have to run by hand otherwise, now baked into the workflow log
+          # itself. `take 100` and last-15-minutes both err generous, since
+          # this only runs on failure and needs to be self-sufficient
+          # (nobody's watching the pipeline live to widen the window).
+          ENV_NAME=$(az containerapp env list --resource-group "$RESOURCE_GROUP" \
+                       --query "[0].name" -o tsv)
+          WORKSPACE_ID=$(az containerapp env show --name "$ENV_NAME" --resource-group "$RESOURCE_GROUP" \
+                            --query "properties.appLogsConfiguration.logAnalyticsConfiguration.customerId" -o tsv)
+
+          for APP in backend frontend; do
+            echo "::group::$APP container logs (live tail, last 200 lines)"
+            az containerapp logs show --name "$APP" --resource-group "$RESOURCE_GROUP" --tail 200 || \
+              echo "Could not fetch logs via 'az containerapp logs show' -- no live replica (expected if the revision never passed its readiness probe). Falling through to the Log Analytics query below."
+            echo "::endgroup::"
+          done
+
+          if [ -n "$WORKSPACE_ID" ]; then
+            for APP in backend frontend; do
+              echo "::group::$APP console logs from Log Analytics (last 15 minutes)"
+              az monitor log-analytics query --workspace "$WORKSPACE_ID" \
+                --analytics-query "ContainerAppConsoleLogs_CL | where ContainerAppName_s == '$APP' | where TimeGenerated > ago(15m) | project TimeGenerated, Log_s | order by TimeGenerated desc | take 100" \
+                --output table || echo "Log Analytics query failed for $APP -- check the '$ENV_NAME' Container Apps Environment's Log Analytics workspace directly in the Azure Portal."
+              echo "::endgroup::"
+            done
+          else
+            echo "::warning::Could not resolve the Log Analytics workspace customerId for environment '$ENV_NAME' -- check the Azure Portal's Container Apps Environment > Log stream directly."
+          fi
+
+          echo "::group::backend revision status"
+          az containerapp revision list --name backend --resource-group "$RESOURCE_GROUP" \
+            --query "[].{name:name, active:properties.active, healthState:properties.healthState, runningState:properties.runningState, replicas:properties.replicas}" \
+            -o table || true
+          echo "::endgroup::"
+          echo "::group::frontend revision status"
+          az containerapp revision list --name frontend --resource-group "$RESOURCE_GROUP" \
+            --query "[].{name:name, active:properties.active, healthState:properties.healthState, runningState:properties.runningState, replicas:properties.replicas}" \
+            -o table || true
+          echo "::endgroup::"
