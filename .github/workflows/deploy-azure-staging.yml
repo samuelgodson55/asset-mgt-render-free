@@ -132,7 +132,7 @@ jobs:
     # same one). GitHub only injects an Environment's secrets into a job
     # that actually declares `environment:` -- without this, those three
     # `secrets.AZURE_*` references silently resolve to empty strings (not
-    # an error at parse time), and azure/login@v2 fails at runtime with
+    # an error at parse time), and azure/login@v3 fails at runtime with
     # "Not all values are present. Ensure 'client-id' and 'tenant-id' are
     # supplied" even though the secrets exist and are correctly named.
     # infra-deploy.yml already gets this right (`environment:
@@ -140,7 +140,7 @@ jobs:
     # deploy jobs below (migrate, deploy) in line with it.
     environment: staging
     steps:
-      - uses: azure/login@v2
+      - uses: azure/login@v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -178,7 +178,7 @@ jobs:
           exit 1
 
       # BUG FIX: this used to jump straight to `az containerapp job logs
-      # show` on failure, reusing the azure/login@v2 session from the top
+      # show` on failure, reusing the azure/login@v3 session from the top
       # of this job. That login exchanges a GitHub Actions OIDC token for
       # an Azure AD access token via a client assertion that's only valid
       # for a few minutes (observed: ~5 minutes) from when it was minted --
@@ -188,11 +188,11 @@ jobs:
       # commonly already expired, and every `az` call below fails with
       # "AADSTS700024: Client assertion is not within its valid time
       # range" -- the exact failure this diagnostic step exists to avoid.
-      # Re-running azure/login@v2 here mints a fresh GitHub OIDC token and
+      # Re-running azure/login@v3 here mints a fresh GitHub OIDC token and
       # a fresh assertion, right before it's actually used.
       - name: Re-authenticate (previous login may have expired during the wait above)
         if: failure()
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -229,7 +229,7 @@ jobs:
     # requirement to declare `environment:` to actually receive them.
     environment: staging
     steps:
-      - uses: azure/login@v2
+      - uses: azure/login@v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -313,7 +313,7 @@ jobs:
                  exit 1
                }
 
-      # BUG FIX: azure/login@v2 at the top of this job exchanges a GitHub
+      # BUG FIX: azure/login@v3 at the top of this job exchanges a GitHub
       # Actions OIDC token for an Azure AD access token via a client
       # assertion that's only valid for a few minutes (observed: ~5
       # minutes) from when it was minted -- NOT for the lifetime of the
@@ -326,11 +326,11 @@ jobs:
       # exactly what was observed in practice -- both the live-tail AND
       # the Log Analytics fallback failing back-to-back with that same
       # error, leaving this step with nothing useful captured at all.
-      # Re-running azure/login@v2 here mints a fresh GitHub OIDC token and
+      # Re-running azure/login@v3 here mints a fresh GitHub OIDC token and
       # a fresh assertion, right before it's actually used.
       - name: Re-authenticate (previous login may have expired during the steps above)
         if: failure() && steps.smoke.outcome == 'failure'
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
