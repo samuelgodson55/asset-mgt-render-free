@@ -1,0 +1,293 @@
+# =============================================================================
+# nginx/default.conf.template
+# -----------------------------------------------------------------------------
+# This is a TEMPLATE, not a finished nginx config. The official nginx image's
+# entrypoint script (docker-entrypoint.sh -> 20-envsubst-on-templates.sh) runs
+# automatically every time this container starts. It scans /etc/nginx/templates
+# for any *.template file, substitutes every ${VARIABLE} it finds with that
+# variable's real environment value, and writes the result to
+# /etc/nginx/conf.d/default.conf -- which is the file nginx actually loads.
+#
+# WHY THIS MATTERS FOR YOU (the point of this whole file):
+# Nothing below is hardcoded to "localhost", "backend", or any single
+# environment. The exact same Docker image runs unmodified in all three
+# tiers -- local docker compose, Render, and your cloud environment -- and
+# simply gets handed different environment variables at container start:
+#
+#   Variable       | Local (docker-compose.yml)      | Render / Cloud
+#   ---------------|----------------------------------|--------------------------------
+#   PORT           | 80 (default, see frontend/Dockerfile)| Render injects its own port
+#   BACKEND_HOST   | backend (Compose service name)    | your backend service's hostname
+#   BACKEND_PORT   | 8000                               | whatever port that service listens on
+#   RESOLVER_IP    | 127.0.0.11 (Docker's embedded DNS) | your platform's internal DNS IP
+#
+# See frontend/Dockerfile for the default values baked into the image, and
+# README.md for how to override them per environment.
+#
+# THE CORE IDEA (what makes this a "reverse proxy" and not just a static
+# file server): the browser NEVER talks to the FastAPI backend directly and
+# never needs to know its hostname. It only ever calls relative paths like
+# "/api/auth/login" against whatever domain served the page. This nginx
+# server is the only thing that knows where the real backend lives, and it
+# quietly forwards ("proxies") those /api/* requests there under the hood --
+# see the `location /api/` block below. That's what lets frontend/js/api.js
+# hardcode nothing (see its API_URL = '/api' constant) and just work,
+# unchanged, in every environment.
+# =============================================================================
+
+# Docker Compose, Kubernetes, ECS, and Render all resolve service hostnames
+# through their own internal DNS server rather than a static /etc/hosts
+# entry -- and that DNS mapping CAN change (e.g. when a backend container
+# is redeployed and gets a new internal IP). Declaring a `resolver` and
+# referencing the backend through an nginx *variable* (below) -- instead of
+# a bare hostname literal in `proxy_pass` -- forces nginx to re-resolve DNS
+# on every request instead of caching the IP once at startup and going
+# stale after a redeploy. Local Docker Compose pins the RESOLVER_IP
+# variable substituted below to 127.0.0.11 (Docker's own embedded DNS
+# server); other platforms either set their own correct value explicitly,
+# or -- if left unset -- get it auto-detected at container boot from
+# /etc/resolv.conf by nginx/docker-entrypoint.d/15-detect-resolver-ip.sh
+# (see that script for why we don't just hardcode a guess for every
+# possible platform here). (Deliberately not written as a literal ${...} reference in this
+# comment, since envsubst does blind text substitution and would rewrite
+# this very sentence too otherwise.)
+resolver ${RESOLVER_IP} valid=10s;
+
+server {
+    # ${PORT} lets this exact same image satisfy platforms (like Render)
+    # that assign their own port at runtime, while still defaulting to the
+    # standard port 80 for local Docker Compose. See frontend/Dockerfile.
+    listen ${PORT};
+    server_name _;
+
+    # Don't leak the nginx version number in the Server response header --
+    # low-effort reconnaissance hardening (security requirement: don't
+    # volunteer software version info to anyone probing the app).
+    server_tokens off;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # ---- baseline security headers for static content --------------------
+    # The backend's own SecurityHeadersMiddleware (see
+    # backend/middleware/security_headers.py) already stamps these on every
+    # API response. We add the same baseline here so the HTML/JS/CSS nginx
+    # serves directly gets identical protection, regardless of which layer
+    # answered the request.
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    # ---- Content-Security-Policy ------------------------------------------
+    # Tuned against this frontend's ACTUAL resource usage (verified against
+    # every *.html file under frontend/) rather than a generic copy-pasted
+    # policy that would either break the app or be meaninglessly permissive:
+    #
+    #   script-src  'self' -- ONLY same-origin scripts: js/main.js (the ES
+    #     module bundle) and js/auth-guard.js (the small synchronous
+    #     per-page role guard, loaded as a plain classic <script src=...>).
+    #     Both used to be able to run via 'unsafe-inline' (auth-guard.js
+    #     was copy-pasted inline into every dashboard HTML file) or
+    #     'unsafe-eval'/an external CDN host (Tailwind's old Play CDN
+    #     script) -- all three are now gone from this policy. Verified
+    #     against every *.html file: there isn't a single inline <script>
+    #     block, onclick=/onchange=-style attribute, or eval()/new
+    #     Function() call left anywhere in the app, so 'self' alone is
+    #     sufficient. If you ever add an inline script back, the browser
+    #     console will refuse to run it with a clear CSP error rather than
+    #     silently executing it -- that's the point of dropping
+    #     'unsafe-inline' rather than a bug to work around.
+    #   style-src   'self' + https://fonts.googleapis.com (the Inter/
+    #     JetBrains Mono stylesheet). Every stylesheet the app uses --
+    #     css/tailwind.css, css/theme.css, css/auth-guard.css -- is now a
+    #     same-origin linked file (covered by 'self'); there are no inline
+    #     <style> blocks or style="..." attributes left anywhere in the
+    #     app, so 'unsafe-inline' isn't needed here either.
+    #   font-src    https://fonts.gstatic.com -- where the Google Fonts
+    #     stylesheet's actual .woff2 files are served from.
+    #   img-src     'self' data: -- same-origin images plus any data: URIs
+    #     (e.g. inline SVG/icon data), no third-party image hosts in use.
+    #   connect-src 'self' -- frontend/js/api.js and auth.js only ever call
+    #     the SAME origin that served the page (relative /api/... paths --
+    #     see "Deploying Across Environments" in README.md); no external API
+    #     is called directly from the browser.
+    #   frame-ancestors 'none' -- belt-and-suspenders alongside
+    #     X-Frame-Options above (frame-ancestors is the modern CSP
+    #     equivalent and is respected by browsers that ignore X-Frame-Options
+    #     in edge cases, e.g. some cross-origin iframe scenarios).
+    #   base-uri 'self' / form-action 'self' -- this app has no legitimate
+    #     reason to ever run a <base> tag pointing elsewhere, or submit a
+    #     form to another origin.
+    #   object-src 'none' -- no Flash/Java/plugin content anywhere in this app.
+    #
+    # If you add a new external script/stylesheet/font/API host later,
+    # you'll need to add it to the matching directive below -- the browser
+    # console will show a clear "Refused to load/execute ... violates the
+    # following Content Security Policy directive" error naming exactly
+    # which directive blocked it. Likewise, if you ever need to add an
+    # inline <script>/<style> back instead of an external file, you'd need
+    # to reintroduce 'unsafe-inline' (or, better, a per-request nonce --
+    # not straightforward for a plain static-file nginx setup like this
+    # one, but worth it over 'unsafe-inline' if it ever comes to that).
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'" always;
+
+    # ---- compression for static assets ------------------------------------
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 256;
+    gzip_types text/plain text/css application/javascript application/json image/svg+xml;
+
+    # =========================================================================
+    # THE REVERSE PROXY: forward every /api/* call to the FastAPI backend
+    # UNCHANGED (no path rewriting).
+    #
+    # backend/main.py mounts every API router under an "/api" prefix itself
+    # (see that file's "API ROUTES" section), so:
+    #     browser requests  ->  nginx receives      ->  backend actually sees
+    #     /api/auth/login    ->  /api/auth/login      ->  /api/auth/login
+    #     /api/assets?x=1    ->  /api/assets?x=1      ->  /api/assets?x=1
+    #
+    # That's what lets frontend/js/api.js hardcode nothing (see its
+    # API_URL = '/api' constant) and just work, unchanged, in every
+    # environment -- including the free-tier single-service Render
+    # deployment (see Dockerfile.render/render-start.sh), where the browser
+    # talks to that same "/api"-prefixed FastAPI app directly with no nginx
+    # in front of it at all.
+    # =========================================================================
+    location /api/ {
+        set $backend_upstream ${BACKEND_HOST}:${BACKEND_PORT};
+
+        proxy_pass http://$backend_upstream$request_uri;
+
+        proxy_http_version 1.1;
+
+        # Standard reverse-proxy headers so the backend sees the TRUE
+        # original client, not "the nginx container". FastAPI's
+        # `RateLimitMiddleware` and `audit_service.py` logging both key off
+        # the caller's IP, so this isn't optional -- without it every
+        # request would appear to originate from the nginx container's own
+        # address, breaking per-IP login rate limiting entirely.
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+
+        # Correlation ID (see backend/middleware/request_context.py):
+        # generate/forward it here at the true edge of the system, so the
+        # SAME id ties together nginx access logs and every backend log
+        # line for a given request. If a request already arrives with its
+        # own X-Request-ID (e.g. from an upstream load balancer in front of
+        # this proxy), nginx's $request_id below is still ours to set here;
+        # the backend's own middleware only falls back to generating a new
+        # one if this header is entirely absent, so this is safe either way.
+        proxy_set_header X-Request-ID $request_id;
+
+        # Reasonable timeouts: fail fast instead of letting a hung backend
+        # tie up a browser tab indefinitely. CSV import/export (see
+        # services/export_service.py) is the slowest endpoint in this app,
+        # hence the longer read/send timeout vs. the tight connect timeout.
+        proxy_connect_timeout 5s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+
+        # Kept for forward-compatibility even though this app doesn't use
+        # WebSockets today -- harmless to leave in, and one less thing to
+        # remember to add later if that ever changes.
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        # CSV import (POST /assets/import) uploads real files -- make sure
+        # nginx doesn't reject a moderately large one before it ever reaches
+        # FastAPI. Raise this further if you expect bigger CSVs.
+        client_max_body_size 10m;
+    }
+
+    # Convenience passthroughs so you can browse FastAPI's interactive docs
+    # (Swagger UI / ReDoc / the raw OpenAPI schema) through the SAME public
+    # origin as the app -- no separate backend port to expose or remember.
+    # Unlike /api/, these are NOT prefix-stripped, because FastAPI serves
+    # them at these exact root paths (see backend/main.py's custom_openapi).
+    #
+    # SECURITY: gated on ENABLE_API_DOCS as defense in depth, in addition to
+    # (not instead of) backend/main.py's own docs_url/redoc_url/openapi_url
+    # gating on the identically-named backend setting -- see config.py's
+    # ENABLE_API_DOCS docstring for the full reasoning. Set ENABLE_API_DOCS
+    # to anything other than exactly "true" (e.g. "false", or leave it
+    # unset -- see frontend/Dockerfile's ENV default) in any environment
+    # reachable from the public internet, so these routes are blocked
+    # HERE, before the request ever reaches the backend at all -- not
+    # merely relying on the backend happening to be configured correctly.
+    location ~ ^/(docs|redoc|openapi\.json)$ {
+        set $enable_api_docs "${ENABLE_API_DOCS}";
+        if ($enable_api_docs != "true") {
+            return 404;
+        }
+
+        # BUG FIX -- "/docs shows a blank page in dev mode":
+        # FastAPI's default Swagger UI (/docs) and ReDoc (/redoc) pages
+        # don't ship their own JS/CSS -- they load swagger-ui-bundle.js /
+        # redoc.standalone.js and their stylesheets from the jsdelivr CDN.
+        # The server-level Content-Security-Policy above (`add_header
+        # Content-Security-Policy ... always;`) is deliberately locked down
+        # to `script-src 'self'` / `style-src 'self' ...` for OUR frontend's
+        # own JS/CSS -- it had no idea /docs needs a CDN-dependent policy,
+        # so it was silently blocking every one of those CDN requests. The
+        # browser still got a 200 OK for the HTML shell, so the tab loaded
+        # and the URL bar looked fine -- it just rendered nothing, with the
+        # real errors only visible in the browser console ("Refused to
+        # load ... violates ... Content-Security-Policy").
+        #
+        # `add_header` does NOT merge with headers set in an enclosing
+        # block once a location declares its own (same nginx gotcha called
+        # out on the static-asset location below) -- so every baseline
+        # header has to be re-declared here too, not just the CSP.
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'; style-src 'self' https://cdn.jsdelivr.net https://fonts.googleapis.com 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: https://cdn.jsdelivr.net https://fastapi.tiangolo.com; connect-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'" always;
+
+        set $backend_upstream ${BACKEND_HOST}:${BACKEND_PORT};
+        proxy_pass http://$backend_upstream$request_uri;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # ---- static frontend ---------------------------------------------------
+    # Everything that isn't /api/* or the docs routes above is a plain static
+    # file from the frontend/ folder (index.html, admin.html, staff.html,
+    # manager.html, customer.html, js/*).
+    location / {
+        try_files $uri $uri/ =404;
+    }
+
+    # Long-lived caching for hashed/static assets. If you later add a build
+    # step that fingerprints filenames (e.g. app.a1b2c3.js), consider
+    # bumping this further -- for now these are plain filenames that change
+    # on deploy, so a moderate cache time keeps repeat visits fast without
+    # risking someone being stuck on stale JS after a release.
+    #
+    # NGINX GOTCHA: `add_header` directives are only inherited from an
+    # enclosing block (the `server {}` above) if the CURRENT block doesn't
+    # declare any `add_header` of its own -- one `add_header Cache-Control`
+    # here would otherwise silently DROP every security header set above
+    # (X-Frame-Options, Content-Security-Policy, etc.) for every CSS/JS/
+    # image response. So this block re-declares the full set explicitly
+    # rather than relying on inheritance.
+    location ~* \.(?:css|js|svg|png|jpg|jpeg|gif|ico|woff2?)$ {
+        expires 1h;
+        add_header Cache-Control "public, max-age=3600";
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'" always;
+    }
+
+    # Never serve dotfiles (.env, .git, etc.) even if one somehow ends up in
+    # the image -- defense in depth alongside .gitignore/.dockerignore.
+    location ~ /\. {
+        deny all;
+    }
+}

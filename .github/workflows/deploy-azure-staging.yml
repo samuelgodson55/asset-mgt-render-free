@@ -1,0 +1,144 @@
+# .github/workflows/deploy-azure-staging.yml
+# -----------------------------------------------------------------------------
+# Mirrors deploy-azure-production.yml but triggers on `develop` and targets
+# the staging resource group/environment. Same cost-optimized 4-app shape
+# (frontend/backend/db/redis, two Docker Hub images) -- see
+# infra/main.bicep's top-of-file comment. Staging's `backend` AND `frontend`
+# are both provisioned with min replicas 0 (see infra-deploy.yml) -- pure
+# scale-to-zero, a cold start on the first request after idle, effectively
+# free compute the rest of the time.
+# -----------------------------------------------------------------------------
+name: Deploy to Azure (Staging)
+
+on:
+  push:
+    branches: [develop]
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  RESOURCE_GROUP: ${{ secrets.STAGING_RESOURCE_GROUP }}
+  IMAGE_TAG: ${{ github.sha }}
+  BACKEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend-staging
+  FRONTEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-frontend-staging
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  build-push:
+    name: Build + push both images
+    needs: [ci]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - service: backend
+            dockerfile: backend/Dockerfile
+            context: backend
+            image_env: BACKEND_IMAGE
+          - service: frontend
+            dockerfile: frontend/Dockerfile
+            context: .
+            image_env: FRONTEND_IMAGE
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Docker Hub login
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Resolve image name
+        id: img
+        run: echo "name=${{ matrix.image_env == 'BACKEND_IMAGE' && env.BACKEND_IMAGE || env.FRONTEND_IMAGE }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build + push ${{ matrix.service }} image
+        run: |
+          docker build -f ${{ matrix.dockerfile }} \
+                       -t ${{ steps.img.outputs.name }}:$IMAGE_TAG \
+                       -t ${{ steps.img.outputs.name }}:latest \
+                       ${{ matrix.context }}
+          docker push ${{ steps.img.outputs.name }}:$IMAGE_TAG
+          docker push ${{ steps.img.outputs.name }}:latest
+
+      - name: Trivy scan (report-only -- staging doesn't block on findings)
+        # Pinned to the commit SHA behind the verified-safe v0.35.0 release,
+        # not a mutable tag -- see ci.yml's backend Trivy step for why.
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          image-ref: ${{ steps.img.outputs.name }}:${{ env.IMAGE_TAG }}
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
+
+  migrate:
+    name: Run database migrations
+    needs: [build-push]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Point the migrate job at the new backend image
+        run: |
+          az containerapp job update \
+            --name migrate --resource-group "$RESOURCE_GROUP" \
+            --image "$BACKEND_IMAGE:$IMAGE_TAG"
+
+      - name: Run alembic upgrade head
+        run: |
+          az containerapp job start --name migrate --resource-group "$RESOURCE_GROUP" --output json > job-run.json
+          EXECUTION_NAME=$(jq -r '.name' job-run.json)
+          echo "Started migration execution: $EXECUTION_NAME"
+
+      - name: Wait for migration to complete
+        run: |
+          for i in $(seq 1 30); do
+            STATUS=$(az containerapp job execution list \
+              --name migrate --resource-group "$RESOURCE_GROUP" \
+              --query "[0].properties.status" -o tsv)
+            echo "Migration status: $STATUS"
+            if [ "$STATUS" = "Succeeded" ]; then exit 0; fi
+            if [ "$STATUS" = "Failed" ]; then echo "::error::Migration failed"; exit 1; fi
+            sleep 10
+          done
+          echo "::error::Migration timed out after 5 minutes"
+          exit 1
+
+  deploy:
+    name: Roll out new revisions
+    needs: [build-push, migrate]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Update backend
+        run: |
+          az containerapp update --name backend --resource-group "$RESOURCE_GROUP" \
+            --image "$BACKEND_IMAGE:$IMAGE_TAG"
+
+      - name: Update frontend
+        run: |
+          az containerapp update --name frontend --resource-group "$RESOURCE_GROUP" \
+            --image "$FRONTEND_IMAGE:$IMAGE_TAG"
+
+      - name: Smoke test
+        run: |
+          FQDN=$(az containerapp show --name frontend --resource-group "$RESOURCE_GROUP" \
+                   --query "properties.configuration.ingress.fqdn" -o tsv)
+          echo "Testing https://$FQDN (cold start possible -- both apps scale from zero)"
+          curl -f --retry 5 --retry-delay 5 --retry-connrefused "https://$FQDN/" || exit 1

@@ -1,0 +1,2302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<!-- Applies the saved (or OS-preferred) dark/light theme to <html> BEFORE
+     first paint -- see js/theme-init.js for why this has to be external
+     and synchronous instead of a module script. -->
+<script src="js/theme-init.js"></script>
+<title>Snipe-IT Lite — Super Admin</title>
+
+<!-- =====================================================================
+     SYNCHRONOUS AUTH GUARD -- see js/auth-guard.js for the full
+     explanation. Short version: this stylesheet + script pair run BEFORE
+     the rest of the page (including the locally compiled Tailwind
+     stylesheet and every dashboard element) is parsed, so an unauthorized
+     visitor never sees so much as a flash of this page's real content
+     before being redirected to the login screen. Both files are external
+     (not inline) specifically so this page's CSP doesn't need
+     'unsafe-inline' -- see nginx/default.conf.template's CSP comment.
+     ===================================================================== -->
+<link rel="stylesheet" href="css/auth-guard.css">
+<script src="js/auth-guard.js" data-allowed-roles="super_admin,admin"></script>
+
+<!-- Tailwind CSS is compiled locally at build time instead of being
+     pulled from cdn.tailwindcss.com at runtime -- see
+     build-tailwind/README.md for how to regenerate css/tailwind.css
+     after changing any class names in the HTML/JS. -->
+<link rel="stylesheet" href="css/tailwind.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/theme.css">
+</head>
+<!-- data-view="admin" tells the JS modules this is the full-privilege dashboard (vs "manager") -->
+<body class="min-h-screen overflow-x-hidden font-sans text-slate-200 antialiased" data-view="admin">
+
+<!-- ================= GLOBAL NAVBAR ================= -->
+<header class="sticky top-0 z-30 border-b border-border bg-card/95 backdrop-blur">
+  <div class="mx-auto max-w-[1440px] px-4 sm:px-6">
+    <div class="flex h-16 items-center justify-between gap-2">
+      <div class="flex items-center gap-3">
+        <div class="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-600/15 ring-1 ring-blue-500/30">
+          <svg class="h-5 w-5 text-blue-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M3 9h18"/><path d="M8 4v5"/></svg>
+        </div>
+        <div class="leading-tight">
+          <p id="siteBrandName" class="text-[15px] font-bold tracking-tight text-slate-50">Snipe-IT <span class="font-medium text-slate-400">Lite</span></p>
+          <p class="hidden text-[11px] text-slate-500 tag-mono sm:block">asset-registry.internal.corp</p>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-1.5 sm:gap-4">
+        <!-- ================= NOTIFICATION CENTER BELL =================
+             Replaces the old "Check Alerts" refresh button + always-visible
+             dashboard banners. See js/components/notifications.js for the
+             full rationale. Badge shows the combined count across every
+             section below; dropdown is closed by default and only loads/
+             refreshes its contents when opened (see toggleNotificationDropdown()). -->
+        <div class="relative">
+          <button type="button" data-action="toggle-notifications" id="notificationBellBtn" title="Notifications" aria-label="Notifications" aria-haspopup="true" aria-expanded="false"
+            class="relative flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border bg-card text-slate-300 transition hover:border-blue-500/40 hover:text-blue-400 sm:h-9 sm:w-9">
+            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 00-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>
+            <span id="notificationBadge" class="hidden absolute -right-1 -top-1 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-rose-500 px-1 text-[10px] font-bold leading-none text-white ring-2 ring-card">0</span>
+          </button>
+
+          <div id="notificationDropdown" class="hidden absolute right-0 z-40 mt-2 w-[22rem] max-w-[90vw] overflow-hidden rounded-xl border border-border bg-card shadow-2xl sm:w-96">
+            <div class="flex items-center justify-between border-b border-border px-4 py-3">
+              <p class="text-[13px] font-semibold text-slate-100">Notifications</p>
+              <div class="flex items-center gap-2">
+                <span id="notificationEmptyLabel" class="hidden text-[11px] text-slate-500">All caught up</span>
+                <button type="button" data-action="close-notifications" title="Close" aria-label="Close notifications"
+                  class="rounded-md p-1 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+                  <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                </button>
+              </div>
+            </div>
+            <div class="max-h-[70vh] overflow-y-auto p-3 space-y-3">
+
+              <div id="notificationEmptyState" class="hidden flex flex-col items-center gap-2 py-8 text-center">
+                <svg class="h-6 w-6 text-emerald-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><path d="M22 4L12 14.01l-3-3"/></svg>
+                <p class="text-[12px] text-slate-500">Nothing overdue, due soon, or awaiting review.</p>
+              </div>
+
+              <!-- ---- OVERDUE CHECKOUTS (review -- Super Admin/Manager) ---- -->
+              <div id="overdueAlertBanner" class="hidden rounded-lg border border-rose-500/30 bg-rose-500/5 p-3">
+                <div class="flex items-center gap-2 text-[12px] font-semibold text-rose-400">
+                  <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01M10.29 3.86l-8.18 14.18A2 2 0 003.82 21h16.36a2 2 0 001.71-2.96L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
+                  <span><span id="overdueAlertCount">0</span> checkout(s) are overdue</span>
+                </div>
+                <ul id="overdueAlertList" class="mt-1.5 divide-y divide-rose-500/10 pl-6 text-[12px]"></ul>
+              </div>
+
+              <!-- ---- DUE SOON (review -- Super Admin/Manager) ---- -->
+              <div id="dueSoonAlertBanner" class="hidden rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
+                <div class="flex items-center gap-2 text-[12px] font-semibold text-amber-400">
+                  <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+                  <span><span id="dueSoonAlertCount">0</span> checkout(s) due soon</span>
+                </div>
+                <ul id="dueSoonAlertList" class="mt-1.5 divide-y divide-amber-500/10 pl-6 text-[12px]"></ul>
+              </div>
+
+              <!-- ---- EXTENSION REQUESTS AWAITING REVIEW (Super Admin/Manager) ----
+                   Clicking straight into Approve/Deny right here IS "taking
+                   action" -- no extra navigation needed. -->
+              <div id="extensionRequestsPanel" class="hidden rounded-lg border border-violet-500/30 bg-violet-500/5 p-3">
+                <div class="flex items-center gap-2 text-[12px] font-semibold text-violet-300">
+                  <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="9"/></svg>
+                  <span><span id="extensionRequestsCount">0</span> extension request(s) awaiting your review</span>
+                </div>
+                <ul id="extensionRequestsList" class="mt-1.5 divide-y divide-violet-500/10 pl-6 text-[12px]"></ul>
+              </div>
+
+              <!-- ---- MY OWN OVERDUE ITEMS (personal -- every role) ---- -->
+              <div id="notifMyOverdueSection" class="hidden rounded-lg border border-rose-500/30 bg-rose-500/5 p-3">
+                <div class="flex items-center gap-2 text-[12px] font-semibold text-rose-400">
+                  <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01M10.29 3.86l-8.18 14.18A2 2 0 003.82 21h16.36a2 2 0 001.71-2.96L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
+                  <span><span id="notifMyOverdueCount">0</span> item(s) you hold are overdue</span>
+                </div>
+                <ul id="notifMyOverdueList" class="mt-1.5 divide-y divide-rose-500/10 pl-6 text-[12px]"></ul>
+              </div>
+
+              <!-- ---- MY OWN DUE-SOON ITEMS (personal -- every role) ---- -->
+              <div id="notifMyDueSoonSection" class="hidden rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
+                <div class="flex items-center gap-2 text-[12px] font-semibold text-amber-400">
+                  <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+                  <span><span id="notifMyDueSoonCount">0</span> item(s) you hold are due soon</span>
+                </div>
+                <ul id="notifMyDueSoonList" class="mt-1.5 divide-y divide-amber-500/10 pl-6 text-[12px]"></ul>
+              </div>
+
+              <!-- ---- MY OWN PENDING EXTENSION REQUESTS (personal -- every role) ---- -->
+              <div id="notifMyPendingExtensionSection" class="hidden rounded-lg border border-violet-500/30 bg-violet-500/5 p-3">
+                <div class="flex items-center gap-2 text-[12px] font-semibold text-violet-300">
+                  <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="9"/></svg>
+                  <span><span id="notifMyPendingExtensionCount">0</span> of your extension request(s) awaiting review</span>
+                </div>
+                <ul id="notifMyPendingExtensionList" class="mt-1.5 divide-y divide-violet-500/10 pl-6 text-[12px]"></ul>
+              </div>
+
+              <!-- ---- MY EXTENSION REQUEST DECISIONS (personal -- every role) ----
+                   Once one of MY OWN extension requests gets approved/denied
+                   (whether I requested it myself, or a Manager/Admin also
+                   holds their own checkout), I find out here even if I miss
+                   the email. -->
+              <div id="myExtensionDecisionsBanner" class="hidden rounded-lg border border-blue-500/30 bg-blue-500/5 p-3">
+                <div class="flex items-center justify-between gap-2">
+                  <div class="flex items-center gap-2 text-[12px] font-semibold text-blue-400">
+                    <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="9"/></svg>
+                    <span><span id="myExtensionDecisionsCount">0</span> extension request update(s)</span>
+                  </div>
+                  <button data-action="dismiss-my-extension-decisions-alert" title="Clear" class="rounded-md p-1 text-blue-400/70 transition hover:bg-blue-500/10 hover:text-blue-300">
+                    <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                  </button>
+                </div>
+                <ul id="myExtensionDecisionsList" class="mt-1.5 divide-y divide-blue-500/10 text-[12px]"></ul>
+              </div>
+
+            </div>
+          </div>
+        </div>
+
+        <span class="hidden items-center gap-1.5 rounded-full border border-rose-500/50 bg-rose-500/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-wide text-rose-400 glow-red sm:flex">
+          <span class="h-1.5 w-1.5 rounded-full bg-rose-500 animate-pulse"></span>
+          Admin Mode
+        </span>
+
+        <button type="button" id="navProfileBtn" data-action="open-profile" title="View profile &amp; change password" class="flex items-center gap-2.5 border-l border-border pl-2 transition hover:opacity-80 sm:pl-4">
+          <div id="navUserInitials" class="h-8 w-8 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-xs font-bold text-white">RA</div>
+          <div class="hidden text-right leading-tight md:block">
+            <p id="navUserName" class="text-[13px] font-semibold text-slate-100">R. Adeyemi</p>
+            <p id="myProfileRole" class="text-[11px] text-slate-500">Super Admin</p>
+          </div>
+        </button>
+
+        <button type="button" data-action="toggle-theme" title="Switch to light / dark theme" aria-label="Toggle color theme" class="theme-toggle flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border bg-card text-slate-300 transition hover:border-blue-500/40 hover:text-blue-400 sm:h-9 sm:w-9">
+          <span class="icon-moon"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg></span>
+          <span class="icon-sun"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg></span>
+        </button>
+
+        <button id="logout-btn" title="Log out" class="flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-[13px] font-medium text-slate-300 transition hover:border-rose-500/40 hover:text-rose-400 sm:px-3">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>
+          <span class="hidden sm:inline">Log out</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Tabs -->
+    <nav class="flex gap-1 -mb-px">
+      <button id="tabAssets" data-action="switch-tab" data-tab="assets" class="relative border-b-2 border-blue-500 px-3 py-3 text-[13px] font-semibold text-slate-50 sm:px-4">
+        <span class="sm:hidden">Assets</span><span class="hidden sm:inline">Asset Inventory</span>
+      </button>
+      <button id="tabUsers" data-action="switch-tab" data-tab="users" class="relative border-b-2 border-transparent px-3 py-3 text-[13px] font-medium text-slate-500 transition hover:text-slate-300 sm:px-4">
+        <span class="sm:hidden">Users</span><span class="hidden sm:inline">User Directory</span>
+      </button>
+      <button id="tabAdhoc" data-action="switch-tab" data-tab="adhoc" class="relative border-b-2 border-transparent px-3 py-3 text-[13px] font-medium text-slate-500 transition hover:text-slate-300 sm:px-4">
+        <span class="sm:hidden">Ad-Hoc</span><span class="hidden sm:inline">Ad-Hoc Directory</span>
+      </button>
+      <button id="tabQuotes" data-action="switch-tab" data-tab="quotes" class="relative border-b-2 border-transparent px-3 py-3 text-[13px] font-medium text-slate-500 transition hover:text-slate-300 sm:px-4">
+        <span class="sm:hidden">Quotes</span><span class="hidden sm:inline">Quotes</span>
+      </button>
+      <button id="tabLogs" data-action="switch-tab" data-tab="logs" class="relative border-b-2 border-transparent px-3 py-3 text-[13px] font-medium text-slate-500 transition hover:text-slate-300 sm:px-4">
+        <span class="sm:hidden">Logs</span><span class="hidden sm:inline">Audit &amp; Backups</span>
+      </button>
+    </nav>
+  </div>
+</header>
+
+<main class="mx-auto max-w-[1440px] px-4 py-6 space-y-6 sm:px-6 sm:py-8 sm:space-y-8">
+
+  <!-- Swipe hint dots (mobile only) -- see js/ui.js's updateSwipeDots(). -->
+  <div id="swipeDots" class="mb-4 flex items-center justify-center gap-1.5 sm:hidden"></div>
+
+  <!-- #swipeArea wraps all five tab sections below so js/ui.js's
+       initSwipeNav() can attach a single touchstart/touchend pair here and
+       let a phone visitor move between Asset Inventory / User Directory /
+       Ad-Hoc Directory / Quotes / Audit & Backups by swiping left or right, in
+       addition to tapping the tabs in the navbar above. Desktop is
+       unaffected -- touch events simply never fire from a mouse. -->
+  <div id="swipeArea">
+  <!-- ================= ASSET INVENTORY INTERFACE ================= -->
+  <section id="assetInventorySection">
+    <div class="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <div>
+        <h1 class="text-xl font-bold tracking-tight text-slate-50">Asset Inventory</h1>
+        <p class="text-[13px] text-slate-500"><span class="asset-pool-count">0</span> pools tracked · live from database</p>
+      </div>
+      <div class="flex flex-wrap items-center gap-3">
+        <div class="relative w-full sm:w-72">
+          <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+          <!-- Wired up in main.js's wireTableControls(): typing here calls
+               setSearch('assets', ...), which re-filters the cached asset
+               list client-side and re-renders (no extra API call). -->
+          <input type="text" id="assetSearchInput" placeholder="Search by asset name…"
+            class="w-full rounded-lg border border-border bg-card2 py-2 pl-9 pr-8 text-[13px] text-slate-200 placeholder-slate-500 outline-none transition focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40 search-clearable" />
+        </div>
+        <div class="flex items-center gap-2 text-[13px] text-slate-400">
+          <span>Rows per page</span>
+          <!-- Wired up in main.js: changing this calls setPerPage('assets', ...). -->
+          <select id="assetPerPageSelect" class="rounded-lg border border-border bg-card2 px-2.5 py-2 text-slate-200 outline-none focus:border-blue-500/60">
+            <option value="5" selected>5</option>
+            <option value="10">10</option>
+            <option value="25">25</option>
+            <option value="50">50</option>
+          </select>
+        </div>
+        <!-- Opens #assetExportModal (category picker + CSV/PDF) -- see
+             js/components/assets.js's openAssetExportModal(). -->
+        <button data-action="open-asset-export" title="Export the Asset Inventory table"
+          class="flex items-center gap-1.5 rounded-md border border-border bg-card2 px-3 py-2 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+          Export
+        </button>
+      </div>
+    </div>
+
+    <!-- Data Table (rows rendered dynamically by the assets component -> loadAssets()) -->
+    <div class="overflow-hidden rounded-xl border border-border bg-card">
+      <table class="w-full text-left text-[13px]">
+        <thead>
+          <tr class="border-b border-border bg-card2/60 text-[11px] uppercase tracking-wide text-slate-500">
+            <th class="px-5 py-3 font-semibold">Asset Name</th>
+            <th class="hidden px-5 py-3 font-semibold sm:table-cell">Available / Total</th>
+            <th class="px-5 py-3 font-semibold">Status</th>
+            <th class="hidden px-5 py-3 font-semibold text-right sm:table-cell">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="assetTableBody" class="divide-y divide-border">
+          <tr><td colspan="4" class="px-5 py-6 text-center text-slate-500">Loading asset pools…</td></tr>
+        </tbody>
+      </table>
+      <!-- Pagination bar: text + Prev/Next filled in by ui.js's renderPaginationBar('assets', ...) -->
+      <div class="flex items-center justify-between border-t border-border bg-card2/40 px-5 py-3 text-[12px] text-slate-400">
+        <span id="assetsPageInfo">Loading…</span>
+        <div class="flex items-center gap-2">
+          <button id="assetsPrevBtn" data-action="change-page" data-key="assets" data-delta="-1" class="rounded-md border border-border px-2.5 py-1 font-medium text-slate-300 transition hover:border-slate-500 disabled:opacity-40 disabled:cursor-not-allowed">Prev</button>
+          <button id="assetsNextBtn" data-action="change-page" data-key="assets" data-delta="1" class="rounded-md border border-border px-2.5 py-1 font-medium text-slate-300 transition hover:border-slate-500 disabled:opacity-40 disabled:cursor-not-allowed">Next</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Two column forms -->
+    <!-- UX NOTE: these two "create new stuff" forms are deliberately placed
+         BELOW the inventory table (they used to sit above it). The table
+         is what a Super Admin looks at 95% of the time -- putting it first
+         means it's visible immediately on page load without scrolling past
+         two large, mostly-empty-looking forms first. Registering a new pool
+         or importing a CSV is a comparatively rare action, so it belongs
+         further down the page, not above the fold. -->
+    <div class="mt-6 grid grid-cols-1 gap-5 lg:grid-cols-2">
+      <!-- Register New Inventory Pool -->
+      <div class="rounded-xl border border-border bg-card p-5">
+        <h2 class="mb-1 text-[14px] font-semibold text-slate-100">Register New Inventory Pool</h2>
+        <p class="mb-4 text-[12px] text-slate-500">Create a new trackable stock group for a shared asset type.</p>
+        <form id="createPoolForm" class="space-y-3">
+          <div>
+            <label class="mb-1 block text-[12px] font-medium text-slate-400">Asset Name</label>
+            <input type="text" id="newPoolName" required placeholder="e.g. Dell UltraSharp U2723QE Monitor"
+              class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
+          </div>
+          <div>
+            <label class="mb-1 block text-[12px] font-medium text-slate-400">Starting Total Capacity</label>
+            <input type="number" id="newPoolQty" required min="0" placeholder="e.g. 20"
+              class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
+          </div>
+          <div>
+            <label class="mb-1 block text-[12px] font-medium text-slate-400">Category <span class="text-slate-600">(optional)</span></label>
+            <input type="text" id="newPoolCategory" placeholder="e.g. Engineering"
+              class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
+            <p class="mt-1 text-[11px] text-slate-500">Which internal category this equipment belongs to.</p>
+          </div>
+          <div>
+            <label class="mb-1 block text-[12px] font-medium text-slate-400">Price <span class="text-slate-600">(optional)</span></label>
+            <input type="number" id="newPoolPrice" min="0" step="0.01" placeholder="e.g. 1899.00"
+              class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
+            <p class="mt-1 text-[11px] text-slate-500">Per-unit purchase/replacement price for this equipment.</p>
+          </div>
+          <button type="submit" class="mt-1 w-full rounded-lg bg-blue-600 py-2 text-[13px] font-semibold text-white transition hover:bg-blue-500 active:bg-blue-700">
+            Create Stock Pool
+          </button>
+        </form>
+      </div>
+
+      <!-- Spreadsheet Batch Import -->
+      <div class="rounded-xl border border-border bg-card p-5">
+        <div class="mb-1 flex items-center justify-between gap-3">
+          <h2 class="text-[14px] font-semibold text-slate-100">Spreadsheet Batch Import</h2>
+          <!-- Generates and downloads a ready-to-fill-in sample CSV
+               client-side -- see js/components/assets.js's
+               downloadCsvImportTemplate(). Placed right next to the
+               format hint below so someone about to prep an inventory
+               sheet sees "here's exactly what that looks like" before
+               they start typing, instead of guessing at column names or
+               reverse-engineering them from an error message after a
+               failed import. -->
+          <button type="button" data-action="download-csv-template" title="Download a sample CSV to see the exact column format"
+            class="flex shrink-0 items-center gap-1.5 rounded-md border border-border bg-card2 px-2.5 py-1.5 text-[11px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
+            <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+            Sample CSV
+          </button>
+        </div>
+        <p class="mb-4 text-[12px] text-slate-500">Bulk-load asset pools from a formatted CSV export (columns: name, total_quantity, category [optional], price [optional]). Not sure of the format? Download the sample CSV above, fill it in to match your inventory sheet, then drop it below.</p>
+        <form id="csvImportForm">
+          <!-- id="csvDropZone" is what js/main.js's wireCsvDragAndDrop()
+               attaches dragover/dragleave/drop listeners to -- see that
+               function's comment for why a plain <label>+<input type=file>
+               does NOT get drag-and-drop for free just because it LOOKS
+               like a drop zone. -->
+          <label id="csvDropZone" class="group flex h-[142px] cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border bg-card2/50 text-center transition hover:border-blue-500/50 hover:bg-blue-500/5">
+            <svg class="h-7 w-7 text-slate-500 transition group-hover:text-blue-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M12 16V4"/><path d="M6 10l6-6 6 6"/><path d="M4 20h16"/></svg>
+            <p class="text-[13px] font-medium text-slate-300">Drop CSV file here, or <span class="text-blue-400">browse</span></p>
+            <p class="text-[11px] text-slate-500">Accepts .csv up to 5MB</p>
+            <input type="file" id="csvFileInput" accept=".csv" class="hidden"  />
+          </label>
+        </form>
+
+        <!-- CSV Import Result Summary (populated dynamically by JS) -->
+        <div id="csvImportResult" class="mt-3 hidden">
+          <div id="csvImportBanner" class="rounded-md px-4 py-3 text-[13px] font-medium"></div>
+          <div id="csvImportActions" class="mt-3 flex items-center gap-3"></div>
+          <div id="csvImportErrors" class="mt-3 overflow-auto max-h-64 rounded-md border border-border bg-card2/60 p-3 text-sm text-slate-200 hidden"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Restore Deleted Assets -->
+    <!-- Super Admin only -- "oops, wrong pool" recovery for a pool
+         soft-deleted via the "Delete" button in the table above. Lives
+         below the two forms (rarest action on this page, same placement
+         reasoning as Restore Deleted Users below) and powers itself off
+         GET /assets/deleted + POST /assets/{id}/restore -- see
+         js/components/assets.js's loadDeletedAssets()/restoreAssetPool(). -->
+    <div class="mt-6 rounded-xl border border-border bg-card p-5">
+      <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h2 class="text-[14px] font-semibold text-slate-100">Restore Deleted Assets</h2>
+          <p class="text-[12px] text-slate-500"><span class="deleted-asset-count">0</span> soft-deleted pool(s) · checkout/exception history is preserved</p>
+        </div>
+        <div class="flex flex-wrap items-center gap-3">
+          <div class="relative w-full sm:w-64">
+            <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+            <input type="text" id="deletedAssetSearchInput" placeholder="Search by asset name…"
+              class="w-full rounded-lg border border-border bg-card2 py-2 pl-9 pr-8 text-[13px] text-slate-200 placeholder-slate-500 outline-none transition focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40 search-clearable" />
+          </div>
+          <div class="flex items-center gap-2 text-[13px] text-slate-400">
+            <span>Rows per page</span>
+            <select id="deletedAssetPerPageSelect" class="rounded-lg border border-border bg-card2 px-2.5 py-2 text-slate-200 outline-none focus:border-blue-500/60">
+              <option value="5" selected>5</option>
+              <option value="10">10</option>
+              <option value="25">25</option>
+              <option value="50">50</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div class="overflow-hidden rounded-xl border border-border bg-card2/20">
+        <table class="w-full text-left text-[13px]">
+          <thead>
+            <tr class="border-b border-border bg-card2/60 text-[11px] uppercase tracking-wide text-slate-500">
+              <th class="px-5 py-3 font-semibold">Asset Pool</th>
+              <th class="hidden px-5 py-3 font-semibold sm:table-cell">Total Quantity</th>
+              <th class="hidden px-5 py-3 font-semibold sm:table-cell">Deleted On</th>
+              <th class="hidden px-5 py-3 font-semibold text-right sm:table-cell">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="deletedAssetTableBody" class="divide-y divide-border">
+            <tr><td colspan="4" class="px-5 py-6 text-center text-slate-500">Loading…</td></tr>
+          </tbody>
+        </table>
+        <div class="flex items-center justify-between border-t border-border bg-card2/40 px-5 py-3 text-[12px] text-slate-400">
+          <span id="deletedAssetsPageInfo">Loading…</span>
+          <div class="flex items-center gap-2">
+            <button id="deletedAssetsPrevBtn" data-action="change-page" data-key="deletedAssets" data-delta="-1" class="rounded-md border border-border px-2.5 py-1 font-medium text-slate-300 transition hover:border-slate-500 disabled:opacity-40 disabled:cursor-not-allowed">Prev</button>
+            <button id="deletedAssetsNextBtn" data-action="change-page" data-key="deletedAssets" data-delta="1" class="rounded-md border border-border px-2.5 py-1 font-medium text-slate-300 transition hover:border-slate-500 disabled:opacity-40 disabled:cursor-not-allowed">Next</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= USER DIRECTORY INTERFACE ================= -->
+  <section id="userDirectorySection" class="hidden">
+    <div class="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <div>
+        <h1 class="text-xl font-bold tracking-tight text-slate-50">User Directory</h1>
+        <p class="text-[13px] text-slate-500"><span class="user-count">0</span> accounts provisioned · live from database</p>
+      </div>
+      <div class="flex flex-wrap items-center gap-3">
+        <div class="relative w-full sm:w-72">
+          <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+          <input type="text" id="userSearchInput" placeholder="Search by name, email, or role…"
+            class="w-full rounded-lg border border-border bg-card2 py-2 pl-9 pr-8 text-[13px] text-slate-200 placeholder-slate-500 outline-none transition focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40 search-clearable" />
+        </div>
+        <div class="flex items-center gap-2 text-[13px] text-slate-400">
+          <span>Rows per page</span>
+          <select id="userPerPageSelect" class="rounded-lg border border-border bg-card2 px-2.5 py-2 text-slate-200 outline-none focus:border-blue-500/60">
+            <option value="5" selected>5</option>
+            <option value="10">10</option>
+            <option value="25">25</option>
+            <option value="50">50</option>
+          </select>
+        </div>
+        <div class="flex items-center gap-2">
+          <button data-action="export-all-users" data-format="csv" title="Export properties assigned to every user (CSV)"
+            class="flex items-center gap-1.5 rounded-md border border-border bg-card2 px-3 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
+            <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+            Export All (.CSV)
+          </button>
+          <button data-action="export-all-users" data-format="pdf" title="Export properties assigned to every user (PDF)"
+            class="flex items-center gap-1.5 rounded-md border border-border bg-card2 px-3 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
+            <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+            Export All (.PDF)
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Directory Table (rows rendered dynamically by the users component -> loadUsers()) -->
+    <div class="overflow-hidden rounded-xl border border-border bg-card">
+      <table class="w-full text-left text-[13px]">
+        <thead>
+          <tr class="border-b border-border bg-card2/60 text-[11px] uppercase tracking-wide text-slate-500">
+            <th class="px-5 py-3 font-semibold">User</th>
+            <th class="hidden px-5 py-3 font-semibold sm:table-cell">Privilege Tier</th>
+            <th class="hidden px-5 py-3 font-semibold sm:table-cell">Custody</th>
+            <th class="hidden px-5 py-3 font-semibold text-right sm:table-cell">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="userTableBody" class="divide-y divide-border">
+          <tr><td colspan="4" class="px-5 py-6 text-center text-slate-500">Loading directory…</td></tr>
+        </tbody>
+      </table>
+      <div class="flex items-center justify-between border-t border-border bg-card2/40 px-5 py-3 text-[12px] text-slate-400">
+        <span id="usersPageInfo">Loading…</span>
+        <div class="flex items-center gap-2">
+          <button id="usersPrevBtn" data-action="change-page" data-key="users" data-delta="-1" class="rounded-md border border-border px-2.5 py-1 font-medium text-slate-300 transition hover:border-slate-500 disabled:opacity-40 disabled:cursor-not-allowed">Prev</button>
+          <button id="usersNextBtn" data-action="change-page" data-key="users" data-delta="1" class="rounded-md border border-border px-2.5 py-1 font-medium text-slate-300 transition hover:border-slate-500 disabled:opacity-40 disabled:cursor-not-allowed">Next</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Provision System User Account -->
+    <!-- UX NOTE: placed BELOW the directory table (it used to sit above it),
+         same reasoning as the Asset Inventory tab's reorder -- scanning the
+         existing directory is the common action; provisioning a new
+         account is comparatively rare and belongs further down the page. -->
+    <div class="mt-6 rounded-xl border border-border bg-card p-5">
+      <h2 class="mb-1 text-[14px] font-semibold text-slate-100">Provision System User Account</h2>
+      <p class="mb-4 text-[12px] text-slate-500">Create a new login for staff needing directory access.</p>
+      <form id="createUserForm" class="space-y-3">
+        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <div>
+            <label class="mb-1 block text-[12px] font-medium text-slate-400">Name</label>
+            <input type="text" id="newUserName" required placeholder="e.g. Femi Balogun"
+              class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
+          </div>
+          <div>
+            <label class="mb-1 block text-[12px] font-medium text-slate-400">Email</label>
+            <input type="email" id="newUserEmail" required placeholder="e.g. f.balogun@corp.io"
+              class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
+          </div>
+        </div>
+        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <div>
+            <label class="mb-1 block text-[12px] font-medium text-slate-400">Phone Number (optional)</label>
+            <input type="tel" id="newUserPhone" placeholder="e.g. +234 801 234 5678"
+              class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
+          </div>
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="mb-1 block text-[12px] font-medium text-slate-400">Role</label>
+            <select id="newUserRole" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60">
+              <option value="admin">Admin</option>
+              <option value="manager">Manager</option>
+              <option value="staff" selected>Staff</option>
+              <option value="customer">Customer</option>
+            </select>
+          </div>
+          <div>
+            <label class="mb-1 block text-[12px] font-medium text-slate-400">Temporary Password</label>
+            <input type="text" id="newUserPassword" required placeholder="Set a temp password"
+              class="tag-mono w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          </div>
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="mb-1 block text-[12px] font-medium text-slate-400">Department (optional)</label>
+            <input type="text" id="newUserDepartment" placeholder="e.g. Engineering"
+              class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          </div>
+          <div>
+            <label class="mb-1 block text-[12px] font-medium text-slate-400">Department Role (optional)</label>
+            <input type="text" id="newUserDeptRole" placeholder="e.g. Senior Engineer"
+              class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          </div>
+        </div>
+        <button type="submit" class="mt-1 w-full rounded-lg bg-blue-600 py-2 text-[13px] font-semibold text-white transition hover:bg-blue-500 active:bg-blue-700">
+          Provision Account
+        </button>
+      </form>
+    </div>
+
+    <!-- Restore Deleted Users -->
+    <!-- Super Admin/Admin only -- "oops, wrong person" recovery for an
+         account soft-deleted via the "Delete Profile" button above. Lives
+         below the Provision panel (rarest action on the page) and powers
+         itself off GET /users/deleted + POST /users/{id}/restore -- see
+         js/components/users.js's loadDeletedUsers()/restoreUser(). -->
+    <div class="mt-6 rounded-xl border border-border bg-card p-5">
+      <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h2 class="text-[14px] font-semibold text-slate-100">Restore Deleted Users</h2>
+          <p class="text-[12px] text-slate-500"><span class="deleted-user-count">0</span> soft-deleted account(s) · login history and custody records are preserved</p>
+        </div>
+        <div class="flex flex-wrap items-center gap-3">
+          <div class="relative w-full sm:w-64">
+            <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+            <input type="text" id="deletedUserSearchInput" placeholder="Search by name, email, or role…"
+              class="w-full rounded-lg border border-border bg-card2 py-2 pl-9 pr-8 text-[13px] text-slate-200 placeholder-slate-500 outline-none transition focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40 search-clearable" />
+          </div>
+          <div class="flex items-center gap-2 text-[13px] text-slate-400">
+            <span>Rows per page</span>
+            <select id="deletedUserPerPageSelect" class="rounded-lg border border-border bg-card2 px-2.5 py-2 text-slate-200 outline-none focus:border-blue-500/60">
+              <option value="5" selected>5</option>
+            <option value="10">10</option>
+              <option value="25">25</option>
+              <option value="50">50</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div class="overflow-hidden rounded-xl border border-border bg-card2/20">
+        <table class="w-full text-left text-[13px]">
+          <thead>
+            <tr class="border-b border-border bg-card2/60 text-[11px] uppercase tracking-wide text-slate-500">
+              <th class="px-5 py-3 font-semibold">User</th>
+              <th class="hidden px-5 py-3 font-semibold sm:table-cell">Privilege Tier</th>
+              <th class="hidden px-5 py-3 font-semibold sm:table-cell">Deleted On</th>
+              <th class="hidden px-5 py-3 font-semibold text-right sm:table-cell">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="deletedUserTableBody" class="divide-y divide-border">
+            <tr><td colspan="4" class="px-5 py-6 text-center text-slate-500">Loading…</td></tr>
+          </tbody>
+        </table>
+        <div class="flex items-center justify-between border-t border-border bg-card2/40 px-5 py-3 text-[12px] text-slate-400">
+          <span id="deletedUsersPageInfo">Loading…</span>
+          <div class="flex items-center gap-2">
+            <button id="deletedUsersPrevBtn" data-action="change-page" data-key="deletedUsers" data-delta="-1" class="rounded-md border border-border px-2.5 py-1 font-medium text-slate-300 transition hover:border-slate-500 disabled:opacity-40 disabled:cursor-not-allowed">Prev</button>
+            <button id="deletedUsersNextBtn" data-action="change-page" data-key="deletedUsers" data-delta="1" class="rounded-md border border-border px-2.5 py-1 font-medium text-slate-300 transition hover:border-slate-500 disabled:opacity-40 disabled:cursor-not-allowed">Next</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= AD-HOC (UNLINKED) DIRECTORY INTERFACE ================= -->
+  <!-- Requirement #6: external people who receive equipment without holding a
+       full system account (models.Outsider on the backend). Lives right next
+       to the main User Directory, with an identical Custody Ledger flow. -->
+  <section id="adhocDirectorySection" class="hidden">
+    <div class="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <div>
+        <h1 class="text-xl font-bold tracking-tight text-slate-50">Ad-Hoc Individuals (Unlinked)</h1>
+        <p class="text-[13px] text-slate-500"><span class="outsider-count">0</span> unlinked profile(s) · created automatically when dispatching to an "Ad-Hoc Individual" in the Issue / Dispatch drawer</p>
+      </div>
+      <div class="flex flex-wrap items-center gap-3">
+        <div class="relative w-full sm:w-72">
+          <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+          <input type="text" id="outsiderSearchInput" placeholder="Search by name, contact, or company…"
+            class="w-full rounded-lg border border-border bg-card2 py-2 pl-9 pr-8 text-[13px] text-slate-200 placeholder-slate-500 outline-none transition focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40 search-clearable" />
+        </div>
+        <div class="flex items-center gap-2 text-[13px] text-slate-400">
+          <span>Rows per page</span>
+          <select id="outsiderPerPageSelect" class="rounded-lg border border-border bg-card2 px-2.5 py-2 text-slate-200 outline-none focus:border-blue-500/60">
+            <option value="5" selected>5</option>
+            <option value="10">10</option>
+            <option value="25">25</option>
+            <option value="50">50</option>
+          </select>
+        </div>
+        <div class="flex items-center gap-2">
+          <button data-action="export-all-outsiders" data-format="csv" title="Export properties assigned to every ad-hoc individual (CSV)"
+            class="flex items-center gap-1.5 rounded-md border border-border bg-card2 px-3 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
+            <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+            Export All (.CSV)
+          </button>
+          <button data-action="export-all-outsiders" data-format="pdf" title="Export properties assigned to every ad-hoc individual (PDF)"
+            class="flex items-center gap-1.5 rounded-md border border-border bg-card2 px-3 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
+            <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+            Export All (.PDF)
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="overflow-hidden rounded-xl border border-border bg-card">
+      <table class="w-full text-left text-[13px]">
+        <thead>
+          <tr class="border-b border-border bg-card2/60 text-[11px] uppercase tracking-wide text-slate-500">
+            <th class="px-5 py-3 font-semibold">Individual</th>
+            <th class="hidden px-5 py-3 font-semibold sm:table-cell">Company</th>
+            <th class="hidden px-5 py-3 font-semibold sm:table-cell">Custody</th>
+            <th class="hidden px-5 py-3 font-semibold text-right sm:table-cell">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="outsiderTableBody" class="divide-y divide-border">
+          <tr><td colspan="4" class="px-5 py-6 text-center text-slate-500">Loading ad-hoc directory…</td></tr>
+        </tbody>
+      </table>
+      <div class="flex items-center justify-between border-t border-border bg-card2/40 px-5 py-3 text-[12px] text-slate-400">
+        <span id="outsidersPageInfo">Loading…</span>
+        <div class="flex items-center gap-2">
+          <button id="outsidersPrevBtn" data-action="change-page" data-key="outsiders" data-delta="-1" class="rounded-md border border-border px-2.5 py-1 font-medium text-slate-300 transition hover:border-slate-500 disabled:opacity-40 disabled:cursor-not-allowed">Prev</button>
+          <button id="outsidersNextBtn" data-action="change-page" data-key="outsiders" data-delta="1" class="rounded-md border border-border px-2.5 py-1 font-medium text-slate-300 transition hover:border-slate-500 disabled:opacity-40 disabled:cursor-not-allowed">Next</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= QUOTES (Admin/Manager) =================
+       Every submitted Equipment Quotation -- look one up by its ID
+       (reference number) or requester, then open it to adjust line
+       items, leave notes, and assign it to a user. See
+       js/components/quotation.js and backend/api/quotations.py. -->
+  <section id="quotesSection" class="hidden">
+    <div class="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <div>
+        <h1 class="text-xl font-bold tracking-tight text-slate-50">Quotes</h1>
+        <p class="text-[13px] text-slate-500"><span class="quote-count">0</span> quotation(s) in the master queue · search or recall by Quotation ID, name, or email</p>
+      </div>
+      <div class="flex flex-wrap items-center gap-3">
+        <div class="relative w-full sm:w-72">
+          <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+          <input type="text" id="quotesSearchInput" placeholder="Search or recall by Quotation ID, name, or email…"
+            class="w-full rounded-lg border border-border bg-card2 py-2 pl-9 pr-8 text-[13px] text-slate-200 placeholder-slate-500 outline-none transition focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40 search-clearable" />
+        </div>
+        <div class="flex items-center gap-2 text-[13px] text-slate-400">
+          <span>Rows per page</span>
+          <select id="quotesPerPageSelect" class="rounded-lg border border-border bg-card2 px-2.5 py-2 text-slate-200 outline-none focus:border-blue-500/60">
+            <option value="5" selected>5</option>
+            <option value="10">10</option>
+            <option value="25">25</option>
+            <option value="50">50</option>
+          </select>
+        </div>
+        <button type="button" data-action="open-fulfillment-drawer"
+          class="flex items-center gap-1.5 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-[13px] font-semibold text-emerald-400 transition hover:bg-emerald-500/20">
+          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 12V8H6a2 2 0 010-4h12v4"/><path d="M4 6v12a2 2 0 002 2h14v-4"/><path d="M18 12a2 2 0 000 4h4v-4Z"/></svg>
+          Fulfillment Drawer
+        </button>
+        <button type="button" data-action="open-create-quote-modal"
+          class="flex items-center gap-1.5 rounded-md bg-blue-600 px-3 py-2 text-[13px] font-semibold text-white transition hover:bg-blue-500">
+          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+          Create Quote
+        </button>
+      </div>
+    </div>
+
+    <div class="overflow-hidden rounded-xl border border-border bg-card">
+      <table class="w-full text-left text-[13px]">
+        <thead>
+          <tr class="border-b border-border bg-card2/60 text-[11px] uppercase tracking-wide text-slate-500">
+            <th class="px-3 py-3 font-semibold">Quotation ID</th>
+            <th class="px-3 py-3 font-semibold">Status</th>
+            <th class="hidden px-3 py-3 font-semibold sm:table-cell">Requester</th>
+            <th class="hidden px-3 py-3 font-semibold sm:table-cell">Submitted</th>
+            <th class="px-3 py-3 font-semibold">Items</th>
+            <th class="hidden px-3 py-3 font-semibold sm:table-cell">Assigned To</th>
+            <th class="px-3 py-3 text-right font-semibold">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="quotesTableBody" class="divide-y divide-border">
+          <tr><td colspan="7" class="px-5 py-6 text-center text-slate-500">Loading quotes…</td></tr>
+        </tbody>
+      </table>
+      <div class="flex items-center justify-between border-t border-border bg-card2/40 px-5 py-3 text-[12px] text-slate-400">
+        <span id="quotesPageInfo">Loading…</span>
+        <div class="flex items-center gap-2">
+          <button id="quotesPrevBtn" data-action="change-page" data-key="quotes" data-delta="-1" class="rounded-md border border-border px-2.5 py-1 font-medium text-slate-300 transition hover:border-slate-500 disabled:opacity-40 disabled:cursor-not-allowed">Prev</button>
+          <button id="quotesNextBtn" data-action="change-page" data-key="quotes" data-delta="1" class="rounded-md border border-border px-2.5 py-1 font-medium text-slate-300 transition hover:border-slate-500 disabled:opacity-40 disabled:cursor-not-allowed">Next</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ================= QUOTATION SETTINGS (VAT) =================
+         The only value tied to the self-service Equipment Quotation
+         feature that's edited HERE rather than per-asset: the global VAT
+         percentage applied to every saved order's total (see
+         js/components/quotation.js on staff.html/customer.html and
+         backend/services/quotation_service.py). Per-asset day-rate price
+         is still edited from each pool's own Properties Hub, in the
+         Inventory tab -- see "Price" in the Register New Inventory Pool
+         form there and js/components/assets.js's savePrice() -- and
+         already applies globally to every quotation immediately, the
+         same way this does. Lives here, under Quotes, rather than
+         Inventory, since VAT is a quotation-wide setting, not a
+         per-asset one. -->
+    <div class="mt-6 rounded-xl border border-border bg-card p-5">
+      <h2 class="mb-1 text-[14px] font-semibold text-slate-100">Quotation Settings</h2>
+      <p class="mb-4 text-[12px] text-slate-500">Global VAT applied to every staff/customer's saved Equipment Quotation. Changes take effect immediately -- editable here only.</p>
+      <form id="vatSettingsForm" class="flex flex-wrap items-end gap-3">
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">VAT (%)</label>
+          <input type="number" id="vatPercentInput" min="0" max="100" step="0.01" placeholder="e.g. 7.5"
+            class="w-32 rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
+        </div>
+        <button type="submit" class="rounded-lg bg-blue-600 px-4 py-2 text-[13px] font-semibold text-white transition hover:bg-blue-500 active:bg-blue-700">
+          Save VAT
+        </button>
+        <span id="vatSettingsMessage" class="hidden text-[12px] font-medium"></span>
+      </form>
+    </div>
+  </section>
+
+  <!-- ================= AUDIT & BACKUPS (4th tab) =================
+       Previously both of these sat unconditionally below the 3 tabs above
+       (visible no matter which tab was active), which crowded the page on
+       mobile in particular. Grouped into their own tab instead -- manager.html
+       doesn't get this same tab since its own Audit Trail section has no
+       System Backups panel next to it (backups are Super Admin-only,
+       see that section's own comment below). -->
+  <section id="auditBackupsSection" class="hidden space-y-6 sm:space-y-8">
+
+  <!-- ================= AUDIT TRAIL ================= -->
+  <section class="overflow-hidden rounded-xl border border-border bg-card">
+    <div class="flex flex-col gap-3 border-b border-border px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+      <div>
+        <h2 class="text-[14px] font-bold text-slate-100">System Immutability Audit Trail Logs</h2>
+        <p class="text-[12px] text-slate-500">Append-only ledger of every action taken across the platform</p>
+      </div>
+      <div class="flex flex-wrap items-center gap-3">
+        <div class="flex items-center gap-2 text-[12px] text-slate-400">
+          <span>Rows per page</span>
+          <select id="auditPerPageSelect" data-action="set-audit-perpage" class="rounded-lg border border-border bg-card2 px-2 py-1.5 text-slate-200 outline-none focus:border-blue-500/60">
+            <option value="5" selected>5</option>
+            <option value="10">10</option>
+            <option value="25">25</option>
+            <option value="50">50</option>
+          </select>
+        </div>
+        <!-- Exports now run on a background worker instead of inline in
+             the request (see js/components/audit.js) -- this span shows
+             that job's queued/generating/ready progress next to the
+             button instead of leaving it looking frozen while the
+             worker builds the file. -->
+        <span id="auditExportStatus" class="text-[12px] text-slate-500"></span>
+        <!-- Opens #auditExportModal (date range + CSV/PDF picker) instead
+             of the browser's native prompt() dialogs -- see
+             js/components/audit.js's openAuditExportModal(). -->
+        <button data-action="open-audit-export" class="flex items-center gap-1.5 rounded-md border border-border bg-card2 px-3 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+          Export Ledger
+        </button>
+      </div>
+    </div>
+    <table class="w-full text-left text-[12.5px]">
+      <thead>
+        <tr class="border-b border-border bg-card2/60 text-[11px] uppercase tracking-wide text-slate-500">
+          <th class="px-5 py-2.5 font-semibold">Timestamp</th>
+          <th class="hidden px-5 py-2.5 font-semibold sm:table-cell">Operator</th>
+          <th class="hidden px-5 py-2.5 font-semibold sm:table-cell">Action</th>
+          <th class="hidden px-5 py-2.5 font-semibold sm:table-cell">Detail</th>
+        </tr>
+      </thead>
+      <tbody id="auditTableBody" class="divide-y divide-border tag-mono text-slate-400">
+        <tr><td colspan="4" class="px-5 py-6 text-center text-slate-500">Loading audit trail…</td></tr>
+      </tbody>
+    </table>
+    <!-- Data Quality & Usability requirement: unlike the other tables'
+         pagination bars, these Prev/Next buttons drive a TRUE server-side
+         re-fetch (GET /audit-logs?limit=&offset=) on every click -- see
+         js/components/audit.js's module docstring. -->
+    <div class="flex items-center justify-between border-t border-border bg-card2/40 px-5 py-3 text-[12px] text-slate-400">
+      <span id="auditPageInfo">Loading…</span>
+      <div class="flex items-center gap-2">
+        <button id="auditPrevBtn" data-action="change-audit-page" data-delta="-1" class="rounded-md border border-border px-2.5 py-1 font-medium text-slate-300 transition hover:border-slate-500 disabled:opacity-40 disabled:cursor-not-allowed">Prev</button>
+        <button id="auditNextBtn" data-action="change-audit-page" data-delta="1" class="rounded-md border border-border px-2.5 py-1 font-medium text-slate-300 transition hover:border-slate-500 disabled:opacity-40 disabled:cursor-not-allowed">Next</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= SYSTEM BACKUPS ================= -->
+  <!-- Super Admin ONLY, both on the backend (deps.require_true_super_admin,
+       every /backup/* route) and here in the UI -- main.js hides this
+       whole section for a plain `admin` session (see its DOMContentLoaded
+       handler) rather than just disabling the buttons inside it, since an
+       `admin` has no access to any of this panel now, not just Restore.
+       See js/components/backups.js and backend/api/backup_api.py. Daily
+       scheduled backup + optional Google Drive sync run automatically;
+       this panel is for manual "Backup Now", downloading a copy, and
+       restoring the database from a backup (either one already on local
+       disk, or one you upload -- e.g. after downloading it back from
+       Google Drive once local disk has been wiped by a Render
+       redeploy/spin-down). -->
+  <section id="systemBackupsSection" class="overflow-hidden rounded-xl border border-border bg-card">
+    <div class="flex flex-col gap-3 border-b border-border px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+      <div>
+        <h2 class="text-[14px] font-bold text-slate-100">System Backups</h2>
+        <p class="text-[12px] text-slate-500">Daily automated backup, downloadable copies, and one-click restore</p>
+      </div>
+      <div class="flex flex-wrap items-center gap-2">
+        <button data-action="refresh-backups" title="Refresh" class="flex items-center gap-1.5 rounded-md border border-border bg-card2 px-3 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.13-3.36L23 10M1 14l5.36 4.36A9 9 0 0020.49 15"/></svg>
+          Refresh
+        </button>
+        <button data-action="restore-upload-backup" title="Restore from an uploaded backup file" class="flex items-center gap-1.5 rounded-md border border-border bg-card2 px-3 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-amber-500/50 hover:text-amber-400">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg>
+          Restore from File…
+        </button>
+        <button data-action="create-backup-now" id="backupNowBtn" title="Run a backup right now" class="flex items-center gap-1.5 rounded-md border border-blue-500/40 bg-blue-500/10 px-3 py-1.5 text-[12px] font-medium text-blue-400 transition hover:bg-blue-500/20">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
+          Backup Now
+        </button>
+      </div>
+    </div>
+
+    <div id="backupStatusCard" class="border-b border-border px-5 py-4">
+      <p class="text-[13px] text-slate-500">Loading backup status…</p>
+    </div>
+
+    <table class="w-full text-left text-[13px]">
+      <thead>
+        <tr class="border-b border-border bg-card2/60 text-[11px] uppercase tracking-wide text-slate-500">
+          <th class="px-5 py-3 font-semibold">File</th>
+          <th class="hidden px-5 py-3 font-semibold sm:table-cell">Created</th>
+          <th class="hidden px-5 py-3 font-semibold sm:table-cell">Size / Trigger</th>
+          <th class="hidden px-5 py-3 font-semibold sm:table-cell">Cloud Sync</th>
+          <th class="hidden px-5 py-3 font-semibold text-right sm:table-cell">Actions</th>
+        </tr>
+      </thead>
+      <tbody id="backupTableBody" class="divide-y divide-border">
+        <tr><td colspan="5" class="px-5 py-6 text-center text-slate-500">Loading backups…</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ================= DAILY DIGEST RECIPIENTS =================
+       Super Admin/Admin only (backend: deps.require_super_admin, see
+       backend/api/notifications.py). Controls who receives the ONE
+       daily overdue/due-soon summary email sent by the background
+       scheduler (backend/tasks/notification_tasks.py) -- being an
+       Admin/Manager account no longer means you automatically get it;
+       only the addresses listed here (and any configured via the
+       server-level ADMIN_NOTIFICATION_EMAILS env var, added on top of
+       whatever's here) do. Recipients don't need to be users of this
+       app at all -- an ops distribution list or an on-call inbox works
+       just as well as a person's own address. This does NOT affect the
+       separate, immediate "new extension request" alert emails, which
+       still go to every Admin/Manager as before. -->
+  <div class="mt-6 overflow-hidden rounded-xl border border-border bg-card">
+    <div class="border-b border-border px-5 py-4">
+      <h2 class="text-[14px] font-bold text-slate-100">Daily Digest Recipients</h2>
+      <p class="text-[12px] text-slate-500">Only these addresses receive the daily overdue / due-soon summary email. Adding or removing an address here does not affect anyone's account, role, or access.</p>
+    </div>
+    <div class="px-5 py-4">
+      <div id="digestRecipientsList" class="mb-3 flex flex-wrap gap-2">
+        <span class="text-[12px] text-slate-500">Loading…</span>
+      </div>
+      <form id="digestRecipientAddForm" class="flex flex-wrap items-end gap-3">
+        <div class="flex-1 min-w-[220px]">
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">Add email address</label>
+          <input type="email" id="digestRecipientInput" placeholder="ops@yourcompany.com"
+            class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
+        </div>
+        <button type="submit" class="rounded-lg bg-blue-600 px-4 py-2 text-[13px] font-semibold text-white transition hover:bg-blue-500 active:bg-blue-700">
+          Add
+        </button>
+        <span id="digestRecipientsMessage" class="hidden text-[12px] font-medium"></span>
+      </form>
+    </div>
+  </div>
+
+  </section><!-- /#auditBackupsSection -->
+  </div><!-- /#swipeArea -->
+</main>
+
+<!-- ================= RESTORE BACKUP MODAL ================= -->
+<!-- Deliberately requires typing "RESTORE" (not just a confirm() dialog) --
+     this action replaces the ENTIRE database and cannot be undone except
+     by restoring yet another backup. See js/components/backups.js's
+     confirmRestore(). -->
+<div id="restoreBackupModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative w-full max-w-md overflow-y-auto sheet-panel rounded-t-2xl border border-amber-500/30 bg-[#141922] sm:rounded-xl shadow-2xl">
+    <div class="flex items-start justify-between border-b border-border px-6 py-5">
+      <div>
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-amber-500">Destructive Action</p>
+        <h3 class="text-[16px] font-bold text-slate-50">Restore Database</h3>
+      </div>
+      <button data-action="close-modal" data-modal="restoreBackupModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <div class="space-y-4 px-6 py-5">
+      <p class="text-[12px] text-slate-400">
+        This will replace the ENTIRE current database with the contents of
+        <span id="restoreModalTarget" class="font-semibold text-slate-200">this backup</span>.
+        Every asset, user, checkout, and audit record created since that backup was taken will be lost.
+        A safety backup of the current state is taken automatically right before this runs.
+      </p>
+
+      <div id="restoreUploadRow" class="hidden">
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Backup file (.sql.gz or .sql)</label>
+        <input type="file" id="restoreUploadInput" accept=".gz,.sql"
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60" />
+        <p class="mt-1 text-[11px] text-slate-500">e.g. a backup you downloaded from Google Drive after this app's local disk was wiped by a redeploy/spin-down.</p>
+      </div>
+
+      <div class="border-t border-border pt-4">
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Type <span class="tag-mono font-bold text-amber-400">RESTORE</span> to confirm</label>
+        <input type="text" id="restoreConfirmInput" placeholder="RESTORE"
+          class="tag-mono w-full rounded-lg border border-amber-500/30 bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-amber-500/60" />
+      </div>
+
+      <div class="flex items-center justify-end gap-3 pt-2">
+        <button type="button" data-action="close-modal" data-modal="restoreBackupModal" class="rounded-md px-3 py-2 text-[13px] font-medium text-slate-400 transition hover:text-slate-200">Cancel</button>
+        <button type="button" id="restoreConfirmBtn" data-action="confirm-restore-backup" class="rounded-md border border-amber-500/40 bg-amber-500/10 px-4 py-2 text-[13px] font-semibold text-amber-400 transition hover:bg-amber-500/20">Restore Database</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= DISPATCH CHECKOUT DRAWER (MODAL) ================= -->
+<div id="dispatchModal" class="fixed inset-0 z-40 hidden items-center justify-end">
+  <div class="absolute inset-0 bg-black/60 backdrop"></div>
+  <div class="relative h-full w-full max-w-md overflow-y-auto drawer-panel border-l border-border bg-[#141922] p-4 shadow-2xl sm:p-6">
+    <div class="mb-5 flex items-start justify-between">
+      <div>
+        <h3 class="text-[16px] font-bold text-slate-50">Issue Outbound Deployment</h3>
+        <p id="dispatchAssetName" class="text-[12px] text-slate-500">Select a pool</p>
+      </div>
+      <button data-action="close-modal" data-modal="dispatchModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <form id="dispatchForm" class="space-y-4">
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Assign To</label>
+        <select id="routeSelect" data-action="toggle-route" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60">
+          <option value="staff">Staff Member</option>
+          <option value="customer">Linked Customer Account</option>
+          <option value="adhoc">Ad-Hoc Individual (Unlinked)</option>
+        </select>
+      </div>
+
+      <div id="staffField">
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Staff Member</label>
+        <select id="staffSelect" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60"></select>
+      </div>
+
+      <div id="customerField" class="hidden">
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Linked Customer Account</label>
+        <select id="customerSelect" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60"></select>
+      </div>
+
+      <div id="adhocField" class="hidden space-y-3">
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">Ad-Hoc Individual</label>
+          <select id="adhocExistingSelect" data-action="toggle-adhoc-existing" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60">
+            <option value="new">+ Create New Unlinked Profile</option>
+          </select>
+        </div>
+        <div id="adhocNewFields" class="space-y-3 rounded-lg border border-border bg-card2/50 p-3">
+          <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Unlinked Profile Details</p>
+          <input type="text" id="adhocName" placeholder="Full name" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          <input type="text" id="adhocCompany" placeholder="Company" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          <input type="email" id="adhocEmail" placeholder="Email (at least one of email/phone required)" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          <input type="tel" id="adhocPhone" placeholder="Phone number" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+        </div>
+      </div>
+
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">Quantity to Assign</label>
+          <input type="number" id="dispatchQuantity" min="1" value="1" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60" />
+        </div>
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">Return Deadline</label>
+          <input type="date" id="dispatchDueDate" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60" />
+        </div>
+      </div>
+
+      <div class="flex gap-3 pt-2">
+        <button type="button" data-action="close-modal" data-modal="dispatchModal" class="flex-1 rounded-lg border border-border py-2.5 text-[13px] font-semibold text-slate-300 transition hover:border-slate-500">Cancel</button>
+        <button type="submit" class="flex-1 rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500">Confirm Deployment</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ================= CUSTODY LEDGER DRAWER (MODAL) ================= -->
+<div id="custodyModal" class="fixed inset-0 z-40 hidden items-center justify-end">
+  <div class="absolute inset-0 bg-black/60 backdrop"></div>
+  <div class="relative h-full w-full max-w-md overflow-y-auto drawer-panel border-l border-border bg-[#141922] p-4 shadow-2xl sm:p-6">
+    <div class="mb-5 flex items-start justify-between gap-3">
+      <div class="min-w-0">
+        <h3 class="text-[16px] font-bold text-slate-50">Custody Ledger</h3>
+        <p id="custodyUserName" class="truncate text-[12px] text-slate-500">—</p>
+      </div>
+      <div class="flex shrink-0 items-center gap-1.5">
+        <button data-action="export-custody" data-format="csv" title="Export this account's items (CSV)"
+          class="rounded-md border border-border px-2 py-1.5 text-[11px] font-semibold text-slate-400 transition hover:border-blue-500/50 hover:text-blue-400">
+          CSV
+        </button>
+        <button data-action="export-custody" data-format="pdf" title="Export this account's items (PDF)"
+          class="rounded-md border border-border px-2 py-1.5 text-[11px] font-semibold text-slate-400 transition hover:border-blue-500/50 hover:text-blue-400">
+          PDF
+        </button>
+        <button data-action="close-modal" data-modal="custodyModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <div>
+      <h4 class="mb-1 text-[13px] font-semibold text-slate-100">Items Currently Checked Out</h4>
+      <p class="mb-4 text-[12px] text-slate-500"><span id="custodyCount">0</span> asset(s) on file under this account. Process a return to release stock back to its pool.</p>
+
+      <!-- Select All + Bulk Actions Bar -->
+      <div class="mb-3 flex items-center justify-between rounded-lg border border-border bg-card2 px-3 py-2.5">
+        <label class="flex items-center gap-2 text-[12px] font-medium text-slate-300">
+          <input type="checkbox" id="custodySelectAll" data-action="toggle-select-all-custody"
+            class="h-4 w-4 rounded border-border bg-card2 text-blue-600 focus:ring-0 focus:ring-offset-0" />
+          Select All
+        </label>
+        <button data-action="process-all-returns" class="text-[12px] font-medium text-blue-400 underline-offset-2 transition hover:text-blue-300 hover:underline">
+          Process Return of All Items
+        </button>
+      </div>
+      <div class="mb-4 flex flex-col gap-2 sm:flex-row">
+        <button id="bulkReturnBtn" data-action="bulk-process-returns" disabled
+          class="flex-1 rounded-lg bg-emerald-600 px-3 py-2 text-[12px] font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed">
+          Bulk Process Selected Returns (<span id="custodySelectedCount">0</span>)
+        </button>
+        <button id="bulkExtendBtn" data-action="open-bulk-extend" disabled
+          class="flex-1 rounded-lg border border-blue-500/40 px-3 py-2 text-[12px] font-semibold text-blue-400 transition hover:border-blue-500/70 hover:text-blue-300 disabled:opacity-40 disabled:cursor-not-allowed">
+          Bulk Extend Selected
+        </button>
+      </div>
+
+      <div id="custodyItemList" class="space-y-2.5"></div>
+
+      <div class="mt-5 flex gap-3 border-t border-border pt-5">
+        <button data-action="close-modal" data-modal="custodyModal" class="flex-1 rounded-lg border border-border py-2.5 text-[13px] font-semibold text-slate-300 transition hover:border-slate-500">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= EXTEND DUE DATE (MODAL) =================
+     A Manager/Admin/Super Admin grants more time on an active checkout
+     directly from the Custody Ledger drawer's "Extend" button (User
+     Directory AND Ad-Hoc Directory both share this same drawer -- see
+     js/components/custody.js) -- no separate request/approval round trip.
+     Submits straight to POST /checkouts/{id}/extend -- see
+     js/components/extensions.js. -->
+<div id="directExtendModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative w-full max-w-sm overflow-y-auto sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl shadow-2xl">
+    <div class="flex items-start justify-between border-b border-border px-6 py-5">
+      <div>
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Custody</p>
+        <h3 class="text-[16px] font-bold text-slate-50">Extend Due Date</h3>
+        <p id="directExtendAssetName" class="text-[12px] text-slate-500">—</p>
+      </div>
+      <button data-action="close-modal" data-modal="directExtendModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <form id="directExtendForm" class="space-y-4 px-6 py-5">
+      <p class="text-[12px] text-slate-400">Current due date: <span id="directExtendCurrentDue" class="tag-mono text-slate-300">—</span></p>
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">New Due Date</label>
+        <input type="date" id="directExtendNewDueDate" required
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60" />
+      </div>
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Reason (optional)</label>
+        <textarea id="directExtendReason" rows="2" placeholder="e.g. Approved by phone -- project ran long"
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60"></textarea>
+      </div>
+      <div class="flex gap-3 pt-1">
+        <button type="button" data-action="close-modal" data-modal="directExtendModal" class="flex-1 rounded-lg border border-border py-2.5 text-[13px] font-semibold text-slate-300 transition hover:border-slate-500">Cancel</button>
+        <button type="submit" class="flex-1 rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500">Extend</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ================= BULK EXTEND DUE DATE (MODAL) =================
+     Same one-new-due-date idea as the single Extend modal above, applied
+     to every item currently CHECKED in the Custody Ledger drawer's item
+     list -- reuses the same checkbox selection already used for Bulk
+     Process Selected Returns. Submits to POST /checkouts/bulk-extend --
+     see js/components/custody.js's submitBulkExtendForm(). -->
+<div id="bulkExtendModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative w-full max-w-sm overflow-y-auto sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl shadow-2xl">
+    <div class="flex items-start justify-between border-b border-border px-6 py-5">
+      <div>
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Custody</p>
+        <h3 class="text-[16px] font-bold text-slate-50">Bulk Extend Due Date</h3>
+        <p class="text-[12px] text-slate-500"><span id="bulkExtendCount">0</span> item(s) selected</p>
+      </div>
+      <button data-action="close-modal" data-modal="bulkExtendModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <form id="bulkExtendForm" class="space-y-4 px-6 py-5">
+      <p class="text-[12px] text-slate-400">Every selected item gets this same new due date. An item whose current due date is already later than what's chosen here will simply be skipped, not fail the whole batch.</p>
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">New Due Date</label>
+        <input type="date" id="bulkExtendNewDueDate" required
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60" />
+      </div>
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Reason (optional)</label>
+        <textarea id="bulkExtendReason" rows="2" placeholder="e.g. Department-wide extension for end-of-quarter inventory"
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60"></textarea>
+      </div>
+      <div class="flex gap-3 pt-1">
+        <button type="button" data-action="close-modal" data-modal="bulkExtendModal" class="flex-1 rounded-lg border border-border py-2.5 text-[13px] font-semibold text-slate-300 transition hover:border-slate-500">Cancel</button>
+        <button type="submit" class="flex-1 rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500">Extend Selected</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ================= DENY EXTENSION REQUEST -- REASON (MODAL) =================
+     Replaces a bare window.prompt() when denying a pending extension
+     request (from either the Notification Center's Extension Requests
+     panel or the Custody Ledger drawer's inline Approve/Deny buttons) --
+     see js/components/extensions.js's openDenyReasonModal()/
+     submitDenyReasonForm(). Approving needs no such detour (nothing to
+     explain when granting exactly what was asked for), so only Deny
+     routes through here. -->
+<div id="denyReasonModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative w-full max-w-sm overflow-y-auto sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl shadow-2xl">
+    <div class="flex items-start justify-between border-b border-border px-6 py-5">
+      <div>
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-rose-400">Deny Request</p>
+        <h3 class="text-[16px] font-bold text-slate-50">Reason for Denial</h3>
+      </div>
+      <button data-action="close-modal" data-modal="denyReasonModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <form id="denyReasonForm" class="space-y-4 px-6 py-5">
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Note back to the requester (optional, but recommended)</label>
+        <textarea id="denyReasonText" rows="3" placeholder="e.g. This pool is needed back for a training session next Monday"
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-rose-500/60"></textarea>
+      </div>
+      <div class="flex gap-3 pt-1">
+        <button type="button" data-action="close-modal" data-modal="denyReasonModal" class="flex-1 rounded-lg border border-border py-2.5 text-[13px] font-semibold text-slate-300 transition hover:border-slate-500">Cancel</button>
+        <button type="submit" class="flex-1 rounded-lg bg-rose-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-rose-500">Deny Request</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ================= EXPORT AUDIT LEDGER -- DATE RANGE (MODAL) =================
+     Replaces the pair of bare window.prompt() calls that used to ask for a
+     start/end date before running the export -- see
+     js/components/audit.js's openAuditExportModal()/submitAuditExportForm().
+     Same reasoning as denyReasonModal above: a stacked pair of prompt()
+     dialogs is cramped, gives no room to label which date is which, and
+     looks nothing like the rest of this app's forms. Real <input
+     type="date"> fields also mean the browser handles format/validity
+     (no more hand-typing "YYYY-MM-DD" and hoping it parses). -->
+<div id="auditExportModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative w-full max-w-sm overflow-y-auto sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl shadow-2xl">
+    <div class="flex items-start justify-between border-b border-border px-6 py-5">
+      <div>
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-blue-400">Export Ledger</p>
+        <h3 id="auditExportModalTitle" class="text-[16px] font-bold text-slate-50">Choose a Date Range</h3>
+      </div>
+      <button data-action="close-modal" data-modal="auditExportModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <form id="auditExportForm" class="space-y-4 px-6 py-5">
+      <p class="text-[12px] text-slate-500">Leave either field blank to leave that side of the range open.</p>
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">From</label>
+        <input id="auditExportStartDate" type="date" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60">
+      </div>
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">To</label>
+        <input id="auditExportEndDate" type="date" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60">
+      </div>
+      <div class="flex gap-3 pt-1">
+        <button type="button" data-action="close-modal" data-modal="auditExportModal" class="flex-1 rounded-lg border border-border py-2.5 text-[13px] font-semibold text-slate-300 transition hover:border-slate-500">Cancel</button>
+        <button type="submit" class="flex-1 rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500">Export</button>
+      </div>
+    </form>
+  </div>
+</div>
+     <!-- Super Admin/Admin only -- the "this person forgot their password"
+     recovery path. Opened from the User Directory's "Reset Password"
+     button (see js/components/users.js's renderUsersTable() ->
+     data-action="reset-password") and submits straight to POST
+     /users/{id}/reset-password. No confirmation of the TARGET's current
+     password is needed (that's the whole point: an admin resetting
+     someone else's password has no way to know their old one) -- but the
+     ACTING admin must re-confirm their OWN current password below as a
+     step-up security check before this high-privilege action is allowed
+     to proceed (see services/user_service.py -> reset_user_password()). -->
+<div id="resetPasswordModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative w-full max-w-sm overflow-y-auto sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl shadow-2xl">
+    <div class="flex items-start justify-between border-b border-border px-6 py-5">
+      <div>
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">User Directory</p>
+        <h3 class="text-[16px] font-bold text-slate-50">Reset Password</h3>
+        <p id="resetPasswordUserName" class="text-[12px] text-slate-500">—</p>
+      </div>
+      <button data-action="close-modal" data-modal="resetPasswordModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <form id="resetPasswordForm" class="space-y-4 px-6 py-5">
+      <p class="text-[12px] text-slate-400">Sets a brand-new password for this account immediately -- no need to know their current one. Share the new password with them securely once it's set.</p>
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">New Password</label>
+        <input type="text" id="resetPasswordNew" required placeholder="At least 8 characters, mixed case, digit, symbol"
+          class="tag-mono w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+      </div>
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Confirm New Password</label>
+        <input type="text" id="resetPasswordConfirm" required placeholder="Re-type the password above"
+          class="tag-mono w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+      </div>
+      <div class="border-t border-border pt-4">
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Your Password</label>
+        <input type="password" id="resetPasswordAdminConfirm" required autocomplete="current-password" placeholder="Confirm it's you -- enter your own password"
+          class="tag-mono w-full rounded-lg border border-amber-500/30 bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-amber-500/60" />
+        <p class="mt-1 text-[11px] text-slate-500">Required to confirm it's really you performing this reset.</p>
+      </div>
+      <p id="resetPasswordMessage" class="hidden text-[12px]"></p>
+      <div class="flex gap-3 pt-1">
+        <button type="button" data-action="close-modal" data-modal="resetPasswordModal" class="flex-1 rounded-lg border border-border py-2.5 text-[13px] font-semibold text-slate-300 transition hover:border-slate-500">Cancel</button>
+        <button type="submit" class="flex-1 rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500">Reset Password</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ============= EDIT USER DETAILS (Super Admin/Admin: all accounts; ============
+     Manager: Staff/Customer only -- see js/components/users.js's
+     openEditUserModal()/submitEditUserForm() and
+     services/user_service.py -> update_user() for the enforcement). -->
+<div id="editUserModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative w-full max-w-sm overflow-y-auto sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl shadow-2xl">
+    <div class="flex items-start justify-between border-b border-border px-6 py-5">
+      <div>
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">User Directory</p>
+        <h3 class="text-[16px] font-bold text-slate-50">Edit User Details</h3>
+        <p id="editUserTargetName" class="text-[12px] text-slate-500">—</p>
+      </div>
+      <button data-action="close-modal" data-modal="editUserModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <form id="editUserForm" class="space-y-4 px-6 py-5">
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Full Name</label>
+        <input type="text" id="editUserName" required
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+      </div>
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Username</label>
+        <input type="text" id="editUserUsername" required
+          class="tag-mono w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+      </div>
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Email</label>
+        <input type="email" id="editUserEmail" required
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+      </div>
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Phone Number (optional)</label>
+        <input type="tel" id="editUserPhone"
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+      </div>
+      <p id="editUserMessage" class="hidden text-[12px]"></p>
+      <div class="flex gap-3 pt-1">
+        <button type="button" data-action="close-modal" data-modal="editUserModal" class="flex-1 rounded-lg border border-border py-2.5 text-[13px] font-semibold text-slate-300 transition hover:border-slate-500">Cancel</button>
+        <button type="submit" class="flex-1 rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500">Save Changes</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ============= EDIT AD-HOC INDIVIDUAL (Super Admin/Admin and Manager) ============
+     See js/components/outsiders.js's openEditOutsiderModal()/
+     submitEditOutsiderForm() and services/outsider_service.py ->
+     update_outsider(). -->
+<div id="editOutsiderModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative w-full max-w-sm overflow-y-auto sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl shadow-2xl">
+    <div class="flex items-start justify-between border-b border-border px-6 py-5">
+      <div>
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Ad-Hoc (Unlinked) Directory</p>
+        <h3 class="text-[16px] font-bold text-slate-50">Edit Individual</h3>
+        <p id="editOutsiderTargetName" class="text-[12px] text-slate-500">—</p>
+      </div>
+      <button data-action="close-modal" data-modal="editOutsiderModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <form id="editOutsiderForm" class="space-y-4 px-6 py-5">
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Full Name</label>
+        <input type="text" id="editOutsiderName" required
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+      </div>
+      <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">Email</label>
+          <input type="email" id="editOutsiderEmail"
+            class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+        </div>
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">Phone Number</label>
+          <input type="tel" id="editOutsiderPhone" placeholder="At least one of email/phone is required"
+            class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+        </div>
+      </div>
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Company <span class="text-slate-600">(optional)</span></label>
+        <input type="text" id="editOutsiderCompany"
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+      </div>
+      <p id="editOutsiderMessage" class="hidden text-[12px]"></p>
+      <div class="flex gap-3 pt-1">
+        <button type="button" data-action="close-modal" data-modal="editOutsiderModal" class="flex-1 rounded-lg border border-border py-2.5 text-[13px] font-semibold text-slate-300 transition hover:border-slate-500">Cancel</button>
+        <button type="submit" class="flex-1 rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500">Save Changes</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ============= CONVERT AD-HOC INDIVIDUAL TO REAL USER (Super Admin/Admin and Manager) ============
+     "The outsider finally decides he wants a login". See
+     js/components/outsiders.js's openConvertOutsiderModal()/
+     submitConvertOutsiderForm() and services/outsider_service.py ->
+     convert_outsider_to_user(). Their name carries over automatically
+     (not editable here -- this is the SAME person getting a login, not a
+     chance to rename them), and every existing checkout + quotation
+     assignment moves with them. -->
+<div id="convertOutsiderModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative w-full max-w-sm overflow-y-auto sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl shadow-2xl">
+    <div class="flex items-start justify-between border-b border-border px-6 py-5">
+      <div>
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Ad-Hoc (Unlinked) Directory</p>
+        <h3 class="text-[16px] font-bold text-slate-50">Convert to Real User Account</h3>
+        <p id="convertOutsiderTargetName" class="text-[12px] text-slate-500">—</p>
+      </div>
+      <button data-action="close-modal" data-modal="convertOutsiderModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <form id="convertOutsiderForm" class="space-y-4 px-6 py-5">
+      <p class="rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-3 py-2 text-[12px] text-emerald-300/90">
+        Every checkout (active and past) and quotation assignment currently under this ad-hoc profile will move to the new account. The Ad-Hoc profile itself is retired, not deleted -- its history stays intact.
+      </p>
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Login Email</label>
+        <input type="email" id="convertOutsiderEmail" required placeholder="e.g. f.adeyemi@corp.io"
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+      </div>
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Phone Number (optional)</label>
+        <input type="tel" id="convertOutsiderPhone" placeholder="e.g. +234 801 234 5678"
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">Role</label>
+          <select id="convertOutsiderRole" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60">
+            <option value="admin">Admin</option>
+            <option value="manager">Manager</option>
+            <option value="staff" selected>Staff</option>
+            <option value="customer">Customer</option>
+          </select>
+        </div>
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">Temporary Password</label>
+          <input type="text" id="convertOutsiderPassword" required placeholder="Set a temp password"
+            class="tag-mono w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+        </div>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">Department (optional)</label>
+          <input type="text" id="convertOutsiderDepartment" placeholder="e.g. Engineering"
+            class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+        </div>
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">Department Role (optional)</label>
+          <input type="text" id="convertOutsiderDeptRole" placeholder="e.g. Senior Engineer"
+            class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+        </div>
+      </div>
+      <p id="convertOutsiderMessage" class="hidden text-[12px]"></p>
+      <div class="flex gap-3 pt-1">
+        <button type="button" data-action="close-modal" data-modal="convertOutsiderModal" class="flex-1 rounded-lg border border-border py-2.5 text-[13px] font-semibold text-slate-300 transition hover:border-slate-500">Cancel</button>
+        <button type="submit" class="flex-1 rounded-lg bg-emerald-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-emerald-500">Convert</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div id="revokeUserModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative w-full max-w-sm overflow-y-auto sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl shadow-2xl">
+    <div class="flex items-start justify-between border-b border-border px-6 py-5">
+      <div>
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">User Directory</p>
+        <h3 class="text-[16px] font-bold text-slate-50">Revoke Login Access</h3>
+        <p id="revokeUserTargetName" class="text-[12px] text-slate-500">—</p>
+      </div>
+      <button data-action="close-modal" data-modal="revokeUserModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <form id="revokeUserForm" class="space-y-4 px-6 py-5">
+      <p class="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-[12px] text-amber-300/90">
+        This account will no longer be able to log in. Every checkout (active and past) and quotation assignment currently under it will move to a new Ad-Hoc profile -- the login itself is retired, not deleted, and its history stays intact.
+      </p>
+      <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">Email</label>
+          <input type="email" id="revokeUserEmail" placeholder="Defaults to their current login email"
+            class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+        </div>
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">Phone Number (optional)</label>
+          <input type="tel" id="revokeUserPhone" placeholder="e.g. +234 801 234 5678"
+            class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+        </div>
+      </div>
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Company (optional)</label>
+        <input type="text" id="revokeUserCompany" placeholder="e.g. Lagos Fintech Ltd."
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+      </div>
+      <p id="revokeUserMessage" class="hidden text-[12px]"></p>
+      <div class="flex gap-3 pt-1">
+        <button type="button" data-action="close-modal" data-modal="revokeUserModal" class="flex-1 rounded-lg border border-border py-2.5 text-[13px] font-semibold text-slate-300 transition hover:border-slate-500">Cancel</button>
+        <button type="submit" class="flex-1 rounded-lg bg-amber-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-amber-500">Revoke Access</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+
+<!-- ================= ASSET PROPERTIES MULTI-TAB VIEW HUB ================= -->
+<div id="propsModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl shadow-2xl">
+
+    <!-- Header -->
+    <div class="flex items-start justify-between gap-3 border-b border-border px-4 py-4 sm:px-6 sm:py-5">
+      <div class="min-w-0 flex-1">
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Properties Hub</p>
+        <div id="nameDisplay" class="flex items-center gap-2">
+          <h3 id="propsAssetName" class="truncate text-[18px] font-bold text-slate-50">—</h3>
+          <button data-action="toggle-name-edit" class="shrink-0 rounded-md p-1 text-slate-500 transition hover:bg-card2 hover:text-blue-400" title="Rename asset pool">
+            <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+          </button>
+        </div>
+        <!-- Category (optional -- see models.py's AssetType
+             docstring). Editable here (unlike manager.html's read-only
+             version of this modal): always shown, with a placeholder text
+             when unset, so a Super Admin can backfill a category onto
+             pools that don't have one yet, same rename-in-place pattern as
+             nameDisplay/nameEdit above. -->
+        <div id="categoryDisplay" class="mt-0.5 flex items-center gap-1.5 text-[12px] text-slate-500">
+          <span>Category: <span id="propsCategory" class="font-medium text-slate-300">—</span></span>
+          <button data-action="toggle-category-edit" class="shrink-0 rounded-md p-1 text-slate-500 transition hover:bg-card2 hover:text-blue-400" title="Edit category">
+            <svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+          </button>
+        </div>
+        <!-- Same stack-below-`sm` layout as nameEdit above, for the same
+             reason (a fixed-width input plus two buttons doesn't fit one
+             row on a phone-width modal). -->
+        <div id="categoryEdit" class="hidden mt-2 flex-col items-stretch gap-2 sm:mt-1.5 sm:flex-row sm:items-center">
+          <input type="text" id="categoryInput" placeholder="e.g. Engineering" class="w-full rounded-md border border-border bg-card2 px-2 py-1.5 text-[13px] text-slate-200 outline-none focus:border-blue-500/60 sm:w-56" />
+          <div class="flex gap-2">
+            <button data-action="save-category" class="rounded-md bg-emerald-600 px-2.5 py-1.5 text-[11px] font-semibold text-white transition hover:bg-emerald-500">Save</button>
+            <button data-action="toggle-category-edit" class="rounded-md border border-border px-2.5 py-1.5 text-[11px] font-medium text-slate-300 transition hover:border-slate-500">Cancel</button>
+          </div>
+        </div>
+        <!-- Per-unit price (optional -- see models.py's AssetType
+             docstring). Same editable-in-place pattern as categoryDisplay/
+             categoryEdit above: always shown, with a placeholder text when
+             unset, so a Super Admin can backfill a price onto pools that
+             don't have one yet. -->
+        <div id="priceDisplay" class="mt-0.5 flex items-center gap-1.5 text-[12px] text-slate-500">
+          <span>Price: <span id="propsPrice" class="font-medium text-slate-300">—</span></span>
+          <button data-action="toggle-price-edit" class="shrink-0 rounded-md p-1 text-slate-500 transition hover:bg-card2 hover:text-blue-400" title="Edit price">
+            <svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+          </button>
+        </div>
+        <div id="priceEdit" class="hidden mt-2 flex-col items-stretch gap-2 sm:mt-1.5 sm:flex-row sm:items-center">
+          <input type="number" id="priceInput" min="0" step="0.01" placeholder="e.g. 1899.00" class="w-full rounded-md border border-border bg-card2 px-2 py-1.5 text-[13px] text-slate-200 outline-none focus:border-blue-500/60 sm:w-56" />
+          <div class="flex gap-2">
+            <button data-action="save-price" class="rounded-md bg-emerald-600 px-2.5 py-1.5 text-[11px] font-semibold text-white transition hover:bg-emerald-500">Save</button>
+            <button data-action="toggle-price-edit" class="rounded-md border border-border px-2.5 py-1.5 text-[11px] font-medium text-slate-300 transition hover:border-slate-500">Cancel</button>
+          </div>
+        </div>
+        <!-- Stacks (input full-width, Save/Cancel side-by-side beneath it)
+             below `sm` instead of trying to cram a fixed-width input plus
+             two buttons into one row on a phone-width modal, which used to
+             clip the "Cancel" button clean off the edge. -->
+        <div id="nameEdit" class="hidden mt-2 flex-col items-stretch gap-2 sm:mt-1.5 sm:flex-row sm:items-center">
+          <input type="text" id="nameInput" class="w-full rounded-md border border-border bg-card2 px-2 py-1.5 text-[13px] text-slate-200 outline-none focus:border-blue-500/60 sm:w-56" />
+          <div class="flex gap-2">
+            <button data-action="save-name" class="rounded-md bg-emerald-600 px-2.5 py-1.5 text-[11px] font-semibold text-white transition hover:bg-emerald-500">Save</button>
+            <button data-action="toggle-name-edit" class="rounded-md border border-border px-2.5 py-1.5 text-[11px] font-medium text-slate-300 transition hover:border-slate-500">Cancel</button>
+          </div>
+        </div>
+      </div>
+      <div class="flex shrink-0 items-center gap-2">
+        <!-- Delete Asset Pool (Super Admin only). Backend endpoint
+             (DELETE /assets/{id}) already existed and was already
+             enforced server-side (Super Admin-only, soft-delete, blocked
+             while outstanding checkouts/isolated units exist) -- this was
+             just missing a button to reach it. See
+             components/assets.js's deleteAssetPool(). Icon-only below
+             `sm` (title attribute still gives it an accessible name/
+             tooltip) so it can't crowd out the name/rename controls next
+             to it on a narrow phone screen. -->
+        <button data-action="delete-asset-pool" id="propsDeleteBtn" data-asset-id="" data-asset-name="" title="Delete Asset Pool" class="flex items-center gap-1.5 rounded-md border border-rose-500/30 px-2.5 py-1.5 text-[12px] font-medium text-rose-400 transition hover:border-rose-500 hover:bg-rose-500/10 sm:px-3">
+          <svg class="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0l-1 14a2 2 0 01-2 2H7a2 2 0 01-2-2L4 6h16z"/></svg>
+          <span class="hidden sm:inline">Delete Asset Pool</span>
+        </button>
+        <button data-action="close-modal" data-modal="propsModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- Metric block -->
+    <div class="flex flex-wrap items-center gap-2.5 border-b border-border px-4 py-4 sm:gap-3 sm:px-6">
+      <div class="rounded-lg border border-border bg-card2 px-4 py-2.5">
+        <p class="text-[11px] text-slate-500">Total Capacity</p>
+        <p id="propsTotal" class="text-[18px] font-bold text-slate-100">0</p>
+      </div>
+      <div class="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-4 py-2.5">
+        <p class="text-[11px] text-emerald-400/80">Available</p>
+        <p id="propsAvailable" class="text-[18px] font-bold text-emerald-400">0</p>
+      </div>
+      <div class="rounded-lg border border-blue-500/30 bg-blue-500/10 px-4 py-2.5">
+        <p class="text-[11px] text-blue-400/80">Outbound</p>
+        <p id="propsOutbound" class="text-[18px] font-bold text-blue-400">0</p>
+      </div>
+      <div class="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-2.5">
+        <p class="text-[11px] text-amber-400/80">Undeployable</p>
+        <p id="propsRepair" class="text-[18px] font-bold text-amber-400">0</p>
+      </div>
+
+      <!-- Adjust Capacity Count (Super Admin only) -->
+      <div class="ml-auto">
+        <button data-action="toggle-capacity-edit" id="capacityBtn" class="flex items-center gap-1.5 rounded-md border border-border bg-card2 px-3 py-2 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+          Adjust Capacity Count
+        </button>
+        <div id="capacityEdit" class="hidden items-center gap-2">
+          <input type="number" id="capacityInput" class="w-20 rounded-md border border-border bg-card2 px-2 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60" />
+          <button data-action="save-capacity" class="rounded-md bg-emerald-600 px-3 py-2 text-[12px] font-semibold text-white transition hover:bg-emerald-500">Save</button>
+          <button data-action="toggle-capacity-edit" class="rounded-md border border-border px-3 py-2 text-[12px] font-medium text-slate-300 transition hover:border-slate-500">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Split body -->
+    <div class="grid flex-1 grid-cols-1 gap-0 overflow-y-auto lg:grid-cols-2">
+      <!-- Isolate Maintenance Exception (Super Admin only) -->
+      <div class="border-b border-border p-6 lg:border-b-0 lg:border-r">
+        <h4 class="mb-1 text-[13px] font-semibold text-slate-100">Isolate Maintenance Exception</h4>
+        <p class="mb-4 text-[12px] text-slate-500">Log a damaged or missing unit and remove it from the available pool.</p>
+        <form id="exceptionForm" class="space-y-3">
+          <div>
+            <label class="mb-1 block text-[12px] font-medium text-slate-400">Serial Number</label>
+            <input type="text" id="exceptionSerial" required placeholder="e.g. C02FX3QALVDT" class="tag-mono w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-amber-500/60" />
+          </div>
+          <div>
+            <label class="mb-1 block text-[12px] font-medium text-slate-400">Status</label>
+            <select id="exceptionStatus" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-amber-500/60">
+              <option>Under Repair</option>
+              <option>Missing / Stolen</option>
+            </select>
+          </div>
+          <div>
+            <label class="mb-1 block text-[12px] font-medium text-slate-400">Log Notes</label>
+            <textarea id="exceptionNotes" rows="3" placeholder="Describe the fault or circumstances…" class="w-full resize-none rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-amber-500/60"></textarea>
+          </div>
+          <button type="submit" class="w-full rounded-lg bg-amber-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-amber-500">Isolate Unit</button>
+        </form>
+
+        <div class="mt-6">
+          <h4 class="mb-1 text-[13px] font-semibold text-slate-100">Currently Isolated Units</h4>
+          <p class="mb-3 text-[12px] text-slate-500">Recall a unit once it's repaired or recovered to add it back to the Available pool.</p>
+          <div id="propsIsolatedList" class="space-y-2.5"></div>
+        </div>
+      </div>
+
+      <!-- Active Field Deployments Ledger -->
+      <div class="p-6">
+        <h4 class="mb-1 text-[13px] font-semibold text-slate-100">Active Field Deployments Ledger</h4>
+        <p class="mb-4 text-[12px] text-slate-500">Current holders of units checked out from this pool.</p>
+        <div id="propsDeploymentList" class="space-y-2.5"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= MY PROFILE & CHANGE PASSWORD =================
+     Opened by clicking the navbar user block (#navProfileBtn,
+     data-action="open-profile") -- see js/components/profile.js. Shared,
+     identical markup on every dashboard page (admin/manager/staff/
+     customer.html) since it's driven entirely by the logged-in user's own
+     data from GET /auth/me, with nothing role-specific about it. -->
+<div id="profileModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative max-h-[90vh] w-full max-w-md overflow-y-auto sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl shadow-2xl">
+    <div class="flex items-start justify-between border-b border-border px-6 py-5">
+      <div>
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Account</p>
+        <h3 class="text-[16px] font-bold text-slate-50">My Profile</h3>
+      </div>
+      <button data-action="close-modal" data-modal="profileModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <div class="space-y-5 px-6 py-5">
+      <!-- Read-only account details, populated by profile.js's
+           openProfileModal() from GET /auth/me every time the window opens. -->
+      <div class="space-y-2 text-[13px]">
+        <div class="flex items-center justify-between"><span class="text-slate-500">Name</span><span id="profileName" class="font-medium text-slate-200">—</span></div>
+        <div class="flex items-center justify-between"><span class="text-slate-500">Email</span><span id="profileEmail" class="font-medium text-slate-200">—</span></div>
+        <div class="flex items-center justify-between"><span class="text-slate-500">Username</span><span id="profileUsername" class="tag-mono font-medium text-slate-200">—</span></div>
+        <div class="flex items-center justify-between"><span class="text-slate-500">Privilege Tier</span><span id="profileRole" class="font-medium text-slate-200">—</span></div>
+        <!-- Hidden whenever neither department nor department_role is set
+             (e.g. Super Admin, most Customers) -- see profile.js. -->
+        <div id="profileDepartmentRow" class="hidden items-center justify-between">
+          <span class="text-slate-500">Department</span><span id="profileDepartment" class="font-medium text-slate-200">—</span>
+        </div>
+      </div>
+
+      <!-- Two-Factor Authentication -- populated/shown only for
+           role === 'super_admin' by profile.js's openProfileModal(); 2FA
+           doesn't apply to any other role today (see
+           backend/services/auth_service.py's login() SECURITY note). -->
+      <div id="profileMfaSection" class="hidden border-t border-border pt-4">
+        <h4 class="mb-1 text-[13px] font-semibold text-slate-100">Two-Factor Authentication</h4>
+        <p class="mb-3 text-[12px] text-slate-500">Enabled for this account. If you're running low on recovery codes, or think yours may have leaked, regenerate them below -- this invalidates every existing code.</p>
+        <button
+          type="button"
+          data-action="open-regenerate-recovery-codes"
+          class="w-full rounded-lg border border-border py-2 text-[13px] font-medium text-slate-300 transition hover:bg-card2"
+        >
+          Regenerate Recovery Codes
+        </button>
+      </div>
+
+      <div class="border-t border-border pt-4">
+        <h4 class="mb-1 text-[13px] font-semibold text-slate-100">Change Password</h4>
+        <p class="mb-3 text-[12px] text-slate-500">Requires your current password -- for security reasons</p>
+        <form id="changePasswordForm" class="space-y-3">
+          <div>
+            <label class="mb-1 block text-[12px] font-medium text-slate-400">Current Password</label>
+            <input type="password" id="currentPasswordInput" required autocomplete="current-password"
+              class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
+          </div>
+          <div>
+            <label class="mb-1 block text-[12px] font-medium text-slate-400">New Password</label>
+            <input type="password" id="newPasswordInput" required autocomplete="new-password"
+              class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
+          </div>
+          <div>
+            <label class="mb-1 block text-[12px] font-medium text-slate-400">Confirm New Password</label>
+            <input type="password" id="confirmPasswordInput" required autocomplete="new-password"
+              class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
+          </div>
+          <!-- Success (emerald) / error (rose) feedback -- see
+               profile.js's setProfileFormMessage(). -->
+          <p id="profileFormMessage" class="hidden text-[12px] font-medium"></p>
+          <button type="submit" class="mt-1 w-full rounded-lg bg-blue-600 py-2 text-[13px] font-semibold text-white transition hover:bg-blue-500 active:bg-blue-700">
+            Update Password
+          </button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= REGENERATE 2FA RECOVERY CODES: password confirm =================
+     Opened from #profileModal's "Regenerate Recovery Codes" button
+     (data-action="open-regenerate-recovery-codes" -- see js/main.js /
+     js/components/profile.js's openRegenerateRecoveryCodesModal()).
+     Re-confirms the CURRENT password before calling POST
+     /auth/mfa/recovery-codes/regenerate -- same re-confirmation pattern
+     #profileModal's own Change Password form above already uses. -->
+<div id="regenerateRecoveryCodesModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative max-h-[90vh] w-full max-w-md overflow-y-auto sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl shadow-2xl">
+    <div class="flex items-start justify-between border-b border-border px-6 py-5">
+      <div>
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Two-Factor Authentication</p>
+        <h3 class="text-[16px] font-bold text-slate-50">Regenerate Recovery Codes</h3>
+      </div>
+      <button data-action="close-modal" data-modal="regenerateRecoveryCodesModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="space-y-4 px-6 py-5">
+      <p class="text-[12px] text-slate-500">This invalidates every recovery code you currently have and issues 10 new ones. Enter your current password to confirm.</p>
+      <form id="regenerateRecoveryCodesForm" class="space-y-3">
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">Current Password</label>
+          <input type="password" id="regenerateCodesPasswordInput" required autocomplete="current-password"
+            class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
+        </div>
+        <p id="regenerateCodesFormMessage" class="hidden text-[12px] font-medium"></p>
+        <div class="flex gap-2">
+          <button type="button" data-action="close-modal" data-modal="regenerateRecoveryCodesModal"
+            class="flex-1 rounded-lg border border-border py-2 text-[13px] font-medium text-slate-300 transition hover:bg-card2">
+            Cancel
+          </button>
+          <button type="submit"
+            class="flex-1 rounded-lg bg-amber-600 py-2 text-[13px] font-semibold text-white transition hover:bg-amber-500 active:bg-amber-700">
+            Regenerate
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- ================= REGENERATE 2FA RECOVERY CODES: result =================
+     Opened automatically the moment the form above succeeds (see
+     profile.js's submitRegenerateRecoveryCodesForm()). Shows the fresh
+     batch of 10 codes EXACTLY ONCE -- there is no way to view them again
+     after this modal is closed (see backend/models.py's RecoveryCode
+     docstring) -- with the same Download-as-.txt option the login-page
+     enrollment screen offers (index.html's #mfa-recovery-codes-screen). -->
+<div id="recoveryCodesResultModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative max-h-[90vh] w-full max-w-lg overflow-y-auto sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl shadow-2xl">
+    <div class="flex items-start justify-between border-b border-border px-6 py-5">
+      <div>
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Two-Factor Authentication</p>
+        <h3 class="text-[16px] font-bold text-slate-50">New Recovery Codes</h3>
+      </div>
+    </div>
+    <div class="space-y-4 px-6 py-5">
+      <p class="text-[12px] text-slate-500">
+        Each code works once. Store them somewhere safe (a password manager is ideal) --
+        <span class="font-medium text-amber-400">they will not be shown again.</span> Every previous code has been invalidated.
+      </p>
+      <div id="regeneratedRecoveryCodesList" class="tag-mono grid grid-cols-2 gap-x-4 gap-y-2 rounded-lg border border-border bg-card2/50 p-4 text-[13px] text-slate-200"></div>
+      <div class="flex flex-col gap-2 sm:flex-row">
+        <button type="button" data-action="download-regenerated-recovery-codes"
+          class="flex-1 rounded-lg border border-border py-2.5 text-[12px] font-medium text-slate-300 transition hover:bg-card2">
+          Download as .txt
+        </button>
+        <button type="button" data-action="close-recovery-codes-result"
+          class="flex-1 rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500 active:bg-blue-700 shadow-lg shadow-blue-600/10">
+          Done
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= ASSET INVENTORY EXPORT (MODAL) =================
+     Opened by the Asset Inventory tab's "Export" button (data-action=
+     "open-asset-export" -- see js/components/assets.js's
+     openAssetExportModal(), which populates #assetExportCategory with
+     "Download All" plus one option per distinct category on file
+     before showing this). Downloads the INVENTORY TABLE itself (one row
+     per pool) -- not a properties-assigned/custody export -- via
+     GET /assets/export, see js/components/exports.js's
+     exportAssetsInventory(). -->
+<div id="assetExportModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative w-full max-w-sm overflow-y-auto sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl shadow-2xl">
+    <div class="flex items-start justify-between border-b border-border px-6 py-5">
+      <div>
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Asset Inventory</p>
+        <h3 class="text-[16px] font-bold text-slate-50">Export Inventory</h3>
+      </div>
+      <button data-action="close-modal" data-modal="assetExportModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="space-y-4 px-6 py-5">
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Category</label>
+        <select id="assetExportCategory" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60">
+          <option value="all">Download All</option>
+        </select>
+        <p class="mt-1 text-[11px] text-slate-500">Pick a category to export just its pools, or download everything.</p>
+      </div>
+      <div class="flex gap-3 pt-1">
+        <button data-action="export-assets-inventory" data-format="csv"
+          class="flex-1 flex items-center justify-center gap-1.5 rounded-lg border border-border py-2.5 text-[13px] font-semibold text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+          .CSV
+        </button>
+        <button data-action="export-assets-inventory" data-format="pdf"
+          class="flex-1 flex items-center justify-center gap-1.5 rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+          .PDF
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= AUDIT LEDGER EXPORT (MODAL) =================
+     Opened by the Audit Trail's "Export Ledger" button (data-action=
+     "open-audit-export" -- see js/components/audit.js's
+     openAuditExportModal()). Replaces the old back-to-back prompt()
+     dialogs (one for start date, one for end date) with a normal date-
+     range form -- prompt() blocks the whole tab, can't be styled,
+     silently truncates on some browsers, and gives no room to explain
+     what "blank" means for either field the way this modal's helper
+     text can. Submitting either format button enqueues the same
+     background export job as before (see exportAuditLogs() in
+     js/components/audit.js). -->
+<div id="auditExportModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative w-full max-w-sm overflow-y-auto sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl shadow-2xl">
+    <div class="flex items-start justify-between border-b border-border px-6 py-5">
+      <div>
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Audit & Backups</p>
+        <h3 class="text-[16px] font-bold text-slate-50">Export Ledger</h3>
+      </div>
+      <button data-action="close-modal" data-modal="auditExportModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="space-y-4 px-6 py-5">
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">From</label>
+          <input type="date" id="auditExportStartDate" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60" />
+        </div>
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">To</label>
+          <input type="date" id="auditExportEndDate" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60" />
+        </div>
+      </div>
+      <p class="text-[11px] text-slate-500">Leave either field blank for no start/end limit. Exports the full ledger by default.</p>
+      <div class="flex gap-3 pt-1">
+        <button data-action="export-audit-logs" data-format="csv"
+          class="flex-1 flex items-center justify-center gap-1.5 rounded-lg border border-border py-2.5 text-[13px] font-semibold text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+          .CSV
+        </button>
+        <button data-action="export-audit-logs" data-format="pdf"
+          class="flex-1 flex items-center justify-center gap-1.5 rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+          .PDF
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============= QUOTE DETAIL MODAL (Admin/Manager "Quotes" tab) =============
+     View/adjust a submitted Quotation's line items, leave notes, and
+     assign it to a user. Opened by components/quotation.js's
+     openQuoteDetail(); see backend/api/quotations.py for the endpoints
+     this drives. -->
+<div id="quoteDetailModal" class="fixed inset-0 z-40 hidden items-center justify-center p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-border bg-[#141922] shadow-2xl">
+    <div class="flex items-start justify-between gap-3 border-b border-border px-5 py-4">
+      <div class="min-w-0">
+        <div class="flex flex-wrap items-center gap-2">
+          <h3 id="quoteDetailRef" class="text-[15px] font-bold tag-mono text-slate-50">—</h3>
+          <span id="quoteDetailStatusBadge"></span>
+        </div>
+        <p id="quoteDetailMeta" class="mt-0.5 truncate text-[12px] text-slate-500">—</p>
+      </div>
+      <div class="flex shrink-0 items-center gap-2">
+        <button type="button" id="quoteDetailApproveBtn" data-action="approve-quote-detail"
+          class="hidden items-center gap-1.5 rounded-md bg-emerald-600/90 px-2.5 py-1.5 text-[12px] font-semibold text-white transition hover:bg-emerald-500 sm:inline-flex">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 13l4 4L19 7"/></svg>
+          Approve
+        </button>
+        <button type="button" data-action="export-quote-detail"
+          class="flex items-center gap-1.5 rounded-md border border-border bg-card2 px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+          <span class="hidden sm:inline">Export PDF</span>
+        </button>
+        <!-- Admin/Super Admin only -- deleting a Quotation is a stronger
+             gate (deps.require_super_admin) than every other action on this
+             modal, which a Manager can also perform. This element only
+             exists on admin.html (not manager.html), same pattern as the
+             VAT settings form below in the Quotes tab. -->
+        <button type="button" id="quoteDetailDeleteBtn" data-action="delete-quote-detail" title="Delete quotation"
+          class="flex items-center gap-1.5 rounded-md border border-border bg-card2 px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-rose-500/50 hover:text-rose-400">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0l-1 14a2 2 0 01-2 2H7a2 2 0 01-2-2L4 6"/></svg>
+          <span class="hidden sm:inline">Delete</span>
+        </button>
+        <button data-action="close-modal" data-modal="quoteDetailModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <div class="space-y-5 px-5 py-4">
+      <!-- Shown once the quote is Approved/Fulfilled -- items/notes/
+           assignment are locked past this point (see
+           components/quotation.js's renderQuoteDetail()). -->
+      <p id="quoteDetailLockedNotice" class="hidden rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-[12px] font-medium text-emerald-300"></p>
+      <!-- Line items -->
+      <!-- Desktop/tablet table (sm and up) -->
+      <div class="hidden overflow-hidden rounded-lg border border-border sm:block">
+        <table class="w-full text-left text-[13px]">
+          <thead>
+            <tr class="border-b border-border bg-card2/60 text-[11px] uppercase tracking-wide text-slate-500">
+              <th class="px-3 py-2.5 font-semibold">Asset</th>
+              <th class="px-3 py-2.5 font-semibold">Qty</th>
+              <th class="px-3 py-2.5 font-semibold">Start</th>
+              <th class="px-3 py-2.5 font-semibold">Due</th>
+              <th class="px-3 py-2.5 font-semibold">Days</th>
+              <th class="px-3 py-2.5 font-semibold">Line Total</th>
+              <th class="px-3 py-2.5 text-right font-semibold">Remove</th>
+            </tr>
+          </thead>
+          <tbody id="quoteDetailItemsBody" class="divide-y divide-border"></tbody>
+        </table>
+      </div>
+
+      <!-- Mobile cards (below sm) -- a table with Asset/Qty/Line Total/
+           Remove crammed into a phone-width modal either clips the Remove
+           button off-screen or forces horizontal scroll. Each line item
+           gets the full modal width instead, same pattern as
+           #quotationCatalogCards/#myOrderCards on staff.html/customer.html. -->
+      <div id="quoteDetailItemsCards" class="divide-y divide-border rounded-lg border border-border sm:hidden"></div>
+
+      <!-- Add another asset -- search box instead of a long dropdown, and
+           each control (Qty/Start/Due/Add) gets its own fixed, compact
+           width so the quantity box never stretches to fill the row.
+           Hidden entirely once the quote is locked (Approved/Fulfilled). -->
+      <div id="quoteDetailAddItemForm" class="space-y-2 rounded-lg border border-dashed border-border p-3">
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Add another asset</p>
+        <div class="relative">
+          <svg class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+          <input type="text" id="quoteDetailAssetSearchInput" placeholder="Search assets by name or category…" autocomplete="off"
+            class="w-full rounded-md border border-border bg-card2 py-2 pl-8 pr-8 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60 search-clearable" />
+          <div id="quoteDetailAssetResults" class="absolute z-10 mt-1 hidden max-h-48 w-full overflow-y-auto rounded-md border border-border bg-[#141922] py-1 shadow-xl"></div>
+        </div>
+        <div id="quoteDetailSelectedAsset" class="hidden items-center justify-between gap-2 rounded-md bg-card2 px-3 py-2 text-[12px]">
+          <span id="quoteDetailSelectedAssetLabel" class="min-w-0 truncate text-slate-200"></span>
+          <button type="button" data-action="clear-quote-detail-asset" class="shrink-0 text-[11px] font-medium text-slate-500 transition hover:text-rose-400">Clear</button>
+        </div>
+        <div class="flex flex-wrap items-end gap-2">
+          <div>
+            <label class="mb-1 block text-[10px] font-medium uppercase tracking-wide text-slate-500">Qty</label>
+            <input type="number" id="quoteDetailAddQty" min="1" value="1"
+              class="w-16 rounded-md border border-border bg-card2 px-2.5 py-1.5 text-[12px] text-slate-200 outline-none focus:border-blue-500/60" />
+          </div>
+          <div>
+            <label class="mb-1 block text-[10px] font-medium uppercase tracking-wide text-slate-500">Start</label>
+            <input type="date" id="quoteDetailAddStart" class="w-[8.5rem] rounded-md border border-border bg-card2 px-2.5 py-1.5 text-[12px] text-slate-200 outline-none focus:border-blue-500/60" />
+          </div>
+          <div>
+            <label class="mb-1 block text-[10px] font-medium uppercase tracking-wide text-slate-500">Due</label>
+            <input type="date" id="quoteDetailAddDue" class="w-[8.5rem] rounded-md border border-border bg-card2 px-2.5 py-1.5 text-[12px] text-slate-200 outline-none focus:border-blue-500/60" />
+          </div>
+          <button type="button" data-action="add-quote-detail-item"
+            class="rounded-md bg-blue-600 px-3 py-1.5 text-[12px] font-semibold text-white transition hover:bg-blue-500">
+            Add Item
+          </button>
+        </div>
+      </div>
+
+      <!-- Add outsourced item -- for equipment NOT currently in the Asset
+           Inventory catalog (e.g. a one-off specialty rental). Manager/Admin
+           only: the requester can see this line once added (merged into the
+           same items list, flagged "Not in Inventory") but has no control
+           that can edit or remove it -- see models.py's
+           QuotationOutsourcedItem docstring. Hidden entirely once the quote
+           is locked (Approved/Fulfilled), same as "Add another asset" above. -->
+      <div id="quoteDetailAddOutsourcedItemForm" class="space-y-2 rounded-lg border border-dashed border-amber-500/30 bg-amber-500/5 p-3">
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-amber-400">Add item not currently in inventory</p>
+        <div class="flex flex-wrap items-end gap-2">
+          <div class="min-w-[10rem] flex-1">
+            <label class="mb-1 block text-[10px] font-medium uppercase tracking-wide text-slate-500">Item name</label>
+            <input type="text" id="quoteDetailOutsourcedName" placeholder="e.g. Steadicam"
+              class="w-full rounded-md border border-border bg-card2 px-2.5 py-1.5 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          </div>
+          <div class="min-w-[10rem] flex-1">
+            <!-- Internal tracking only -- never shown to the requester (see
+                 models.py's QuotationOutsourcedItem.sourced_from and
+                 _serialize_quotation()'s `reveal_sourcing` param). -->
+            <label class="mb-1 block text-[10px] font-medium uppercase tracking-wide text-slate-500">Sourced from (vendor)</label>
+            <input type="text" id="quoteDetailOutsourcedSourcedFrom" placeholder="e.g. Fountain Rentals"
+              class="w-full rounded-md border border-border bg-card2 px-2.5 py-1.5 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          </div>
+        </div>
+        <div class="flex flex-wrap items-end gap-2">
+          <div class="min-w-[10rem] flex-1">
+            <label class="mb-1 block text-[10px] font-medium uppercase tracking-wide text-slate-500">Description (optional)</label>
+            <input type="text" id="quoteDetailOutsourcedDescription" placeholder="Notes for internal reference"
+              class="w-full rounded-md border border-border bg-card2 px-2.5 py-1.5 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          </div>
+        </div>
+        <div class="flex flex-wrap items-end gap-2">
+          <div>
+            <label class="mb-1 block text-[10px] font-medium uppercase tracking-wide text-slate-500">Price/day</label>
+            <input type="number" id="quoteDetailOutsourcedPrice" min="0" step="0.01" placeholder="0.00"
+              class="w-24 rounded-md border border-border bg-card2 px-2.5 py-1.5 text-[12px] text-slate-200 outline-none focus:border-blue-500/60" />
+          </div>
+          <div>
+            <label class="mb-1 block text-[10px] font-medium uppercase tracking-wide text-slate-500">Qty</label>
+            <input type="number" id="quoteDetailOutsourcedQty" min="1" value="1"
+              class="w-16 rounded-md border border-border bg-card2 px-2.5 py-1.5 text-[12px] text-slate-200 outline-none focus:border-blue-500/60" />
+          </div>
+          <div>
+            <label class="mb-1 block text-[10px] font-medium uppercase tracking-wide text-slate-500">Start</label>
+            <input type="date" id="quoteDetailOutsourcedStart" class="w-[8.5rem] rounded-md border border-border bg-card2 px-2.5 py-1.5 text-[12px] text-slate-200 outline-none focus:border-blue-500/60" />
+          </div>
+          <div>
+            <label class="mb-1 block text-[10px] font-medium uppercase tracking-wide text-slate-500">Due</label>
+            <input type="date" id="quoteDetailOutsourcedDue" class="w-[8.5rem] rounded-md border border-border bg-card2 px-2.5 py-1.5 text-[12px] text-slate-200 outline-none focus:border-blue-500/60" />
+          </div>
+          <button type="button" data-action="add-quote-outsourced-item"
+            class="rounded-md bg-amber-600 px-3 py-1.5 text-[12px] font-semibold text-white transition hover:bg-amber-500">
+            Add Outsourced Item
+          </button>
+        </div>
+      </div>
+
+      <!-- Discount -- Admin/Manager-only, editable right up until the
+           quote is fulfilled (same lock as Notes/items below -- see
+           components/quotation.js's renderQuoteDetail()). -->
+      <div class="rounded-lg border border-border p-3">
+        <label class="mb-1.5 block text-[12px] font-semibold uppercase tracking-wide text-slate-500" for="quoteDetailDiscountInput">Discount (%)</label>
+        <div class="flex items-center gap-2">
+          <input type="number" id="quoteDetailDiscountInput" min="0" max="100" step="0.01" placeholder="0"
+            class="w-28 rounded-md border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          <button type="button" id="quoteDetailSaveDiscountBtn" data-action="save-quote-discount"
+            class="rounded-md border border-border bg-card2 px-3 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
+            Save Discount
+          </button>
+        </div>
+      </div>
+
+      <!-- Totals -->
+      <div class="flex justify-end text-[13px] text-slate-400">
+        <div class="space-y-1 text-right">
+          <p>Subtotal: <span id="quoteDetailSubtotal" class="tag-mono text-slate-200">—</span></p>
+          <p id="quoteDetailVat" class="tag-mono">VAT: —</p>
+          <p id="quoteDetailDiscountAmount" class="hidden tag-mono text-emerald-400">Discount: —</p>
+          <p class="text-[14px] font-semibold text-slate-100">Total: <span id="quoteDetailTotal" class="tag-mono">—</span></p>
+        </div>
+      </div>
+
+      <!-- Assign to user -->
+      <div class="rounded-lg border border-border p-3">
+        <p class="mb-2 text-[12px] font-semibold uppercase tracking-wide text-slate-500">Assigned To</p>
+        <p id="quoteDetailAssignedTo" class="mb-3 text-[13px]"></p>
+        <div id="quoteDetailAssignForm" class="relative">
+          <input type="text" id="quoteAssignSearchInput" placeholder="Search users by name or email to assign…" autocomplete="off"
+            class="w-full rounded-md border border-border bg-card2 pl-3 pr-8 py-2 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60 search-clearable" />
+          <div id="quoteAssignResults" class="absolute z-10 mt-1 hidden w-full rounded-md border border-border bg-[#141922] py-1 shadow-xl"></div>
+        </div>
+        <button type="button" data-action="toggle-quote-assign-adhoc" class="mt-2 text-[11px] font-medium text-slate-500 underline-offset-2 transition hover:text-blue-400 hover:underline">
+          Assign to an Ad-Hoc Individual instead
+        </button>
+        <!-- Ad-Hoc assignment mini-form -- hidden until the link above is clicked. Creates a
+             new Outsider row on submit, exactly like the Issue/Dispatch drawer's own Ad-Hoc
+             route. See components/quotation.js's submitQuoteAssignAdhoc(). -->
+        <div id="quoteAssignAdhocForm" class="hidden mt-2 space-y-2">
+          <select id="quoteAssignAdhocExistingSelect" data-action="toggle-quote-assign-adhoc-existing" class="w-full rounded-md border border-border bg-card2 px-3 py-2 text-[12px] text-slate-200 outline-none focus:border-blue-500/60">
+            <option value="new">+ Create New Unlinked Profile</option>
+          </select>
+          <div id="quoteAssignAdhocNewFields" class="space-y-2 rounded-lg border border-border bg-card2/50 p-3">
+            <input type="text" id="quoteAssignAdhocName" placeholder="Full name" class="w-full rounded-md border border-border bg-card2 px-3 py-2 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+            <input type="text" id="quoteAssignAdhocCompany" placeholder="Company" class="w-full rounded-md border border-border bg-card2 px-3 py-2 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+            <input type="email" id="quoteAssignAdhocEmail" placeholder="Email (at least one of email/phone required)" class="w-full rounded-md border border-border bg-card2 px-3 py-2 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+            <input type="tel" id="quoteAssignAdhocPhone" placeholder="Phone number" class="w-full rounded-md border border-border bg-card2 px-3 py-2 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          </div>
+          <button type="button" data-action="submit-quote-assign-adhoc" class="w-full rounded-md bg-blue-600 px-3 py-1.5 text-[12px] font-semibold text-white transition hover:bg-blue-500">
+            Assign to Ad-Hoc Individual
+          </button>
+        </div>
+      </div>
+
+      <!-- Notes -->
+      <div>
+        <label class="mb-1.5 block text-[12px] font-semibold uppercase tracking-wide text-slate-500" for="quoteDetailNotes">Notes</label>
+        <textarea id="quoteDetailNotes" rows="3" placeholder="Internal notes about this quotation…"
+          class="w-full rounded-md border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60"></textarea>
+        <button type="button" id="quoteDetailSaveNotesBtn" data-action="save-quote-notes"
+          class="mt-2 rounded-md border border-border bg-card2 px-3 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
+          Save Notes
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= CREATE QUOTE (MODAL) =================
+     Admin/Manager starts a brand new Quotation directly -- e.g. building
+     one on a user's behalf over the phone -- instead of waiting for that
+     person to build and submit their own cart. Assignment uses the same
+     Staff Member / Linked Customer Account / Ad-Hoc Individual route
+     select as the Issue/Dispatch drawer (plus an Unassigned option, since
+     unlike a checkout a Quotation can be created without a recipient yet).
+     Created empty, then handed straight off to the Quote Detail modal
+     above to add line items. See components/quotation.js's
+     openCreateQuoteModal()/toggleQuoteRoute()/submitCreateQuote() and
+     POST /quotations. -->
+<div id="createQuoteModal" class="fixed inset-0 z-40 hidden items-center justify-center p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative w-full max-w-md rounded-xl border border-border bg-[#141922] p-5 shadow-2xl">
+    <div class="mb-4 flex items-start justify-between gap-3">
+      <div>
+        <h3 class="text-[15px] font-bold text-slate-100">Create Quote</h3>
+        <p class="text-[12px] text-slate-500">Starts empty -- you'll add assets on the next screen.</p>
+      </div>
+      <button data-action="close-modal" data-modal="createQuoteModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <form id="createQuoteForm" class="space-y-4">
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Assign To</label>
+        <select id="quoteRouteSelect" data-action="toggle-quote-route" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60">
+          <option value="unassigned" selected>Unassigned (decide later)</option>
+          <option value="staff">Staff Member</option>
+          <option value="customer">Linked Customer Account</option>
+          <option value="adhoc">Ad-Hoc Individual (Unlinked)</option>
+        </select>
+      </div>
+
+      <div id="quoteStaffField" class="hidden">
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Staff Member</label>
+        <select id="quoteStaffSelect" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60"></select>
+      </div>
+
+      <div id="quoteCustomerField" class="hidden">
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Linked Customer Account</label>
+        <select id="quoteCustomerSelect" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60"></select>
+      </div>
+
+      <div id="quoteAdhocField" class="hidden space-y-3">
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">Ad-Hoc Individual</label>
+          <select id="quoteAdhocExistingSelect" data-action="toggle-quote-adhoc-existing" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60">
+            <option value="new">+ Create New Unlinked Profile</option>
+          </select>
+        </div>
+        <div id="quoteAdhocNewFields" class="space-y-3 rounded-lg border border-border bg-card2/50 p-3">
+          <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Unlinked Profile Details</p>
+          <input type="text" id="quoteAdhocName" placeholder="Full name" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          <input type="text" id="quoteAdhocCompany" placeholder="Company" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          <input type="email" id="quoteAdhocEmail" placeholder="Email (at least one of email/phone required)" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          <input type="tel" id="quoteAdhocPhone" placeholder="Phone number" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+        </div>
+      </div>
+
+      <p id="createQuoteUnassignedHint" class="text-[11px] text-slate-500">Leave unassigned to decide later -- you can assign it anytime from the Quote Detail screen.</p>
+
+      <button type="button" data-action="submit-create-quote"
+        class="w-full rounded-md bg-blue-600 px-3 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500">
+        Create Quote
+      </button>
+    </form>
+  </div>
+</div>
+
+<!-- ============= FULFILLMENT DRAWER (Quote-to-Checkout bulk physical checkout) =============
+     Lists every "approved" Quotation (oldest first), checkbox-selectable
+     exactly like components/custody.js's bulk-return selection. Stock is
+     evaluated/deducted ONLY when "Check Out Selected" actually runs --
+     never at draft/submit/approve time. See components/quotation.js's
+     openFulfillmentDrawer()/processFulfillmentSelected(). -->
+<div id="fulfillmentDrawerModal" class="fixed inset-0 z-40 hidden items-center justify-center p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative flex max-h-[85vh] w-full max-w-lg flex-col rounded-xl border border-border bg-[#141922] shadow-2xl">
+    <div class="flex items-start justify-between gap-3 border-b border-border px-5 py-4">
+      <div>
+        <h3 class="text-[15px] font-bold text-slate-100">Fulfillment Drawer</h3>
+        <p class="text-[12px] text-slate-500"><span id="fulfillmentQueueCount">0</span> quote(s) Approved / Ready for Pickup</p>
+      </div>
+      <button data-action="close-modal" data-modal="fulfillmentDrawerModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <div class="flex items-center gap-2 border-b border-border px-5 py-2.5">
+      <input type="checkbox" id="fulfillmentSelectAll" data-action="toggle-select-all-fulfillment" class="h-4 w-4 rounded border-border bg-card2" />
+      <label for="fulfillmentSelectAll" class="text-[12px] font-medium text-slate-400">Select all</label>
+    </div>
+
+    <div id="fulfillmentQueueBody" class="flex-1 overflow-y-auto">
+      <p class="px-4 py-6 text-center text-[13px] text-slate-500">Loading approved quotes…</p>
+    </div>
+
+    <div class="flex items-center justify-between gap-3 border-t border-border px-5 py-3.5">
+      <p class="text-[12px] text-slate-500"><span id="fulfillmentSelectedCount">0</span> selected</p>
+      <button type="button" id="processFulfillmentBtn" data-action="process-fulfillment-selected" disabled
+        class="rounded-md bg-emerald-600/90 px-4 py-2 text-[13px] font-semibold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40">
+        Check Out Selected
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ============= MOBILE ROW DETAILS POPUP =============
+     One shared, generic small modal for every data table on this page.
+     Each table hides its less-critical columns below the `sm` breakpoint
+     (see each components/*.js render function's `hidden sm:table-cell`
+     cells) so tables never force a long horizontal scroll on a phone --
+     desktop still shows every column unchanged. A per-row "Details"
+     button (also `sm:hidden`) opens THIS popup with whatever got hidden --
+     see js/ui.js's rowDetailsTrigger()/openRowDetailsFromElement(). -->
+<div id="rowDetailsModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative w-full max-w-sm sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl p-5 shadow-2xl">
+    <div class="mb-2 flex items-center justify-between">
+      <h3 id="rowDetailsTitle" class="text-[15px] font-bold text-slate-50">Details</h3>
+      <button data-action="close-modal" data-modal="rowDetailsModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <dl id="rowDetailsBody" class="text-[13px]"></dl>
+  </div>
+</div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,42 @@
+# =============================================================================
+# .gitignore
+# -----------------------------------------------------------------------------
+# Keeps secrets and machine-local junk out of version control. This is the
+# git-history counterpart to .dockerignore (which keeps the same secrets out
+# of the Docker BUILD CONTEXT) -- the two files intentionally overlap on the
+# "Secrets" section below, but exist for different reasons and both need to
+# stay in sync if you ever rename/add a secrets file.
+# =============================================================================
+
+# --- Secrets -- never commit these ------------------------------------------
+.env
+.env.*
+!.env.example
+!.env.azure.example
+
+# --- Editors / OS -------------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- Python (backend/) --------------------------------------------------------
+**/__pycache__/
+**/*.py[cod]
+**/.venv/
+**/venv/
+**/*.egg-info/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+
+# --- Node (build-tailwind/) ----------------------------------------------------
+node_modules/
+npm-debug.log*
+
+# --- Logs / misc ---------------------------------------------------------------
+*.log
+
+# --- Local database dumps / backups, if you ever pull one down for debugging ---
+*.sql
+*.dump

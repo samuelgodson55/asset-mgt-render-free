@@ -1,0 +1,118 @@
+# .github/workflows/infra-deploy.yml
+# -----------------------------------------------------------------------------
+# Provisions/updates the Azure infrastructure in infra/main.bicep -- the
+# cost-optimized, 4-service shape: Container Apps Environment, Log
+# Analytics, Storage (Azure Files), and exactly FOUR Container Apps
+# (frontend/backend/db/redis) + one `migrate` Container Apps Job. No ACR, no
+# Key Vault, no managed identity, no Application Insights -- see
+# infra/main.bicep's top-of-file comment.
+#
+# This is DELIBERATELY separate from deploy-azure-production.yml /
+# -staging.yml, which only ever push new `backend`/`frontend` images --
+# infra changes (a new env var, a Postgres volume size bump, ...) are
+# infrequent and reviewed, not something you want re-running on every
+# `git push`.
+#
+# Run this:
+#   - once, to create a brand-new environment (staging or prod)
+#   - again, any time infra/main.bicep itself changes and you want that
+#     change applied
+#
+# SAFE TO RE-RUN: it reads whatever image tags are CURRENTLY deployed on
+# `backend`/`frontend` first and passes those back in as `initialImageTag`
+# (both apps share one tag per deploy, so this reads either one), so
+# re-applying infra changes never rolls a running environment back to a
+# placeholder image.
+# -----------------------------------------------------------------------------
+name: Deploy Azure Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Which environment to provision/update'
+        required: true
+        type: choice
+        options: [staging, production]
+
+permissions:
+  id-token: write # required for OIDC federated login (azure/login) -- no client secret stored anywhere
+  contents: read
+
+jobs:
+  deploy-infra:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.target }}
+    env:
+      RESOURCE_GROUP: ${{ github.event.inputs.target == 'production' && secrets.PROD_RESOURCE_GROUP || secrets.STAGING_RESOURCE_GROUP }}
+      ENV_NAME: ${{ github.event.inputs.target == 'production' && 'prod' || 'staging' }}
+      ENV_SUFFIX: ${{ github.event.inputs.target == 'production' && '' || '-staging' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC, no secret)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Ensure resource group exists
+        run: |
+          az group show --name "$RESOURCE_GROUP" 2>/dev/null || \
+          az group create --name "$RESOURCE_GROUP" --location "${{ secrets.AZURE_LOCATION }}"
+
+      # First deploy ever: this `az containerapp show` call fails (backend
+      # doesn't exist yet) -- fall back to "latest", which is fine, since
+      # deploy-azure-production.yml/-staging.yml will push a real image
+      # immediately after this workflow finishes anyway.
+      - name: Resolve currently-deployed image tag (so infra updates don't clobber it)
+        id: current
+        run: |
+          TAG=$(az containerapp show --name backend --resource-group "$RESOURCE_GROUP" \
+                  --query "properties.template.containers[0].image" -o tsv 2>/dev/null | awk -F: '{print $NF}') || true
+          echo "tag=${TAG:-latest}" >> "$GITHUB_OUTPUT"
+
+      # COST LEVER: staging has no real users waiting on it, so `backend`
+      # AND `frontend` both scale to zero when idle (min replicas 0 -- pure
+      # cold-start-on-first-request tradeoff, ~$0 idle compute). Production
+      # keeps `backend` warm (min 1) so the first real visitor of the day
+      # never eats a cold start on the API; `frontend` still scales to zero
+      # even in production, since static/proxy responses have a much
+      # shorter cold start than backend's Python process. `db`/`redis`
+      # always run at exactly 1 replica regardless -- see
+      # infra/main.bicep, they're stateful and can't scale to zero.
+      - name: Resolve replica floors for this environment
+        id: replicas
+        run: |
+          if [ "$ENV_NAME" = "prod" ]; then
+            echo "backend_min=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "backend_min=0" >> "$GITHUB_OUTPUT"
+          fi
+          echo "frontend_min=0" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy Bicep
+        run: |
+          az deployment group create \
+            --resource-group "$RESOURCE_GROUP" \
+            --template-file infra/main.bicep \
+            --parameters \
+              environmentName="$ENV_NAME" \
+              dockerHubBackendImage="${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend$ENV_SUFFIX" \
+              dockerHubFrontendImage="${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-frontend$ENV_SUFFIX" \
+              initialImageTag="${{ steps.current.outputs.tag }}" \
+              dockerHubUsername="${{ secrets.DOCKERHUB_USERNAME }}" \
+              dockerHubToken="${{ secrets.DOCKERHUB_TOKEN }}" \
+              backendMinReplicas=${{ steps.replicas.outputs.backend_min }} \
+              frontendMinReplicas=${{ steps.replicas.outputs.frontend_min }} \
+              postgresPassword="${{ secrets.POSTGRES_PASSWORD }}" \
+              redisPassword="${{ secrets.REDIS_PASSWORD }}" \
+              jwtSecretKey="${{ secrets.JWT_SECRET_KEY }}" \
+              rootAdminBootstrapPassword="${{ secrets.ROOT_ADMIN_BOOTSTRAP_PASSWORD }}" \
+              customDomain="${{ secrets.CUSTOM_DOMAIN }}"
+
+      - name: Show outputs
+        run: |
+          az deployment group show --resource-group "$RESOURCE_GROUP" --name main \
+            --query properties.outputs -o json

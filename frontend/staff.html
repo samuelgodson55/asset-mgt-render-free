@@ -1,0 +1,720 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<!-- Applies the saved (or OS-preferred) dark/light theme to <html> BEFORE
+     first paint -- see js/theme-init.js for why this has to be external
+     and synchronous instead of a module script. -->
+<script src="js/theme-init.js"></script>
+<title>Snipe-IT Lite — My Assets</title>
+
+<!-- =====================================================================
+     SYNCHRONOUS AUTH GUARD -- runs before the rest of the page is parsed.
+     See js/auth-guard.js for the full explanation of why this has to be
+     an external, synchronous (non-module) script instead of just relying
+     on the app's JS modules, and why it's external rather than inline
+     (short version: so this page's CSP doesn't need 'unsafe-inline').
+     ===================================================================== -->
+<link rel="stylesheet" href="css/auth-guard.css">
+<script src="js/auth-guard.js" data-allowed-roles="staff,super_admin,admin"></script>
+
+<!-- Tailwind CSS is compiled locally at build time instead of being
+     pulled from cdn.tailwindcss.com at runtime -- see
+     build-tailwind/README.md for how to regenerate css/tailwind.css
+     after changing any class names in the HTML/JS. -->
+<link rel="stylesheet" href="css/tailwind.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/theme.css">
+</head>
+<!-- data-view="staff": a read-only self-service page, no admin tables involved -->
+<body class="min-h-screen overflow-x-hidden font-sans text-slate-200 antialiased" data-view="staff">
+
+<!-- ================= GLOBAL NAVBAR ================= -->
+<header class="sticky top-0 z-30 border-b border-border bg-card/95 backdrop-blur">
+  <div class="mx-auto max-w-[1100px] px-4 sm:px-6">
+    <div class="flex h-16 items-center justify-between gap-2">
+      <div class="flex items-center gap-3">
+        <div class="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-600/15 ring-1 ring-blue-500/30">
+          <svg class="h-5 w-5 text-blue-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M3 9h18"/><path d="M8 4v5"/></svg>
+        </div>
+        <div class="leading-tight">
+          <p id="siteBrandName" class="text-[15px] font-bold tracking-tight text-slate-50">Snipe-IT <span class="font-medium text-slate-400">Lite</span></p>
+          <p class="hidden text-[11px] text-slate-500 tag-mono sm:block">asset-registry.internal.corp</p>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-1.5 sm:gap-4">
+        <!-- ================= NOTIFICATION CENTER BELL =================
+             Personal alerts only (staff/customer accounts don't review
+             others' checkouts) -- my own items overdue/due soon, my own
+             pending extension requests, and updates on decisions made
+             about them. See js/components/notifications.js. -->
+        <div class="relative">
+          <button type="button" data-action="toggle-notifications" id="notificationBellBtn" title="Notifications" aria-label="Notifications" aria-haspopup="true" aria-expanded="false"
+            class="relative flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border bg-card text-slate-300 transition hover:border-blue-500/40 hover:text-blue-400 sm:h-9 sm:w-9">
+            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 00-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>
+            <span id="notificationBadge" class="hidden absolute -right-1 -top-1 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-rose-500 px-1 text-[10px] font-bold leading-none text-white ring-2 ring-card">0</span>
+          </button>
+
+          <div id="notificationDropdown" class="hidden absolute right-0 z-40 mt-2 w-[22rem] max-w-[90vw] overflow-hidden rounded-xl border border-border bg-card shadow-2xl sm:w-96">
+            <div class="flex items-center justify-between border-b border-border px-4 py-3">
+              <p class="text-[13px] font-semibold text-slate-100">Notifications</p>
+              <div class="flex items-center gap-2">
+                <span id="notificationEmptyLabel" class="hidden text-[11px] text-slate-500">All caught up</span>
+                <button type="button" data-action="close-notifications" title="Close" aria-label="Close notifications"
+                  class="rounded-md p-1 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+                  <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                </button>
+              </div>
+            </div>
+            <div class="max-h-[70vh] overflow-y-auto p-3 space-y-3">
+
+              <div id="notificationEmptyState" class="hidden flex flex-col items-center gap-2 py-8 text-center">
+                <svg class="h-6 w-6 text-emerald-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><path d="M22 4L12 14.01l-3-3"/></svg>
+                <p class="text-[12px] text-slate-500">Nothing overdue, due soon, or awaiting review.</p>
+              </div>
+
+              <!-- ---- MY OWN OVERDUE ITEMS ---- -->
+              <div id="notifMyOverdueSection" class="hidden rounded-lg border border-rose-500/30 bg-rose-500/5 p-3">
+                <div class="flex items-center gap-2 text-[12px] font-semibold text-rose-400">
+                  <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01M10.29 3.86l-8.18 14.18A2 2 0 003.82 21h16.36a2 2 0 001.71-2.96L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
+                  <span><span id="notifMyOverdueCount">0</span> item(s) you hold are overdue</span>
+                </div>
+                <ul id="notifMyOverdueList" class="mt-1.5 divide-y divide-rose-500/10 pl-6 text-[12px]"></ul>
+              </div>
+
+              <!-- ---- MY OWN DUE-SOON ITEMS ---- -->
+              <div id="notifMyDueSoonSection" class="hidden rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
+                <div class="flex items-center gap-2 text-[12px] font-semibold text-amber-400">
+                  <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+                  <span><span id="notifMyDueSoonCount">0</span> item(s) you hold are due soon</span>
+                </div>
+                <ul id="notifMyDueSoonList" class="mt-1.5 divide-y divide-amber-500/10 pl-6 text-[12px]"></ul>
+              </div>
+
+              <!-- ---- MY OWN PENDING EXTENSION REQUESTS ---- -->
+              <div id="notifMyPendingExtensionSection" class="hidden rounded-lg border border-violet-500/30 bg-violet-500/5 p-3">
+                <div class="flex items-center gap-2 text-[12px] font-semibold text-violet-300">
+                  <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="9"/></svg>
+                  <span><span id="notifMyPendingExtensionCount">0</span> of your extension request(s) awaiting review</span>
+                </div>
+                <ul id="notifMyPendingExtensionList" class="mt-1.5 divide-y divide-violet-500/10 pl-6 text-[12px]"></ul>
+              </div>
+
+              <!-- ---- MY EXTENSION REQUEST DECISIONS =================
+                   Populated by js/components/extensions.js's
+                   loadMyExtensionDecisionsAlert() from GET
+                   /checkouts/my-extension-decisions -- shows up once one of
+                   your own extension requests has been approved or denied,
+                   in case you miss the email backend/services/
+                   extension_service.py already sends. -->
+              <div id="myExtensionDecisionsBanner" class="hidden rounded-lg border border-blue-500/30 bg-blue-500/5 p-3">
+                <div class="flex items-center justify-between gap-2">
+                  <div class="flex items-center gap-2 text-[12px] font-semibold text-blue-400">
+                    <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="9"/></svg>
+                    <span><span id="myExtensionDecisionsCount">0</span> extension request update(s)</span>
+                  </div>
+                  <button data-action="dismiss-my-extension-decisions-alert" title="Clear" class="rounded-md p-1 text-blue-400/70 transition hover:bg-blue-500/10 hover:text-blue-300">
+                    <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                  </button>
+                </div>
+                <ul id="myExtensionDecisionsList" class="mt-1.5 divide-y divide-blue-500/10 text-[12px]"></ul>
+              </div>
+
+            </div>
+          </div>
+        </div>
+
+        <span class="hidden items-center gap-1.5 rounded-full border border-blue-500/50 bg-blue-500/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-wide text-blue-400 glow-blue sm:flex">
+          <span class="h-1.5 w-1.5 rounded-full bg-blue-500"></span>
+          Staff Portal
+        </span>
+
+        <button type="button" id="navProfileBtn" data-action="open-profile" title="View profile &amp; change password" class="flex items-center gap-2.5 border-l border-border pl-2 transition hover:opacity-80 sm:pl-4">
+          <div id="navUserInitials" class="h-8 w-8 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-xs font-bold text-white">TO</div>
+          <div class="hidden text-right leading-tight md:block">
+            <p id="navUserName" class="text-[13px] font-semibold text-slate-100">T. Okafor</p>
+            <p id="myProfileRole" class="text-[11px] text-slate-500">Senior Engineer</p>
+          </div>
+        </button>
+
+        <button type="button" data-action="toggle-theme" title="Switch to light / dark theme" aria-label="Toggle color theme" class="theme-toggle flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border bg-card text-slate-300 transition hover:border-blue-500/40 hover:text-blue-400 sm:h-9 sm:w-9">
+          <span class="icon-moon"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg></span>
+          <span class="icon-sun"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg></span>
+        </button>
+
+        <button id="logout-btn" title="Log out" class="flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-[13px] font-medium text-slate-300 transition hover:border-rose-500/40 hover:text-rose-400 sm:px-3">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>
+          <span class="hidden sm:inline">Log out</span>
+        </button>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main class="mx-auto max-w-[1100px] px-4 py-6 sm:px-6 sm:py-8">
+
+  <!-- ================= TOP-LEVEL TABS ("My Items" / "Equipment Quotation") =================
+       A swipeable tab pair (see js/ui.js's switchDashboardTab()/initDashSwipeNav())
+       so a phone visitor doesn't have to scroll past the whole checked-out-items
+       table just to reach the Equipment Quotation card below it -- each becomes
+       its own full-height panel instead. Same visual language as admin.html/
+       manager.html's top-level tab strip. -->
+  <nav class="mb-5 flex gap-1 border-b border-border -mb-px sm:mb-6">
+    <button id="dashTabItems" data-action="switch-dash-tab" data-tab="items" class="relative border-b-2 border-blue-500 px-3 py-3 text-[13px] font-semibold text-slate-50 sm:px-4">
+      <span class="sm:hidden">Items</span><span class="hidden sm:inline">My Items</span>
+    </button>
+    <button id="dashTabQuotation" data-action="switch-dash-tab" data-tab="quotation" class="relative border-b-2 border-transparent px-3 py-3 text-[13px] font-medium text-slate-500 transition hover:text-slate-300 sm:px-4">
+      <span class="sm:hidden">Quotation</span><span class="hidden sm:inline">Equipment Quotation</span>
+    </button>
+  </nav>
+
+  <!-- Swipe hint dots (mobile only) -- see js/ui.js's updateDashSwipeDots(). -->
+  <div id="dashSwipeDots" class="mb-4 flex items-center justify-center gap-1.5 sm:hidden"></div>
+
+  <!-- #dashSwipeArea wraps both tab panels below so js/ui.js's
+       initDashSwipeNav() can attach a single touchstart/touchend pair here
+       and let a phone visitor swipe between the two tabs, same as tapping
+       them above. -->
+  <div id="dashSwipeArea">
+
+  <section id="dashItemsSection" class="space-y-5 sm:space-y-6">
+  <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+    <div>
+      <h1 class="text-xl font-bold tracking-tight text-slate-50">My Checked-Out Items</h1>
+      <p class="text-[13px] text-slate-500">
+        <span id="myProfileName" class="tag-mono text-slate-400">—</span> ·
+        <span class="my-item-count">0</span> item(s) currently on loan to you
+      </p>
+    </div>
+    <div class="flex flex-wrap items-center gap-3">
+      <div class="relative w-full sm:w-64">
+        <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+        <input type="text" id="myItemsSearchInput" placeholder="Search by asset name…"
+          class="w-full rounded-lg border border-border bg-card2 py-2 pl-9 pr-8 text-[13px] text-slate-200 placeholder-slate-500 outline-none transition focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40 search-clearable" />
+      </div>
+      <div class="flex items-center gap-2 text-[13px] text-slate-400">
+        <span>Rows per page</span>
+        <select id="myItemsPerPageSelect" class="rounded-lg border border-border bg-card2 px-2.5 py-2 text-slate-200 outline-none focus:border-blue-500/60">
+          <option value="5" selected>5</option>
+            <option value="10">10</option>
+          <option value="25">25</option>
+          <option value="50">50</option>
+        </select>
+      </div>
+      <div class="flex items-center gap-2">
+        <button data-action="export-my-items" data-format="csv" title="Download as CSV"
+          class="flex items-center gap-1.5 rounded-md border border-border bg-card2 px-3 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+          CSV
+        </button>
+        <button data-action="export-my-items" data-format="pdf" title="Download as PDF"
+          class="flex items-center gap-1.5 rounded-md border border-border bg-card2 px-3 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+          PDF
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!--
+    Read-only by design: staff accounts can see what they're holding and when
+    it's due back, but returns/dispatches are processed by a Manager or Super
+    Admin via the Custody Ledger on their dashboards -- not self-service here.
+  -->
+  <div class="overflow-hidden rounded-xl border border-border bg-card">
+    <table class="w-full text-left text-[13px]">
+      <thead>
+        <tr class="border-b border-border bg-card2/60 text-[11px] uppercase tracking-wide text-slate-500">
+          <th class="px-5 py-3 font-semibold">Asset</th>
+          <th class="hidden px-5 py-3 font-semibold sm:table-cell">Quantity</th>
+          <th class="hidden px-5 py-3 font-semibold sm:table-cell">Checked Out</th>
+          <th class="hidden px-5 py-3 font-semibold sm:table-cell">Due Back</th>
+          <th class="px-5 py-3 font-semibold">Status</th>
+          <th class="hidden px-5 py-3 font-semibold sm:table-cell">Actions</th>
+        </tr>
+      </thead>
+      <tbody id="myItemsTableBody" class="divide-y divide-border">
+        <tr><td colspan="6" class="px-5 py-6 text-center text-slate-500">Loading your items…</td></tr>
+      </tbody>
+    </table>
+    <div class="flex items-center justify-between border-t border-border bg-card2/40 px-5 py-3 text-[12px] text-slate-400">
+      <span id="myItemsPageInfo">Loading…</span>
+      <div class="flex items-center gap-2">
+        <button id="myItemsPrevBtn" data-action="change-page" data-key="myItems" data-delta="-1" class="rounded-md border border-border px-2.5 py-1 font-medium text-slate-300 transition hover:border-slate-500 disabled:opacity-40 disabled:cursor-not-allowed">Prev</button>
+        <button id="myItemsNextBtn" data-action="change-page" data-key="myItems" data-delta="1" class="rounded-md border border-border px-2.5 py-1 font-medium text-slate-300 transition hover:border-slate-500 disabled:opacity-40 disabled:cursor-not-allowed">Next</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="rounded-xl border border-border bg-card p-5">
+    <p class="text-[12px] text-slate-500">
+      Need something checked out, or need to return an item early? Reach out to your department manager --
+      they can dispatch new equipment to you or process a return on your behalf from their dashboard.
+      Need more time with something you already have? Use "Request Extension" on the row above and your
+      manager or an admin will review it.
+    </p>
+  </div>
+  </section><!-- /#dashItemsSection -->
+
+  <!-- ================= EQUIPMENT QUOTATION (SELF-SERVICE) =================
+       Browse the Asset Catalog, add items with a quantity + rental date
+       range to your own saved order, edit/remove lines, export the
+       current order as a PDF, and submit it to get a Quotation ID your
+       manager/admin can pull up, adjust, and assign. See
+       js/components/quotation.js and backend/api/quotations.py.
+       Whether "Available"/"Status" columns show below is controlled
+       server-side (CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER -- see
+       backend/config.py); this markup renders whatever the API returns. -->
+  <section id="dashQuotationSection" class="hidden space-y-5">
+  <div class="space-y-5">
+    <div>
+      <h2 class="text-lg font-bold tracking-tight text-slate-50">Equipment Quotation</h2>
+      <p class="text-[13px] text-slate-500">Browse available equipment, add what you need to your order, then submit it or export it as a PDF to share with your manager.</p>
+    </div>
+
+    <!-- ---- Asset Catalog ---- -->
+    <div class="overflow-hidden rounded-xl border border-border bg-card">
+      <div class="flex flex-col gap-3 border-b border-border bg-card2/60 px-5 py-3 sm:flex-row sm:items-center sm:justify-between">
+        <h3 class="text-[13px] font-semibold text-slate-100">Asset Catalog <span class="text-slate-500">(<span id="quotationCatalogCount">0</span>)</span></h3>
+        <div class="flex flex-wrap items-center gap-3">
+          <div class="relative w-full sm:w-56">
+            <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+            <input type="text" id="quotationCatalogSearchInput" placeholder="Search assets…"
+              class="w-full rounded-lg border border-border bg-card2 py-2 pl-9 pr-8 text-[13px] text-slate-200 placeholder-slate-500 outline-none transition focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40 search-clearable" />
+          </div>
+          <div class="flex items-center gap-2 text-[13px] text-slate-400">
+            <span class="hidden sm:inline">Rows per page</span>
+            <select id="quotationCatalogPerPageSelect" class="rounded-lg border border-border bg-card2 px-2.5 py-2 text-slate-200 outline-none focus:border-blue-500/60">
+              <option value="1" selected>1</option>
+              <option value="3">3</option>
+              <option value="5">5</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <!-- Desktop/tablet table (sm and up) -->
+      <div class="hidden overflow-x-auto sm:block">
+        <table class="w-full text-left text-[13px]">
+          <thead>
+            <tr class="border-b border-border bg-card2/40 text-[11px] uppercase tracking-wide text-slate-500">
+              <th class="px-3 py-3 font-semibold">Asset</th>
+              <th class="hidden px-3 py-3 font-semibold sm:table-cell">Category</th>
+              <th class="px-3 py-3 font-semibold">Price / Day</th>
+              <th class="qcat-stock-col hidden px-3 py-3 font-semibold">Available</th>
+              <th class="qcat-stock-col hidden px-3 py-3 font-semibold">Status</th>
+              <th class="px-2 py-3 font-semibold">Qty</th>
+              <th class="px-2 py-3 font-semibold">Start</th>
+              <th class="px-2 py-3 font-semibold">Due</th>
+              <th class="px-3 py-3 text-right font-semibold">Add</th>
+            </tr>
+          </thead>
+          <tbody id="quotationCatalogBody" class="divide-y divide-border">
+            <tr><td colspan="9" class="px-5 py-6 text-center text-slate-500">Loading catalog…</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Mobile cards (below sm) -- each asset's quantity/date/Add controls
+           get the full screen width instead of a horizontally-scrolling
+           table row, so Add is always reachable without scrolling. -->
+      <div id="quotationCatalogCards" class="divide-y divide-border sm:hidden">
+        <p class="px-4 py-6 text-center text-[13px] text-slate-500">Loading catalog…</p>
+      </div>
+
+      <div class="flex items-center justify-between border-t border-border bg-card2/40 px-5 py-3 text-[12px] text-slate-400">
+        <span id="quotationCatalogPageInfo">Loading…</span>
+        <div class="flex items-center gap-2">
+          <button id="quotationCatalogPrevBtn" data-action="change-page" data-key="quotationCatalog" data-delta="-1" class="rounded-md border border-border px-2.5 py-1 font-medium text-slate-300 transition hover:border-slate-500 disabled:opacity-40 disabled:cursor-not-allowed">Prev</button>
+          <button id="quotationCatalogNextBtn" data-action="change-page" data-key="quotationCatalog" data-delta="1" class="rounded-md border border-border px-2.5 py-1 font-medium text-slate-300 transition hover:border-slate-500 disabled:opacity-40 disabled:cursor-not-allowed">Next</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ---- My Order / My Quotes (tabbed) ----
+         Two panels sharing one tab strip: the editable "My Order" cart
+         and the read-only "My Quotes" submission history. Swipeable on
+         mobile (like admin.html/manager.html's top-level tabs) via
+         components/quotation.js's switchQuotationTab()/
+         initQuotationSwipeNav() -- a small, self-contained tab pair
+         scoped to just this card. -->
+    <div class="overflow-hidden rounded-xl border border-border bg-card">
+      <nav class="flex gap-1 border-b border-border px-2 pt-2">
+        <button id="quotationTabOrder" data-action="switch-quotation-tab" data-tab="order"
+          class="relative border-b-2 border-blue-500 px-3 py-2.5 text-[13px] font-semibold text-slate-50 sm:px-4">
+          My Order <span class="text-slate-500">(<span id="myOrderTabCount">0</span>)</span>
+        </button>
+        <button id="quotationTabHistory" data-action="switch-quotation-tab" data-tab="history"
+          class="relative border-b-2 border-transparent px-3 py-2.5 text-[13px] font-medium text-slate-500 transition hover:text-slate-300 sm:px-4">
+          My Quotes <span class="text-slate-500">(<span id="myQuotesTabCount">0</span>)</span>
+        </button>
+      </nav>
+
+      <!-- Swipe hint dots (mobile only) -- see components/quotation.js's updateQuotationSwipeDots(). -->
+      <div id="quotationSwipeDots" class="flex items-center justify-center gap-1.5 py-2 sm:hidden"></div>
+
+      <!-- #quotationSwipeArea wraps both panels so components/quotation.js's
+           initQuotationSwipeNav() can attach a single touchstart/touchend
+           pair here and let a phone visitor move between "My Order" and
+           "My Quotes" by swiping left/right, in addition to tapping the
+           tabs above. Desktop is unaffected -- touch events never fire
+           from a mouse. -->
+      <div id="quotationSwipeArea">
+
+      <!-- ---- Panel 1: My Order (editable saved cart) ---- -->
+      <div id="myOrderTabSection">
+        <div class="flex flex-col gap-3 border-b border-border bg-card2/60 px-5 py-3 sm:flex-row sm:items-center sm:justify-between">
+          <p class="text-[12px] text-slate-500">Adjust quantities, remove lines, export as a PDF, or submit to get a Quotation ID.</p>
+          <div class="flex flex-wrap items-center gap-2">
+            <button type="button" id="exportQuotationBtn" data-action="export-quotation" disabled
+              class="flex items-center gap-1.5 rounded-md border border-border bg-card2 px-3 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400 disabled:cursor-not-allowed disabled:opacity-40">
+              <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+              Export PDF
+            </button>
+            <button type="button" id="submitQuotationBtn" data-action="submit-quotation" disabled
+              class="flex items-center gap-1.5 rounded-md bg-blue-600 px-3 py-1.5 text-[12px] font-semibold text-white transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-40">
+              <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 13l4 4L19 7"/></svg>
+              Submit Quotation
+            </button>
+          </div>
+        </div>
+
+        <div class="hidden overflow-x-auto sm:block">
+          <table class="w-full text-left text-[13px]">
+            <thead>
+              <tr class="border-b border-border bg-card2/40 text-[11px] uppercase tracking-wide text-slate-500">
+                <th class="px-3 py-3 font-semibold">Asset</th>
+                <th class="hidden px-3 py-3 font-semibold sm:table-cell">Category</th>
+                <th class="px-3 py-3 font-semibold">Qty</th>
+                <th class="hidden px-3 py-3 font-semibold sm:table-cell">Start</th>
+                <th class="hidden px-3 py-3 font-semibold sm:table-cell">Due</th>
+                <th class="hidden px-3 py-3 font-semibold sm:table-cell">Days</th>
+                <th class="px-3 py-3 font-semibold">Line Total</th>
+                <th class="px-3 py-3 text-right font-semibold">Remove</th>
+              </tr>
+            </thead>
+            <tbody id="myOrderTableBody" class="divide-y divide-border">
+              <tr><td colspan="8" class="px-5 py-6 text-center text-slate-500">Loading your order…</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div id="myOrderCards" class="divide-y divide-border sm:hidden">
+          <p class="px-4 py-6 text-center text-[13px] text-slate-500">Loading your order…</p>
+        </div>
+
+        <div class="flex flex-col items-end gap-1 border-t border-border bg-card2/40 px-5 py-4 text-[13px]">
+          <div class="flex w-full max-w-xs justify-between text-slate-400">
+            <span>Subtotal</span><span id="quotationSubtotal" class="tag-mono text-slate-200">—</span>
+          </div>
+          <div class="flex w-full max-w-xs justify-between text-slate-400">
+            <span id="quotationVatLabel">VAT</span><span id="quotationVatAmount" class="tag-mono text-slate-200">—</span>
+          </div>
+          <!-- Hidden unless an Admin/Manager has set a discount on this
+               quote (see services/quotation_service.py's
+               _serialize_quotation()) -- most quotes have none. -->
+          <div id="quotationDiscountRow" class="hidden w-full max-w-xs justify-between text-emerald-400">
+            <span id="quotationDiscountLabel">Discount</span><span id="quotationDiscountAmount" class="tag-mono">—</span>
+          </div>
+          <div class="flex w-full max-w-xs justify-between border-t border-border pt-1.5 text-[14px] font-semibold text-slate-100">
+            <span>Total</span><span id="quotationTotal" class="tag-mono">—</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- ---- Panel 2: My Quotes (read-only submission history) ---- -->
+      <div id="myQuotationHistoryTabSection" class="hidden">
+        <div class="border-b border-border bg-card2/60 px-5 py-3">
+          <p class="text-[12px] text-slate-500">Tap a quote to view it -- while it's still "Pending Review" (unapproved) and you're the one who submitted it, you can adjust quantities or remove lines. Once approved (green badge), it's locked and ready for physical pickup. Quotes an Admin/Manager builds and assigns to you show up here too, view-only.</p>
+        </div>
+        <div class="overflow-hidden">
+          <table class="w-full text-left text-[13px]">
+            <thead>
+              <tr class="border-b border-border bg-card2/40 text-[11px] uppercase tracking-wide text-slate-500">
+                <th class="px-3 py-3 font-semibold">Quotation ID</th>
+                <th class="px-3 py-3 font-semibold">Status</th>
+                <th class="hidden px-3 py-3 font-semibold sm:table-cell">Submitted</th>
+                <th class="hidden px-3 py-3 font-semibold sm:table-cell">Items</th>
+                <th class="px-3 py-3 font-semibold">Total</th>
+                <th class="hidden px-3 py-3 font-semibold sm:table-cell">Assigned To</th>
+              </tr>
+            </thead>
+            <tbody id="myQuotationHistoryBody" class="divide-y divide-border">
+              <tr><td colspan="6" class="px-5 py-6 text-center text-slate-500">Loading your quotes…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      </div><!-- /#quotationSwipeArea -->
+    </div>
+  </div>
+  </section><!-- /#dashQuotationSection -->
+
+  </div><!-- /#dashSwipeArea -->
+
+  <!-- Submitted-quotation confirmation modal -->
+  <div id="submittedQuotationModal" class="fixed inset-0 z-50 hidden items-center justify-center p-4">
+    <div class="absolute inset-0 bg-black/60 backdrop"></div>
+    <div class="relative w-full max-w-sm rounded-xl border border-border bg-card p-5 shadow-xl">
+      <div class="mb-3 flex items-center gap-2 text-emerald-400">
+        <svg class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><path d="M22 4L12 14.01l-3-3"/></svg>
+        <h3 class="text-[15px] font-semibold text-slate-100">Quotation Submitted</h3>
+      </div>
+      <p id="submittedQuotationRef" class="mb-1 text-xl font-bold tag-mono text-slate-50">—</p>
+      <p id="submittedQuotationBody" class="mb-4 text-[13px] text-slate-400">—</p>
+      <button type="button" data-action="close-modal" data-modal="submittedQuotationModal"
+        class="w-full rounded-md bg-blue-600 px-3 py-2 text-[13px] font-semibold text-white transition hover:bg-blue-500">
+        Done
+      </button>
+    </div>
+  </div>
+
+  <!-- ================= MY QUOTE DETAIL (SELF-SERVICE) =================
+       Opened from a "My Quotes" history row. Still adjustable (quantity /
+       remove line) while the quote is "Pending Review" (unapproved) --
+       read-only once Approved/Fulfilled. See js/components/quotation.js's
+       openMyQuoteDetail(); backend/services/quotation_service.py's
+       _get_own_editable_quotation() enforces the same rule server-side. -->
+  <div id="myQuoteDetailModal" class="fixed inset-0 z-50 hidden items-center justify-center p-4">
+    <div class="absolute inset-0 bg-black/70 backdrop"></div>
+    <div class="relative max-h-[85vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-border bg-[#141922] shadow-2xl">
+      <div class="flex items-start justify-between gap-3 border-b border-border px-5 py-4">
+        <div class="min-w-0">
+          <div class="flex flex-wrap items-center gap-2">
+            <h3 id="myQuoteDetailRef" class="text-[15px] font-bold tag-mono text-slate-50">—</h3>
+            <span id="myQuoteDetailStatusBadge"></span>
+          </div>
+          <p id="myQuoteDetailMeta" class="mt-0.5 truncate text-[12px] text-slate-500">—</p>
+        </div>
+        <div class="flex shrink-0 items-center gap-2">
+          <button type="button" data-action="export-my-quote-detail"
+            class="flex items-center gap-1.5 rounded-md border border-border bg-card2 px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
+            <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+            <span class="hidden sm:inline">Export PDF</span>
+          </button>
+          <button data-action="close-modal" data-modal="myQuoteDetailModal" class="shrink-0 rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="space-y-4 px-5 py-4">
+        <p id="myQuoteDetailEditableNotice" class="hidden rounded-md border border-blue-500/30 bg-blue-500/10 px-3 py-2 text-[12px] font-medium text-blue-300">
+          Still Pending Review -- you can adjust quantities or remove lines until it's approved.
+        </p>
+
+        <!-- Desktop/tablet table (sm and up) -->
+        <div class="hidden overflow-hidden rounded-lg border border-border sm:block">
+          <table class="w-full text-left text-[13px]">
+            <thead>
+              <tr class="border-b border-border bg-card2/60 text-[11px] uppercase tracking-wide text-slate-500">
+                <th class="px-3 py-2.5 font-semibold">Asset</th>
+                <th class="px-3 py-2.5 font-semibold">Qty</th>
+                <th class="px-3 py-2.5 font-semibold">Start</th>
+                <th class="px-3 py-2.5 font-semibold">Due</th>
+                <th class="px-3 py-2.5 font-semibold">Line Total</th>
+                <th class="px-3 py-2.5 text-right font-semibold">Remove</th>
+              </tr>
+            </thead>
+            <tbody id="myQuoteDetailItemsBody" class="divide-y divide-border"></tbody>
+          </table>
+        </div>
+
+        <!-- Mobile cards (below sm) -- same reasoning as #quotationCatalogCards/
+             #myOrderCards: a table crammed into a phone-width modal either
+             clips the Remove button/Qty input off-screen or forces
+             horizontal scroll. Each line item gets the full modal width
+             instead, so Qty and Remove are always reachable. -->
+        <div id="myQuoteDetailCards" class="divide-y divide-border rounded-lg border border-border sm:hidden"></div>
+
+        <!-- Add item -- search box + Qty/Start/Due/Add, same pattern as the
+             Admin/Manager Quote Detail modal's "Add another asset" (see
+             js/components/quotation.js's searchMyQuoteDetailAssets() and
+             friends). Hidden by renderMyQuoteDetail() once the quote is no
+             longer editable (Approved/Fulfilled). -->
+        <div id="myQuoteDetailAddItemForm" class="space-y-2 rounded-lg border border-dashed border-border p-3">
+          <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Add item</p>
+          <div class="relative">
+            <svg class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+            <input type="text" id="myQuoteDetailAssetSearchInput" placeholder="Search assets by name or category…" autocomplete="off"
+              class="w-full rounded-md border border-border bg-card2 py-2 pl-8 pr-8 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60 search-clearable" />
+            <div id="myQuoteDetailAssetResults" class="absolute z-10 mt-1 hidden max-h-48 w-full overflow-y-auto rounded-md border border-border bg-[#141922] py-1 shadow-xl"></div>
+          </div>
+          <div id="myQuoteDetailSelectedAsset" class="hidden items-center justify-between gap-2 rounded-md bg-card2 px-3 py-2 text-[12px]">
+            <span id="myQuoteDetailSelectedAssetLabel" class="min-w-0 truncate text-slate-200"></span>
+            <button type="button" data-action="clear-my-quote-detail-asset" class="shrink-0 text-[11px] font-medium text-slate-500 transition hover:text-rose-400">Clear</button>
+          </div>
+          <div class="flex flex-wrap items-end gap-2">
+            <div>
+              <label class="mb-1 block text-[10px] font-medium uppercase tracking-wide text-slate-500">Qty</label>
+              <input type="number" id="myQuoteDetailAddQty" min="1" value="1"
+                class="w-16 rounded-md border border-border bg-card2 px-2.5 py-1.5 text-[12px] text-slate-200 outline-none focus:border-blue-500/60" />
+            </div>
+            <div>
+              <label class="mb-1 block text-[10px] font-medium uppercase tracking-wide text-slate-500">Start</label>
+              <input type="date" id="myQuoteDetailAddStart" class="w-[8.5rem] rounded-md border border-border bg-card2 px-2.5 py-1.5 text-[12px] text-slate-200 outline-none focus:border-blue-500/60" />
+            </div>
+            <div>
+              <label class="mb-1 block text-[10px] font-medium uppercase tracking-wide text-slate-500">Due</label>
+              <input type="date" id="myQuoteDetailAddDue" class="w-[8.5rem] rounded-md border border-border bg-card2 px-2.5 py-1.5 text-[12px] text-slate-200 outline-none focus:border-blue-500/60" />
+            </div>
+            <button type="button" data-action="add-my-quote-detail-item"
+              class="rounded-md bg-blue-600 px-3 py-1.5 text-[12px] font-semibold text-white transition hover:bg-blue-500">
+              Add Item
+            </button>
+          </div>
+        </div>
+
+        <div class="flex justify-end text-[13px] text-slate-400">
+          <div class="space-y-1 text-right">
+            <p>Subtotal: <span id="myQuoteDetailSubtotal" class="tag-mono text-slate-200">—</span></p>
+            <p id="myQuoteDetailVat" class="tag-mono">VAT: —</p>
+            <!-- Hidden unless an Admin/Manager has set a discount on this
+                 quote (see services/quotation_service.py's
+                 _serialize_quotation()) -- most quotes have none. -->
+            <p id="myQuoteDetailDiscount" class="hidden tag-mono text-emerald-400">Discount: —</p>
+            <p class="text-[14px] font-semibold text-slate-100">Total: <span id="myQuoteDetailTotal" class="tag-mono">—</span></p>
+          </div>
+        </div>
+
+        <p class="text-[12px] text-slate-500">Assigned to: <span id="myQuoteDetailAssignedTo" class="text-slate-300">—</span></p>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<!-- ================= MY PROFILE & CHANGE PASSWORD =================
+     Opened by clicking the navbar user block (#navProfileBtn,
+     data-action="open-profile") -- see js/components/profile.js. Shared,
+     identical markup on every dashboard page (admin/manager/staff/
+     customer.html) since it's driven entirely by the logged-in user's own
+     data from GET /auth/me, with nothing role-specific about it. -->
+<div id="profileModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative max-h-[90vh] w-full max-w-md overflow-y-auto sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl shadow-2xl">
+    <div class="flex items-start justify-between border-b border-border px-6 py-5">
+      <div>
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Account</p>
+        <h3 class="text-[16px] font-bold text-slate-50">My Profile</h3>
+      </div>
+      <button data-action="close-modal" data-modal="profileModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <div class="space-y-5 px-6 py-5">
+      <!-- Read-only account details, populated by profile.js's
+           openProfileModal() from GET /auth/me every time the window opens. -->
+      <div class="space-y-2 text-[13px]">
+        <div class="flex items-center justify-between"><span class="text-slate-500">Name</span><span id="profileName" class="font-medium text-slate-200">—</span></div>
+        <div class="flex items-center justify-between"><span class="text-slate-500">Email</span><span id="profileEmail" class="font-medium text-slate-200">—</span></div>
+        <div class="flex items-center justify-between"><span class="text-slate-500">Username</span><span id="profileUsername" class="tag-mono font-medium text-slate-200">—</span></div>
+        <div class="flex items-center justify-between"><span class="text-slate-500">Privilege Tier</span><span id="profileRole" class="font-medium text-slate-200">—</span></div>
+        <!-- Hidden whenever neither department nor department_role is set
+             (e.g. Super Admin, most Customers) -- see profile.js. -->
+        <div id="profileDepartmentRow" class="hidden items-center justify-between">
+          <span class="text-slate-500">Department</span><span id="profileDepartment" class="font-medium text-slate-200">—</span>
+        </div>
+      </div>
+
+      <div class="border-t border-border pt-4">
+        <h4 class="mb-1 text-[13px] font-semibold text-slate-100">Change Password</h4>
+        <p class="mb-3 text-[12px] text-slate-500">Requires your current password -- for security reasons</p>
+        <form id="changePasswordForm" class="space-y-3">
+          <div>
+            <label class="mb-1 block text-[12px] font-medium text-slate-400">Current Password</label>
+            <input type="password" id="currentPasswordInput" required autocomplete="current-password"
+              class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
+          </div>
+          <div>
+            <label class="mb-1 block text-[12px] font-medium text-slate-400">New Password</label>
+            <input type="password" id="newPasswordInput" required autocomplete="new-password"
+              class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
+          </div>
+          <div>
+            <label class="mb-1 block text-[12px] font-medium text-slate-400">Confirm New Password</label>
+            <input type="password" id="confirmPasswordInput" required autocomplete="new-password"
+              class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
+          </div>
+          <!-- Success (emerald) / error (rose) feedback -- see
+               profile.js's setProfileFormMessage(). -->
+          <p id="profileFormMessage" class="hidden text-[12px] font-medium"></p>
+          <button type="submit" class="mt-1 w-full rounded-lg bg-blue-600 py-2 text-[13px] font-semibold text-white transition hover:bg-blue-500 active:bg-blue-700">
+            Update Password
+          </button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= REQUEST DUE-DATE EXTENSION (MODAL) =================
+     Self-service: lets the logged-in staff/customer account ask for more
+     time on one active checkout. Submits to
+     POST /checkouts/{id}/extension-requests -- see
+     js/components/extensions.js. A Manager/Admin/Super Admin then
+     approves/denies it from the "Extension Requests" panel on their own
+     dashboard (admin.html / manager.html). -->
+<div id="extensionRequestModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative w-full max-w-sm overflow-y-auto sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl shadow-2xl">
+    <div class="flex items-start justify-between border-b border-border px-6 py-5">
+      <div>
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Custody</p>
+        <h3 class="text-[16px] font-bold text-slate-50">Request Extension</h3>
+        <p id="extensionRequestAssetName" class="text-[12px] text-slate-500">—</p>
+      </div>
+      <button data-action="close-modal" data-modal="extensionRequestModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <form id="extensionRequestForm" class="space-y-4 px-6 py-5">
+      <p class="text-[12px] text-slate-400">Current due date: <span id="extensionRequestCurrentDue" class="tag-mono text-slate-300">—</span></p>
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Requested New Due Date</label>
+        <input type="date" id="extensionNewDueDate" required
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60" />
+      </div>
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Reason (optional)</label>
+        <textarea id="extensionReason" rows="2" placeholder="e.g. Still onboarding a new hire on this laptop"
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60"></textarea>
+      </div>
+      <div class="flex gap-3 pt-1">
+        <button type="button" data-action="close-modal" data-modal="extensionRequestModal" class="flex-1 rounded-lg border border-border py-2.5 text-[13px] font-semibold text-slate-300 transition hover:border-slate-500">Cancel</button>
+        <button type="submit" class="flex-1 rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500">Submit Request</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ============= MOBILE ROW DETAILS POPUP =============
+     One shared, generic small modal for every data table on this page.
+     Each table hides its less-critical columns below the `sm` breakpoint
+     (see each components/*.js render function's `hidden sm:table-cell`
+     cells) so tables never force a long horizontal scroll on a phone --
+     desktop still shows every column unchanged. A per-row "Details"
+     button (also `sm:hidden`) opens THIS popup with whatever got hidden --
+     see js/ui.js's rowDetailsTrigger()/openRowDetailsFromElement(). -->
+<div id="rowDetailsModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative w-full max-w-sm sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl p-5 shadow-2xl">
+    <div class="mb-2 flex items-center justify-between">
+      <h3 id="rowDetailsTitle" class="text-[15px] font-bold text-slate-50">Details</h3>
+      <button data-action="close-modal" data-modal="rowDetailsModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <dl id="rowDetailsBody" class="text-[13px]"></dl>
+  </div>
+</div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "environmentName": { "value": "prod" },
+    "appBaseName": { "value": "snipeit-lite" },
+    "dockerHubBackendImage": { "value": "REPLACE_ME_yourdockerhubusername/snipeit-lite-backend" },
+    "dockerHubFrontendImage": { "value": "REPLACE_ME_yourdockerhubusername/snipeit-lite-frontend" },
+    "initialImageTag": { "value": "latest" },
+    "dockerHubUsername": { "value": "" },
+    "dockerHubToken": { "value": "" },
+    "postgresUsername": { "value": "snipeit" },
+    "postgresPassword": { "value": "REPLACE_ME_OR_PASS_VIA_CLI" },
+    "redisPassword": { "value": "REPLACE_ME_OR_PASS_VIA_CLI" },
+    "jwtSecretKey": { "value": "REPLACE_ME_OR_PASS_VIA_CLI" },
+    "rootAdminBootstrapPassword": { "value": "" },
+    "customDomain": { "value": "" },
+    "backendMinReplicas": { "value": 0 },
+    "backendMaxReplicas": { "value": 3 },
+    "frontendMinReplicas": { "value": 0 },
+    "frontendMaxReplicas": { "value": 3 },
+    "postgresVolumeQuotaGb": { "value": 20 },
+    "notificationsEnabled": { "value": false },
+    "enableApiDocs": { "value": false }
+  }
+}
