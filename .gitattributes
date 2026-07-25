@@ -1,9 +1,0 @@
-# Force LF line endings for shell scripts regardless of the committer's OS
-# (a CRLF shebang line, e.g. from a Windows checkout, makes bash fail with
-# "bad interpreter" even when the executable bit is fine) and mark them
-# executable in git's own index (mode 100755) so `git clone`/`actions/
-# checkout` always restores +x -- independent of whatever the working
-# tree's permissions happened to be at commit time on any given
-# contributor's machine. See .github/workflows/ci.yml's nginx-config job
-# for the belt-and-suspenders `chmod +x` fallback in CI itself.
-*.sh text eol=lf executable
