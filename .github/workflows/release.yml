@@ -180,7 +180,7 @@ jobs:
       # has been merged yet, since the changelog is documentation, not a
       # deploy input.
       - name: Open PR with the CHANGELOG.md update
-        uses: peter-evans/create-pull-request@v6
+        uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           base: main
