@@ -151,25 +151,27 @@
         </button>
       </div>
     </div>
+
+    <!-- ================= TOP-LEVEL TABS ("My Items" / "Equipment Quotation") =================
+         A swipeable tab pair (see js/ui.js's switchDashboardTab()/initDashSwipeNav())
+         so a phone visitor doesn't have to scroll past the whole checked-out-items
+         table just to reach the Equipment Quotation card below it -- each becomes
+         its own full-height panel instead. Same visual language as admin.html/
+         manager.html's top-level tab strip. Lives inside <header> (not <main>) so it
+         scrolls with -- and stays pinned under -- the sticky navbar, matching
+         admin.html/manager.html where the tab strip is part of the sticky header. -->
+    <nav class="flex gap-1 -mb-px">
+      <button id="dashTabItems" data-action="switch-dash-tab" data-tab="items" class="relative border-b-2 border-blue-500 px-3 py-3 text-[13px] font-semibold text-slate-50 sm:px-4">
+        <span class="sm:hidden">Items</span><span class="hidden sm:inline">My Items</span>
+      </button>
+      <button id="dashTabQuotation" data-action="switch-dash-tab" data-tab="quotation" class="relative border-b-2 border-transparent px-3 py-3 text-[13px] font-medium text-slate-500 transition hover:text-slate-300 sm:px-4">
+        <span class="sm:hidden">Quotation</span><span class="hidden sm:inline">Equipment Quotation</span>
+      </button>
+    </nav>
   </div>
 </header>
 
 <main class="mx-auto max-w-[1100px] px-4 py-6 sm:px-6 sm:py-8">
-
-  <!-- ================= TOP-LEVEL TABS ("My Items" / "Equipment Quotation") =================
-       A swipeable tab pair (see js/ui.js's switchDashboardTab()/initDashSwipeNav())
-       so a phone visitor doesn't have to scroll past the whole checked-out-items
-       table just to reach the Equipment Quotation card below it -- each becomes
-       its own full-height panel instead. Same visual language as admin.html/
-       manager.html's top-level tab strip. -->
-  <nav class="mb-5 flex gap-1 border-b border-border -mb-px sm:mb-6">
-    <button id="dashTabItems" data-action="switch-dash-tab" data-tab="items" class="relative border-b-2 border-blue-500 px-3 py-3 text-[13px] font-semibold text-slate-50 sm:px-4">
-      <span class="sm:hidden">Items</span><span class="hidden sm:inline">My Items</span>
-    </button>
-    <button id="dashTabQuotation" data-action="switch-dash-tab" data-tab="quotation" class="relative border-b-2 border-transparent px-3 py-3 text-[13px] font-medium text-slate-500 transition hover:text-slate-300 sm:px-4">
-      <span class="sm:hidden">Quotation</span><span class="hidden sm:inline">Equipment Quotation</span>
-    </button>
-  </nav>
 
   <!-- Swipe hint dots (mobile only) -- see js/ui.js's updateDashSwipeDots(). -->
   <div id="dashSwipeDots" class="mb-4 flex items-center justify-center gap-1.5 sm:hidden"></div>

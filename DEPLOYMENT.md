@@ -27,7 +27,10 @@ conceptually (safety checklist, migration ordering, scaling shape, backup
 strategy) — jump straight to
 [Azure Container Apps Production Deployment (Cost-Optimized)](#azure-container-apps-production-deployment-cost-optimized)
 for the fully automated, Azure-native version of this same pipeline
-(`infra/main.bicep` + `.github/workflows/deploy-azure-*.yml`).
+(`infra/main.bicep` + `.github/workflows/deploy-azure-*.yml`). Once that's
+up and running, see [POST_DEPLOYMENT.md](POST_DEPLOYMENT.md) for the
+optional next steps: SMTP, Google Drive backup uploads, and mapping a
+custom domain.
 
 ---
 
@@ -44,6 +47,7 @@ for the fully automated, Azure-native version of this same pipeline
   - [Versioning & Cutting a Release](#versioning--cutting-a-release)
   - [Rollback](#rollback)
 - [Troubleshooting](#troubleshooting)
+- **[Post-Deployment: SMTP, Google Drive backups, custom domain →](POST_DEPLOYMENT.md)**
 
 ---
 
@@ -56,15 +60,24 @@ because they're the ones most likely to bite you specifically in a
 multi-instance/production setup.
 
 - **`ENVIRONMENT=production`** in your real `.env`. This isn't cosmetic —
-  `config.py` uses it to refuse to boot at all if `JWT_SECRET_KEY` or
-  `SUPER_ADMIN_PASSWORD` are still placeholder/weak values. Treat a
-  startup crash here as the app protecting you, not a bug.
+  `config.py` uses it to refuse to boot at all if `JWT_SECRET_KEY` is
+  still a placeholder/weak value. Treat a startup crash here as the app
+  protecting you, not a bug.
 - **Generate real secrets.** `JWT_SECRET_KEY`, `POSTGRES_PASSWORD`,
-  `SUPER_ADMIN_PASSWORD` — none of these should be the values shipped in
-  `.env.example`. Generate a real JWT secret with:
+  and (optionally) `ROOT_ADMIN_BOOTSTRAP_PASSWORD` — none of these should
+  be the values shipped in `.env.example`. Generate a real JWT secret
+  with:
   ```bash
   python3 -c "import secrets; print(secrets.token_hex(32))"
   ```
+  There is deliberately no standing `SUPER_ADMIN_PASSWORD` env var —
+  `config.py`'s comment on `SUPER_ADMIN_USERNAME`/`SUPER_ADMIN_NAME`
+  explains why: the root admin's password is a normal database-backed
+  hash, set once by `alembic/versions/0002_bootstrap_root_admin.py`
+  (either from `ROOT_ADMIN_BOOTSTRAP_PASSWORD` if you set it, or a
+  randomly generated one printed to stderr exactly once if you don't —
+  see README's "Viewing the one-time-generated root admin password"),
+  then rotated afterward the same way any other account's password is.
   Every `backend`, `worker`, and `beat` replica must be given the exact
   SAME `JWT_SECRET_KEY` — if they ever drift apart, tokens issued by one
   replica will fail to verify against another, which (with a load
@@ -315,12 +328,64 @@ rather than the same Docker Compose network.
 ## Health Checks & Monitoring
 
 - `GET /healthz` (see `backend/main.py`) returns a simple liveness check —
-  point your orchestrator's health check / load balancer target group at
-  it for each `backend` replica.
+  no DB dependency, just "is the process up and answering HTTP." Point
+  your orchestrator's *liveness* health check / load balancer target
+  group at it for each `backend` replica.
+- `GET /readyz` (see `backend/main.py` and `database.py`'s
+  `get_schema_status()`) is the separate *readiness* check — it queries
+  the database and compares its current Alembic revision against what
+  this build of the code expects, returning `503` (not `500`) until they
+  match. Point your orchestrator's *readiness* probe here instead of
+  `/healthz` — a liveness failure kills and restarts the container, which
+  is the wrong response to "migrations haven't finished yet" or "the DB
+  had a brief blip," while a readiness failure just holds traffic back
+  from that replica until the next poll succeeds. `infra/main.bicep`
+  wires these up exactly this way for `backend` on Azure Container Apps
+  (`Liveness` → `/healthz`, `Readiness` → `/readyz`), which is what lets
+  a rolling deploy hold traffic back from a new revision until it's
+  actually ready, not just alive — see [Zero-downtime rollout
+  mechanics](#zero-downtime-rollout-mechanics).
 - `db` and `redis` already have `healthcheck:` blocks in
   `docker-compose.yml` that `backend`/`worker`/`beat` all `depends_on:
   condition: service_healthy` — a fresh `docker compose up` won't start
   the app tier racing against a Postgres/Redis that isn't ready yet.
+- `backend/Dockerfile` and `frontend/Dockerfile` now each carry their own
+  image-level `HEALTHCHECK` instruction (`backend` hits `GET /healthz`
+  via Python's stdlib — no curl/wget in that slim image; `frontend` hits
+  `GET /` via BusyBox `wget` — nginx:alpine ships it). Docker Compose
+  automatically uses a service's image `HEALTHCHECK` unless the service
+  overrides it, so `docker compose ps`/`docker ps` now report `backend`
+  and `frontend` as `healthy`/`unhealthy`, not just `running` — the same
+  signal `db`/`redis` always had, extended to the rest of the stack.
+  `frontend`'s own `depends_on: backend: condition: service_healthy`
+  relies on this: nginx won't start proxying `/api/*` until `/healthz`
+  is genuinely answering `200`, not merely until the backend process has
+  started.
+  - `worker` and `beat` build from the SAME image as `backend`
+    (`build: ./backend`) and would otherwise inherit that same
+    HTTP-based check — but neither serves HTTP on port 8000, so
+    `docker-compose.yml` overrides it per-service: `worker` gets the
+    standard `celery -A celery_app inspect ping` (round-trips a real
+    control command through the same Redis broker it consumes from);
+    `beat` explicitly disables the inherited check (`healthcheck:
+    disable: true`) — there's no equivalent liveness probe for a
+    RedBeat-scheduled Beat process (its schedule lives in Redis, not a
+    local `celerybeat-schedule` file to watch), so it correctly falls
+    back to `restart: unless-stopped` for crash recovery, same as it
+    always has.
+- A global "unhandled exception" safety net
+  (`backend/middleware/error_handling.py`) now catches anything that
+  isn't already a deliberate `HTTPException` anywhere in the app,
+  guaranteeing every 500 — not just the ones an endpoint explicitly
+  raises itself — gets a full traceback in the logs (tagged with
+  `request_id`, same as every other log line — see the structured
+  logging bullet below) AND a `{"detail": ..., "request_id": ...}`
+  response body the frontend/support agent can actually correlate back
+  to that log line. Registered as the innermost middleware layer
+  (deliberately NOT `@app.exception_handler(Exception)` — see that
+  file's module docstring for why that alternative would have silently
+  dropped CORS headers from every unhandled 500) so CORS/security
+  headers still apply exactly as they would to any other response.
 - Structured JSON logging is already wired up (`LOG_LEVEL`/`LOG_FORMAT` —
   see `backend/logging_config.py`) with a correlation ID
   (`X-Request-ID`) threaded from nginx through to every backend log line
@@ -381,27 +446,59 @@ and the infrastructure lives in `infra/main.bicep`.
 
 > **If you deployed an earlier version of this architecture** — either the
 > original managed-services design (Flexible Server + Azure Cache + ACR +
-> Key Vault + 4 Container Apps) or the interim single-`app` cost-optimized
-> version (one combined container + `db` + `redis`) — this section
-> describes the current shape, not an incremental change from either. See
-> `infra/main.bicep`'s top-of-file comment for what changed and why each
-> change is safe at this scale.
+> Key Vault + 4 Container Apps), the interim single-`app` cost-optimized
+> version (one combined container + `db` + `redis`), or the 4-Container-App
+> cost-optimized version that ran Postgres as a `db` Container App on Azure
+> Files (**that version doesn't actually work** — Azure Files can't host
+> Postgres's data directory at all, see `infra/main.bicep`'s "WHY POSTGRES
+> IS A MANAGED SERVICE" comment) — this section describes the current
+> shape, not an incremental change from any of them.
 
-### The shape: `frontend`, `backend`, `db`, `redis`
+### The shape: `frontend`, `backend`, `redis` + a managed Postgres
 
-`infra/main.bicep` provisions **four** Container Apps, split so `frontend`
+`infra/main.bicep` provisions **three** Container Apps, split so `frontend`
 and `backend` can scale independently instead of being coupled to the same
-replica count:
+replica count, **plus** a standalone Azure Database for PostgreSQL Flexible
+Server — a managed service, not a Container App:
 
 | Service | What it is | Public? | Scaling |
 |---|---|---|---|
 | `frontend` | `frontend/Dockerfile`, UNCHANGED from local Docker Compose — serves the static build, reverse-proxies `/api/*` to `backend` | Yes — the only public entry point | 0-N, independent of `backend` |
 | `backend` | FastAPI + embedded Celery worker/beat (`backend/Dockerfile`) | No — internal-only | 0-N, independent of `frontend` |
-| `db` | `postgres:16-alpine`, official Docker Hub image | No — internal-only | Pinned to 1 |
 | `redis` | `redis:7-alpine`, official Docker Hub image | No — internal-only | Pinned to 1 |
+| `postgresServer` | Azure Database for PostgreSQL Flexible Server (managed PaaS, **not** a Container App) | No — firewall-restricted to Azure services + optionally your own IP | N/A — no replica concept |
 
 Plus one **Container Apps Job** (`migrate`) that runs `alembic upgrade head`
 against `backend`'s own image, on demand — not a fifth standing service.
+
+**Why Postgres is a managed service, not a Container App:** an earlier
+version of this file ran Postgres as a fourth Container App (`db`) on a
+persistent Azure Files share, the same pattern still used for `backend`'s
+`backup-data`/`export-data` volumes. That fails at container *start*,
+before Postgres ever serves a query:
+
+```
+F chmod: /var/lib/postgresql/data/pgdata: Operation not permitted
+F initdb: error: could not change permissions of directory "/var/lib/postgresql/data/pgdata": Operation not permitted
+```
+
+Azure Files (an SMB/NFS share) doesn't implement real POSIX ownership/
+permission bits, and Postgres's own `initdb` unconditionally `chmod 700`s
+its data directory as a hard-coded safety check. There's no config flag,
+env var, or CPU/memory setting that fixes this — it's a permanent
+incompatibility between Azure Files and any database engine that needs
+POSIX permissions on its data directory, not a resource-sizing problem.
+Every Container Apps persistent-volume type is backed by Azure Files under
+the hood, so no volume type inside Container Apps can host Postgres at all.
+The fix is Azure Database for PostgreSQL Flexible Server: Postgres running
+on Microsoft-managed, Postgres-aware storage instead. This also means you
+now get automated backups with point-in-time restore and managed engine
+patching for the one genuinely stateful, single-writer piece of this stack
+— see `infra/main.bicep`'s top-of-file comment for the full reasoning.
+
+`redis` doesn't hit the Azure Files problem: it runs with `--appendonly no`
+(no on-disk persistence at all), so keeping it as a small Container App
+(not a managed Azure Cache instance) is a safe, cheap trade.
 
 **Why `frontend` and `backend` are split, not combined:** a burst of pure
 asset-browsing traffic used to scale up the same container that also ran
@@ -433,27 +530,31 @@ changes were needed for any of this.
 > lands this under a few dollars a month) with zero code risk. Revisit this
 > only if you're prepared to also do the Bearer-token auth migration.
 
-**Why `redis` is still here, not just three services:** once `backend`
-scales past 1 replica, it needs a *shared* Celery broker (all replicas'
-embedded workers pull from the same queue, not N independent ones), a
-shared cross-replica login rate limiter, and a shared backup-job leader
-lock (so N replicas don't all run pg_dump at 3am simultaneously) — all
-three already built into this codebase, all three requiring Redis. Cutting
-Redis would mean pinning `backend` to exactly 1 replica forever (no real
-autoscaling) or silently breaking all three the first time it scales past
-1. It's a small container (0.25 vCPU/0.5 GiB, no persistent volume, same
-"resets on restart" trade as before) — cheap insurance for correctness.
+**Why `redis` is still a Container App:** once `backend` scales past 1
+replica, it needs a *shared* Celery broker (all replicas' embedded workers
+pull from the same queue, not N independent ones), a shared cross-replica
+login rate limiter, and a shared backup-job leader lock (so N replicas
+don't all run pg_dump at 3am simultaneously) — all three already built into
+this codebase, all three requiring Redis. Cutting Redis would mean pinning
+`backend` to exactly 1 replica forever (no real autoscaling) or silently
+breaking all three the first time it scales past 1. It's a small container
+(0.25 vCPU/0.5 GiB, no persistent volume, "resets on restart" trade), and
+unlike Postgres, it never touches Azure Files in the first place.
 
-**Zero application code changes were needed for the backend/db/redis
-split** — `db` and `redis` communicate with `backend`/`migrate` over the
-exact same `DATABASE_URL`/`REDIS_URL` env vars `config.py`/`celery_app.py`
-already read; only the values differ (see `.env.azure.example`).
+**Zero application code changes were needed for the backend/redis split, or
+for moving Postgres to a managed service** — `postgresServer` and `redis`
+communicate with `backend`/`migrate` over the exact same `DATABASE_URL`/
+`REDIS_URL` env vars `config.py`/`celery_app.py` already read; only the
+values differ (see `.env.azure.example`), and `database.py`'s connection
+pooling (`pool_pre_ping`, `pool_recycle`, `connect_timeout`) was already
+written with a managed Postgres provider's idle-connection behavior in
+mind.
 
 `backup_data` and `export_data` (Compose's named volumes) are Azure Files
 shares, mounted into `backend` at the exact same paths (`/app/backups`,
-`/app/export_results`). Postgres's own data directory is ALSO an Azure
-Files share, mounted into `db` — this is what makes it safe to
-restart/redeploy `db` without losing data.
+`/app/export_results`). Postgres's own data directory lives on
+`postgresServer`'s Microsoft-managed storage — not Azure Files, not
+mounted into any Container App at all.
 
 ### Docker Hub instead of Azure Container Registry
 
@@ -487,16 +588,33 @@ not you ever push an image).
    az provider register --namespace Microsoft.App
    az provider register --namespace Microsoft.OperationalInsights
    az provider register --namespace Microsoft.Storage
+   az provider register --namespace Microsoft.Network
+   az provider register --namespace Microsoft.DBforPostgreSQL
    ```
-   (No `Microsoft.ContainerRegistry`, `Microsoft.DBforPostgreSQL`,
-   `Microsoft.Cache`, or `Microsoft.KeyVault` registration needed.)
+   (`infra-deploy.yml` also registers `Microsoft.DBforPostgreSQL` — and,
+   conditionally, `Microsoft.Insights` if you set `ALERT_EMAIL_ADDRESS` —
+   automatically on every run, so this step is a belt-and-suspenders
+   one-time step, not strictly required before your first deploy. No
+   `Microsoft.ContainerRegistry`, `Microsoft.Cache`, or `Microsoft.KeyVault`
+   registration needed — none of those services are used.)
 
 3. **Create the two resource groups** (or let `infra-deploy.yml` create them
    on first run):
    ```bash
-   az group create --name rg-snipeit-lite-staging --location eastus
-   az group create --name rg-snipeit-lite-prod --location eastus
+   az group create --name rg-snipeit-lite-staging --location eastus2
+   az group create --name rg-snipeit-lite-prod --location eastus2
    ```
+   (`eastus2` is used here instead of `eastus` because brand-new/Free Trial
+   subscriptions are frequently hit with `LocationIsOfferRestricted` on
+   `eastus` specifically for Azure Database for PostgreSQL Flexible Server —
+   `eastus2` and `centralus` are the two regions that most consistently work
+   on Free Trial/Pay-As-You-Go subscriptions. If `eastus2` also gets
+   restricted for your subscription, try `centralus` next — there's no way
+   to know in advance which region a given subscription is cleared for, so
+   this is trial and error. Whatever you pick, use the same region for both
+   commands above and for the `AZURE_LOCATION` secret in step 5, and keep
+   `POSTGRES_SKU_NAME` on a `Standard_B*` (Burstable) tier — Burstable has
+   the widest regional availability of the three Flexible Server tiers.)
 
 4. **Set up OIDC federated login** for GitHub Actions: an Azure AD App
    Registration, Contributor on both resource groups, a federated
@@ -510,22 +628,38 @@ not you ever push an image).
    | Secret | Scope | Notes |
    |---|---|---|
    | `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` | per-environment | From the App Registration in step 4 |
-   | `AZURE_LOCATION` | repo | e.g. `eastus` |
+   | `AZURE_LOCATION` | repo | e.g. `eastus2` — see the note on region restrictions in step 3 above; `centralus` is the fallback if `eastus2` is also restricted on your subscription |
    | `STAGING_RESOURCE_GROUP` / `PROD_RESOURCE_GROUP` | repo | The two resource group names from step 3 |
    | `DOCKERHUB_USERNAME` | repo | From step 1 |
    | `DOCKERHUB_TOKEN` | repo | From step 1 |
-   | `POSTGRES_PASSWORD` | per-environment | Generate with `openssl rand -hex 16`, different per environment |
-   | `REDIS_PASSWORD` | per-environment | Same, different per environment |
+   | `POSTGRES_PASSWORD` | per-environment | Generate with `openssl rand -base64 24`, **not** `openssl rand -hex ...` — Azure Database for PostgreSQL Flexible Server requires 8-128 characters with at least 3 of {uppercase, lowercase, digit, symbol}; hex output is only digits + a-f (2 categories) and will be rejected. Different value per environment. |
+   | `REDIS_PASSWORD` | per-environment | `openssl rand -hex 16` is fine here — no complexity rule, this isn't Flexible Server. Different per environment. |
    | `JWT_SECRET_KEY` | per-environment | Generate with `openssl rand -hex 32` |
-   | `SUPER_ADMIN_PASSWORD` | per-environment | The initial Super Admin login |
+   | `ROOT_ADMIN_BOOTSTRAP_PASSWORD` | per-environment | Optional — the root admin's initial password. Leave unset to have `0002_bootstrap_root_admin.py` generate a random one and print it once instead (see README's "Viewing the one-time-generated root admin password"). Note: the root admin's username/display name (`SUPER_ADMIN_USERNAME`/`SUPER_ADMIN_NAME`) aren't wired as GitHub secrets at all here — `infra/main.bicep` hardcodes them to `superadmin`/`Super Admin`; edit the bicep file directly if you want different values. |
    | `CUSTOM_DOMAIN` | per-environment | Optional — leave unset to use the generated `*.azurecontainerapps.io` FQDN |
+   | `NOTIFICATIONS_ENABLED` | per-environment | Optional, string `"true"`/`"false"` — master switch for all outbound email. Leave unset (defaults to off) until the four `SMTP_*` secrets below are set. See [POST_DEPLOYMENT.md](POST_DEPLOYMENT.md) for the full walkthrough. |
+   | `SMTP_HOST` / `SMTP_USERNAME` / `SMTP_PASSWORD` / `SMTP_FROM_EMAIL` | per-environment | Optional — required together if `NOTIFICATIONS_ENABLED=true`. Any RFC 5321 SMTP server works (your own Postfix, SendGrid, Mailgun, AWS SES's SMTP endpoint, ...) — no vendor-specific SDK. See [POST_DEPLOYMENT.md](POST_DEPLOYMENT.md). |
+   | `ADMIN_NOTIFICATION_EMAILS` | per-environment | Optional — comma-separated extra recipients for extension-request alerts, on top of Admins/Managers/the Super Admin, who are covered automatically. |
+   | `GDRIVE_BACKUP_ENABLED` | per-environment | Optional, string `"true"`/`"false"` — leave unset (defaults to off, local-disk-only backups) until the four `GDRIVE_*` secrets below are set. See [POST_DEPLOYMENT.md](POST_DEPLOYMENT.md). |
+   | `GDRIVE_OAUTH_CLIENT_ID` / `GDRIVE_OAUTH_CLIENT_SECRET` / `GDRIVE_OAUTH_REFRESH_TOKEN` | per-environment | Optional — required together if `GDRIVE_BACKUP_ENABLED=true`. Produced by running `backend/scripts/gdrive_oauth_setup.py` **once, on your own machine, not in CI** — see [POST_DEPLOYMENT.md](POST_DEPLOYMENT.md). |
+   | `GDRIVE_FOLDER_ID` | per-environment | Optional — the destination Drive folder's ID (from its URL), required alongside the three secrets above. |
+   | `ALERT_EMAIL_ADDRESS` | per-environment | Optional — leave unset to skip creating any alerting resources (no cost, no action group). Set it to wire up the three Azure Monitor scheduled query alerts (backend error-rate spike, `/readyz` failing, daily backup missing) from `infra/main.bicep` to that address — see [SRE_STRATEGY.md](SRE_STRATEGY.md) section 2. **Leave this unset on a brand-new environment's first-ever `infra-deploy.yml` run.** The three alert rules query the `ContainerAppConsoleLogs_CL` table, which Azure only creates once a log line has actually been ingested — on a fresh Log Analytics workspace it doesn't exist yet, and the deployment fails with `Failed to resolve table or column expression named 'ContainerAppConsoleLogs_CL'` if you try to create the rules first. Deploy once with this unset, let `backend`/`frontend` run for a few minutes (or serve one request), then set this secret and re-run `infra-deploy.yml` for the same environment to add the alert rules on top of the already-running infra. |
+
+   Optionally, also set two repo-level **Variables** (Settings → Secrets
+   and variables → Actions → **Variables** tab, not Secrets — these aren't
+   sensitive) to size the Flexible Server: `POSTGRES_SKU_NAME` (default
+   `Standard_B1ms` if unset) and `POSTGRES_STORAGE_GB` (default `32` if
+   unset). Most deployments never need to touch these.
 
 6. **Run `infra-deploy.yml` manually once per environment** (Actions tab →
    "Deploy Azure Infrastructure" → Run workflow → choose `staging`, then run
    it again for `production`). This provisions everything: Log Analytics,
-   Storage + Azure Files shares, the Container Apps Environment, and all
-   four Container Apps (`backend`/`frontend` start on a placeholder
-   `latest` tag — the next step gives them real images).
+   Storage + Azure Files shares, the Container Apps Environment, all three
+   Container Apps (`backend`/`frontend` start on a placeholder `latest` tag
+   — the next step gives them real images), and the Azure Database for
+   PostgreSQL Flexible Server. The Flexible Server takes noticeably longer
+   to provision than the Container Apps (several minutes is normal) — this
+   is expected, not a stuck deployment.
 
 7. **Allow Actions to open pull requests** (Settings → Actions → General →
    Workflow permissions → check **"Allow GitHub Actions to create and
@@ -622,28 +756,73 @@ ask if you want it wired in.
 
 
 
-If you're moving off the original managed-services design (Azure Database
-for PostgreSQL Flexible Server):
+If you're moving off an earlier version of this repo that ran Postgres as a
+self-hosted `db` Container App on Azure Files — the version this section
+replaces, and the one that doesn't actually work (see "The shape" section
+above for why) — here's how to get your data onto the new
+`postgresServer` (Azure Database for PostgreSQL Flexible Server):
 
 ```bash
-# 1. Dump from the old Flexible Server
+# 1. Get a temporary shell into the OLD `db` container app (internal-only
+#    ingress, so this needs `az containerapp exec`, not a direct psql
+#    connection from your machine) and dump from inside that session.
+az containerapp exec --name db --resource-group rg-snipeit-lite-prod --command /bin/sh
+# (inside the container:)
+pg_dump -U snipeit -d asset_db --format=custom --file=/tmp/migration.dump
+# then copy /tmp/migration.dump out of the container -- e.g. `az
+# containerapp exec` doesn't support file transfer directly, so the
+# simplest path is usually: base64-encode it and paste it out, or run this
+# whole dump/restore pair from a `backend` shell instead (see step 2) since
+# `backend` already has network access to both the old `db` app (same
+# environment, internal DNS) and the new `postgresServer` (public FQDN).
+
+# 2. Simpler in practice: run BOTH pg_dump and pg_restore from a `backend`
+#    shell (backend/Dockerfile already has pg_dump/psql installed) after
+#    infra-deploy.yml has created `postgresServer` alongside the still-live
+#    old `db` app -- no manual file transfer needed, since both source and
+#    destination are reachable in one place.
+az containerapp exec --name backend --resource-group rg-snipeit-lite-prod --command /bin/sh
+# (inside that shell:)
+pg_dump "postgresql://snipeit:<old-db-password>@db:5432/asset_db" \
+  --format=custom --file=/tmp/migration.dump
+pg_restore --no-owner --no-privileges \
+  -d "postgresql://snipeit:<new-postgres-password>@<server-name>.postgres.database.azure.com:5432/asset_db?sslmode=require" \
+  /tmp/migration.dump
+
+# 3. Once verified, remove the old `db` Container App (infra-deploy.yml
+#    already stopped managing it once infra/main.bicep no longer declares
+#    it, but ARM doesn't delete resources it no longer manages on its own):
+az containerapp delete --name db --resource-group rg-snipeit-lite-prod --yes
+# Also safe to delete the now-unused `postgres-data` Azure Files share
+# (Storage account -> File shares in the portal, or `az storage share
+# delete`) once you've confirmed the restore succeeded.
+```
+
+If you're instead moving off the *original* managed-services design (an
+even earlier Flexible Server + Azure Cache + ACR + Key Vault + 4
+Container Apps shape) straight onto this version: your data is already on
+a Flexible Server, just possibly a different one (different name/SKU) than
+`infra/main.bicep` provisions now. Either point `postgresPassword`/a
+manually-edited `postgresServer` name at your existing server (skip
+provisioning a new one), or `pg_dump`/`pg_restore` between the two Flexible
+Servers directly — both reachable over their public FQDNs, no
+`containerapp exec` needed for either side:
+
+```bash
 pg_dump "postgresql://<user>:<pass>@<old-server>.postgres.database.azure.com/asset_db?sslmode=require" \
   --format=custom --file=migration.dump
-
-# 2. Get a temporary shell into the new `db` container app (internal-only by design)
-az containerapp exec --name db --resource-group rg-snipeit-lite-prod --command /bin/sh
-
-# 3. Restore through that session (or copy the dump in and run pg_restore inside `db` directly)
-pg_restore --no-owner --no-privileges -d asset_db migration.dump
+pg_restore --no-owner --no-privileges \
+  -d "postgresql://<user>:<pass>@<new-server>.postgres.database.azure.com/asset_db?sslmode=require" \
+  migration.dump
 ```
 
 If you're moving off the interim single-`app` version of this
 cost-optimized design (one combined container instead of separate
-`backend`/`frontend`): no database migration needed — `db`/`redis` are
-unchanged. Just run `infra-deploy.yml` against the new `infra/main.bicep`
-(it will remove the old `app` Container App and create `backend`/
-`frontend` in its place), then push to `main`/`develop` to populate both
-new apps' images.
+`backend`/`frontend`, but still `db`/`redis` as Container Apps): follow the
+`db` → `postgresServer` migration steps above first, then run
+`infra-deploy.yml` against the new `infra/main.bicep` (it will remove the
+old `app` Container App and create `backend`/`frontend` in its place), then
+push to `main`/`develop` to populate both new apps' images.
 
 ### The pipeline, branch by branch
 
@@ -666,15 +845,18 @@ new apps' images.
   `frontend`'s `/` AND `/api/auth/me` (proving the whole chain — nginx's
   reverse proxy actually reaching `backend` — works, not just that
   `frontend` serves static files) — a failure triggers automatic rollback
-  of both apps to their previously-deployed images. `backend` runs with min
-  replicas 1 in production by default; `frontend` still scales to zero even
-  in production (a cold start on static/proxy responses is much shorter
-  than on `backend`'s Python process). `deploy-azure-production.yml` itself
+  of both apps to their previously-deployed images. Both `backend` AND
+  `frontend` run with min replicas 1 in production by default (see
+  `infra-deploy.yml`'s "Resolve replica floors" step) — zero cold starts
+  anywhere in the production request path, at the cost of two always-on
+  replicas instead of one. `deploy-azure-production.yml` itself
   has no `push` trigger of its own anymore — it only runs when `release.yml`
   calls it, or via manual `workflow_dispatch` (see [Rollback](#rollback)).
-- **`db` and `redis` are never touched by either pipeline** — fixed
-  official images, only change when `infra/main.bicep` itself changes
-  (re-run `infra-deploy.yml` manually).
+- **`redis` and `postgresServer` are never touched by either pipeline** —
+  `redis` runs a fixed official image, only changing when
+  `infra/main.bicep` itself changes (re-run `infra-deploy.yml` manually);
+  `postgresServer` is a managed PaaS resource with no image or deploy step
+  at all.
 
 ### Zero-downtime rollout mechanics
 
@@ -683,8 +865,9 @@ separately, `frontend`) alongside the old ones, waits for each app's
 readiness probe to pass, then shifts traffic and removes the old replicas —
 no separate load balancer step needed. `backend` is always updated before
 `frontend` in the pipeline, so `frontend`'s proxy target is already correct
-by the time `frontend` itself rolls out. `db`/`redis` are pinned to exactly
-1 replica always and are never part of a rolling update.
+by the time `frontend` itself rolls out. `redis` is pinned to exactly 1
+replica always and is never part of a rolling update; `postgresServer`
+isn't a Container App at all, so the concept doesn't apply to it either.
 
 ### Rollback
 
@@ -775,15 +958,22 @@ preference:
   `frontendMinReplicas`/`frontendMaxReplicas`), independent of `backend`.
   Static/proxy responses are cheap, so its per-replica concurrency
   threshold is set higher than `backend`'s (see `infra/main.bicep`).
-- **`db` and `redis`**: pinned to exactly 1 replica, always. Do not raise
-  this — Postgres is single-writer and there's no clustering/failover story
-  here; this is the explicit trade for the cost savings. If you outgrow a
-  single-instance Postgres container, move `db` back to a managed service
-  rather than trying to scale the container itself.
+- **`redis`**: pinned to exactly 1 replica, always. Do not raise this —
+  there's no clustering here, and the Celery beat schedule assumes a
+  single broker instance; this is the explicit trade for the cost savings.
+- **`postgresServer`**: not a Container App, so replica counts don't apply.
+  Vertical scaling instead — bump `postgresSkuName` (e.g. `Standard_B1ms`
+  → `Standard_B2s`) and/or `postgresStorageGb` in `infra/main.bicep` (or
+  via the `POSTGRES_SKU_NAME`/`POSTGRES_STORAGE_GB` GitHub Variables,
+  see the one-time setup section above), then re-run `infra-deploy.yml`.
+  Storage can only be **increased**, never decreased, so don't over-size
+  it "just in case." If you outgrow Burstable entirely (sustained CPU, not
+  just occasional bursts), switch `postgresSkuTier` to `GeneralPurpose`
+  and `postgresSkuName` to a matching D-series size.
 
 ### Monitoring
 
-All four Container Apps' console and system logs flow into one Log
+All three Container Apps' console and system logs flow into one Log
 Analytics workspace (`infra/main.bicep`'s `logAnalytics` resource, 30-day
 retention). Query it from the Azure Portal (Log Analytics workspace →
 Logs) or the CLI:
@@ -795,34 +985,47 @@ az monitor log-analytics query \
 For live tailing without Log Analytics at all: `az containerapp logs show
 --name backend --resource-group rg-snipeit-lite-prod --follow` (or
 `--name frontend` for nginx's access/error logs). There is no Application
-Insights in this architecture.
+Insights in this architecture. `postgresServer` has its own metrics/logs
+surface separate from Log Analytics — Azure Portal → your Flexible Server
+→ Monitoring, or:
+```bash
+az monitor metrics list --resource <postgresServer resource ID> \
+  --metric cpu_percent,memory_percent,storage_percent --output table
+```
 
 ### Cost
 
-East US pricing, ballpark — always check the
+East US 2 pricing, ballpark — always check the
 [Azure Pricing Calculator](https://azure.microsoft.com/pricing/calculator/)
 before committing:
 
-| Component | This architecture (4 apps) | Interim single-`app` version | Original managed-services version |
+| Component | This architecture | Interim single-`app` version (also self-hosted Postgres — doesn't work) | Original managed-services version |
 |---|---|---|---|
-| Database | `db` container, 0.25 vCPU/0.5 GiB, 24/7 | same | Flexible Server, Burstable B1ms |
+| Database | Azure Database for PostgreSQL Flexible Server, Burstable B1ms (1 vCore/2GiB) + 32 GiB storage | `db` container, 0.25 vCPU/0.5 GiB, 24/7 (fails at boot — Azure Files can't host Postgres, see "The shape" above) | same Flexible Server, Burstable B1ms |
 | Cache/broker | `redis` container, 0.25 vCPU/0.5 GiB, 24/7 | same | Azure Cache for Redis, Basic C0 |
 | App compute | `backend` (0-N) + `frontend` (0-N), independent scaling | one combined `app` (0-N) | 4 separate always-on Container Apps |
 | Registry | Docker Hub, 2 images (free) | Docker Hub, 1 image (free) | Azure Container Registry, Basic |
 | Secrets | Container Apps secrets (free) | same | Key Vault |
 | Observability | Log Analytics only | same | Log Analytics + Application Insights |
-| **Rough monthly total** | **~US$10-22/mo** | **~US$10-20/mo** | **~US$50-100+/mo** |
+| **Rough monthly total** | **~US$20-35/mo** | N/A — doesn't actually run | **~US$50-100+/mo** |
 
-Splitting `frontend` out adds roughly US$0-2/month over the single-`app`
-version (one more small scale-to-zero container), in exchange for
-`frontend` and `backend` each scaling to their own actual load instead of
-both being sized for whichever is busier — often close to a wash in
-practice, and sometimes a net win if the two workloads' traffic shapes
-differ a lot. The real cost floor either way is `db` + `redis` running 24/7
-at the smallest possible size, since they're stateful and can't scale to
-zero (partially offset by the Container Apps Consumption plan's free
-monthly grant: 180,000 vCPU-seconds + 360,000 GiB-seconds + 2M requests,
-shared across all four apps).
+The Flexible Server is the one component here with a real fixed floor —
+roughly US$12-15/month for the smallest Burstable SKU (1 vCore/2GiB) plus
+a few dollars for 32 GiB of storage, billed 24/7 regardless of traffic,
+since Flexible Server has no scale-to-zero tier. `redis` adds a small
+additional 24/7 floor (0.25 vCPU/0.5 GiB). Everything else —
+`backend`/`frontend`, Storage/Azure Files, Log Analytics — keeps the
+scale-to-zero/pay-for-what-you-use profile this design has always had
+(partially offset by the Container Apps Consumption plan's free monthly
+grant: 180,000 vCPU-seconds + 360,000 GiB-seconds + 2M requests, shared
+across `backend`/`frontend`/`redis`).
+
+Compared to the *original* managed-services design (Flexible Server +
+Azure Cache + ACR + Key Vault + 4 always-on Container Apps), this version
+keeps the one piece that has no working scale-to-zero substitute
+(Flexible Server) and cuts the rest — Azure Cache, ACR Basic, and Key
+Vault each had their own fixed monthly floor on top of an already
+always-on compute layer.
 
 **Levers you can pull for even more savings:**
 - `backendMinReplicas=0` on production too (small extra cold-start latency
@@ -831,27 +1034,38 @@ shared across all four apps).
 - Skip Log Analytics entirely (remove `appLogsConfiguration` from
   `infra/main.bicep`) if `az containerapp logs show --follow`-only
   visibility is enough for you.
-- Reduce `postgresVolumeQuotaGb`/backup/export share quotas if your data
-  footprint is small (Azure Files bills by GB actually used, so this mostly
-  just caps a ceiling).
+- Reduce backup/export Azure Files share quotas if your data footprint is
+  small (Azure Files bills by GB actually used, so this mostly just caps a
+  ceiling, not the actual bill).
+- Keep `postgresGeoRedundantBackup=false` (the default) unless your
+  recovery plan specifically needs to survive a full regional outage —
+  geo-redundancy roughly doubles backup storage cost.
+- `postgresStorageGb` can only go up, never down, so start at the 32 GiB
+  minimum rather than over-provisioning.
 
 ### Managing Environment Variables & Secrets Safely
 
 There is no Key Vault in this architecture. Sensitive values
-(`JWT_SECRET_KEY`, `SUPER_ADMIN_PASSWORD`, `DATABASE_URL`, `REDIS_URL`,
-`SMTP_PASSWORD`, and the Docker Hub token if using a private repo) are
-stored as **Container Apps secrets** on `backend`/`migrate` — encrypted at
-rest, referenced by `secretRef`, never shown in `az containerapp show`'s
-output or GitHub Actions logs. `frontend` carries no secrets at all — it
-never touches the database, Redis, JWTs, or SMTP directly, only
-`BACKEND_HOST`/`BACKEND_PORT`/`ENABLE_API_DOCS` as plain env vars.
+(`JWT_SECRET_KEY`, `ROOT_ADMIN_BOOTSTRAP_PASSWORD`, `DATABASE_URL`,
+`REDIS_URL`, `SMTP_PASSWORD`, and the Docker Hub token if using a private
+repo) are stored as **Container Apps secrets** on `backend`/`migrate` —
+encrypted at rest, referenced by `secretRef`, never shown in
+`az containerapp show`'s output or GitHub Actions logs. `frontend` carries
+no secrets at all — it never touches the database, Redis, JWTs, or SMTP
+directly, only `BACKEND_HOST`/`BACKEND_PORT`/`ENABLE_API_DOCS` as plain
+env vars. `postgresServer`'s own administrator password is a Flexible
+Server property, not a Container Apps secret — Azure stores/manages it as
+part of the server resource itself.
 
-To rotate a secret (e.g. `POSTGRES_PASSWORD`): update the corresponding
-GitHub secret, then re-run `infra-deploy.yml` for that environment — Bicep
-deployments are idempotent, so this updates the secret on `db`, `redis`,
-`backend`, and `migrate` consistently in one pass. Don't rotate by
-hand-editing one container app's secrets directly; the others will drift
-out of sync.
+To rotate `POSTGRES_PASSWORD`: update the GitHub secret, then re-run
+`infra-deploy.yml` for that environment — this updates both the Flexible
+Server's administrator password AND the `DATABASE_URL` secret on
+`backend`/`migrate` in one pass (Bicep deployments are idempotent). Don't
+rotate by hand-editing the Flexible Server's password directly in the
+Portal/CLI without also updating the GitHub secret — `backend` would keep
+using the old, now-invalid `DATABASE_URL` until the next `infra-deploy.yml`
+run overwrites it, causing a connection outage in the meantime. Same
+caution applies to `REDIS_PASSWORD`.
 
 ## Troubleshooting
 
@@ -882,7 +1096,7 @@ out of sync.
   dashboard) to confirm the backup exists, rather than grepping one
   specific replica's logs.
 
-### Azure Container Apps specific (cost-optimized 4-app architecture)
+### Azure Container Apps specific (cost-optimized architecture)
 
 - **`az containerapp update` succeeds but it still serves old behavior** —
   check `az containerapp revision list --name backend` (or `--name
@@ -898,24 +1112,52 @@ out of sync.
   env vars are still `backend`/`8000` (see `infra/main.bicep`'s
   `frontendApp` resource) — there is no public hostname for `backend` at
   all in this architecture, nginx is the only thing that reaches it.
-- **`backend` can't reach Postgres: connection refused / timeout** — `db`
-  is internal-ingress-only by design; confirm it's actually `Healthy`
-  (`az containerapp revision list --name db`) rather than a networking
-  issue. Also confirm `DATABASE_URL` is hitting the short internal name
-  `db:5432`, not a public hostname.
+- **`backend`/`migrate` can't reach Postgres: connection refused / timeout
+  / "no pg_hba.conf entry for host"** — `postgresServer` is a standalone
+  managed resource reached over its public FQDN
+  (`<server>.postgres.database.azure.com`), not the short in-environment
+  DNS name used for `redis`/`backend`. Check:
+  1. `az postgres flexible-server show --name <server-name> --resource-group
+     <rg> --query state` — should be `Ready`.
+  2. The `AllowAllAzureServicesAndResourcesWithinAzureIps` firewall rule
+     still exists (`az postgres flexible-server firewall-rule list --name
+     <server-name> --resource-group <rg>`) — this is what lets
+     `backend`/`migrate` (which have no static outbound IP on the
+     Consumption plan) reach the server at all. It should never need manual
+     recreation from `infra/main.bicep` alone; if it's missing, something
+     bypassed the Bicep template.
+  3. `DATABASE_URL` includes `?sslmode=require` and points at the FQDN, not
+     a bare hostname like `db` (a leftover from an old self-hosted `db`
+     Container App config that no longer exists in this architecture).
+  4. If you're debugging from your own machine rather than from inside
+     `backend`, you'll need your own IP added via `infra/main.bicep`'s
+     `postgresAdminClientIp` parameter (redeploy after setting it) — the
+     "Allow Azure services" rule above only covers Azure's own backbone,
+     not arbitrary internet clients.
 - **`backend` starts but every login fails with a Redis error** — same
-  check as above but for `redis:6379`; also confirm the `REDIS_PASSWORD`
-  secret used to build `REDIS_URL` matches what `redis`'s
-  `--requirepass` was actually started with (a password rotation on one
-  side without redeploying the other will break this silently — always
-  change it via `infra/main.bicep`'s `redisPassword` parameter and
-  redeploy both, not by hand-editing one container app's env vars).
-- **Postgres data is gone after a redeploy** — check that the
-  `postgres-data` Azure Files share still has content
-  (`az storage file list --share-name postgres-data ...`) and that `db`'s
-  volume mount didn't get dropped from a hand-edited revision. This should
-  never happen from `infra/main.bicep` alone — if it does, it's a strong
-  signal something bypassed the Bicep template.
+  general check as above but for `redis:6379`, which IS reached over the
+  short in-environment DNS name (it's still a Container App, unlike
+  Postgres); also confirm the `REDIS_PASSWORD` secret used to build
+  `REDIS_URL` matches what `redis`'s `--requirepass` was actually started
+  with (a password rotation on one side without redeploying the other will
+  break this silently — always change it via `infra/main.bicep`'s
+  `redisPassword` parameter and redeploy both, not by hand-editing one
+  container app's env vars).
+- **Postgres password rejected: "password does not meet complexity
+  requirements"** — Azure Database for PostgreSQL Flexible Server requires
+  8-128 characters with at least 3 of {uppercase, lowercase, digit,
+  symbol}. `openssl rand -hex ...` output is only digits + `a`-`f` (2
+  categories) and will always be rejected — use `openssl rand -base64 24`
+  instead (see the one-time setup section's GitHub secrets table above).
+- **`initdb`/`chmod: Operation not permitted` in a `db` container's
+  logs** — you're looking at logs from an old, no-longer-declared self-
+  hosted `db` Container App (Postgres on Azure Files, which does not and
+  cannot work — see "The shape" section above for the full explanation).
+  This isn't something to fix in place; migrate that data onto
+  `postgresServer` instead (see "moving off an earlier version" above)
+  and then delete the old `db` Container App once the migration is
+  verified — `az containerapp delete --name db --resource-group <rg>
+  --yes`.
 - **`migrate` job succeeds instantly with no actual migration applied** —
   usually means the job is still pointed at an old `backend` image tag.
   `deploy-azure-production.yml`'s migrate job always runs
@@ -923,11 +1165,19 @@ out of sync.
   `az containerapp job start` for exactly this reason; if you're triggering
   the job manually, do the same.
 - **First request of the day is slow** — expected on staging (both apps
-  default to min replicas 0) and, for `frontend` specifically, even on
-  production (it defaults to min replicas 0 there too — its cold start is
-  short). If `backend`'s cold start is the slow part on production, confirm
-  `backendMinReplicas` is actually `1` there (small extra cost, see the
-  Cost section above).
+  default to min replicas 0, pure cold-start-on-idle tradeoff). Should NOT
+  happen on production — both `backendMinReplicas` and `frontendMinReplicas`
+  default to `1` there (see `infra-deploy.yml`'s "Resolve replica floors"
+  step), so neither app should ever scale to zero. `postgresServer` itself
+  has no cold start either way — Flexible Server has no scale-to-zero tier,
+  it's always running. If you're seeing a slow first request on production
+  anyway, confirm both `backendMinReplicas`/`frontendMinReplicas` actually
+  show `1` in the deployed environment (`az containerapp show --name
+  backend --query properties.template.scale.minReplicas`, same for
+  `frontend`) — a manual `az deployment group create` that skips
+  `infra-deploy.yml` and its defaults, or a bicep default left as-is, would
+  silently reintroduce a cold start (small extra cost either way to keep
+  both warm, see the Cost section above).
 - **`/docs` (Swagger UI) 404s even with `ENABLE_API_DOCS=true`** — this
   flag has to match on BOTH `backend` (gates FastAPI's own docs routes) and
   `frontend` (gates nginx's passthrough route in

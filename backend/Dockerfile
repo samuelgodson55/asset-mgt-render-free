@@ -102,6 +102,50 @@ COPY docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh /app/start.sh
 ENTRYPOINT ["/docker-entrypoint.sh"]
 
+# ZERO-DOWNTIME: without this, nothing running the container (Docker
+# Compose, Container Apps, Kubernetes, Render, ...) has any way to detect
+# "the process is up but hung/deadlocked" -- e.g. stuck inside a database
+# call that never times out, a poisoned event loop, a livelocked thread
+# pool -- distinct from "the process crashed", which restart policies
+# already handle fine on their own. A hung-but-still-running container
+# keeps its port open and its PID alive, so naive process-liveness checks
+# see nothing wrong, while every real request against it just hangs.
+#
+# Hits GET /healthz (see main.py's health_check() docstring) -- the pure
+# LIVENESS probe with zero database dependency, deliberately NOT /readyz
+# (see that same docstring for why: a slow/unreachable database should
+# stop traffic being routed here, not get this container killed and
+# restarted, which wouldn't fix a database problem anyway). Azure
+# Container Apps' own liveness probe (infra/main.bicep) already points at
+# /healthz for the SAME reason; this HEALTHCHECK is what gives that same
+# signal to `docker compose ps`/`docker ps` and any platform (like plain
+# Docker Compose) that relies on the image's own HEALTHCHECK instead of a
+# separately-configured platform-level probe.
+#
+# No curl/wget in this slim image (see the postgresql-client apt-get step
+# above -- deliberately minimal), so this uses Python's own stdlib
+# (already installed, zero extra image size) instead of adding a new
+# package just for this. Exits non-zero (crashes the one-liner) on any
+# connection error, timeout, or non-2xx status -- all of which Docker
+# treats as "unhealthy".
+#   --interval=30s   check every 30s once healthy (frequent enough to
+#                     catch a hang quickly, not so frequent it adds
+#                     meaningful load)
+#   --timeout=5s      /healthz has zero I/O of its own (see its docstring)
+#                     -- a real response taking anywhere near this long
+#                     already indicates the event loop is unhealthy
+#   --start-period=15s gives the app time to actually finish importing/
+#                     starting (init_db()/seed_db() when enabled, backup
+#                     scheduler thread, etc. -- see main.py's on_startup())
+#                     before a slow-but-legitimate boot counts as a
+#                     failure
+#   --retries=3       three consecutive failures (~90s of genuinely bad
+#                     responses at the interval above) before Docker
+#                     marks the container unhealthy -- tolerates one-off
+#                     blips without flapping
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD python -c "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3).status == 200 else 1)" || exit 1
+
 # start.sh picks the right uvicorn invocation for ENVIRONMENT at container
 # start (no --reload + multiple workers for production, --reload for
 # development/local) -- see that script's own header comment for the full

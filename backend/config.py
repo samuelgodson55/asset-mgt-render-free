@@ -565,6 +565,36 @@ class Settings(BaseSettings):
     # a Shared Drive, per the docstring above.
     BACKUP_GDRIVE_FOLDER_ID: str = ""
 
+    # --- Audit log partition maintenance (services/audit_partition_service.py) --
+    # `audit_logs` is a native Postgres table PARTITIONED BY RANGE on
+    # `timestamp`, one partition per calendar year (see
+    # alembic/versions/0010_partition_audit_logs.py's module docstring for
+    # the full "why"). These two settings control the ONE automated part
+    # of that system -- keeping future years' partitions pre-created so
+    # writes never fail once the calendar rolls over. They do NOT control
+    # retiring old years: that stays a deliberate, manual, once-a-year (or
+    # "whenever disk space actually requires it") DB-ops action -- see
+    # SRE_STRATEGY.md's "Audit log partitioning & annual archive" section
+    # for that runbook. Nothing in this app ever drops a partition on its
+    # own.
+    #
+    # How many years of FUTURE partitions to keep pre-created at all times,
+    # on top of the current year -- e.g. 2 means "this year, plus the next
+    # two" always exist before they're needed. A generous buffer costs
+    # nothing (an empty partition is just a few hundred bytes of catalog
+    # metadata) and means the scheduled check below can miss a run or two
+    # (a redeploy, Redis being down, etc.) without ever risking an insert
+    # falling through to the DEFAULT catch-all partition (see that
+    # migration's docstring for why the default partition exists as a
+    # safety net even so).
+    AUDIT_PARTITION_YEARS_AHEAD: int = 2
+    # How often (in hours) the worker checks that the partitions above
+    # still exist and creates any that don't -- see
+    # tasks/audit_partition_tasks.py and celery_app.py's beat_schedule.
+    # Cheap and idempotent (a no-op almost every time it runs), so a
+    # once-a-day cadence is generous, not aggressive.
+    AUDIT_PARTITION_CHECK_INTERVAL_HOURS: float = 24
+
     # Tell Pydantic Settings v2 to also look for a `.env` file (useful when
     # running the backend directly with `uvicorn main:app` outside Docker,
     # where environment variables aren't injected by docker-compose.yml).

@@ -65,9 +65,11 @@ from fastapi.openapi.utils import get_openapi
 from database import init_db, seed_db, get_schema_status
 from config import settings
 from logging_config import configure_logging
+from middleware.error_handling import UnhandledExceptionMiddleware
 from middleware.request_context import RequestContextMiddleware
 from middleware.rate_limit import RateLimitMiddleware
 from middleware.security_headers import SecurityHeadersMiddleware
+from middleware.clean_urls import CleanUrlsMiddleware
 
 from api.auth_api import router as auth_router
 from api.assets_api import router as assets_router
@@ -197,10 +199,25 @@ def on_startup() -> None:
 #                                early as possible, so even a request that
 #                                gets rate-limited below still logs with a
 #                                proper request_id and returns X-Request-ID)
-#   RateLimitMiddleware         (added first -> innermost: only cares about
-#                                POST /auth/login; every other path is a
-#                                no-op pass-through)
+#   RateLimitMiddleware         (only cares about POST /auth/login; every
+#                                other path is a no-op pass-through)
+#   UnhandledExceptionMiddleware (added first -> INNERMOST, wrapping the
+#                                actual route dispatch directly -- see
+#                                middleware/error_handling.py's module
+#                                docstring for why this has to be the
+#                                innermost layer rather than a plain
+#                                `@app.exception_handler(Exception)`:
+#                                FastAPI/Starlette routes a handler
+#                                registered for the bare `Exception` class
+#                                to the OUTERMOST ServerErrorMiddleware --
+#                                past CORSMiddleware entirely -- so a 500
+#                                built that way would ship with no CORS
+#                                headers. Being innermost here means every
+#                                other layer above still sees a normal
+#                                response and adds its headers exactly as
+#                                it would for any other request.)
 #   -> your route handlers
+app.add_middleware(UnhandledExceptionMiddleware)
 app.add_middleware(
     RateLimitMiddleware,
     # BUG FIX: every router below is mounted with `prefix="/api"` (see
@@ -387,16 +404,27 @@ app.include_router(notifications_router, prefix="/api")
 # the order they're registered, so every "/api/*" route (and /docs/etc.
 # above) is matched first and this StaticFiles mount only ever handles
 # whatever's left over -- the actual frontend/*.html, css/*, and js/* files.
-# `html=True` makes "/" itself resolve to frontend/index.html; every other
-# page (admin.html, manager.html, staff.html, customer.html) is requested
-# by its exact filename from the frontend's own <a>/redirect links, so no
-# further SPA-style fallback routing is needed here.
+# `html=True` makes "/" itself resolve to frontend/index.html. Every other
+# page is requested by its CLEAN url (/admin, /manager, /staff, /customer
+# -- see frontend/js/auth.js) rather than its raw filename; CleanUrlsMiddleware,
+# added just below, rewrites that clean path to the real *.html filename
+# before this mount ever sees the request.
 if settings.SERVE_FRONTEND:
     import os
 
     from fastapi.staticfiles import StaticFiles
 
     if os.path.isdir(settings.FRONTEND_DIR):
+        # Clean URLs (see middleware/clean_urls.py): rewrites "/admin" ->
+        # "admin.html" before it reaches the StaticFiles mount below, and
+        # 301-redirects any lingering "/admin.html"-style link to "/admin".
+        # Registered here (rather than unconditionally near the other
+        # app.add_middleware(...) calls above) because it only makes sense
+        # at all when there's actually a frontend mounted to rewrite paths
+        # for -- the docker-compose/multi-service deployment shape has
+        # SERVE_FRONTEND off and does the equivalent rewrite in nginx
+        # instead (see nginx/default.conf.template).
+        app.add_middleware(CleanUrlsMiddleware)
         app.mount("/", StaticFiles(directory=settings.FRONTEND_DIR, html=True), name="frontend")
     else:
         logger.warning(

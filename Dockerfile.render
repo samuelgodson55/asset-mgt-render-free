@@ -53,7 +53,7 @@ ENV BUILD_ENV=${BUILD_ENV}
 
 WORKDIR /build
 COPY build-frontend/package.json build-frontend/package-lock.json* /build/build-frontend/
-RUN cd build-frontend && npm install --no-audit --no-fund
+RUN cd build-frontend && npm ci --no-audit --no-fund
 COPY build-frontend/build.js /build/build-frontend/build.js
 COPY frontend/ /build/frontend-src/
 RUN node build-frontend/build.js /build/frontend-src /build/frontend-out

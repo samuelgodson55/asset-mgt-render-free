@@ -12,10 +12,21 @@
 # time:
 #     cp .env.example .env
 #
-# Three services:
+# Six services:
 #   db       - PostgreSQL database that stores everything
+#   redis    - Celery broker/result backend (async exports + email), the
+#              cross-replica login rate limiter, and the scheduled-backup
+#              leader lock -- see middleware/rate_limit.py and
+#              services/backup_service.py's docstrings
 #   backend  - FastAPI app (main.py) talking to the db (not published to the
 #              host anymore -- see the "frontend" service below)
+#   worker   - Celery worker (backend/Dockerfile, unmodified) consuming the
+#              queue `backend` produces to: CSV/PDF export generation and
+#              every outbound notification email
+#   beat     - Celery Beat (same image as `worker`, different command) --
+#              fires the scheduled overdue/due-soon digest jobs on a timer.
+#              Split from `worker` so `worker` can be scaled to multiple
+#              replicas without duplicating the scheduled jobs.
 #   frontend - the static site (index.html/admin.html/js/*) PLUS an nginx
 #              reverse proxy in front of it, built from frontend/Dockerfile.
 #              nginx serves the frontend directly and transparently forwards
@@ -229,6 +240,16 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # ZERO-DOWNTIME: no explicit `healthcheck:` block needed here -- this
+    # service's image (backend/Dockerfile) now bakes in its own
+    # HEALTHCHECK instruction (GET /healthz -- see that Dockerfile's own
+    # comment for the full reasoning), and Compose automatically uses an
+    # image's built-in HEALTHCHECK for any service that doesn't override
+    # it with one of its own. That's what makes `condition:
+    # service_healthy` below (on the `frontend` service's `depends_on`)
+    # meaningful: Compose won't consider this container healthy -- and
+    # therefore won't start `frontend` -- until GET /healthz is actually
+    # answering 200, not merely until the process has started.
     # NOTE: no host `ports:` mapping here anymore -- see nginx reverse-proxy
     # comment block below for why. The backend is still fully reachable by
     # the frontend container over Compose's internal network at
@@ -334,6 +355,26 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # ZERO-DOWNTIME / BUG FIX: this service shares backend/Dockerfile's
+    # image with `backend` above (`build: ./backend`, no separate
+    # Dockerfile) -- which means it also inherits that image's baked-in
+    # HEALTHCHECK instruction (GET /healthz over HTTP) UNLESS overridden
+    # here. This container runs `celery ... worker`, not uvicorn -- there
+    # is no HTTP server listening on port 8000 in this process at all, so
+    # the inherited check would connection-refuse every single time and
+    # Compose would report this container permanently "unhealthy" despite
+    # it working perfectly correctly. Override with the standard Celery
+    # liveness check instead: `celery inspect ping` round-trips a real
+    # message through the SAME broker this worker actually consumes from
+    # (settings.REDIS_URL), so it only reports healthy if the worker
+    # process is both alive AND actually able to receive/answer control
+    # commands -- not just "the process didn't exit".
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A celery_app inspect ping --destination celery@$$HOSTNAME --timeout 10 | grep -q OK"]
+      interval: 30s
+      timeout: 15s
+      start_period: 20s
+      retries: 3
 
   # ---------------------------------------------------------------------
   # beat (Celery periodic-task scheduler -- fires the overdue/due-soon
@@ -380,6 +421,31 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # BUG FIX: same image-sharing issue as `worker` above (see that
+    # service's own `healthcheck:` comment for the full "why this needs
+    # overriding at all" explanation) -- this container also inherits
+    # backend/Dockerfile's HTTP-based HEALTHCHECK otherwise, and `celery
+    # ... beat` serves no HTTP endpoint to satisfy it either.
+    #
+    # Unlike `worker`, there's no equivalent "round-trip a real command
+    # through the broker" check available here: `celery inspect ping`
+    # only targets WORKER processes (the ones consuming task queues) --
+    # Beat doesn't run that consumer loop, so it never answers control
+    # commands at all, healthy or not. And because this app's Beat
+    # scheduler is RedBeat (celery_app.py's `beat_scheduler=
+    # "redbeat.RedBeatScheduler"`), the schedule itself lives in Redis,
+    # not in a local `celerybeat-schedule` file on disk whose mtime a
+    # healthcheck could otherwise watch for "is it still ticking".
+    # Rather than ship a low-signal check that just re-confirms the
+    # process hasn't exited (which `restart: unless-stopped` above
+    # already handles for a genuine crash -- see celery_app.py's
+    # `redbeat_lock_timeout`/`beat_max_loop_interval` comments for the
+    # one known crash-and-clean-restart case, which is a correctly
+    # handled scenario, not a gap), explicitly disable the inherited
+    # check rather than have Compose falsely report this container
+    # unhealthy forever.
+    healthcheck:
+      disable: true
 
   # ---------------------------------------------------------------------
   # frontend / nginx reverse proxy (requirement: multi-tier deployment)
@@ -445,8 +511,23 @@ services:
       ENABLE_API_DOCS: ${ENABLE_API_DOCS:-}
     ports:
       - "8080:80"
+    # ZERO-DOWNTIME: `condition: service_healthy` (not the old bare
+    # `- backend` shorthand, which only waits for the container to
+    # START, not for it to actually be ANSWERING requests) -- now that
+    # `backend` has a real HEALTHCHECK (see backend/Dockerfile), this
+    # makes Compose hold `frontend` back until GET /healthz on that
+    # container is genuinely returning 200. Without this, `docker
+    # compose up`'s first few seconds could route real traffic through
+    # nginx to a backend container that's still mid-import/mid-startup
+    # (see main.py's on_startup()) and get a connection-refused/502
+    # instead of a clean "not ready yet" -- nginx's own `resolver ...
+    # valid=10s` + per-request re-resolution (see
+    # nginx/default.conf.template) already handles the backend's IP
+    # CHANGING later during a redeploy, but it can't paper over the
+    # backend not being reachable AT ALL yet on first boot.
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
 
 volumes:
   pgdata:

@@ -9,6 +9,7 @@ instead of an empty one.
 """
 
 import datetime
+import logging
 import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -16,6 +17,8 @@ from models import Base, utc_now
 import models
 from security import hash_password, SUPER_ADMIN_ROLE
 from config import settings
+
+logger = logging.getLogger(__name__)
 
 # Retrieve the connection string from the central `settings` object
 # (backend/config.py), which itself reads DATABASE_URL from the
@@ -158,42 +161,99 @@ def get_schema_status() -> dict:
     try:
         with engine.connect() as conn:
             if not inspect(conn).has_table("alembic_version"):
-                return {
+                # BUG FIX (silent readiness failures): every "not ready"
+                # branch below used to return straight to the caller with
+                # no logging at all. That made a READINESS probe that fails
+                # forever -- e.g. the exact "new image, DB unreachable/
+                # schema mismatch" scenarios this function exists to catch
+                # -- completely invisible in Log Analytics/console logs:
+                # the replica keeps running (this isn't a liveness failure,
+                # so nothing restarts it or logs a crash), Container Apps
+                # just never routes traffic to it and eventually reports
+                # the revision as failed to activate, and `az containerapp
+                # logs show`/the console log stream shows nothing but a
+                # clean startup -- indistinguishable from a healthy
+                # container from the logs alone.
+                #
+                # Logging the exact status dict here (not a paraphrase) is
+                # deliberate, not just for humans reading Log Analytics --
+                # infra/main.bicep's `alertReadyzFailing` scheduled query
+                # rule already greps ContainerAppConsoleLogs_CL for
+                # `Log_s has "readyz" and Log_s has "\"ready\": false"`
+                # (see that resource's own comment: "Same KQL as
+                # SRE_STRATEGY.md section 2b"). That alert has been dead
+                # code since it was added -- nothing ever produced a
+                # console log line matching it, so it could never fire no
+                # matter how long /readyz stayed broken.
+                #
+                # IMPORTANT: passing the dict via `extra=status` (not
+                # embedding `json.dumps(status)` INSIDE the message
+                # string) is what actually makes this match. logging_config.py's
+                # JsonFormatter renders the whole log line as ONE JSON
+                # object; anything placed inside the "message" field's own
+                # string value gets its quotes escaped by that outer
+                # json.dumps() (`"ready": false` -> `\"ready\": false` in
+                # the raw text) -- KQL's `has "\"ready\": false"` searches
+                # for a literal, UNescaped `"` character, so an
+                # escaped-quotes version inside "message" would silently
+                # never match either, just like the original missing-log
+                # bug it's meant to fix. `extra=status` instead makes
+                # "ready"/"reason"/etc. their own TOP-LEVEL keys in the
+                # JSON payload (see JsonFormatter's extra-field folding
+                # loop), so `json.dumps` renders them with real,
+                # unescaped quote characters -- exactly the raw substring
+                # the alert's KQL is looking for.
+                status = {
                     "ready": False,
                     "reason": "Database has no 'alembic_version' table -- "
                               "'alembic upgrade head' has never been run against it.",
                     "expected_heads": sorted(expected_heads),
                     "current_heads": [],
                 }
+                logger.warning("readyz: not ready", extra=status)
+                return status
             current_heads = {row[0] for row in conn.execute(text("SELECT version_num FROM alembic_version"))}
     except Exception as exc:
         # Same "fail legibly, not with a raw traceback" reasoning as
         # main.py's on_startup() -- an unreachable database at readiness-
         # check time should read as "not ready yet", not crash the probe.
-        return {
+        # Unlike on_startup() though, this path is hit on EVERY failed
+        # readiness poll (every 10s -- see infra/main.bicep's Readiness
+        # probe periodSeconds), not just once at boot, so exc_info=True is
+        # deliberately omitted to avoid flooding Log Analytics with a full
+        # traceback per poll -- the single-line exception message already
+        # in `reason` is enough to point at the cause (wrong host, missing
+        # sslmode, firewall) without drowning out everything else.
+        status = {
             "ready": False,
             "reason": f"Could not reach the database to check its migration state: {exc}",
             "expected_heads": sorted(expected_heads),
             "current_heads": [],
         }
+        logger.warning("readyz: not ready", extra=status)
+        return status
 
     if not current_heads:
-        return {
+        status = {
             "ready": False,
             "reason": "Database's 'alembic_version' table is empty -- "
                       "no migration has ever been recorded as applied.",
             "expected_heads": sorted(expected_heads),
             "current_heads": [],
         }
+        logger.warning("readyz: not ready", extra=status)
+        return status
 
     if current_heads != expected_heads:
-        return {
+        status = {
             "ready": False,
             "reason": "Database schema version does not match what this build of the code "
                       "expects -- run 'alembic upgrade head' before routing traffic to this image.",
             "expected_heads": sorted(expected_heads),
             "current_heads": sorted(current_heads),
         }
+        logger.warning("readyz: not ready", extra=status)
+        return status
 
     return {
         "ready": True,

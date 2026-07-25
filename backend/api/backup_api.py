@@ -32,13 +32,33 @@ router = APIRouter(prefix="/backup", tags=["backup"])
 @router.get("/status")
 def backup_status(user: dict = Depends(require_true_super_admin)):
     """Scheduler config, Google Drive on/off, and the most recent backup's metadata -- powers the status card at the top of the Backups panel."""
-    return backup_service.get_status()
+    try:
+        return backup_service.get_status()
+    except Exception as exc:
+        # Was a bare `return backup_service.get_status()` -- any failure
+        # here (e.g. an unwritable/missing BACKUP_DIR, a corrupt
+        # index.json, a bad DISPLAY_TIMEZONE/BACKUP_HOURS_UTC value) fell
+        # straight through to main.py's UnhandledExceptionMiddleware,
+        # which logs the real traceback but hands the caller back only a
+        # generic "An unexpected error occurred" 500 -- so a failure here
+        # was invisible from the response itself (e.g. in a CI test log)
+        # even though the app-side log had the answer the whole time.
+        # Logging *and* surfacing a specific detail here (like every other
+        # route in this file already does) makes that failure
+        # self-diagnosing instead of a bare `assert 500 == 200`.
+        logger.exception("backup: failed to load backup status")
+        raise HTTPException(status_code=500, detail=f"Failed to load backup status: {exc}")
 
 
 @router.get("/list")
 def list_backups(user: dict = Depends(require_true_super_admin)):
     """Newest-first list of local backup files (each entry also reports its Google Drive upload state, if enabled)."""
-    return backup_service.list_backups()
+    try:
+        return backup_service.list_backups()
+    except Exception as exc:
+        # See backup_status()'s comment above for why this is now wrapped.
+        logger.exception("backup: failed to list backups")
+        raise HTTPException(status_code=500, detail=f"Failed to list backups: {exc}")
 
 
 @router.post("/create")

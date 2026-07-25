@@ -85,7 +85,7 @@ export async function logout() {
   } catch (e) {
     // Ignore logout failures; the page redirect below still completes.
   }
-  window.location.href = 'index.html';
+  window.location.href = '/';
 }
 
 // Performs the actual POST /auth/login call and stores the resulting token.
@@ -196,22 +196,27 @@ export async function verifyMfa(mfaPendingToken, code) {
 // at the top of admin.html/manager.html/staff.html/customer.html for why
 // that matters. This function re-checks the same rules once the full page
 // (including these modules) has loaded, as a safety net.
+// Keys are the CLEAN urls each dashboard is served at (see
+// middleware/clean_urls.py / nginx/default.conf.template's rewrite rules)
+// -- "/admin", not "admin.html".
 const PAGE_ACCESS_RULES = {
-  'admin.html': ['super_admin', 'admin'],
-  'manager.html': ['manager', 'super_admin', 'admin'],
-  'staff.html': ['staff', 'super_admin', 'admin'],
-  'customer.html': ['customer', 'super_admin', 'admin'],
+  '/admin': ['super_admin', 'admin'],
+  '/manager': ['manager', 'super_admin', 'admin'],
+  '/staff': ['staff', 'super_admin', 'admin'],
+  '/customer': ['customer', 'super_admin', 'admin'],
 };
 
 export function currentPageName() {
-  const parts = window.location.pathname.split('/');
-  return parts[parts.length - 1] || 'index.html';
+  const path = window.location.pathname;
+  if (path === '' || path === '/') return '/';
+  // Trailing slash is cosmetic ("/admin/" and "/admin" are the same page).
+  return path.replace(/\/+$/, '');
 }
 
 export async function checkAccess() {
   const session = getSession();
   const page = currentPageName();
-  const onLoginPage = page === 'index.html' || page === '';
+  const onLoginPage = page === '/';
 
   if (onLoginPage) {
     if (!session) return;
@@ -221,13 +226,13 @@ export async function checkAccess() {
     // whether the real HttpOnly auth cookie is still valid server-side
     // (expired, cleared, rejected by the browser due to a cookie
     // domain/SameSite mismatch after a deploy, backend restart, etc.).
-    // Trusting it here caused a redirect LOOP: index.html sends the user
-    // to e.g. admin.html on the stale flag -> admin.html's auth-guard.js
-    // makes the same /api/auth/me check we do below, finds no valid
-    // cookie, clears the flag, and bounces back to index.html -> which
-    // (before this fix) still saw a session on the very first render and
-    // sent them straight back to admin.html. The two pages ping-ponged
-    // forever and the login form never got a chance to run.
+    // Trusting it here caused a redirect LOOP: "/" sends the user to e.g.
+    // "/admin" on the stale flag -> "/admin"'s auth-guard.js makes the
+    // same /api/auth/me check we do below, finds no valid cookie, clears
+    // the flag, and bounces back to "/" -> which (before this fix) still
+    // saw a session on the very first render and sent them straight back
+    // to "/admin". The two pages ping-ponged forever and the login form
+    // never got a chance to run.
     //
     // Verifying against the server FIRST, here, breaks the loop: an
     // invalid cookie now just clears the stale flag and leaves the user
@@ -249,7 +254,7 @@ export async function checkAccess() {
 
   const allowedRoles = PAGE_ACCESS_RULES[page];
   if (allowedRoles) {
-    if (!session) { window.location.href = 'index.html'; return; }
+    if (!session) { window.location.href = '/'; return; }
     if (!allowedRoles.includes(session.role)) {
       alert('Access Denied: You do not have permission to view this page.');
       logout();
@@ -259,13 +264,13 @@ export async function checkAccess() {
 
 export function redirectByUserRole(role) {
   if (role === 'super_admin' || role === 'admin') {
-    window.location.href = 'admin.html';
+    window.location.href = '/admin';
   } else if (role === 'manager') {
-    window.location.href = 'manager.html';
+    window.location.href = '/manager';
   } else if (role === 'staff') {
-    window.location.href = 'staff.html';
+    window.location.href = '/staff';
   } else if (role === 'customer') {
-    window.location.href = 'customer.html';
+    window.location.href = '/customer';
   } else {
     alert('No dashboard is configured for this account role yet.');
     logout();
@@ -285,7 +290,7 @@ const IDLE_CHECK_INTERVAL_MS = 15000;
 export function startIdleWatchdog() {
   setInterval(() => {
     const page = currentPageName();
-    const onLoginPage = page === 'index.html' || page === '';
+    const onLoginPage = page === '/';
     if (onLoginPage) return; // nothing to expire on the login screen itself
 
     const session = getSession();
@@ -294,7 +299,7 @@ export function startIdleWatchdog() {
     const expired = session.expires_at && session.expires_at * 1000 < Date.now();
     if (expired) {
       clearSessionStorage();
-      window.location.href = 'index.html';
+      window.location.href = '/';
     }
   }, IDLE_CHECK_INTERVAL_MS);
 }

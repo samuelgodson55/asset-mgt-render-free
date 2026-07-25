@@ -18,7 +18,7 @@ import secrets
 import datetime
 import jwt  # PyJWT package
 import pyotp
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.fernet import Fernet
 from pwdlib import PasswordHash
 from config import settings
 

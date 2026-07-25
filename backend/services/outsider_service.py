@@ -356,21 +356,6 @@ def convert_outsider_to_user(db: Session, outsider_id: int, req: OutsiderConvert
         department=req.department, department_role=req.department_role, actor=user,
     )
 
-    # How many of the checkouts about to be migrated are still ACTIVE
-    # (equipment genuinely out in this person's hands right now) vs
-    # already RETURNED (pure history) -- must be counted BEFORE the bulk
-    # UPDATE below, since that update clears `outsider_id` on every
-    # matching row and there'd be nothing left to distinguish them by
-    # afterward. This is what lets the audit/response wording below say
-    # "0 active" instead of just "1 checkout(s)", which on its own reads
-    # as "this person currently has equipment out" even when every
-    # migrated row is a long-since-returned historical record.
-    active_checkouts_count = (
-        db.query(models.AssetCheckout)
-        .filter(models.AssetCheckout.outsider_id == target.id, models.AssetCheckout.status == "active")
-        .count()
-    )
-
     # Move every checkout (active AND historical) over to the new
     # account in one bulk UPDATE -- see docstring point #2. Deliberately
     # a raw bulk update (not a Python loop mutating loaded objects) so
@@ -417,18 +402,6 @@ def convert_outsider_to_user(db: Session, outsider_id: int, req: OutsiderConvert
         .update({"outsider_id": None, "user_id": new_user.id}, synchronize_session=False)
     )
     historical_checkouts_migrated = checkouts_migrated - active_checkouts_migrated
-
-    # Human-readable breakdown used in both the audit log detail and the
-    # response message below -- "1 checkout(s)" alone reads as "they had
-    # equipment out at the time", which is only true if some of those
-    # rows were actually still active.
-    if checkouts_migrated:
-        checkout_detail = (
-            f"{checkouts_migrated} checkout(s) ({active_checkouts_count} still active, "
-            f"{checkouts_migrated - active_checkouts_count} already returned)"
-        )
-    else:
-        checkout_detail = "0 checkout(s)"
 
     # Same treatment for any Quotation this profile was the Ad-Hoc
     # assignee of -- see docstring point #3.

@@ -196,6 +196,58 @@ def test_upgrade_head_creates_full_schema(database_url):
         assert expected in tables, f"Expected table '{expected}' missing after upgrade head: {tables}"
 
 
+def test_audit_logs_is_partitioned_by_year_with_a_default_catch_all(database_url):
+    """
+    0010_partition_audit_logs.py's whole point: `audit_logs` must come out
+    of `alembic upgrade head` as a native Postgres RANGE-partitioned table
+    (by `timestamp`, one partition per calendar year), with a DEFAULT
+    partition as a catch-all, and a row inserted with a given year's
+    timestamp must physically land in that year's partition -- see that
+    migration's module docstring for why (query pruning + instant,
+    VACUUM-free retirement of old years).
+    """
+    result = _run_alembic("upgrade", "head", database_url=database_url, environment="development")
+    assert result.returncode == 0, f"alembic upgrade head failed:\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+
+    conn = psycopg2.connect(database_url)
+    try:
+        with conn.cursor() as cur:
+            # audit_logs itself must be relkind 'p' (partitioned table).
+            cur.execute("SELECT relkind FROM pg_class WHERE relname = 'audit_logs'")
+            assert cur.fetchone()[0] == "p", "audit_logs must be a native partitioned table (relkind='p')"
+
+            # A default (catch-all) partition must exist.
+            cur.execute(
+                "SELECT count(*) FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid "
+                "WHERE i.inhparent = 'audit_logs'::regclass AND c.relname = 'audit_logs_default'"
+            )
+            assert cur.fetchone()[0] == 1, "audit_logs_default catch-all partition is missing"
+
+            # This year must already have its own partition (not just the
+            # default one) -- inserting a row dated this year should land
+            # in it, not in the default catch-all.
+            this_year = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).year
+            partition_name = f"audit_logs_y{this_year}"
+            cur.execute(
+                "SELECT count(*) FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid "
+                "WHERE i.inhparent = 'audit_logs'::regclass AND c.relname = %s",
+                (partition_name,),
+            )
+            assert cur.fetchone()[0] == 1, f"Expected a partition for the current year ({partition_name})"
+
+            cur.execute(
+                "INSERT INTO audit_logs (operator, action, target_type, target_id, details, \"timestamp\") "
+                "VALUES ('t@corp.io', 'TEST', 'AssetType', 1, 'partition routing check', now()) RETURNING tableoid::regclass"
+            )
+            routed_to = cur.fetchone()[0]
+            assert str(routed_to) == partition_name, (
+                f"A row timestamped 'now()' landed in '{routed_to}', expected '{partition_name}'"
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def test_upgrade_head_in_development_never_bootstraps_root_admin(database_url):
     """
     0002_bootstrap_root_admin.py must be a strict no-op outside of
@@ -348,9 +400,29 @@ def test_downgrade_and_reupgrade_round_trip_does_not_corrupt_schema(database_url
 
 def test_downgrade_from_head_by_one_step_removes_only_the_root_admin_row(database_url):
     """
-    Downgrading just the one root-admin-bootstrap migration (not the whole
-    chain) must remove exactly that row and leave every other table/row
-    (the schema itself) completely untouched.
+    Downgrading all the way back to right after 0001_baseline_schema must
+    undo 0002_bootstrap_root_admin.py's row (no users left at all), and
+    re-upgrading back to head afterward must cleanly re-bootstrap exactly
+    one root admin row again -- with the full schema (every table this app
+    now defines, including whatever 0003+ added after 0002) restored
+    exactly as it was.
+
+    NOTE: this deliberately downgrades to "0001_baseline_schema" and then
+    re-upgrades, rather than asserting the table set is unchanged
+    immediately after downgrading (which is what an earlier version of
+    this test did). "0001_baseline_schema" is the revision right BEFORE
+    0002_bootstrap_root_admin.py -- downgrading to it necessarily undoes
+    every migration between there and head, not just 0002's, since
+    Alembic's chain is a straight line and every migration after 0002
+    (0003's soft-delete columns, ..., 0010's audit_logs partitioning) sits
+    on top of it. That's exactly why the old assertion (table set
+    unchanged right after downgrading to 0001) was never actually
+    correct once a second migration landed after 0002 -- it only
+    happened to pass while 0002 was still the sole migration past
+    baseline. What this test can actually guarantee is the round-trip
+    invariant below: downgrade past 0002, then come back up, and you get
+    the exact same shape you started with, with no leftover/duplicate
+    root admin row.
     """
     up = _run_alembic(
         "upgrade", "head", database_url=database_url, environment="production", bootstrap_password="StepDown123!",
@@ -359,12 +431,18 @@ def test_downgrade_from_head_by_one_step_removes_only_the_root_admin_row(databas
     assert len(_query_users(database_url)) == 1
     tables_before = _table_names(database_url)
 
-    down_one = _run_alembic(
+    down_past_root_admin = _run_alembic(
         "downgrade", "0001_baseline_schema", database_url=database_url, environment="production",
     )
-    assert down_one.returncode == 0, down_one.stderr
-
+    assert down_past_root_admin.returncode == 0, down_past_root_admin.stderr
     assert _query_users(database_url) == []
-    # The schema itself (every table) must be untouched by this one-step
-    # data-migration downgrade -- only the row is gone, not the table.
+
+    back_up = _run_alembic(
+        "upgrade", "head", database_url=database_url, environment="production", bootstrap_password="StepDown123!",
+    )
+    assert back_up.returncode == 0, back_up.stderr
+
+    users = _query_users(database_url)
+    root_admins = [u for u in users if u["role"] == "super_admin"]
+    assert len(root_admins) == 1, f"Expected exactly one super_admin row after the round-trip, found {len(root_admins)}: {users}"
     assert _table_names(database_url) == tables_before
