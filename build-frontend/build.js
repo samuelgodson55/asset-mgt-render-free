@@ -118,13 +118,26 @@ async function processJs(code, relPath) {
     return code;
   }
 
-  const minified = await minify(code, {
-    compress: true,
-    mangle: true,
-    format: { comments: false },
-  });
+  let minified;
+  try {
+    minified = await minify(code, {
+      compress: true,
+      mangle: true,
+      format: { comments: false },
+    });
+  } catch (err) {
+    // Newer terser versions REJECT the promise (throw) on a hard parse
+    // failure instead of resolving with `.error` set -- the `if
+    // (minified.error)` check below only ever caught the latter case, so
+    // a rejection used to propagate terser's own internal stack trace
+    // (bundle.min.js:NNNN) all the way up to main().catch() with nothing
+    // in the log identifying which of OUR files caused it. Re-throwing
+    // here with relPath prefixed makes that always show up regardless of
+    // which failure mode terser used.
+    throw new Error(`terser failed on ${relPath}: ${err && err.message ? err.message : err}`, { cause: err });
+  }
   if (minified.error) {
-    throw new Error(`terser failed on ${relPath}: ${minified.error}`);
+    throw new Error(`terser failed on ${relPath}: ${minified.error}`, { cause: minified.error });
   }
   let output = minified.code || "";
 
@@ -200,6 +213,18 @@ async function processHtml(code, relPath) {
       collapseWhitespace: true,
       conservativeCollapse: false,
       removeComments: true,
+      // html-minifier-terser's removeComments:true does NOT mean "remove
+      // every comment" -- it defaults ignoreCustomComments to
+      // [/^!/, /^\s*#/], protecting "important" (<!--! ... -->) comments
+      // and anything shaped like a Server-Side-Include directive
+      // (<!--#include file="..." -->). This app has neither -- every
+      // comment in frontend/*.html is plain developer documentation, some
+      // of which (e.g. "<!-- #swipeArea wraps... -->") happens to start
+      // with "#" as a way of naming the element it's describing, which
+      // matched that SSI-shaped default and was silently surviving every
+      // build (dev AND prod) even though removeComments was already on.
+      // Empty array means "no exceptions -- strip every comment".
+      ignoreCustomComments: [],
       removeRedundantAttributes: false,
       removeAttributeQuotes: false,
       minifyJS: false,

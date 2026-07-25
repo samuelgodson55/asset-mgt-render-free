@@ -30,6 +30,37 @@
 # -----------------------------------------------------------------------------
 set -e
 
+# -----------------------------------------------------------------------------
+# BUG FIX: embedded Celery worker/beat wasn't actually wired up here
+# -----------------------------------------------------------------------------
+# infra/main.bicep sets RUN_EMBEDDED_WORKER=true on the Azure `backend`
+# Container App (there's no separate `worker`/`beat` Container App in this
+# cost-optimized layout -- see that file's comments), but until now nothing
+# in this script ever read that variable: it only ever started uvicorn.
+# The result was silent, not loud -- `celery_app.py`'s `.delay(...)` calls
+# (audit export, extension-request emails) queued jobs into Redis with
+# NO worker ever consuming them, so exports hung forever and the
+# overdue/due-soon notification digest (celery_app.py's `beat_schedule`)
+# never fired. This launches that same embedded worker+beat command
+# render-start.sh already uses for the Render free-tier image, applying
+# the same fixes: bounded Redis connection timeouts (celery_app.py), low
+# scheduling priority + no gossip/mingle/heartbeat (this is always a
+# solo, never-clustered worker regardless of how many uvicorn
+# processes/replicas exist), and RedBeat as the Beat scheduler
+# (celery_app.py's `beat_scheduler`/`redbeat_redis_url` config) so `-B`
+# is safe to pass unconditionally here even when Azure's `backendApp`
+# scales to more than one replica -- RedBeat's Redis-backed lock ensures
+# only one replica is ever the active scheduler at a time, automatically
+# failing over if that replica dies. No manual per-replica bookkeeping
+# needed.
+if [ "${RUN_EMBEDDED_WORKER:-false}" = "true" ]; then
+    echo "start.sh: RUN_EMBEDDED_WORKER=true -- launching embedded Celery worker+beat in the background (low priority)"
+    nice -n 19 celery -A celery_app worker -B --loglevel=info --concurrency=1 \
+        --without-gossip --without-mingle --without-heartbeat &
+else
+    echo "start.sh: RUN_EMBEDDED_WORKER is not 'true' -- skipping the embedded Celery worker"
+fi
+
 ENV_LOWER=$(echo "${ENVIRONMENT:-development}" | tr '[:upper:]' '[:lower:]')
 
 LEAN_MODE_VALUE="${LEAN_MODE:-}"

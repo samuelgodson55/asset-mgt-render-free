@@ -1204,46 +1204,6 @@
     </form>
   </div>
 </div>
-
-<!-- ================= EXPORT AUDIT LEDGER -- DATE RANGE (MODAL) =================
-     Replaces the pair of bare window.prompt() calls that used to ask for a
-     start/end date before running the export -- see
-     js/components/audit.js's openAuditExportModal()/submitAuditExportForm().
-     Same reasoning as denyReasonModal above: a stacked pair of prompt()
-     dialogs is cramped, gives no room to label which date is which, and
-     looks nothing like the rest of this app's forms. Real <input
-     type="date"> fields also mean the browser handles format/validity
-     (no more hand-typing "YYYY-MM-DD" and hoping it parses). -->
-<div id="auditExportModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
-  <div class="absolute inset-0 bg-black/70 backdrop"></div>
-  <div class="relative w-full max-w-sm overflow-y-auto sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl shadow-2xl">
-    <div class="flex items-start justify-between border-b border-border px-6 py-5">
-      <div>
-        <p class="text-[11px] font-semibold uppercase tracking-wide text-blue-400">Export Ledger</p>
-        <h3 id="auditExportModalTitle" class="text-[16px] font-bold text-slate-50">Choose a Date Range</h3>
-      </div>
-      <button data-action="close-modal" data-modal="auditExportModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
-        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
-      </button>
-    </div>
-
-    <form id="auditExportForm" class="space-y-4 px-6 py-5">
-      <p class="text-[12px] text-slate-500">Leave either field blank to leave that side of the range open.</p>
-      <div>
-        <label class="mb-1 block text-[12px] font-medium text-slate-400">From</label>
-        <input id="auditExportStartDate" type="date" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60">
-      </div>
-      <div>
-        <label class="mb-1 block text-[12px] font-medium text-slate-400">To</label>
-        <input id="auditExportEndDate" type="date" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60">
-      </div>
-      <div class="flex gap-3 pt-1">
-        <button type="button" data-action="close-modal" data-modal="auditExportModal" class="flex-1 rounded-lg border border-border py-2.5 text-[13px] font-semibold text-slate-300 transition hover:border-slate-500">Cancel</button>
-        <button type="submit" class="flex-1 rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500">Export</button>
-      </div>
-    </form>
-  </div>
-</div>
      <!-- Super Admin/Admin only -- the "this person forgot their password"
      recovery path. Opened from the User Directory's "Reset Password"
      button (see js/components/users.js's renderUsersTable() ->

@@ -45,7 +45,7 @@ celery_app = Celery(
     "snipeit_lite",
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
-    include=["tasks.export_tasks", "tasks.notification_tasks"],
+    include=["tasks.export_tasks", "tasks.notification_tasks", "tasks.audit_partition_tasks"],
 )
 
 celery_app.conf.update(
@@ -110,13 +110,43 @@ celery_app.conf.update(
     # time, short enough that a crashed leader's replacement takes over
     # within a reasonable window rather than leaving the schedule stalled.
     redbeat_lock_timeout=90,
+    # BUG FIX (LockNotOwnedError crash-loop): RedBeat only renews its lock
+    # when Beat wakes up to check the schedule -- and Celery's own default
+    # `beat_max_loop_interval` is 300s. With nothing due sooner than that
+    # (this app's notification tasks run every 24h -- see beat_schedule
+    # below), Beat can legitimately sleep the full 300s, which is >3x
+    # longer than the 90s lock above. Redis expires the lock key mid-sleep,
+    # so the next wake-up's `lock.extend()` raises LockNotOwnedError,
+    # crashing the process (Compose/Container Apps then restart it, which
+    # re-acquires the lock cleanly -- confusing but not data-lossy, since
+    # only one replica ever holds the lock at a time either way). Forcing
+    # Beat to wake well inside the lock's TTL, regardless of how far away
+    # the next scheduled task is, is what actually prevents this.
+    beat_max_loop_interval=30,
+    # BUG FIX (fragmented/inconsistent log lines from worker & beat):
+    # Celery's own `worker`/`beat` CLI commands reconfigure the root
+    # logger themselves once they start (`worker_hijack_root_logger`
+    # defaults to True), which clobbers `logging_config.py`'s
+    # `configure_logging()` setup that already ran at import time above.
+    # In practice this meant `worker`/`beat` output didn't consistently
+    # use our JSON/text formatter, and multi-line output (like a
+    # traceback) could come out as several separate, disjointed log
+    # lines instead of one coherent record -- confusing to read and
+    # awkward to alert on in a log aggregator. Setting this to False
+    # leaves OUR logging config in charge for every process that imports
+    # this module (`backend`, `worker`, `beat` alike), same as the
+    # embedded-worker deployment shapes already get for free.
+    worker_hijack_root_logger=False,
 )
 
 # ---------------------------------------------------------------------------
 # CELERY BEAT SCHEDULE -- Email + Dashboard Notifications requirement
 # ---------------------------------------------------------------------------
-# Fires two independent, recurring jobs (both in
-# backend/tasks/notification_tasks.py):
+# Fires three independent, recurring jobs -- two in
+# backend/tasks/notification_tasks.py, plus
+# backend/tasks/audit_partition_tasks.py's partition-maintenance check
+# (see its own docstring, and services/audit_partition_service.py's, for
+# why that one exists and why it's safe to run this often):
 #   - `tasks.send_overdue_notifications`, every
 #     `settings.OVERDUE_NOTIFICATION_INTERVAL_HOURS` (24 by default) --
 #     checkouts that have ALREADY gone overdue.
@@ -163,5 +193,15 @@ celery_app.conf.beat_schedule = {
     "send-due-soon-checkout-reminders": {
         "task": "tasks.send_due_soon_reminders",
         "schedule": datetime.timedelta(hours=settings.DUE_SOON_NOTIFICATION_INTERVAL_HOURS),
+    },
+    # Keeps `audit_logs`'s future yearly Postgres partitions pre-created --
+    # see tasks/audit_partition_tasks.py and
+    # services/audit_partition_service.py's module docstrings. Cheap and
+    # idempotent (a no-op almost every run), and a no-op entirely against
+    # a non-Postgres database, so this is safe to leave in every
+    # deployment shape.
+    "ensure-audit-log-partitions": {
+        "task": "tasks.ensure_audit_log_partitions",
+        "schedule": datetime.timedelta(hours=settings.AUDIT_PARTITION_CHECK_INTERVAL_HOURS),
     },
 }

@@ -85,19 +85,19 @@
   if (!ALLOWED_ROLES.length || !payload || ALLOWED_ROLES.indexOf(payload.role) === -1) {
     // location.replace (not .href) so this doesn't leave the blocked
     // dashboard page in browser history for a "back button" flash.
-    window.location.replace('index.html');
+    window.location.replace('/');
   } else {
     fetch('/api/auth/me', { credentials: 'include' }).then(function (response) {
       if (!response.ok) {
         clearSessionFlag();
-        window.location.replace('index.html');
+        window.location.replace('/');
         return;
       }
       // Only NOW do we allow <body> to become visible (see css/auth-guard.css).
       document.documentElement.classList.add('authorized');
     }).catch(function () {
       clearSessionFlag();
-      window.location.replace('index.html');
+      window.location.replace('/');
     });
   }
 })();
