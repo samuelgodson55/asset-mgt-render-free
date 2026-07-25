@@ -18,7 +18,7 @@ from sqlalchemy import func
 import models
 from services.search_utils import apply_search_filter
 from models import utc_now
-from schemas.assets import AssetTypeCreate, ExceptionCreate, AdvancedCheckoutRequest, QuantityUpdateRequest, NameUpdateRequest, CategoryUpdateRequest, PriceUpdateRequest
+from schemas.assets_schema import AssetTypeCreate, ExceptionCreate, AdvancedCheckoutRequest, QuantityUpdateRequest, NameUpdateRequest, CategoryUpdateRequest, PriceUpdateRequest
 from services.stock import recalculate_asset_stock
 import services.export_service as export_service
 
@@ -374,6 +374,168 @@ def delete_asset_type(db: Session, asset_id: int, user: dict) -> dict:
     return {"message": f"Asset category '{asset_name}' removed."}
 
 
+# ---------------------------------------------------------------------------
+# SOFT-DELETED ASSET RESTORE ("oops, wrong pool" recovery)
+# ---------------------------------------------------------------------------
+# Same restorable-deletion pattern as services/user_service.py's
+# list_deleted_users()/restore_user() -- a Super Admin who soft-deleted the
+# wrong asset pool (or deleted one that turned out to still be needed) can
+# bring it back instead of having to recreate it from scratch and lose its
+# id, category, price, and total_quantity.
+def list_deleted_assets(db: Session, limit: int = DEFAULT_LIMIT, offset: int = 0, search: Optional[str] = None) -> dict:
+    """
+    Mirror of list_assets() above, scoped to soft-deleted pools only --
+    powers the "Restore Deleted Assets" panel. Super Admin only (see
+    require_super_admin gate in api/assets.py): unlike the main Asset
+    Inventory table, this is not visible to Managers/Staff.
+
+    Same limit/offset/search shape as list_assets() so the frontend can
+    reuse the exact same pagination/search plumbing (see
+    js/ui.js's renderServerPaginationBar()) against a second, independent
+    table state.
+
+    EXCLUDES PURGED POOLS -- purge_asset_type() below overwrites a
+    pool's `name` with an anonymized placeholder and stamps
+    `purged_at`, specifically so its original name's uniqueness lock is
+    released. There's nothing meaningful left to "restore" under its
+    original name at that point, so purged pools are filtered out here.
+    """
+    limit = max(1, min(limit, MAX_LIMIT))
+    offset = max(0, offset)
+
+    query = db.query(models.AssetType).filter(models.AssetType.is_deleted, models.AssetType.purged_at.is_(None))
+    query = apply_search_filter(query, search, [models.AssetType.name])
+
+    total = query.count()
+    # Most-recently-deleted first -- that's almost always the row someone
+    # opening this panel is looking for ("oops, I just deleted the wrong
+    # pool").
+    items = query.order_by(models.AssetType.deleted_at.desc()).offset(offset).limit(limit).all()
+
+    results = [{
+        "id": a.id, "name": a.name, "category": a.category,
+        "total_quantity": a.total_quantity, "price": a.price,
+        # TIMEZONE FIX -- see services/user_service.py's
+        # get_my_assigned_items() for the full explanation of why this is
+        # `.isoformat()` and not a pre-formatted `.strftime(...)` string.
+        "deleted_at": a.deleted_at.isoformat() if a.deleted_at else None,
+    } for a in items]
+    return {"items": results, "total": total, "limit": limit, "offset": offset}
+
+
+def restore_asset_type(db: Session, asset_id: int, user: dict) -> dict:
+    """
+    Reverses delete_asset_type() above: flips is_deleted back to False and
+    clears deleted_at, so the pool reappears in the active Asset Inventory
+    table exactly as it was (same id, category, price, and quantities) --
+    Super Admin only, same gate as delete_asset_type() itself.
+
+    No name-collision handling is needed here: create_asset_type()'s
+    duplicate-name check queries ALL `asset_types` rows regardless of
+    is_deleted (see its comment), so a soft-deleted pool's original name
+    was never up for grabs while it sat deleted -- restoring it can't
+    collide with anything created in the meantime.
+
+    NOT FOR PURGED POOLS -- list_deleted_assets() above already keeps
+    these out of the "Restore Deleted Assets" panel, but this check is
+    repeated here in case restore_asset_type() is ever called directly.
+    purge_asset_type() below has already overwritten this row's `name`
+    with an anonymized placeholder, so "restoring" it wouldn't bring the
+    pool's original name back at all -- it would just reappear in active
+    inventory under the placeholder name.
+    """
+    target = db.query(models.AssetType).filter(
+        models.AssetType.id == asset_id,
+        models.AssetType.is_deleted,
+        models.AssetType.purged_at.is_(None),
+    ).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Deleted asset not found.")
+
+    target.is_deleted = False
+    target.deleted_at = None
+
+    db.add(models.AuditLog(
+        operator=user["email"], action="ASSET_RESTORED", target_type="AssetType", target_id=asset_id,
+        details=f"Restored asset category '{target.name}' (returned to active inventory, deletion reversed).",
+    ))
+    db.commit()
+    return {"message": f"Asset category '{target.name}' has been restored."}
+
+
+# ---------------------------------------------------------------------------
+# PURGE ("I'm done with this deleted pool, free up its name")
+# ---------------------------------------------------------------------------
+def purge_asset_type(db: Session, asset_id: int, user: dict) -> dict:
+    """
+    Permanently releases a soft-deleted pool's `name` so a brand-new pool
+    can reuse it -- called from the "Purge" button that sits next to
+    Restore on the Restore Deleted Assets panel. Super Admin only, same
+    gate as delete_asset_type()/restore_asset_type().
+
+    WHY THIS EXISTS: `asset_types.name` carries a DB-level `unique=True`
+    constraint (see models.py). delete_asset_type() only ever flips
+    is_deleted/deleted_at -- it never touches `name` -- so a deleted
+    pool's original name stays permanently "reserved" and
+    create_asset_type() will keep rejecting it for a new pool (see its
+    existing-name check, which deliberately queries ALL rows regardless
+    of is_deleted). Previously the only way around that was to restore
+    the old pool first (bringing it back into active inventory) purely
+    so it could be renamed -- this button skips that detour.
+
+    WHAT "PURGE" DOES *NOT* DO: it is NOT a hard delete. We never
+    `db.delete()` this row, for the exact same reason delete_asset_type()
+    doesn't -- historical AssetCheckout.asset_id / AssetException rows
+    still point at it, and hard-deleting would either violate that
+    foreign key or silently erase this pool out of the historical
+    custody/audit trail. Instead:
+      1. `name` is overwritten with a placeholder that embeds this
+         row's own (permanent, unique) id -- "Purged Asset Pool #{id}"
+         -- so it can never collide with any other pool, purged or not.
+      2. `purged_at` is stamped, which both list_deleted_assets() and
+         restore_asset_type() above check -- once purged, the pool
+         drops out of the "Restore Deleted Assets" panel entirely and
+         can no longer be restored (there'd be nothing meaningful to
+         bring back under its original name).
+      3. The pool's original name is recorded in the audit log entry
+         below (before it's overwritten) so it's still discoverable
+         later via the Audit Trail even though the `asset_types` row
+         itself no longer carries it.
+
+    Irreversible in the same sense delete_asset_type()'s soft delete is
+    reversible and this is not: there's no "unpurge". A caller who
+    isn't sure yet should use Restore, not Purge.
+
+    Only ever reachable for rows list_deleted_assets() would surface
+    (already soft-deleted, not already purged) -- the same filter is
+    repeated here so a raw API call can't purge a live pool or one
+    that's already been purged.
+    """
+    target = db.query(models.AssetType).filter(
+        models.AssetType.id == asset_id,
+        models.AssetType.is_deleted,
+        models.AssetType.purged_at.is_(None),
+    ).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Deleted asset not found.")
+
+    original_name = target.name
+
+    target.name = f"Purged Asset Pool #{target.id}"
+    target.purged_at = utc_now()
+
+    db.add(models.AuditLog(
+        operator=user["email"], action="ASSET_PURGED", target_type="AssetType", target_id=asset_id,
+        details=(
+            f"Permanently purged deleted asset category '{original_name}'. Its name is now "
+            f"free to be reused by a new pool; historical checkout/exception records remain "
+            f"intact under this now-renamed row."
+        ),
+    ))
+    db.commit()
+    return {"message": f"Asset category '{original_name}' has been purged. Its name is now free to be reused."}
+
+
 def flag_asset_exception(db: Session, asset_id: int, exc: ExceptionCreate, user: dict) -> dict:
     """
     Isolating a serial for repair/loss is a Super Admin-only action.
@@ -551,16 +713,33 @@ def checkout_advanced(db: Session, asset_id: int, req: AdvancedCheckoutRequest, 
             assignee_label = f"{target_user.role.capitalize()}: {target_user.name}"
 
         elif req.assignee_type == "outsider":
-            if not req.outsider_name or not req.outsider_contact:
-                raise HTTPException(status_code=400, detail="Name and contact are required for outsiders.")
             if not req.due_date:
                 raise HTTPException(status_code=400, detail="Due date is mandatory for external unauthenticated allocations.")
 
-            outsider = models.Outsider(name=req.outsider_name, contact_details=req.outsider_contact, company=req.outsider_company)
-            db.add(outsider)
-            db.flush()
+            if req.outsider_id:
+                # Route 1: dispatch to an ad-hoc profile ALREADY on file
+                # (picked from the "Existing Ad-Hoc Individual" dropdown --
+                # see frontend/js/components/assets.js's submitDispatchForm())
+                # instead of creating a new one from scratch.
+                outsider = db.query(models.Outsider).filter(
+                    models.Outsider.id == req.outsider_id, ~models.Outsider.is_deleted
+                ).first()
+                if not outsider:
+                    raise HTTPException(status_code=404, detail="Ad-hoc individual not found.")
+            else:
+                # Route 2: create a brand new unlinked profile on the spot
+                # (the original, only-ever-existing behavior).
+                if not req.outsider_name or (not req.outsider_email and not req.outsider_phone):
+                    raise HTTPException(status_code=400, detail="Name and at least one of email/phone are required for outsiders.")
+                outsider = models.Outsider(
+                    name=req.outsider_name, email=req.outsider_email,
+                    phone_number=req.outsider_phone, company=req.outsider_company,
+                )
+                db.add(outsider)
+                db.flush()
+
             target_outsider_id = outsider.id
-            assignee_label = f"Outsider: {outsider.name} ({req.outsider_company or 'No Company'})"
+            assignee_label = f"Outsider: {outsider.name} ({outsider.company or 'No Company'})"
         else:
             raise HTTPException(status_code=400, detail="Invalid assignee type specified.")
 
@@ -643,11 +822,37 @@ def import_assets_from_csv(db: Session, file: UploadFile, user: dict) -> dict:
         imported_count = 0
         errors = []  # one entry per row that failed validation -- never silently skipped
 
+        # DATA QUALITY FIX: a spreadsheet that lists the same asset name
+        # twice (e.g. "HP ProBook" entered once per delivery batch) is
+        # almost always a data-entry mistake, not two genuinely separate
+        # deliveries -- silently adding the two rows' quantities together
+        # hides that mistake instead of surfacing it. So a name that
+        # reappears LATER IN THE SAME FILE is now rejected outright as a
+        # duplicate row (see the `seen_names_this_file` check below) and
+        # reported in the diagnostic report with the row it first appeared
+        # on, e.g. `Duplicate item "HP ProBook" already exists in this
+        # import file (first seen on row 2).` -- so a Super Admin can spot
+        # and fix the mistake instead of getting a merged quantity they
+        # didn't ask for.
+        #
+        # A name that matches a pool that ALREADY EXISTED in the database
+        # BEFORE this import started (from a previous import or the UI) is
+        # rejected the same way -- see the `existing = db.query(...)` check
+        # further down -- instead of silently adding to that pool's
+        # total_quantity. A CSV import is for REGISTERING NEW pools, not
+        # for restocking existing ones; restocking has its own explicit
+        # "Update Quantity" action in the Properties Hub, which makes the
+        # new total visible and intentional instead of a side effect of a
+        # file upload that may just be re-listing something that's already
+        # on file.
+        seen_names_this_file = {}  # name -> the row it was first seen on
+
         # `enumerate(reader, start=2)`: row 1 is the header line the reader
         # already consumed, so the first actual data row is "row 2" from
         # the point of view of someone looking at the file in a text
         # editor or spreadsheet program.
         for line_number, row in enumerate(reader, start=2):
+
             name = (row.get("name") or "").strip()
             raw_qty = (row.get("total_quantity") or "").strip()
 
@@ -685,6 +890,19 @@ def import_assets_from_csv(db: Session, file: UploadFile, user: dict) -> dict:
                 errors.append({"row": line_number, "name": row.get("name"), "reason": "Missing asset name."})
                 continue
 
+            # REJECT (don't merge) a name that already appeared earlier in
+            # THIS SAME FILE -- see the `seen_names_this_file` comment
+            # above for why this is an error now instead of a silent
+            # quantity merge.
+            if name in seen_names_this_file:
+                errors.append({
+                    "row": line_number, "name": name,
+                    "reason": f'Duplicate item "{name}" already exists in this import file '
+                              f'(first seen on row {seen_names_this_file[name]}).',
+                })
+                continue
+            seen_names_this_file[name] = line_number
+
             try:
                 qty = int(raw_qty)
             except ValueError:
@@ -698,26 +916,24 @@ def import_assets_from_csv(db: Session, file: UploadFile, user: dict) -> dict:
                 errors.append({"row": line_number, "name": name, "reason": "total_quantity cannot be negative."})
                 continue
 
+            # A name already appearing in THIS file was already rejected as
+            # a duplicate above, so this second check is specifically for a
+            # pool that already existed in the database BEFORE this import
+            # started (from a previous import or the UI). Same "flag it,
+            # don't silently merge" treatment as the in-file duplicate
+            # case above -- see the `seen_names_this_file` comment for why.
             existing = db.query(models.AssetType).filter(models.AssetType.name == name).first()
             if existing:
-                existing.total_quantity += qty
-                # A category provided on a re-import of an existing pool
-                # updates/fills in that pool's category; a blank cell
-                # never clears a category that was already set, so a
-                # category-less follow-up import (e.g. a routine
-                # quantity-only restock file) can never accidentally wipe
-                # out a value someone set earlier.
-                if category:
-                    existing.category = category
-                # Same "blank cell never clears a value already on file"
-                # rule as category above -- a routine quantity-only
-                # restock file (no price column filled in) must never wipe
-                # out a price someone set earlier.
-                if price is not None:
-                    existing.price = price
-                recalculate_asset_stock(db, existing)
-            else:
-                db.add(models.AssetType(name=name, total_quantity=qty, available_quantity=qty, category=category, price=price))
+                errors.append({
+                    "row": line_number, "name": name,
+                    "reason": f'Item "{name}" already exists in the system (Pool ID {existing.id}). '
+                              f'Update its quantity directly from the Asset Inventory table instead of '
+                              f're-importing it.',
+                })
+                continue
+
+            new_asset_type = models.AssetType(name=name, total_quantity=qty, available_quantity=qty, category=category, price=price)
+            db.add(new_asset_type)
             imported_count += 1
 
         summary = f"Spreadsheet processed. Registered {imported_count} update(s), {len(errors)} row(s) rejected."

@@ -13,7 +13,7 @@ Admin/Manager account queried by role. See git history / README.md's
 import models
 from services.extension_service import _notification_recipients
 from services.notification_service import set_digest_recipient_emails
-from schemas.notifications import DigestRecipientsUpdateRequest
+from schemas.notifications_schema import DigestRecipientsUpdateRequest
 
 
 def test_recipients_come_from_digest_list_not_admin_manager_roles(db_session):

@@ -27,7 +27,7 @@ import { getSession } from '../auth.js';
 import {
   escapeHtml, formatPrice, setCurrencyCode, applySiteName, showToast, showFieldError, clearFieldError,
   openModal, closeModal, tableState, registerRenderer, filterAndPaginate, renderPaginationBar,
-  rowDetailsTrigger, debounce, renderServerPaginationBar, formatTimestamp,
+  rowDetailsTrigger, debounce, renderServerPaginationBar, formatTimestamp, resetTabScroll,
 } from '../ui.js';
 
 let showStock = false;
@@ -765,6 +765,7 @@ export function switchQuotationTab(tab) {
   if (tabHistoryBtn) { tabHistoryBtn.classList.remove(...activeCls, ...inactiveCls); tabHistoryBtn.classList.add(...(isOrder ? inactiveCls : activeCls)); }
 
   updateQuotationSwipeDots(isOrder ? 'order' : 'history');
+  resetTabScroll(document.getElementById('quotationSwipeArea'));
 
   const activeSection = isOrder ? orderSection : historySection;
   activeSection.classList.remove('swipe-content-enter');
@@ -1511,32 +1512,62 @@ export function toggleQuoteAssignAdhocForm() {
   if (form) form.classList.toggle('hidden');
 }
 
+// Same "new profile fields only show when '+ Create New Unlinked Profile'
+// is selected" pattern as ui.js's toggleAdhocExisting(), just scoped to the
+// Ad-Hoc mini-form under "Assign to an Ad-Hoc Individual instead" on the
+// Quote Detail screen (#quoteAssignAdhocExistingSelect / #quoteAssignAdhocNewFields).
+export function toggleQuoteAssignAdhocExisting() {
+  const select = document.getElementById('quoteAssignAdhocExistingSelect');
+  const newFields = document.getElementById('quoteAssignAdhocNewFields');
+  if (!select || !newFields) return;
+  newFields.classList.toggle('hidden', select.value !== 'new');
+}
+
 export async function submitQuoteAssignAdhoc() {
   if (!currentQuoteId) return;
+  const existingSelect = document.getElementById('quoteAssignAdhocExistingSelect');
+  const existingId = existingSelect ? existingSelect.value : 'new';
   const nameInput = document.getElementById('quoteAssignAdhocName');
   const companyInput = document.getElementById('quoteAssignAdhocCompany');
-  const contactInput = document.getElementById('quoteAssignAdhocContact');
-  const name = nameInput ? nameInput.value.trim() : '';
-  const contact = contactInput ? contactInput.value.trim() : '';
-  if (!name || !contact) {
-    alert('Name and contact are required for an Ad-Hoc individual.');
-    return;
+  const emailInput = document.getElementById('quoteAssignAdhocEmail');
+  const phoneInput = document.getElementById('quoteAssignAdhocPhone');
+
+  // "+ Create New Unlinked Profile" (value="new", the select's only
+  // option before components/outsiders.js's loadOutsiders() populates it
+  // with real profiles) still creates a brand new Outsider row from the
+  // name/company/email/phone fields below. Any other option is an
+  // existing outsider's real id -- selecting one reuses that profile
+  // (backend/schemas/quotations.py's QuotationAssignRequest.outsider_id)
+  // instead of fabricating a duplicate every time the same person is
+  // assigned a quote.
+  const payload = { assignee_type: 'outsider' };
+  if (existingId && existingId !== 'new') {
+    payload.outsider_id = parseInt(existingId, 10);
+  } else {
+    const name = nameInput ? nameInput.value.trim() : '';
+    const email = emailInput ? emailInput.value.trim() : '';
+    const phone = phoneInput ? phoneInput.value.trim() : '';
+    if (!name || (!email && !phone)) {
+      alert('Name and at least one of email/phone are required for an Ad-Hoc individual.');
+      return;
+    }
+    payload.outsider_name = name;
+    payload.outsider_email = email || null;
+    payload.outsider_phone = phone || null;
+    payload.outsider_company = companyInput ? companyInput.value.trim() : '';
   }
+
   try {
     const data = await apiRequest(`/quotations/${currentQuoteId}/assign`, {
       method: 'POST',
-      body: JSON.stringify({
-        assignee_type: 'outsider',
-        outsider_name: name,
-        outsider_contact: contact,
-        outsider_company: companyInput ? companyInput.value.trim() : '',
-      }),
+      body: JSON.stringify(payload),
     });
     renderQuoteDetail(data);
     loadQuotes();
     if (nameInput) nameInput.value = '';
     if (companyInput) companyInput.value = '';
     if (contactInput) contactInput.value = '';
+    if (existingSelect) { existingSelect.value = 'new'; toggleQuoteAssignAdhocExisting(); }
     const form = document.getElementById('quoteAssignAdhocForm');
     if (form) form.classList.add('hidden');
     showToast('Assigned to Ad-Hoc individual.');
@@ -1562,6 +1593,7 @@ export function openCreateQuoteModal() {
   const routeSelect = document.getElementById('quoteRouteSelect');
   if (form) form.reset();
   if (routeSelect) { routeSelect.value = 'unassigned'; toggleQuoteRoute(); }
+  toggleQuoteAdhocExisting();
   openModal('createQuoteModal');
 }
 
@@ -1580,6 +1612,19 @@ export function toggleQuoteRoute() {
   if (hint) hint.classList.toggle('hidden', val !== 'unassigned');
 }
 
+// Same "new profile fields only show when '+ Create New Unlinked Profile'
+// is selected" pattern as ui.js's toggleAdhocExisting(), just scoped to the
+// Create Quote modal's own Ad-Hoc route fields
+// (#quoteAdhocExistingSelect / #quoteAdhocNewFields) so it never collides
+// with the identically-shaped dispatch-drawer or quote-assign fields on
+// the same page.
+export function toggleQuoteAdhocExisting() {
+  const select = document.getElementById('quoteAdhocExistingSelect');
+  const newFields = document.getElementById('quoteAdhocNewFields');
+  if (!select || !newFields) return;
+  newFields.classList.toggle('hidden', select.value !== 'new');
+}
+
 export async function submitCreateQuote(button) {
   const routeVal = document.getElementById('quoteRouteSelect').value;
   const payload = {};
@@ -1595,13 +1640,28 @@ export async function submitCreateQuote(button) {
     payload.assignee_type = 'user';
     payload.assigned_user_id = parseInt(customerId, 10);
   } else if (routeVal === 'adhoc') {
-    const name = document.getElementById('quoteAdhocName').value.trim();
-    const contact = document.getElementById('quoteAdhocContact').value.trim();
-    if (!name || !contact) { alert('Name and contact are required for an Ad-Hoc individual.'); return; }
+    // Same "existing profile vs. brand new" choice as
+    // submitDispatchForm()/submitQuoteAssignAdhoc() above -- "+ Create New
+    // Unlinked Profile" (value="new") creates a new Outsider row from the
+    // name/company/email/phone fields; any other option is an existing
+    // outsider's real id and reuses that profile
+    // (backend/schemas/quotations.py's QuotationCreateRequest.outsider_id).
+    const existingSelect = document.getElementById('quoteAdhocExistingSelect');
+    const existingId = existingSelect ? existingSelect.value : 'new';
     payload.assignee_type = 'outsider';
-    payload.outsider_name = name;
-    payload.outsider_contact = contact;
-    payload.outsider_company = document.getElementById('quoteAdhocCompany').value.trim();
+    if (existingId && existingId !== 'new') {
+      payload.outsider_id = parseInt(existingId, 10);
+    } else {
+      const name = document.getElementById('quoteAdhocName').value.trim();
+      const email = document.getElementById('quoteAdhocEmail').value.trim();
+      const phoneEl = document.getElementById('quoteAdhocPhone');
+      const phone = phoneEl ? phoneEl.value.trim() : '';
+      if (!name || (!email && !phone)) { alert('Name and at least one of email/phone are required for an Ad-Hoc individual.'); return; }
+      payload.outsider_name = name;
+      payload.outsider_email = email || null;
+      payload.outsider_phone = phone || null;
+      payload.outsider_company = document.getElementById('quoteAdhocCompany').value.trim();
+    }
   }
   // routeVal === 'unassigned' -- payload stays empty, quote starts unassigned.
 

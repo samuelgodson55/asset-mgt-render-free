@@ -19,17 +19,19 @@ import jwt
 
 import models
 from database import get_db
-from security import decode_access_token, SUPER_ADMIN_ID
+from security import decode_access_token, SUPER_ADMIN_ROLE
 
 security = HTTPBearer(auto_error=False)
 
 # Roles that carry full Super-Admin-equivalent privileges. `admin` is a
 # normal, DB-backed, deletable account (see database.py's seed_db() and
 # services/user_service.py's create_user()); `super_admin` is the single
-# hardcoded root identity (see security.py's super_admin_principal()).
-# Both are treated identically by every permission check below -- the only
-# difference between them is *how the account exists*, never what it's
-# allowed to do.
+# hardcoded-IDENTITY root account (see security.py's module docstring) --
+# it now IS a real `users` row too, just one that's bootstrapped by
+# migration instead of provisioned through the app, and hidden from
+# directory/audit listings. Both are treated identically by every
+# permission check below -- the only difference between them is *how the
+# account exists*, never what it's allowed to do.
 _FULL_ADMIN_ROLES = ("super_admin", "admin")
 
 
@@ -59,14 +61,6 @@ def get_current_user(
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid authentication token.")
 
-    # The hardcoded Super Admin isn't a `users` table row at all, so there's
-    # nothing to re-query here -- its token is valid for as long as it's
-    # cryptographically valid and unexpired, same as any JWT. (To instantly
-    # revoke Super Admin access, rotate JWT_SECRET_KEY and/or unset
-    # SUPER_ADMIN_PASSWORD and restart the backend.)
-    if payload.get("role") == "super_admin" and str(payload.get("sub")) == str(SUPER_ADMIN_ID):
-        return payload
-
     # Requirement #4 (Auth/User routes must exclude soft-deleted records):
     # the JWT itself is stateless and stays cryptographically valid until it
     # naturally expires (up to JWT_EXPIRY_HOURS later). Without re-checking
@@ -92,4 +86,25 @@ def require_privileged_role(user: dict = Depends(get_current_user)) -> dict:
     """Gate for actions the Super Admin, an Admin, OR a Manager may perform."""
     if user["role"] not in (*_FULL_ADMIN_ROLES, "manager"):
         raise HTTPException(status_code=403, detail="Forbidden: View permission requires elevated administrative rights.")
+    return user
+
+
+def require_true_super_admin(user: dict = Depends(get_current_user)) -> dict:
+    """
+    Gate for the handful of actions reserved for the root Super Admin
+    account ONLY -- a regular `admin` account, despite being treated as
+    fully equivalent to Super Admin everywhere else in this app (see
+    `_FULL_ADMIN_ROLES` above), is deliberately excluded here.
+
+    Currently used for every `/backup/*` route (view/create/download/
+    delete/restore -- see api/backup_api.py): a backup contains literally
+    everything, including every `admin` account's own row, and restoring
+    one wholesale replaces the entire database with it. Letting an `admin`
+    view, download, or (especially) restore backups would let that same
+    action expose or tamper with the very accounts meant to be holding it
+    accountable. Super Admin is the single hardcoded-IDENTITY root account
+    (see security.py's module docstring), so this stays gated to it alone.
+    """
+    if user["role"] != SUPER_ADMIN_ROLE:
+        raise HTTPException(status_code=403, detail="Forbidden: This action is restricted to the Super Admin account.")
     return user

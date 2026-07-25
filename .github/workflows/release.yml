@@ -1,0 +1,217 @@
+# .github/workflows/release.yml
+# -----------------------------------------------------------------------------
+# THE trigger for production releases: `git tag v1.x.x && git push origin
+# v1.x.x` (annotated or lightweight, either works -- `--sort=-creatordate`
+# downstream in DEPLOYMENT.md's rollback runbook relies on tag creation date,
+# which both kinds have). Pushing a tag matching `v*.*.*` is now the ONLY
+# path to a production deploy -- `deploy-azure-production.yml` no longer has
+# its own `push` trigger; it's a reusable workflow this one calls at the end.
+#
+# What happens on `git push origin vX.Y.Z`:
+#   1. `ci`          -- re-runs the same fast gate as every push (lint, tests,
+#                       image build + Trivy scan, bicep validate). Reused via
+#                       `uses: ./.github/workflows/ci.yml`, NOT copy-pasted.
+#   2. `build-push`  -- builds BOTH images and pushes each to Docker Hub
+#                       tagged with the VERSION itself (e.g. `:v1.4.2`), not
+#                       just a commit SHA -- this is what makes a version tag
+#                       a real, independently-pullable release artifact.
+#                       Also tags `:latest` and `:<sha>` on the same images
+#                       for convenience/traceability. Trivy scan is blocking
+#                       on CRITICAL, same bar as the old production pipeline.
+#   3. `changelog`   -- diffs this tag against the previous one
+#                       (`git tag --sort=-creatordate`) and inserts a new
+#                       "## [vX.Y.Z] - <date>" section into CHANGELOG.md,
+#                       opens a pull request against `main` with that change
+#                       (never pushes to `main` directly -- see that job's
+#                       comments), and cuts a GitHub Release with the same
+#                       notes.
+#   4. `deploy`      -- calls deploy-azure-production.yml with
+#                       `image_tag: vX.Y.Z` to actually roll the already-built
+#                       images out to Azure (migrate -> deploy -> smoke test
+#                       -> auto-rollback). Runs in parallel with `changelog`,
+#                       not after it -- a docs PR waiting on human review
+#                       shouldn't hold up shipping an already-built, already
+#                       Trivy-scanned release.
+#
+# `changelog` opens a PR rather than committing straight to `main` because
+# this repo's `main` only ever changes via reviewed pull request (feature
+# branch -> `develop` -> `main`) -- no branch, including this bot's, pushes
+# to it directly. Merge that PR whenever convenient; it doesn't block
+# anything else in this workflow.
+# -----------------------------------------------------------------------------
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false # never cancel a release mid-flight
+
+jobs:
+  ci:
+    name: CI gate
+    uses: ./.github/workflows/ci.yml
+
+  build-push:
+    name: Build + tag + push both images
+    needs: [ci]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ github.ref_name }} # e.g. v1.4.2
+      BACKEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend
+      FRONTEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-frontend
+    strategy:
+      matrix:
+        include:
+          - service: backend
+            dockerfile: backend/Dockerfile
+            context: backend
+            image_env: BACKEND_IMAGE
+          - service: frontend
+            dockerfile: frontend/Dockerfile
+            context: .
+            image_env: FRONTEND_IMAGE
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Docker Hub login
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Resolve image name
+        id: img
+        run: echo "name=${{ matrix.image_env == 'BACKEND_IMAGE' && env.BACKEND_IMAGE || env.FRONTEND_IMAGE }}" >> "$GITHUB_OUTPUT"
+
+      # Three tags on the same build: the VERSION (the real release
+      # artifact -- what deploy-azure-production.yml pulls), the commit SHA
+      # (traceability back to exactly what was built), and `latest`
+      # (convenience for anyone pulling without pinning a version).
+      - name: Build + push ${{ matrix.service }} image
+        run: |
+          docker build -f ${{ matrix.dockerfile }} \
+                       -t ${{ steps.img.outputs.name }}:$VERSION \
+                       -t ${{ steps.img.outputs.name }}:${{ github.sha }} \
+                       -t ${{ steps.img.outputs.name }}:latest \
+                       ${{ matrix.context }}
+          docker push ${{ steps.img.outputs.name }}:$VERSION
+          docker push ${{ steps.img.outputs.name }}:${{ github.sha }}
+          docker push ${{ steps.img.outputs.name }}:latest
+
+      - name: Trivy scan (blocking on CRITICAL -- same bar as production always had)
+        # Pinned to the commit SHA behind the verified-safe v0.35.0 release,
+        # not a mutable tag -- see ci.yml's backend Trivy step for why.
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          image-ref: ${{ steps.img.outputs.name }}:${{ env.VERSION }}
+          severity: 'CRITICAL'
+          exit-code: '1'
+
+  changelog:
+    name: Update CHANGELOG.md (via PR) + cut GitHub Release
+    needs: [build-push]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # to push the changelog branch (not `main` itself)
+      pull-requests: write # to open the PR
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main # base the changelog branch on `main`, not the detached tag commit
+          fetch-depth: 0 # need full tag history for `git tag --sort=-creatordate` and `git log <prev>..<current>`
+
+      - name: Generate changelog section for this tag
+        id: notes
+        run: |
+          set -euo pipefail
+          CURRENT_TAG="${{ github.ref_name }}"
+
+          # Same command the DEPLOYMENT.md rollback runbook uses, so "the
+          # previous version" always means the same thing in both places.
+          PREV_TAG="$(git tag --sort=-creatordate | grep -vFx "$CURRENT_TAG" | head -n 1 || true)"
+
+          if [ -n "$PREV_TAG" ]; then
+            RANGE="${PREV_TAG}..${CURRENT_TAG}"
+            echo "Diffing $RANGE against previous release $PREV_TAG"
+          else
+            RANGE="$CURRENT_TAG"
+            echo "No previous tag found -- this is the first release; using full history up to $CURRENT_TAG"
+          fi
+
+          ENTRIES="$(git log $RANGE --no-merges --pretty=format:'- %s (%h)' -- . || true)"
+          if [ -z "$ENTRIES" ]; then
+            ENTRIES="- No user-facing changes recorded since ${PREV_TAG:-the beginning of history}."
+          fi
+
+          DATE="$(date -u +%Y-%m-%d)"
+          {
+            echo "section<<CHANGELOG_EOF"
+            echo "## [${CURRENT_TAG}] - ${DATE}"
+            echo "$ENTRIES"
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "notes<<NOTES_EOF"
+            echo "$ENTRIES"
+            echo "NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Insert section into CHANGELOG.md
+        run: |
+          set -euo pipefail
+          awk -v section="${{ steps.notes.outputs.section }}" '
+            /<!-- release-notes-insertion-point -->/ { print; print ""; print section; next }
+            { print }
+          ' CHANGELOG.md > CHANGELOG.md.new
+          mv CHANGELOG.md.new CHANGELOG.md
+
+      # This repo's `main` only changes via reviewed PR (feature branch ->
+      # `develop` -> `main`) -- nothing, including this bot, pushes to it
+      # directly. So instead of committing straight to `main`, push a new
+      # branch and open a PR against it; merge whenever convenient. This
+      # does NOT block the `deploy` job below -- that runs off the
+      # already-built, already-tagged images regardless of whether this PR
+      # has been merged yet, since the changelog is documentation, not a
+      # deploy input.
+      - name: Open PR with the CHANGELOG.md update
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          base: main
+          branch: changelog/${{ github.ref_name }}
+          delete-branch: true
+          commit-message: "docs(changelog): ${{ github.ref_name }}"
+          title: "docs(changelog): ${{ github.ref_name }}"
+          body: |
+            Automated changelog entry for `${{ github.ref_name }}`, opened by
+            [`release.yml`](.github/workflows/release.yml). Safe to merge any
+            time -- it doesn't gate the production deploy, which already ran
+            (or is running) off this same tag.
+
+            ${{ steps.notes.outputs.notes }}
+          labels: changelog, automated
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "${{ github.ref_name }}" \
+            --notes "${{ steps.notes.outputs.notes }}"
+
+  deploy:
+    name: Deploy this version to Azure (Production)
+    needs: [build-push] # not `changelog` -- a changelog PR awaiting review shouldn't hold up shipping an already-built, already-scanned release
+    permissions:
+      id-token: write
+      contents: read
+    uses: ./.github/workflows/deploy-azure-production.yml
+    with:
+      image_tag: ${{ github.ref_name }}
+    secrets: inherit

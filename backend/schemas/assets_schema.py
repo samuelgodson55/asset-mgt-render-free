@@ -62,8 +62,20 @@ class AdvancedCheckoutRequest(BaseModel):
     assignee_type: str  # "user" | "outsider"
     quantity: int = Field(1, ge=1)  # NOTE: pydantic v2 uses "ge", not "gte"
     user_id: Optional[int] = None
+    # When `assignee_type="outsider"`, the Issue/Dispatch drawer offers a
+    # choice between two routes (see frontend/js/components/assets.js's
+    # submitDispatchForm() and the #adhocExistingSelect dropdown in
+    # admin.html/manager.html): dispatch to an EXISTING ad-hoc profile
+    # already on file (`outsider_id` set, `outsider_name`/`outsider_email`/
+    # `outsider_phone` left blank) or create a BRAND NEW one on the spot
+    # (`outsider_id` left unset, `outsider_name` plus at least one of
+    # `outsider_email`/`outsider_phone` filled in). Exactly one of these
+    # two shapes is expected; services/asset_service.py's
+    # checkout_advanced() enforces that at the point it's actually used.
+    outsider_id: Optional[int] = None
     outsider_name: Optional[str] = None
-    outsider_contact: Optional[str] = None
+    outsider_email: Optional[str] = None
+    outsider_phone: Optional[str] = None
     outsider_company: Optional[str] = None
     due_date: Optional[datetime.date] = None
 

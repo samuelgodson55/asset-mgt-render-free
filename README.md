@@ -53,7 +53,7 @@ Five kinds of people use the system:
 
 | Role | Can do |
 |------|--------|
-| `super_admin` | Everything `admin` can do (see below). This is a single **hardcoded** identity, not a `users` table row — configured via `SUPER_ADMIN_USERNAME`/`SUPER_ADMIN_PASSWORD` in your environment (see [Environment Variables Reference](#environment-variables-reference)). There is always exactly one, it can never be created/edited/deleted through the app, and it never appears in the User Directory or any other listing. |
+| `super_admin` | Everything `admin` can do (see below). This IS a `users` table row now — exactly one, bootstrapped by `alembic upgrade head` in production (or `database.py`'s `seed_db()` for local/dev) — but its identity (`SUPER_ADMIN_USERNAME`/`SUPER_ADMIN_NAME`) is still fixed/hardcoded and it can never be created/edited/deleted through the app. Its password is a normal database-backed hash, rotatable through the same flows as any other account (see [Environment Variables Reference](#environment-variables-reference)). It never appears in the User Directory, bulk exports, or the Audit Trail. |
 | `admin` | Everything: create/delete asset pools, adjust capacity, flag maintenance exceptions, provision any account, view/export all audit logs, export properties for anyone. A normal, database-backed, editable/deletable account — functionally identical in privilege to `super_admin`, just not the one hardcoded root identity. |
 | `manager` | View inventory, dispatch/check-in items to Staff, Linked Customers, or Ad-Hoc Individuals; manage custody for ANY user (no department-scoping); provision new Staff/Customer logins (never Manager/Admin) with any department; export properties/audit data system-wide, same as Admin. |
 | `staff` | Self-service dashboard showing their own checked-out items, with the ability to export their own list; can view/edit their own profile and change their own password. |
@@ -444,6 +444,12 @@ Click your name in the navbar on any dashboard to:
   their token to naturally expire.
 - An idle dashboard automatically logs you out after a period of
   inactivity.
+- **Super Admin accounts additionally require TOTP two-factor
+  authentication** (Google Authenticator/Authy/1Password-compatible) to
+  log in, with one-time-use recovery codes as a backup if the
+  authenticator device is unavailable — see [Two-factor authentication
+  (2FA)](#two-factor-authentication-2fa) below for the full enrollment,
+  verification, and recovery-code flow.
 
 ## Tech Stack
 
@@ -466,7 +472,7 @@ Click your name in the navbar on any dashboard to:
   [`build-tailwind/README.md`](build-tailwind/README.md)) instead of being
   pulled from a CDN and recompiled in every visitor's browser at runtime.
   Served by an nginx reverse proxy built from
-  [`nginx/Dockerfile`](nginx/Dockerfile) (see
+  [`frontend/Dockerfile`](frontend/Dockerfile) (see
   [Deploying Across Environments](#deploying-across-environments-nginx-reverse-proxy)).
 - **Infra:** Docker Compose, 6 services: `db` (Postgres), `redis`
   (Celery broker/result backend, and the shared counter store for the
@@ -498,33 +504,59 @@ one CSS file — see that folder's README for the one-line command.
 snipe-it-lite/
 ├── .github/
 │   └── workflows/
-│       ├── ci.yml                     # Lint/syntax/dependency-audit checks on
-│       │                                # every push + PR (no full test suite
-│       │                                # yet -- see "Suggested Future
-│       │                                # Features"); also gates the two
-│       │                                # deploy workflows below
+│       ├── ci.yml                     # Runs on every push + PR: ruff lint,
+│       │                                # the real `pytest backend/tests`
+│       │                                # suite (against real Postgres/Redis
+│       │                                # service containers, not mocks --
+│       │                                # see "Automated test suite" below),
+│       │                                # pip-audit, a Gitleaks secret scan,
+│       │                                # frontend build/rendering tests,
+│       │                                # a boot-tested nginx clean-URL
+│       │                                # config check, image build + Trivy
+│       │                                # scan, and `infra/main.bicep`
+│       │                                # validation;
+│       │                                # reusable (workflow_call) -- also
+│       │                                # gates deploy-azure-staging.yml and
+│       │                                # release.yml below
 │       ├── deploy-azure-staging.yml    # Push-to-deploy on `develop` --
 │       │                                # builds, scans, migrates, then rolls
 │       │                                # out to the staging Container Apps
-│       ├── deploy-azure-production.yml # Same shape on `main`, with a
-│       │                                # blocking Trivy scan and automatic
-│       │                                # rollback on a failed smoke test
+│       ├── release.yml                 # Triggered by `git tag v1.x.x` push --
+│       │                                # builds + tags both images with the
+│       │                                # VERSION (not just a SHA), updates
+│       │                                # CHANGELOG.md, cuts a GitHub Release,
+│       │                                # then calls deploy-azure-production.yml
+│       ├── deploy-azure-production.yml # Reusable -- no push trigger of its
+│       │                                # own; called by release.yml (or
+│       │                                # manually via workflow_dispatch for a
+│       │                                # redeploy/rollback) with an image_tag
+│       │                                # to migrate + roll out, blocking Trivy
+│       │                                # scan already done by release.yml, and
+│       │                                # automatic rollback on a failed smoke
+│       │                                # test
 │       └── infra-deploy.yml            # One-time/occasional: provisions or
 │                                          # updates infra/main.bicep itself
-│                                          # (separate from the two workflows
+│                                          # (separate from the workflows
 │                                          # above, which only ship new images)
 │
+├── CHANGELOG.md                # One dated section per `git tag v*.*.*`
+│                                  # release, generated and inserted
+│                                  # automatically by release.yml
 ├── DEPLOYMENT.md              # Companion to this file: production safety
 │                                # checklist, scaling, backups, and the full
 │                                # Azure Container Apps walkthrough
 ├── infra/
-│   └── main.bicep              # Azure Container Apps infra (backend/worker/
-│                                  # beat/frontend + migrate job, ACR, Key
-│                                  # Vault, managed Postgres/Redis) -- see
+│   └── main.bicep              # Azure Container Apps infra, cost-optimized:
+│                                  # 4 container apps (frontend, backend, db,
+│                                  # redis) + migrate job -- Postgres/Redis
+│                                  # run as containers (not managed
+│                                  # services), 2 images pulled from Docker
+│                                  # Hub (not ACR), no Key Vault -- see
 │                                  # DEPLOYMENT.md
 ├── .env.azure.example         # Env var reference for the Azure deployment
-│                                # shape (managed Postgres/Redis connection
-│                                # strings, Key Vault-backed secrets)
+│                                # shape (db/redis as internal container
+│                                # apps, frontend/backend split, Container-
+│                                # Apps-secret-backed secrets)
 │
 ├── docker-compose.yml        # 6 services: db, redis, backend, worker, beat,
 │                                # frontend -- worker/beat are split apart
@@ -559,7 +591,7 @@ snipe-it-lite/
 │                                       # its own header comment for why)
 │
 ├── build-frontend/              # Build tooling ONLY -- runs inside
-│   │                              # nginx/Dockerfile's build stage, never
+│   │                              # frontend/Dockerfile's build stage, never
 │   │                              # directly in Docker Compose. Minifies
 │   │                              # frontend/js and frontend/*.html (and,
 │   │                              # in production, obfuscates the JS) --
@@ -615,7 +647,16 @@ snipe-it-lite/
 │   ├── middleware/                # ASGI middleware, one concern per file
 │   │   ├── request_context.py       # Request Correlation ID (X-Request-ID)
 │   │   ├── rate_limit.py             # Per-IP login rate limiting
-│   │   └── security_headers.py       # Standard defensive response headers
+│   │   ├── security_headers.py       # Standard defensive response headers
+│   │   ├── error_handling.py         # Global unhandled-exception safety net
+│   │   │                                # -- logs full traceback + request_id,
+│   │   │                                # returns a safe {"detail", "request_id"}
+│   │   │                                # JSON body instead of a bare 500
+│   │   └── clean_urls.py             # Render single-service mode only --
+│   │                                    # rewrites /admin -> admin.html etc.
+│   │                                    # before StaticFiles, 301s old *.html
+│   │                                    # links (see main.py's SERVE_FRONTEND
+│   │                                    # block for why this is conditional)
 │   │
 │   ├── api/                       # Thin FastAPI routers (HTTP layer only)
 │   │   ├── auth.py, assets.py, users.py, outsiders.py, checkouts.py, audit.py
@@ -663,10 +704,24 @@ snipe-it-lite/
 │   │
 │   └── alembic/                    # Database migration scripts
 │       ├── env.py
-│       └── versions/
-│           └── 0001_baseline_schema.py   # the ONLY migration -- see "Database &
-│                                           # Migrations" below for why there's no
-│                                           # 0002/0003/... chain
+│       └── versions/                 # 9 migrations, each additive-only --
+│           │                          # see "Database & Migrations" below
+│           ├── 0001_baseline_schema.py         # starting schema
+│           ├── 0002_bootstrap_root_admin.py    # inserts the one root
+│           │                                     # `super_admin` row
+│           ├── 0003_outsider_soft_delete.py    # soft-delete columns on
+│           │                                     # outsiders
+│           ├── 0004_outsider_convert_to_user.py  # Outsider -> real User
+│           ├── 0005_user_convert_to_outsider.py  # User -> Outsider (revoke
+│           │                                        # login)
+│           ├── 0006_purge_deleted_users_and_assets.py  # `purged_at` for
+│           │                                              # Purge Deleted
+│           ├── 0007_split_contact_details.py   # outsider contact_details ->
+│           │                                     # email/phone_number
+│           ├── 0008_super_admin_totp.py        # TOTP secret/enabled columns
+│           │                                     # (2FA)
+│           └── 0009_recovery_codes.py          # recovery_codes table (2FA
+│                                                  # backup codes)
 │
 ├── build-tailwind/              # Build tooling ONLY -- never shipped/run in
 │   │                              # Docker. Compiles frontend/css/tailwind.css.
@@ -863,12 +918,16 @@ for local dev — see [Environment Variables Reference](#environment-variables-r
 
 Login accepts **either** the email or the username in the same field.
 
-**Super Admin** isn't seeded here — it's the hardcoded root identity
-described in [Roles & Permissions Model](#roles--permissions-model). For
-local Docker Compose, `.env.example`'s defaults let you log in with
-username `superadmin` / password `change-this-super-admin-password`; set
-your own `SUPER_ADMIN_USERNAME`/`SUPER_ADMIN_PASSWORD` before deploying
-anywhere real.
+**Super Admin** isn't in the table above because it's provisioned
+separately from the other demo accounts — see [The root admin
+account](#the-root-admin-account). For local Docker Compose
+(`AUTO_SEED_DEMO_DATA=true` by default), `database.py`'s `seed_db()` seeds
+it with the same well-known-demo-password convention as every other
+account: username `superadmin` / password `RootAdmin123!`. Rotate it (via
+"My Profile" → Change Password, once logged in) before using this
+anywhere real — see [The root admin account](#the-root-admin-account) for
+how a real production deployment bootstraps it differently, with a
+randomly generated password instead.
 
 ## Deploying Across Environments (nginx Reverse Proxy)
 
@@ -876,7 +935,7 @@ This app is designed to run, **unmodified**, across three tiers: your local
 Docker Compose setup, a Render staging environment, and a real cloud
 environment (AWS/GCP/Azure/etc.). The piece that makes that possible is the
 `frontend` service — it's no longer a bare static-file server, it's an
-**nginx reverse proxy** built from [`nginx/Dockerfile`](nginx/Dockerfile).
+**nginx reverse proxy** built from [`frontend/Dockerfile`](frontend/Dockerfile).
 
 **The core idea:** the browser never talks to the FastAPI backend directly
 and never needs to know its hostname. `frontend/js/api.js` calls a single
@@ -906,7 +965,7 @@ image works in all three tiers — only these environment variables change:
 | `RESOLVER_IP` | Internal DNS server nginx uses to re-resolve `BACKEND_HOST` on every request (so a backend redeploy never leaves nginx pointed at a stale IP) | `127.0.0.11` (Docker's built-in DNS) | Auto-detected at boot from `/etc/resolv.conf` if left unset — see [`nginx/docker-entrypoint.d/15-detect-resolver-ip.sh`](nginx/docker-entrypoint.d/15-detect-resolver-ip.sh) |
 
 `PORT`, `BACKEND_HOST`, and `BACKEND_PORT` all have sensible defaults baked
-into `nginx/Dockerfile`. `RESOLVER_IP` deliberately does **not** — instead of
+into `frontend/Dockerfile`. `RESOLVER_IP` deliberately does **not** — instead of
 hardcoding a guess that could go stale on some future platform, it's
 auto-detected at container boot (see the table above and
 [`nginx/docker-entrypoint.d/15-detect-resolver-ip.sh`](nginx/docker-entrypoint.d/15-detect-resolver-ip.sh)
@@ -942,10 +1001,17 @@ whole app fits on a single free Web Service.
       about to create — `snipeit-lite-db` (free Postgres),
       `snipeit-lite-redis` (free Key Value), and `snipeit-lite-web` (free
       Web Service) — then provisions them on **Deploy Blueprint**.
-- [ ] That's it — no manual hostname copy-pasting. `JWT_SECRET_KEY` and
-      `SUPER_ADMIN_PASSWORD` are auto-generated (`generateValue: true`);
-      find the generated Super Admin password in the Render dashboard's
-      Environment tab if you need to log in as that account.
+- [ ] That's it — no manual hostname copy-pasting. `JWT_SECRET_KEY` is
+      auto-generated (`generateValue: true`). The root admin account is
+      seeded by `AUTO_SEED_DEMO_DATA=true` (this Blueprint's default) with
+      the same well-known demo password as every other seeded account --
+      username `superadmin` / password `RootAdmin123!` (see [The root
+      admin account](#the-root-admin-account) and `database.py`'s
+      `seed_db()`) -- log in and rotate it immediately via "My Profile" →
+      Change Password. For a real deployment, set `AUTO_SEED_DEMO_DATA` to
+      `false` in the dashboard's Environment tab instead and bootstrap the
+      root admin via `alembic upgrade head` (see below), which generates
+      a random password instead of using the well-known demo one.
 - [ ] Verify: load `snipeit-lite-web`'s public Render URL (expect a ~1
       minute cold start the first time, or after any 15-minute idle period
       — see the free-plan limitations below), log in, and confirm `/api/*`
@@ -987,7 +1053,7 @@ public nginx frontend) for proper horizontal scaling and no shared-process
 tradeoffs:
 
 - [ ] Create a **Web Service** (`plan: starter` or higher) built from
-      `nginx/Dockerfile` (build context = repo root) for the frontend/
+      `frontend/Dockerfile` (build context = repo root) for the frontend/
       proxy — the only piece that needs a public URL.
 - [ ] Create a **Private Service** (`plan: starter` or higher) built from
       `backend/Dockerfile` for the FastAPI backend, with
@@ -1014,7 +1080,7 @@ tradeoffs:
 
 
 ### Cloud (AWS/GCP/Azure/etc.)
-Same pattern: deploy the `nginx/Dockerfile` image as your public-facing
+Same pattern: deploy the `frontend/Dockerfile` image as your public-facing
 service, deploy `backend/Dockerfile` as an internal-only service (e.g.
 behind a private load balancer or in the same VPC/private subnet with no
 public IP), and set `BACKEND_HOST`/`BACKEND_PORT` to match that
@@ -1026,13 +1092,18 @@ confirmed a specific value your platform needs — it's auto-detected from
 [`nginx/docker-entrypoint.d/15-detect-resolver-ip.sh`](nginx/docker-entrypoint.d/15-detect-resolver-ip.sh)).
 
 **Deploying to Azure specifically?** This project ships a complete,
-fully-automated version of this pattern already — [`infra/main.bicep`](infra/main.bicep)
-(Azure Container Apps, managed Postgres/Redis, Key Vault) plus
+fully-automated, cost-optimized version of this pattern already —
+[`infra/main.bicep`](infra/main.bicep) (four Azure Container Apps —
+`frontend`, `backend`, `db`, `redis` — `frontend`/`backend` split so each
+scales independently, with Postgres/Redis running as containers instead of
+managed services and both images pulled from Docker Hub instead of Azure
+Container Registry, to keep monthly cost as low as realistically possible)
+plus
 `.github/workflows/deploy-azure-staging.yml` /
 `deploy-azure-production.yml` / `infra-deploy.yml` — instead of the generic
 mechanics above. See [`DEPLOYMENT.md`](DEPLOYMENT.md)'s **Azure Container
-Apps Production Deployment** section for the full one-time setup and how
-the pipeline runs day to day.
+Apps Production Deployment (Cost-Optimized)** section for the full
+one-time setup, cost breakdown, and how the pipeline runs day to day.
 
 ### Why the backend is no longer exposed directly
 `docker-compose.yml`'s `backend` service no longer publishes port `8000` to
@@ -1103,6 +1174,7 @@ see `.gitignore`) and are read by `backend/config.py` into a single typed
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `ENVIRONMENT` | `development` | `production` enables the startup JWT-secret strength check. |
+| `LEAN_MODE` | `true` if `ENVIRONMENT=production`, else `false` | Rarely set directly — it's a convenience switch that only changes the *defaults* of five other flags below (`ENABLE_API_DOCS`, `AUTO_INIT_DB`, `AUTO_SEED_DEMO_DATA`, `ENABLE_AUTO_BACKUP`, `LOG_LEVEL`) so a plain `ENVIRONMENT=production` alone already lands on sane production values for all five, without listing each one in `.env`. Any of those five still overrides `LEAN_MODE`'s default the moment you set it explicitly — see `config.py`'s `apply_environment_defaults()`. |
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | see `.env.example` | Postgres credentials, shared by the `db` and `backend` services. |
 | `DATABASE_URL` | built from the above | Full SQLAlchemy connection string. |
 | `REDIS_URL` | `redis://redis:6379/0` | Celery broker **and** result backend, shared by `backend` (producer) and `worker` (consumer) — used for async audit-ledger exports and every email notification (see [Due-Date Extensions & Notifications](#due-date-extensions--notifications)). |
@@ -1120,9 +1192,9 @@ see `.gitignore`) and are read by `backend/config.py` into a single typed
 | `LOGIN_RATE_LIMIT_MAX` | `5` | Max `/auth/login` attempts per IP per window before HTTP 429. |
 | `LOGIN_RATE_LIMIT_WINDOW_SECONDS` | `60` | The window (in seconds) the above limit applies over. |
 | `ENABLE_API_DOCS` | `true` | Whether `/docs`, `/redoc`, `/openapi.json` exist at all. **Set `false` in Render/cloud** — see the Security Model section below. Also read by the frontend/nginx service (see the table below) as a second, independent layer. |
-| `SUPER_ADMIN_USERNAME` | `superadmin` | Login identifier for the hardcoded Super Admin (root) account — see [Roles & Permissions Model](#roles--permissions-model). |
-| `SUPER_ADMIN_NAME` | `Super Admin` | Display name for that account (shown in the navbar/profile, same as any other user's `name`). |
-| `SUPER_ADMIN_PASSWORD` | *(placeholder, must be changed in production)* | Password for the hardcoded Super Admin. Leaving it empty fully disables that login path. **Must** be a real, unique value in production — the backend refuses to start otherwise (same idea as `JWT_SECRET_KEY`). |
+| `SUPER_ADMIN_USERNAME` | `superadmin` | Login identifier for the root admin account — see [Roles & Permissions Model](#roles--permissions-model). Also read directly (same env var name) by `alembic/versions/0002_bootstrap_root_admin.py` when it bootstraps this account in production. |
+| `SUPER_ADMIN_NAME` | `Super Admin` | Display name for that account (shown in the navbar/profile, same as any other user's `name`). Also read by the bootstrap migration. |
+| `ROOT_ADMIN_BOOTSTRAP_PASSWORD` | *(empty — auto-generated if unset)* | OPTIONAL. Read once, directly, by `alembic/versions/0002_bootstrap_root_admin.py` the first time it inserts the root admin row in production — never by the running app. Leave unset to have that migration generate a random password and print it to the migration job's own output exactly once instead. Not needed at all for local dev (`database.py`'s `seed_db()` uses a fixed demo password there). |
 | `NOTIFICATIONS_ENABLED` | `false` | Master switch for all email (see [Due-Date Extensions & Notifications](#due-date-extensions--notifications)). Leave `false` for local dev with no mail server — every send is logged at `DEBUG` instead. |
 | `SMTP_HOST` | *(empty)* | Mail server hostname. Required if `NOTIFICATIONS_ENABLED=true`. |
 | `SMTP_PORT` | `587` | Mail server port (587 = STARTTLS, the standard). |
@@ -1213,47 +1285,49 @@ for the full workflow; the short version of who can do what:
 | Look up / adjust / assign any submitted Quotation, add a not-in-inventory line, approve, bulk-fulfill | Manager / Admin / Super Admin only (`require_privileged_role`). No department-scoping. |
 | Change the global VAT percentage | Super Admin / Admin only (`require_super_admin`). |
 
-### The hardcoded Super Admin
+### The root admin account
 
-`super_admin` is treated completely differently from every other role. It
-is **not** a row in the `users` table — it's a single fixed identity built
-entirely from the `SUPER_ADMIN_USERNAME`/`SUPER_ADMIN_PASSWORD`/
-`SUPER_ADMIN_NAME` settings (see [Environment Variables
-Reference](#environment-variables-reference) and `backend/config.py`'s
-docstring). That design is what makes the following true **structurally**,
-not just by convention:
+`super_admin` used to be treated completely differently from every other
+role: not a row in the `users` table at all, just a fixed identity built
+entirely from environment variables. That's changed — the root admin **is**
+a real `users` row now, exactly one, bootstrapped once by
+`alembic/versions/0002_bootstrap_root_admin.py` during `alembic upgrade
+head` in production (or by `database.py`'s `seed_db()` for local/dev/test —
+see that migration's and that function's docstrings). What's still fixed
+**structurally**, not just by convention, is its identity, not its
+credential:
 
-- **Exactly one exists, always.** There's no table row to duplicate, and
-  `POST /users` explicitly rejects `role: "super_admin"` as a reserved
-  value no matter who's provisioning the account (see
-  `services/user_service.py`'s `RESERVED_ROLES`) — anyone who needs the
-  same privileges gets the `admin` role instead (see below).
-- **It can never be deleted.** `DELETE /users/{id}` only ever operates on
-  real `users` rows (`services/user_service.py`'s `delete_user()`); there's
-  no row for the Super Admin to be deleted from.
-- **It never appears anywhere in the UI.** The User Directory, exports,
-  and every other listing all come from `SELECT ... FROM users` — a query
-  that structurally can never return this identity.
-- **Its password lives only in the environment.** `POST
-  /auth/update-password` **and** `POST /users/{id}/reset-password` both
-  explicitly reject any attempt to target it (see
-  `services/auth_service.py`'s `update_password()` and
-  `services/user_service.py`'s `reset_user_password()`) — change it by
-  editing `SUPER_ADMIN_PASSWORD` and restarting the backend, not through
-  the app.
-- **Login is checked first, before the database.** `services/
-  auth_service.py`'s `login()` compares the submitted identifier/password
-  against `SUPER_ADMIN_USERNAME`/a pre-hashed `SUPER_ADMIN_PASSWORD`
-  *before* ever querying `users` — see that function's comments for the
-  exact flow, including why an empty `SUPER_ADMIN_PASSWORD` fully disables
-  this path rather than accepting a blank password.
-- **Its JWT is recognized, not re-validated against the database.**
-  `deps.get_current_user` normally re-queries `users` on every request so
-  deactivating/deleting an account revokes access immediately (see above)
-  — there's no row to re-query for the Super Admin, so its token is simply
-  trusted until it expires. To revoke Super Admin access immediately,
-  rotate `JWT_SECRET_KEY` and/or unset `SUPER_ADMIN_PASSWORD`, then restart
-  the backend.
+- **Exactly one exists, always.** `POST /users` explicitly rejects `role:
+  "super_admin"` as a reserved value no matter who's provisioning the
+  account (see `services/user_service.py`'s `RESERVED_ROLES`), and the
+  bootstrap migration itself checks for an existing row before ever
+  inserting one — anyone who needs the same privileges gets the `admin`
+  role instead (see below).
+- **It can never be deleted or edited through the app.**
+  `DELETE /users/{id}` and `PATCH /users/{id}` both respond with a plain
+  404 — not a clearer "that's the root account" message — the instant they
+  resolve to this row (see `services/user_service.py`'s
+  `is_hidden_root_admin()`), so its existence isn't revealed even to
+  someone probing ids directly.
+- **It never appears in the User Directory, bulk exports, or the Audit
+  Trail.** Every listing/export in `services/user_service.py` and
+  `services/audit_service.py` explicitly filters it out — a real,
+  fully-auditable database row that nonetheless never shows up in the
+  ordinary admin-facing UI ("a secure door for the developer").
+- **Its password is a normal database-backed hash, not an environment
+  variable.** It logs in through the exact same DB-backed lookup in
+  `services/auth_service.py`'s `login()` as any other account, and it can
+  be rotated through the exact same self-service `POST
+  /auth/update-password` / admin-issued `POST /users/{id}/reset-password`
+  flows as any other account — each producing a normal, queryable
+  `AuditLog` row. There is no more "edit an env var and restart the
+  backend" escape hatch, and no more "this fully disables the login path"
+  empty-password special case.
+- **Its JWT is re-validated against the database like anyone else's.**
+  `deps.get_current_user` re-queries `users` on every request, so
+  deactivating this row (an Admin/another Super Admin session, working
+  directly against its known id) revokes its access immediately, exactly
+  like any other account.
 
 `admin` exists precisely so you're not stuck using this one hardcoded
 identity for everyday work: it's a normal, database-backed account with
@@ -1262,6 +1336,85 @@ groups them together in every permission check), but it can be created,
 renamed, given a new password through the app, and soft-deleted like any
 other user — see the seeded demo `admin` account in [Demo Login
 Credentials](#demo-login-credentials).
+
+#### Two-factor authentication (2FA)
+
+`super_admin` — and, structurally, only `super_admin` today — additionally
+requires TOTP (Google Authenticator/Authy/1Password-compatible) 2FA to log
+in. `services/auth_service.py`'s `login()` checks `user.role ==
+SUPER_ADMIN_ROLE` right after password verification and, instead of
+issuing a session, returns one of two challenges:
+
+- **`mfa_setup_required`** (this account has never confirmed a code) — a
+  freshly generated secret plus its `otpauth://` provisioning URI, shown
+  in the login response body **exactly once**. `POST
+  /auth/mfa/setup/confirm` only flips `totp_enabled` to `True` (and
+  finally issues the session cookie) once a live code generated from that
+  secret is actually verified — see `models.py`'s `User.totp_enabled`
+  docstring for why a generated-but-never-confirmed secret deliberately
+  doesn't count as "protected yet".
+- **`mfa_required`** (already enrolled) — a short-lived, single-purpose
+  token; `POST /auth/mfa/verify` exchanges a correct code for the real
+  session cookie.
+
+Both challenge tokens are ordinary JWTs signed with the same
+`JWT_SECRET_KEY`, just with a `purpose` claim (`mfa_setup` / `mfa_pending`)
+and a 5-minute expiry — see `security.py`'s `create_mfa_token()` /
+`decode_mfa_token()`. The secret itself is Fernet-encrypted at rest
+(`security.py`'s `encrypt_totp_secret()`, key derived from
+`JWT_SECRET_KEY`) — never stored in plaintext, and never retrievable again
+through any endpoint once the setup screen has shown it once. Wrong 2FA
+codes count against the exact same `failed_login_attempts`/`locked_until`
+lockout columns a wrong password does, so guessing the 6-digit code is
+throttled the same way guessing a password already is, and both `/auth/
+mfa/verify` and `/auth/mfa/setup/confirm` sit behind the same IP rate
+limiter as `/auth/login` (`main.py`'s `RateLimitMiddleware`).
+
+Because every test's database is freshly seeded, `super_admin` starts
+unenrolled in every test run too — see `tests/conftest.py`'s
+`auth_headers()` for how the test suite transparently completes
+enrollment using `pyotp` so every other fixture didn't need to change, and
+`tests/test_mfa.py` for the dedicated coverage (enrollment, wrong codes,
+lockout, recovery codes, and that no other role is ever asked for 2FA).
+
+**Recovery (backup) codes.** The moment enrollment is confirmed,
+`mfa_setup_confirm()` also issues a batch of 10 single-use recovery codes
+(`security.py`'s `generate_recovery_codes()`, format `XXXXX-XXXXX` from a
+32-symbol alphabet that excludes easily-confused characters like `0`/`O`
+and `1`/`I`), returned in that same response's `recovery_codes` field —
+also shown **exactly once**, same as the TOTP secret. The frontend's
+`#mfa-recovery-codes-screen` (`index.html`/`js/main.js`) displays them
+with a "Download as .txt" option before finally continuing to the
+dashboard.
+
+`POST /auth/mfa/verify`'s `code` field accepts EITHER a live TOTP code OR
+one of these recovery codes interchangeably —
+`security.py`'s `is_recovery_code_format()` tells them apart by shape, so
+the frontend never needs to ask which kind the person is submitting. A
+matched recovery code is stamped `used_at` (`models.py`'s `RecoveryCode`)
+and can never be replayed; the response also carries
+`recovery_codes_remaining` so the frontend can eventually surface a
+"running low" nudge. Wrong recovery-code attempts count against the same
+lockout counters wrong TOTP/password attempts do.
+
+Lost your authenticator app AND used up your recovery codes? There's
+deliberately no self-service reset for that combination — it would defeat
+the point of requiring a second factor at all. Recovery means direct
+database access: clear that row's `totp_secret_encrypted` and
+`totp_enabled` (and its `recovery_codes` rows, via the cascade delete on
+`User.recovery_codes` — deleting the `User` row itself isn't needed, just
+those columns), which re-triggers a normal `mfa_setup_required` enrollment
+on the next login.
+
+An already-logged-in, already-enrolled `super_admin` can invalidate every
+existing recovery code and get a fresh batch via `POST
+/auth/mfa/recovery-codes/regenerate` (`auth_service.py`'s
+`regenerate_recovery_codes()`) — covers "I used most of them" or routine
+hygiene. It requires re-entering the current password first (same
+pattern as `update_password()`), since it's a sensitive action taken from
+inside an already-authenticated session rather than a login step. This
+endpoint isn't wired into the "My Profile" UI yet — call it directly (or
+build that button next) if you need to regenerate codes today.
 
 ## Database & Migrations (Alembic)
 
@@ -1299,30 +1452,96 @@ from `models.py` (so autogenerate can see your tables) and pulls the real
 `DATABASE_URL` from `backend/config.py`'s `settings` object instead of a
 hardcoded connection string.
 
+**Viewing the one-time-generated root admin password:** in production
+(`ENVIRONMENT=production`), `alembic upgrade head`'s first run bootstraps
+the root admin via `0002_bootstrap_root_admin.py`, which prints a randomly
+generated password to **stderr, exactly once** (see that file's docstring)
+-- it is never written to the database in plaintext, never logged again
+afterward, and there's no "view it later" endpoint or dashboard field,
+so you need to actually be watching when the command runs:
+- **Local / Docker Compose:** just run the command from a terminal you're
+  watching -- `docker compose exec backend alembic upgrade head` (or
+  `alembic upgrade head` directly if running the backend without Docker)
+  prints straight to that terminal's stderr, which most terminals render
+  inline with stdout.
+- **Render (free plan):** there's no Background Worker/Job type to run a
+  one-off command against, so use the **Shell** tab on the
+  `snipeit-lite-web` service in the Render dashboard -- it drops you into
+  a live shell inside the running container. Run `cd backend && alembic
+  upgrade head` there; the password prints directly in that Shell session
+  (not the Logs tab), so keep it open and copy the password immediately --
+  it won't reappear if you close the tab before copying it.
+- **Other clouds (ECS, Cloud Run, an Azure/GCP VM, etc.):** run it as a
+  one-off task/exec against the running container (e.g. `az container exec`,
+  `gcloud run jobs execute`, `kubectl exec`) with your terminal attached, so
+  stderr streams to you interactively rather than only to a log aggregator
+  you'd have to search through afterward (log aggregators sometimes scrub
+  or truncate lines that look like secrets, which this one does).
+- **This repo's own Azure deployment (`infra/main.bicep`):** the `migrate`
+  Container Apps Job runs `alembic upgrade head` for you, and its
+  `rootAdminBootstrapPassword` parameter defaults to empty (see
+  `infra/main.parameters.example.json`), so the random-password path is
+  what runs by default there too. Its console output -- including that
+  one-time password -- flows into the shared Log Analytics workspace like
+  every other container (see `DEPLOYMENT.md`'s "Monitoring" section):
+  ```bash
+  az containerapp job execution list --name migrate --resource-group rg-snipeit-lite-prod
+  az monitor log-analytics query --workspace <workspace-id> \
+    --analytics-query "ContainerAppConsoleLogs_CL | where ContainerAppName_s == 'migrate' | order by TimeGenerated desc | take 100"
+  ```
+  Log Analytics ingestion can lag a minute or two behind the job actually
+  running, so if you need it immediately, pass `rootAdminBootstrapPassword`
+  as an explicit parameter to `az deployment group create` instead (see
+  `infra/main.bicep`'s top-of-file `USAGE` comment) so you choose the
+  password yourself rather than reading it back out of logs at all.
+
+**If you missed it (closed the terminal too soon, etc.):** the migration
+only inserts the root admin row once -- re-running `alembic upgrade head`
+against the same database is a no-op and won't print a new password (see
+that file's `already_bootstrapped` guard). Recovery options instead: (1)
+if you already have any other Admin/Super Admin account, use its
+`POST /users/{id}/reset-password` (Admin-issued reset, no old password
+needed -- see `services/user_service.py`'s `reset_user_password()`) once
+you know the root admin's user id, or (2) as a last resort, connect
+directly to the database and update that row's `password_hash` column to
+a fresh Argon2id hash you generate yourself (e.g. `python3 -c "from
+security import hash_password; print(hash_password('your-new-password'))"`
+from inside the `backend/` folder).
+
 `init_db()` (`Base.metadata.create_all()`) is still safe to leave enabled
 for local development — it only creates tables that don't exist yet and
 never alters existing ones, so it won't fight with Alembic. In production,
 disable it (`AUTO_INIT_DB=false`) and let `alembic upgrade head` be the
 only thing that ever changes your schema.
 
-**Current migrations:**
-> **If your database was already migrated with an old 0001–0005 chain**
-> (check with `alembic current` — if it shows anything other than
-> `0001_baseline_schema`), do **not** just run `alembic upgrade head`;
-> Alembic will look for migration files that no longer exist and error
-> out. Since your tables already match the new baseline's schema exactly,
-> just re-point Alembic's bookkeeping at it instead, without touching any
-> table:
-> ```bash
-> alembic stamp 0001_baseline_schema
-> ```
-> Fresh installs (empty/nonexistent database) don't need this — just run
-> `alembic upgrade head` as normal.
+**Current migrations** (`backend/alembic/versions/`, applied in order by
+`alembic upgrade head`) — nine so far, each one additive-only (see the
+"migrate first, only ever ADD" rule in the CI/CD section below):
+
+| Revision | What it does |
+|----------|--------------|
+| `0001_baseline_schema` | Starting schema — every table this app began with. |
+| `0002_bootstrap_root_admin` | Inserts the one hidden `super_admin` row (see [The root admin account](#the-root-admin-account)) — a no-op if it already exists. |
+| `0003_outsider_soft_delete` | Adds soft-delete columns to `outsiders`. |
+| `0004_outsider_convert_to_user` | Adds `converted_to_user_id`, backing the Outsider → real User conversion flow. |
+| `0005_user_convert_to_outsider` | Adds `converted_to_outsider_id`, backing the User → Outsider (revoke login) flow. |
+| `0006_purge_deleted` | Adds `purged_at` to `users` and `asset_types` for the Purge Deleted Users/Assets feature. |
+| `0007_split_contact_details` | Splits outsider `contact_details` into `email`/`phone_number`; adds `users.phone_number`. |
+| `0008_super_admin_totp` | Adds `users.totp_secret_encrypted` / `users.totp_enabled` — see [Two-factor authentication (2FA)](#two-factor-authentication-2fa). |
+| `0009_recovery_codes` | Adds the `recovery_codes` table (2FA backup codes). |
+
+A fresh install just runs `alembic upgrade head` and applies all nine in
+order — nothing special to do. `backend/tests/test_migrations.py` runs
+this exact `upgrade head` → `downgrade` chain against a throwaway Postgres
+database in CI on every push (see `.github/workflows/ci.yml`), so a
+migration that doesn't apply or reverse cleanly fails CI before it ever
+reaches a real database.
 
 **Going forward, every schema change should be its own NEW migration**
 (via `alembic revision --autogenerate -m "description"`) layered on top of
-`0001_baseline_schema.py` — don't keep hand-editing the baseline itself
-once any real data exists anywhere.
+`0009_recovery_codes.py` — don't hand-edit an already-applied migration
+file once any real data exists anywhere; write a new one instead, even for
+a one-line fix.
 
 **When you add a new column to `models.py`, always write a migration for
 it** (either by hand or via `alembic revision --autogenerate`) — don't
@@ -1332,7 +1551,7 @@ table that's missing a new column.
 ## Backups
 
 Everything lives in `backend/services/backup_service.py` (the logic),
-`backend/api/backup.py` (the `/api/backup/*` routes, Super Admin/Admin
+`backend/api/backup_api.py` (the `/api/backup/*` routes, Super Admin/Admin
 only), and the **System Backups** panel at the bottom of `admin.html`.
 
 **What happens automatically:** once a day at each hour listed in
@@ -1483,11 +1702,15 @@ once the backend is running. This table is the high-level map:
 
 | Method & Path | Who | Purpose |
 |---|---|---|
-| `POST /auth/login` | anyone | Exchange email/username + password for a JWT. Matches the submitted identifier against EITHER field, case-insensitively (`"T.Okafor@corp.io"` and `"t.okafor@corp.io"` both work — see `services/auth_service.py`'s `login()`). Rate-limited by IP; also enforces per-account lockout after repeated failures. |
+| `POST /auth/login` | anyone | Exchange email/username + password for a JWT. Matches the submitted identifier against EITHER field, case-insensitively (`"T.Okafor@corp.io"` and `"t.okafor@corp.io"` both work — see `services/auth_service.py`'s `login()`). Rate-limited by IP; also enforces per-account lockout after repeated failures. For the Super Admin account specifically, returns `mfa_setup_required`/`mfa_setup_token` (first login ever, no session cookie yet) or `mfa_required`/`mfa_pending_token` (already enrolled) instead of a session — no other role uses 2FA at all. |
+| `POST /auth/mfa/setup/confirm` | Super Admin, mid-enrollment | Completes first-time 2FA enrollment: exchanges the `mfa_setup_token` from `POST /auth/login` above plus a valid TOTP code for the real session cookie. |
+| `POST /auth/mfa/verify` | Super Admin, already enrolled | Exchanges the `mfa_pending_token` from `POST /auth/login` above plus a valid TOTP code for the real session cookie. Wrong codes are rejected and repeated failures lock the account out, same as a wrong password would. |
+| `POST /auth/mfa/recovery-codes/regenerate` | Super Admin (self) | Invalidates every existing one-time recovery code and issues ten brand-new ones — requires re-confirming the current password first. |
 | `POST /auth/logout` | logged in | Clears the `HttpOnly` session cookie set at login (see [Security Model](#security-model)). |
 | `GET /auth/me` | logged in | "Who am I?" — fresh profile data for the "My Profile" window. |
 | `POST /auth/update-password` | self or Super Admin/Admin | Change a password (self-service requires the current password; a Super Admin resetting someone else's does not). |
 | `GET /assets` | logged in | List asset pools. TRUE server-side pagination + search — `?limit=&offset=&search=` (searches pool name). |
+| `GET /assets/deleted` | Super Admin / Admin | List soft-deleted asset pools, so one can be found to restore or purge. TRUE server-side pagination + search, same as `GET /assets`. |
 | `POST /assets` | Super Admin / Admin | Create a new pool. |
 | `GET /assets/{id}/details` | logged in | Full pool detail: stock breakdown, active checkouts, isolated units. |
 | `PUT /assets/{id}/quantity` | Super Admin / Admin | Adjust total capacity. |
@@ -1495,6 +1718,8 @@ once the backend is running. This table is the high-level map:
 | `PUT /assets/{id}/category` | Super Admin / Admin | Change a pool's category. |
 | `PUT /assets/{id}/price` | Super Admin / Admin | Change a pool's per-unit price (see `CURRENCY_CODE`). |
 | `DELETE /assets/{id}` | Super Admin / Admin | Soft-delete a pool. |
+| `POST /assets/{id}/restore` | Super Admin / Admin | Reverses a soft delete: returns the pool to active inventory. |
+| `POST /assets/{id}/purge` | Super Admin / Admin | Permanently anonymizes a soft-deleted pool's name so it's free to be reused by a new pool. Irreversible — unlike restore, there's no undo. |
 | `POST /assets/{id}/exception` | Super Admin / Admin | Flag a serial as under repair/stolen. |
 | `POST /assets/{id}/exception/{eid}/recall` | Super Admin / Admin | Return an isolated unit to service. |
 | `POST /assets/{id}/checkin` | Super Admin / Admin | Reconcile newly-found stock. |
@@ -1511,12 +1736,16 @@ once the backend is running. This table is the high-level map:
 | `PATCH /users/{id}` | Super Admin / Admin / Manager | Edit an account's name/username/email (a Manager may only target Staff/Customer accounts — enforced server-side). |
 | `GET /users/export` | Super Admin / Admin / Manager | Bulk download of every active checkout across every user, system-wide, for both roles (CSV/PDF). |
 | `DELETE /users/{id}` | Super Admin / Admin | Soft-delete an account. |
+| `POST /users/{id}/convert-to-outsider` | Super Admin / Admin / Manager | Revoke an account's login access and turn it into an Ad-Hoc (no-login) profile instead — the reverse of `POST /outsiders/{id}/convert-to-user` below. A Manager may only target Staff/Customer accounts, same ceiling as account provisioning. |
 | `POST /users/{id}/reset-password` | Super Admin / Admin | "Forgot password" recovery: set a brand-new password for another user's account, no current password required. |
 | `GET /users/deleted` | Super Admin / Admin | List soft-deleted accounts. TRUE server-side pagination + search — `?limit=&offset=&search=`, same fields as `GET /users`. |
 | `POST /users/{id}/restore` | Super Admin / Admin | Undo a soft-delete: re-enables login and returns the account to the User Directory. |
+| `POST /users/{id}/purge` | Super Admin / Admin | Permanently anonymizes a soft-deleted account's email/username so they're free to be reused by a new account. Irreversible — unlike restore, there's no undo. |
 | `GET /outsiders` | Super Admin / Admin / Manager | Ad-Hoc directory listing. TRUE server-side pagination + search — `?limit=&offset=&search=` (searches name, contact details, company). |
 | `GET /outsiders/{id}/items` | Super Admin / Admin / Manager | An outsider's custody ledger. |
 | `PATCH /outsiders/{id}` | Super Admin / Admin / Manager | Edit an ad-hoc individual's name/contact details/company. |
+| `DELETE /outsiders/{id}` | Super Admin / Admin / Manager | Soft-delete an ad-hoc individual's profile; blocked while it still has items in active custody. |
+| `POST /outsiders/{id}/convert-to-user` | Super Admin / Admin / Manager | Turn an ad-hoc individual into a real, log-in-capable user account — migrates their active/returned checkouts and any Quotation assignment along with them (see `test_outsider_convert_to_user.py` under [Testing Your Changes](#testing-your-changes)). Subject to the same Manager role ceiling as provisioning any other new account. |
 | `GET /outsiders/{id}/items/export` | Super Admin / Admin / Manager | Download one specific outsider's custody ledger (CSV/PDF). |
 | `GET /outsiders/export` | Super Admin / Admin / Manager | Bulk download of every active checkout across every ad-hoc individual (CSV/PDF). |
 | `POST /checkouts/{id}/return` | Super Admin / Admin / Manager | Process a (partial or full) return. |
@@ -1573,7 +1802,8 @@ once the backend is running. This table is the high-level map:
 | `PUT /settings/vat` | Super Admin / Admin | Change the global VAT percentage applied to every Quotation immediately. |
 | `GET /settings/digest-recipients` | Super Admin / Admin | The current list of email addresses that receive the daily overdue/due-soon digest (see [Due-Date Extensions & Notifications](#due-date-extensions--notifications)). |
 | `PUT /settings/digest-recipients` | Super Admin / Admin | Replace the entire digest recipients list. Takes effect on the next scheduled digest run — no restart needed. |
-| `GET /healthz` | anyone | Trivial liveness check for Docker/orchestrators. |
+| `GET /healthz` | anyone | Liveness check — process is up and answering HTTP, no DB dependency. `backend/Dockerfile`'s own `HEALTHCHECK` instruction already points here (so plain `docker compose ps`/`docker ps` report it too), and `infra/main.bicep` points Azure Container Apps' liveness probe here as well. |
+| `GET /readyz` | anyone | Readiness check — queries the DB and compares its Alembic revision against what this build expects; `200` + `{"ready": true, ...}` once the schema matches, `503` + `{"ready": false, "reason": "..."}` otherwise. Point orchestrator readiness probes (e.g. Azure Container Apps' `Readiness` probe) here, not at `/healthz`. |
 
 **Every export endpoint** accepts `?format=csv` or `?format=pdf` and
 responds with a real file download (`Content-Disposition: attachment`) —
@@ -1594,9 +1824,15 @@ the actual logic lives. Use this section as a map when you need to find
   their `AUTO_*` settings flags are enabled.
 - `custom_openapi()` — customizes the generated OpenAPI schema (used by
   `/docs`).
-- `health_check()` — `GET /healthz`.
-- Also where the middleware stack (`RateLimitMiddleware`,
-  `RequestContextMiddleware`, `CORSMiddleware`, `SecurityHeadersMiddleware`)
+- `health_check()` — `GET /healthz`. Liveness only; no DB dependency.
+- `readiness_check()` — `GET /readyz`. Readiness; calls
+  `database.py`'s `get_schema_status()` to confirm the live DB's Alembic
+  revision matches this build's code before reporting `200`. This is
+  what Azure Container Apps' readiness probe (see `infra/main.bicep`)
+  actually polls before shifting traffic to a new replica.
+- Also where the middleware stack (`UnhandledExceptionMiddleware`,
+  `RateLimitMiddleware`, `RequestContextMiddleware`, `CORSMiddleware`,
+  `SecurityHeadersMiddleware`)
   and all API routers are registered — if you add a new `api/*.py` file,
   you register its router here.
 
@@ -1609,10 +1845,10 @@ the actual logic lives. Use this section as a map when you need to find
 - `Settings.is_production` — `True` when `ENVIRONMENT=production`.
 - `Settings._enforce_prod_jwt_secret()` — validator that **refuses to
   start** if running in production with a placeholder/weak
-  `JWT_SECRET_KEY`.
-- `Settings._enforce_prod_super_admin_password()` — same idea, for
-  `SUPER_ADMIN_PASSWORD` (the hardcoded Super Admin's password — see
-  Roles & Permissions Model).
+  `JWT_SECRET_KEY`. There is no equivalent Super Admin check anymore --
+  its password lives in the database as a normal hash, not an env var
+  (see [The root admin account](#the-root-admin-account)), so there's
+  nothing here to validate at startup.
 
 #### `backend/database.py`
 - `init_db()` — `Base.metadata.create_all()`; creates any tables that
@@ -1620,9 +1856,11 @@ the actual logic lives. Use this section as a map when you need to find
 - `get_db()` — FastAPI dependency that yields a SQLAlchemy `Session` and
   always closes it afterwards.
 - `seed_db()` — inserts demo accounts/asset pools **only if the database
-  is empty**. Note there's no `super_admin` row seeded here — that
-  identity is hardcoded via environment variables (see Roles &
-  Permissions Model); the seeded top-privilege demo account is `admin`.
+  is empty**, including a local/dev/test root admin row (`_root_admin_demo_row()`,
+  well-known demo password -- see [The root admin
+  account](#the-root-admin-account); production gets its root admin from
+  the `0002_bootstrap_root_admin.py` migration instead, with a randomly
+  generated password).
 
 #### `backend/models.py`
 - `utc_now()` — the one place "the current time" is generated app-wide,
@@ -1680,12 +1918,14 @@ the actual logic lives. Use this section as a map when you need to find
 - `create_access_token(user)` — issues a signed JWT for a logged-in user.
 - `decode_access_token(token)` — verifies signature + expiry and returns
   the token's claims.
-- `SUPER_ADMIN_ID` / `SUPER_ADMIN_ROLE` — constants identifying the
-  hardcoded Super Admin's JWT `sub`/`role` claims.
-- `super_admin_password_hash()` / `SUPER_ADMIN_PASSWORD_HASH` — hashes
-  `settings.SUPER_ADMIN_PASSWORD` once at startup (`None` if unset).
-- `super_admin_principal()` — a `User`-shaped stand-in for the Super Admin
-  so `create_access_token()` can issue it a token like any other account.
+- `SUPER_ADMIN_ROLE` — the reserved `role` string (`"super_admin"`)
+  identifying the root admin's real `users` row (see [The root admin
+  account](#the-root-admin-account)). `SUPER_ADMIN_EMAIL` is its derived
+  placeholder email (`{SUPER_ADMIN_USERNAME}@local`), used only to build
+  the seed/bootstrap row -- there's no `SUPER_ADMIN_ID`,
+  `SUPER_ADMIN_PASSWORD_HASH`, or `super_admin_principal()` anymore: the
+  root admin logs in through the exact same database lookup as any other
+  account, so it needs no JWT-issuing stand-in of its own.
 
 #### `backend/deps.py`
 - `get_current_user(...)` — FastAPI dependency: decodes the bearer token
@@ -1723,31 +1963,60 @@ the actual logic lives. Use this section as a map when you need to find
 - **`security_headers.py`** — `class SecurityHeadersMiddleware` stamps
   `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, and a
   restrictive `Permissions-Policy` onto every response.
+- **`error_handling.py`** — `class UnhandledExceptionMiddleware`, the
+  last-resort safety net for a genuinely unanticipated exception (a bug,
+  an unexpected third-party error, anything nothing else already caught
+  with its own `try/except`). Logs the full traceback — automatically
+  tagged with that request's correlation ID, same as every other log
+  line (see `request_context.py` above) — and returns the SAME
+  `{"detail": ...}` JSON shape every other error in this API uses, plus
+  a `request_id` field so a user/support agent can hand back an ID that
+  maps straight to the matching log line. Registered as the *innermost*
+  middleware layer (see `main.py`'s "MIDDLEWARE STACK" comment) rather
+  than as `@app.exception_handler(Exception)` — that alternative gets
+  routed by Starlette to the outermost `ServerErrorMiddleware`, *outside*
+  `CORSMiddleware`, which would silently strip CORS headers from every
+  unhandled 500 and leave the browser reporting an opaque network error
+  instead. See that file's own module docstring for the full mechanism.
+- **`clean_urls.py`** — `class CleanUrlsMiddleware`, only registered when
+  `settings.SERVE_FRONTEND` is on (the free-tier Render single-service
+  deployment shape — see `Dockerfile.render`/`render-start.sh` — where
+  FastAPI itself serves the built frontend via a `StaticFiles(html=True)`
+  mount, not nginx). Rewrites clean URLs like `/admin` to the actual
+  `admin.html` file *before* that mount ever sees the request (no redirect,
+  no URL flash in the address bar), and 301-redirects anyone still hitting
+  an old `/admin.html`-style link to its clean equivalent. In the
+  nginx-fronted deployment shape (`docker-compose.yml` / most cloud
+  deployments), this middleware isn't loaded at all — the identical
+  rewrite/redirect behavior lives in `nginx/default.conf.template`'s
+  `location /` and `location ~ ^/(.+)\.html$` blocks instead, so both
+  deployment shapes present identical URLs to the browser either way. See
+  that file's own module docstring for the full explicit `CLEAN_URL_MAP`.
 
 ### Backend — API Routes (`backend/api/`)
 
-- **`api/auth.py`** — `login`, `get_my_profile`, `update_password`.
-- **`api/assets.py`** — `create_asset_type`, `list_assets`,
+- **`api/auth_api.py`** — `login`, `get_my_profile`, `update_password`.
+- **`api/assets_api.py`** — `create_asset_type`, `list_assets`,
   `get_asset_details`, `update_asset_quantity`, `delete_asset_type`,
   `flag_asset_exception`, `recall_asset_exception`, `checkin_asset`,
   `checkout_advanced`, `import_assets_from_csv`.
-- **`api/users.py`** — `create_user`, `get_users`, `get_deleted_users`,
+- **`api/users_api.py`** — `create_user`, `get_users`, `get_deleted_users`,
   `get_my_assigned_items`, `export_my_assigned_items`,
   `export_all_users`, `get_user_assigned_items`,
   `export_user_assigned_items`, `delete_user`, `reset_user_password`,
   `restore_user`.
-- **`api/outsiders.py`** — `get_outsiders`, `export_all_outsiders`,
+- **`api/outsiders_api.py`** — `get_outsiders`, `export_all_outsiders`,
   `get_outsider_assigned_items`, `export_outsider_assigned_items`.
-- **`api/checkouts.py`** — `return_checkout`, `get_overdue_checkouts`,
+- **`api/checkouts_api.py`** — `return_checkout`, `get_overdue_checkouts`,
   `get_due_soon_checkouts`, `request_extension`, `get_extension_requests`,
   `decide_extension_request`, `extend_checkout`.
-- **`api/audit.py`** — `get_audit_logs`, `export_audit_logs`.
-- **`api/backup.py`** — `backup_status`, `list_backups`,
+- **`api/audit_api.py`** — `get_audit_logs`, `export_audit_logs`.
+- **`api/backup_api.py`** — `backup_status`, `list_backups`,
   `create_backup_now`, `download_backup`, `delete_backup`,
   `restore_backup`, `restore_backup_upload`. Thin router — see
   `services/backup_service.py` for the actual `pg_dump`/`psql`/Google
   Drive implementation.
-- **`api/quotations.py`** — `get_public_config`, `get_asset_catalog`;
+- **`api/quotations_api.py`** — `get_public_config`, `get_asset_catalog`;
   self-service cart routes (`get_my_quotation`,
   `get_my_quotation_history`, `add_quotation_item`,
   `update_quotation_item`, `remove_quotation_item`, `submit_quotation`,
@@ -1759,7 +2028,7 @@ the actual logic lives. Use this section as a map when you need to find
   `export_quotation_admin`); and the global `get_vat_setting`/
   `update_vat_setting`. See [Equipment
   Quotations](#equipment-quotations-quote-to-checkout).
-- **`api/notifications.py`** — `get_digest_recipients`/
+- **`api/notifications_api.py`** — `get_digest_recipients`/
   `update_digest_recipients` (the daily digest's admin-editable recipient
   list, Super Admin/Admin only).
 
@@ -1771,16 +2040,14 @@ the actual logic lives. Use this section as a map when you need to find
   `delete_asset_type`, `flag_asset_exception`, `recall_asset_exception`,
   `checkin_asset`, `checkout_advanced`, `import_assets_from_csv`.
   `MAX_CSV_UPLOAD_BYTES` caps upload size.
-- **`services/auth_service.py`** — `login(db, req)` checks the hardcoded
-  Super Admin identifier/password FIRST, before ever querying `users`;
-  otherwise verifies credentials against the database, enforces
+- **`services/auth_service.py`** — `login(db, req)` verifies credentials
+  against the database (the root admin is a real row like anyone else --
+  see [The root admin account](#the-root-admin-account)), enforces
   per-account lockout, and issues a JWT. `_DUMMY_PASSWORD_HASH` keeps the
   "no such account" response timing-consistent with "wrong password";
-  `get_profile(db, current_user)` backs `GET /auth/me` (rehydrated
-  straight from JWT claims for the Super Admin, since it has no row to
-  query); `update_password` changes a password and clears any lockout as a
-  side effect, and rejects any attempt to target the Super Admin (whose
-  password only lives in `SUPER_ADMIN_PASSWORD`).
+  `get_profile(db, current_user)` backs `GET /auth/me`; `update_password`
+  changes a password and clears any lockout as a side effect, and works
+  for the root admin exactly the same way as any other account.
 - **`services/checkout_service.py`** — `return_checkout` processes a
   partial/full return (and records who the equipment came from in the
   audit entry); `list_overdue_checkouts` backs the overdue alert feed;
@@ -1913,29 +2180,29 @@ them, completely out-of-band from any HTTP request.
 ### Backend — Schemas (`backend/schemas/`)
 
 Pure Pydantic request/response models, no logic:
-- **`schemas/auth.py`** — `LoginRequest`, `PasswordUpdateRequest`
+- **`schemas/auth_schema.py`** — `LoginRequest`, `PasswordUpdateRequest`
   (enforces password strength via a `field_validator`).
-- **`schemas/assets.py`** — asset/checkout request bodies, including the
-  server-side due-date min/max check.
-- **`schemas/users.py`** — `UserCreateRequest` (also enforces password
-  strength); `UserPasswordResetRequest` (the admin-reset body — just
-  `new_password`, same strength `field_validator`, no `current_password`
-  since the whole point is not needing the old one).
-- **`schemas/checkouts.py`** — `ReturnRequest`; `ExtensionRequestCreate`
-  (self-service or on-behalf-of-Outsider request body);
-  `ExtensionDecisionRequest` (approve/deny, with an optional
+- **`schemas/assets_schema.py`** — asset/checkout request bodies, including
+  the server-side due-date min/max check.
+- **`schemas/users_schema.py`** — `UserCreateRequest` (also enforces
+  password strength); `UserPasswordResetRequest` (the admin-reset body —
+  just `new_password`, same strength `field_validator`, no
+  `current_password` since the whole point is not needing the old one).
+- **`schemas/checkouts_schema.py`** — `ReturnRequest`;
+  `ExtensionRequestCreate` (self-service or on-behalf-of-Outsider request
+  body); `ExtensionDecisionRequest` (approve/deny, with an optional
   `override_due_date`/`note`); `DirectExtensionRequest` (the "Extend"
   button's request body — same shape as `ExtensionRequestCreate`, but
   skips the request/approval workflow entirely).
-- **`schemas/quotations.py`** — `QuotationItemCreate`/
+- **`schemas/quotations_schema.py`** — `QuotationItemCreate`/
   `QuotationItemQuantityUpdate` (self-service cart line bodies);
   `QuotationOutsourcedItemCreate` (Admin/Manager not-in-inventory line);
   `QuotationCreateRequest`/`QuotationMetaUpdate`/`QuotationAssignRequest`
   (the "Quotes" tab); `VatUpdateRequest` (the global VAT setting).
-- **`schemas/notifications.py`** — `DigestRecipientsUpdateRequest` (the
-  daily digest's admin-editable recipient list; validates/normalizes each
-  address without an `email-validator` dependency — see the file's own
-  comments).
+- **`schemas/notifications_schema.py`** — `DigestRecipientsUpdateRequest`
+  (the daily digest's admin-editable recipient list; validates/normalizes
+  each address without an `email-validator` dependency — see the file's
+  own comments).
 
 ### Backend — Scripts (`backend/scripts/`)
 
@@ -2110,13 +2377,13 @@ them, do them **in this order**, and test after each layer if you can
 2. **Migration** — `alembic revision --autogenerate -m "add notes to asset_types"`,
    then check the generated file actually looks right before running
    `alembic upgrade head`.
-3. **`schemas/assets.py`** — add `notes: Optional[str] = None` to whichever
-   request model creates/updates a pool.
+3. **`schemas/assets_schema.py`** — add `notes: Optional[str] = None` to
+   whichever request model creates/updates a pool.
 4. **`services/asset_service.py`** — read `payload.notes` and set it on
    the `AssetType` row in `create_asset_type()`/`update_asset_quantity()`
    (or wherever makes sense).
-5. **`api/assets.py`** — usually needs NO change at all, since routes just
-   pass the whole validated `payload` object through to the service.
+5. **`api/assets_api.py`** — usually needs NO change at all, since routes
+   just pass the whole validated `payload` object through to the service.
 6. **`frontend/js/components/assets.js`** — include `notes` in whatever
    object `submitCreatePoolForm()` sends, and display it in
    `renderAssetsTable()`/`openPropsModal()`.
@@ -2210,6 +2477,10 @@ pytest tests -v
 
 Runs in CI on every push/PR too (`.github/workflows/ci.yml`'s `Pytest`
 step) — a failing test now fails the build, not just gets logged.
+`backend/pytest.ini` is what makes both `cd backend && pytest tests` above
+and CI's own `pytest backend/tests` (run from the repo root) behave
+identically regardless of which directory pytest was started from —
+`tests/conftest.py` handles putting `backend/` on `sys.path` either way.
 
 What's covered today:
 - `test_auth.py` — login for every seeded role (including the hardcoded
@@ -2227,10 +2498,74 @@ What's covered today:
   (see [Due-Date Extensions & Notifications](#due-date-extensions--notifications)).
 - `test_permissions.py` — spot-checks of `deps.py`'s role gates across
   several routers.
+- `test_error_handling.py` — forces a genuinely unanticipated exception
+  (via monkeypatch, not a route's own `try/except`) and confirms
+  `middleware/error_handling.py`'s global safety net: a 500 with the
+  same `{"detail": ...}` shape every other error uses, a `request_id`
+  in the body that matches the `X-Request-ID` response header, the full
+  traceback actually reaching the logger, CORS headers still present on
+  the error response, and ordinary `HTTPException` paths (e.g. a plain
+  401) staying completely unaffected.
+- `test_health.py` — `/healthz` never touches the database even when the
+  schema is missing/broken (pure liveness), and `/readyz` correctly
+  reports not-ready when the `alembic_version` table is missing or its
+  revision is stale, and ready once it matches this build's expected head.
+- `test_mfa.py` — the Super Admin-only TOTP enrollment/verification
+  flow: regular roles never get prompted for 2FA, first-login forces
+  setup vs. later logins requiring verify, wrong codes are rejected and
+  lock out repeated attempts, expired/garbage tokens are rejected, and
+  enrollment issues exactly ten distinct one-time recovery codes.
+- `test_clean_urls_middleware.py` — `middleware/clean_urls.py`'s clean-URL
+  rewriting (`/admin` → `admin.html`) and old-link 301 redirects
+  (`/admin.html` → `/admin`, query string preserved), confirms `/api/*`
+  routes are never touched by it, and an unrecognized clean-looking path
+  404s rather than guessing at a filename.
+- `test_csv_import.py` — bulk asset-pool CSV import: only a Super Admin
+  can import, a file with a mix of valid/invalid rows partially succeeds
+  (valid rows saved, invalid ones rejected, never silently merged/
+  duplicated), and missing required columns are rejected before any row
+  is processed at all.
+- `test_outsiders.py` — Outsider (non-employee borrower) lifecycle:
+  soft-delete blocked while items are in active custody, role gating on
+  who can delete an Outsider, 404s on an already-deleted or nonexistent
+  Outsider ID, and dispatching a checkout/quote to an existing vs. brand
+  new Outsider profile.
+- `test_outsider_convert_to_user.py` / `test_user_convert_to_outsider.py`
+  — the two-way "convert an Outsider into a logged-in User" (and back)
+  flow: active/returned checkouts and any Quotation assignment migrate
+  along with the record, a Manager can't promote someone into an Admin
+  account or revoke an Admin/Manager account, Staff can't perform the
+  conversion at all, and converting an already-converted record 404s
+  instead of double-converting.
+- `test_quotation_workflow.py` — the full Equipment Quotation lifecycle
+  (draft → submit → approve → fulfill/checkout), discount-then-VAT
+  calculation order, per-line rental-day subtotals on a multi-line cart,
+  and the guardrails against approving/checking-out a Quotation twice or
+  checking one out before it's approved.
+- `test_redbeat_scheduling.py` — confirms Celery is actually configured
+  with `RedBeatScheduler` (not the default file-based one — see
+  `celery_app.py`), and that only one replica can hold the Beat lock at
+  a time, including the lock expiring and failing over if the active
+  replica dies, and two replicas racing to dispatch the same scheduled
+  task only ever resulting in one actual dispatch.
+- `test_migrations.py` — runs real `alembic upgrade head`/`downgrade`
+  round-trips against a throwaway database (not the SQLite fixtures the
+  rest of the suite uses): full schema creation, the root-admin bootstrap
+  migration behaving correctly in development (never auto-created) vs.
+  production (created exactly once, with a generated password if none
+  was supplied), re-running the upgrade never duplicating that row, and
+  a downgrade-by-one-step removing only what it added.
 
-This is intentionally not exhaustive (no coverage yet of CSV import,
-exports, backups, quotations, or Outsiders, for instance) — extend it the
-same way: add a new `test_*.py` file under `backend/tests/`, reuse the
+Two of the above (`test_migrations.py`, `test_redbeat_scheduling.py`)
+need a real Postgres/Redis, not just the SQLite fixtures — see each
+file's own module docstring for how to point them at a scratch instance;
+`ci.yml` runs them against real service containers, so `pytest tests -v`
+locally without those services up will show them failing for
+environment reasons, not a real regression.
+
+Not everything has dedicated tests yet — audit-log/export-related
+service functions and the Backups panel's create/restore paths are the
+current gaps — extend it the same way: add a new `test_*.py` file under `backend/tests/`, reuse the
 `client`/`db_session`/`as_admin`/`as_manager`/`as_staff`/`as_customer`/
 `as_super_admin` fixtures from `conftest.py` rather than hand-rolling a
 new database/login setup per file.
@@ -2280,7 +2615,7 @@ main.app.dependency_overrides[database.get_db] = lambda: database.SessionLocal()
 client = TestClient(main.app)
 
 # Log in as the demo Super Admin -- POST /auth/login sets the JWT as an
-# HttpOnly cookie (see api/auth.py), not a "token" field in the response
+# HttpOnly cookie (see api/auth_api.py), not a "token" field in the response
 # body, so `client` (which keeps its own cookie jar) is already
 # authenticated for every request after this one; no headers= needed.
 r = client.post("/api/auth/login", json={"identifier": "r.adeyemi@corp.io", "password": "Admin123!"})
@@ -2401,13 +2736,22 @@ A checklist before you deploy this anywhere real:
 - [ ] `ENVIRONMENT=production` in your `.env` (this alone makes the
       backend **refuse to start** if `JWT_SECRET_KEY` is still a
       placeholder or too short — see `config.py`).
-- [ ] Generate and set a real `JWT_SECRET_KEY`, `POSTGRES_PASSWORD`, and
-      `SUPER_ADMIN_PASSWORD` (this alone makes the backend **refuse to
-      start** if `SUPER_ADMIN_PASSWORD` is still empty/placeholder or too
-      short — see `config.py`).
+- [ ] Generate and set a real `JWT_SECRET_KEY` and `POSTGRES_PASSWORD`
+      (the former alone makes the backend **refuse to start** if
+      `JWT_SECRET_KEY` is still empty/placeholder or too short — see
+      `config.py`).
 - [ ] `AUTO_INIT_DB=false` and `AUTO_SEED_DEMO_DATA=false` — run
-      `alembic upgrade head` as its own explicit deploy step instead, and
-      never create the public demo accounts against a real database.
+      `alembic upgrade head` as its own explicit deploy step instead
+      (this also bootstraps the root admin with a randomly generated
+      password, printed to stderr once — see "Viewing the
+      one-time-generated root admin password" above), and never create
+      the public demo accounts against a real database. **Already the
+      default** the moment `ENVIRONMENT=production` is set — `config.py`'s
+      `LEAN_MODE` (see the Environment Variables Reference above)
+      auto-flips this, `ENABLE_API_DOCS`, and `ENABLE_AUTO_BACKUP` to
+      production-safe values for you. Setting these explicitly in `.env`
+      anyway is still recommended (explicit beats implicit for a
+      deployment's actual config), but nothing breaks if you forget.
 - [ ] Set `CORS_ORIGINS` to your real frontend domain(s) only.
 - [ ] Decide on email: leave `NOTIFICATIONS_ENABLED=false` if you don't
       want extension-request/overdue/due-soon-checkout emails yet, or set
@@ -2420,7 +2764,10 @@ A checklist before you deploy this anywhere real:
       emails silently never leave the enqueue step.
 - [ ] Set `ENABLE_API_DOCS=false` for **both** the backend and frontend
       services (same `.env` key drives both locally; `render.yaml` already
-      sets `false` for both services in Render). Confirm it worked by
+      sets `false` for both services in Render; `LEAN_MODE` — see above —
+      also defaults the backend's copy to `false` under
+      `ENVIRONMENT=production`, but the frontend/nginx copy has no such
+      auto-default, so set it explicitly for both). Confirm it worked by
       requesting `/docs` on your deployed URL and `/openapi.json` directly
       against the backend if it's ever reachable from anywhere but
       nginx — both should return a plain `404`, not a docs page or schema.
@@ -2459,18 +2806,35 @@ A checklist before you deploy this anywhere real:
 
 ## Safely Updating An Existing Production Deployment (CI/CD)
 
-**This repo ships four GitHub Actions workflows** in `.github/workflows/`:
-[`ci.yml`](.github/workflows/ci.yml) (lint, dependency audit, image build +
-Trivy scan, `infra/main.bicep` validation — runs on every push/PR and gates
-the two deploy workflows below; there's no full pytest suite yet, see
-[Suggested Future Features](#suggested-future-features)),
+**This repo ships five GitHub Actions workflows** in `.github/workflows/`:
+[`ci.yml`](.github/workflows/ci.yml) (ruff lint, the real
+`pytest backend/tests` suite against real Postgres/Redis service
+containers — including the actual `alembic upgrade head`/`downgrade` chain
+and the RedBeat distributed-lock test, see [Automated test
+suite](#automated-test-suite-backendtests) — a `pip-audit` dependency
+scan, a Gitleaks secret scan, frontend build/rendering tests, an nginx
+config job that renders `nginx/default.conf.template`, `nginx -t`s it,
+then actually boots it and curls every clean-URL/redirect/static-asset
+path (see `nginx/test-config.sh`), image build + Trivy scan, and
+`infra/main.bicep` validation — runs on every push/PR, and
+is also invoked as a reusable `workflow_call` by the deploy workflows
+below; coverage isn't 100% of the app yet, see [Suggested Future
+Features](#suggested-future-features) for what's still missing),
 [`deploy-azure-staging.yml`](.github/workflows/deploy-azure-staging.yml)
-(push-to-deploy on `develop`), and
+(push-to-deploy on `develop`),
+[`release.yml`](.github/workflows/release.yml) (triggered by pushing a
+`git tag v1.x.x` — builds and pushes both images tagged with that VERSION,
+not just a commit SHA, opens a pull request against `main` with a new
+[`CHANGELOG.md`](CHANGELOG.md) section (never a direct commit — this
+repo's `main` only changes via reviewed PR) and cuts a GitHub Release, and
+in parallel calls the next workflow), and
 [`deploy-azure-production.yml`](.github/workflows/deploy-azure-production.yml)
-(push-to-deploy on `main`, with a blocking Trivy scan and automatic rollback
-on a failed smoke test) — plus
+(no push trigger of its own — reusable, called by `release.yml` with the
+version to deploy, or manually via `workflow_dispatch` for a redeploy/
+rollback; blocking Trivy scan already ran in `release.yml`, and this
+workflow still auto-rolls-back on a failed smoke test) — plus
 [`infra-deploy.yml`](.github/workflows/infra-deploy.yml), run separately and
-occasionally, for provisioning/updating `infra/main.bicep` itself. All four
+occasionally, for provisioning/updating `infra/main.bicep` itself. All five
 already follow the same rule, which is what makes any of this genuinely
 *safe* to automate rather than just fast:
 
@@ -2491,8 +2855,9 @@ The full walkthrough — one-time setup, what each workflow does stage by
 stage, rollback, scaling, monitoring, and cost — lives in
 [`DEPLOYMENT.md`](DEPLOYMENT.md)'s **Azure Container Apps Production
 Deployment** section rather than being duplicated here. Short version: push
-to `develop` and staging updates itself; merge to `main` and production
-updates itself; nothing manual after the one-time setup.
+to `develop` and staging updates itself; push a `git tag v1.x.x` off `main`
+and production updates itself (merging to `main` alone no longer deploys
+anything); nothing manual after the one-time setup.
 
 ### Render
 
@@ -2521,19 +2886,48 @@ platform, but `deploy-azure-production.yml` (build → scan → migrate →
 roll out → smoke test → rollback) is a reasonable template to adapt if
 your platform doesn't have a closer native equivalent.
 
+### Automated Dependency Updates (Dependabot)
+
+[`.github/dependabot.yml`](.github/dependabot.yml) opens a PR once a week
+for every package manifest in this repo — `backend/requirements.txt`,
+all three `package.json`s (`build-frontend`, `build-tailwind`,
+`frontend/tests`), both Dockerfiles' base images (`backend`, `frontend`),
+and the GitHub Actions themselves (`actions/checkout`, `trivy-action`,
+etc.) — rather than dependency drift being something you have to remember
+to go check for.
+
+This is complementary to `ci.yml`'s existing `pip-audit` step, not a
+duplicate of it: `pip-audit` is a point-in-time check ("are any CURRENTLY
+pinned versions known-vulnerable right now?") that runs on every push.
+Dependabot instead proactively proposes version bumps on a schedule —
+including plain staleness with no CVE attached — so upgrades land as
+small, individually-reviewable PRs instead of a single "everything is two
+years behind" PR later. Every Dependabot PR runs through the exact same
+`ci.yml` gate as a human-authored one (`ci.yml` already declares
+`workflow_call` and triggers on any push/PR), so reviewing and merging one
+is no riskier than merging your own PR.
+
+You still own the merge decision — Dependabot opens the PR, it doesn't
+auto-merge. `SRE_STRATEGY.md`'s quarterly checklist is where "actually
+merge the accumulated PRs, run the full suite, ship it as its own release"
+lives, so bumps don't quietly pile up unreviewed either.
+
 ---
 
 ## Suggested Future Features
 
 Small, well-scoped follow-ups if you want to keep extending this project:
 
-- **Broader automated test coverage** — `backend/tests/` now covers auth,
-  asset pools, checkouts/extensions, notification-recipient audience, and
-  role permission gates (see [Testing Your
-  Changes](#testing-your-changes)), but CSV import, exports, backups,
-  quotations, and Outsiders don't have test files yet — a good first PR
-  for getting familiar with the `client`/`db_session`/`as_*` fixtures in
-  `backend/tests/conftest.py`.
+- **Broader automated test coverage** — `backend/tests/` now covers a lot
+  of ground (auth/MFA, asset pools, checkouts/extensions, CSV import,
+  Outsiders and both conversion directions, the full Quotation workflow,
+  clean URLs, health/readiness, RedBeat scheduling, migrations, the
+  global error handler, and role permission gates — see [Testing Your
+  Changes](#testing-your-changes) for the full file-by-file breakdown),
+  but audit-log/export service functions and the Backups panel's
+  create/restore paths still don't have dedicated test files — a good
+  first PR for getting familiar with the `client`/`db_session`/`as_*`
+  fixtures in `backend/tests/conftest.py`.
 - **A `deleted_by` column** recording which admin performed a given
   soft-delete (good first Alembic migration exercise) — `restore_user()`
   itself (undoing a soft-delete) already shipped; see [Directories](#directories-super-admin--manager).
@@ -2560,17 +2954,25 @@ Small, well-scoped follow-ups if you want to keep extending this project:
   Allowed`, and the response body is just `{"detail": "Method Not
   Allowed"}`** — this means nginx is forwarding requests to the backend
   with the wrong path (commonly, every request collapsing down to just
-  `/`, which only has a `GET` handler). This is a well-known nginx
-  gotcha: `proxy_pass`'s usual "trailing slash strips the matched
-  `location` prefix" behavior **only works when the upstream address is a
-  static string** — it silently stops working the moment that address is
-  a *variable* (which `nginx/default.conf.template`'s `/api/` block uses,
-  so nginx re-resolves `BACKEND_HOST` on every request instead of caching
-  a possibly-stale IP). The fix already in this repo uses an explicit
-  `rewrite ^/api/(.*)$ /$1 break;` before `proxy_pass` instead of relying
-  on that trick — if you ever edit that `location /api/` block, keep the
-  `rewrite` line, or `/api/*` requests will start silently arriving at the
-  backend as just `/` again. Rebuild the frontend image after any nginx
+  `/`, which only has a `GET` handler). This is a well-known nginx gotcha:
+  `proxy_pass`'s usual "trailing slash strips the matched `location`
+  prefix" behavior **only works when the upstream address is a static
+  string** — it silently stops working the moment that address is a
+  *variable* (which `nginx/default.conf.template`'s `/api/` block uses, so
+  nginx re-resolves `BACKEND_HOST` on every request instead of caching a
+  possibly-stale IP). The fix already in this repo sidesteps that trick
+  entirely instead of relying on it: `proxy_pass http://$backend_upstream
+  $request_uri;` forwards the request's full original path — `/api/...`
+  prefix included — and every FastAPI router is mounted with
+  `app.include_router(..., prefix="/api")` in `backend/main.py` to match
+  (see that file's `BUG FIX` comment above the router-mounting block for
+  the concrete brute-force-throttle bug this exact mismatch caused before
+  it was fixed). If you ever edit `nginx/default.conf.template`'s
+  `location /api/` block, keep the `$request_uri` variable in `proxy_pass`
+  (don't swap in a bare `$uri`, which drops the query string, or a
+  hardcoded path) — and if you ever change a backend router's prefix,
+  nginx needs no changes at all, since it never strips or rewrites the
+  path in the first place. Rebuild the frontend image after any nginx
   config change: `docker compose build --no-cache frontend && docker
   compose up -d --force-recreate frontend`.
 - **"Refusing to start: ENVIRONMENT=production but JWT_SECRET_KEY is

@@ -120,13 +120,14 @@ function renderUsersTable(users) {
       ${canEdit ? `<button data-action="edit-user" data-user-id="${u.id}" class="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">Edit</button>` : ''}
       <button data-action="open-custody" data-entity-id="${u.id}" data-entity-type="user" class="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">Custody Ledger</button>
       ${isManagerView ? '' : `<button data-action="reset-password" data-user-id="${u.id}" data-user-name="${escapeHtml(u.name)}" class="rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-amber-500/50 hover:text-amber-400">Reset Password</button>`}
+      ${canEdit ? `<button data-action="revoke-user" data-user-id="${u.id}" data-user-name="${escapeHtml(u.name)}" class="rounded-md border border-amber-500/30 px-2.5 py-1.5 text-[12px] font-medium text-amber-400 transition hover:border-amber-500 hover:bg-amber-500/10">Revoke Access</button>` : ''}
       ${isManagerView ? '' : `<button data-action="delete-profile" data-user-id="${u.id}" data-user-name="${escapeHtml(u.name)}" class="rounded-md border border-rose-500/30 px-2.5 py-1.5 text-[12px] font-medium text-rose-400 transition hover:border-rose-500 hover:bg-rose-500/10">Delete Profile</button>`}`;
 
     // Whole row is tappable on mobile -- see components/assets.js's
     // renderAssetsTable() for the full explanation of this pattern.
     return `
     <tr ${rowDetailsTrigger(escapeHtml(u.name), [
-      [isManagerView ? 'Department Role' : 'Privilege Tier', escapeHtml(isManagerView ? (u.department_role || 'Team Member') : u.role.replace('_', ' '))],
+      ['Privilege Tier', escapeHtml(u.role.replace('_', ' '))],
       ['Custody', custodyLabel],
       ['', `<div class="flex flex-wrap gap-2">${actionButtons}</div>`],
     ])} class="cursor-pointer transition hover:bg-card2/40 active:bg-card2/60 sm:cursor-default">
@@ -144,7 +145,7 @@ function renderUsersTable(users) {
       </td>
       <td class="hidden px-5 py-3.5 sm:table-cell">
         <span class="inline-flex items-center gap-1 rounded-full bg-blue-500/10 px-2.5 py-1 text-[11px] font-semibold text-blue-400 ring-1 ring-blue-500/30">
-          <span class="h-1.5 w-1.5 rounded-full bg-blue-500"></span> ${escapeHtml(isManagerView ? (u.department_role || 'Team Member') : u.role.replace('_', ' '))}
+          <span class="h-1.5 w-1.5 rounded-full bg-blue-500"></span> ${escapeHtml(u.role.replace('_', ' '))}
         </span>
       </td>
       <td class="hidden px-5 py-3.5 tag-mono text-slate-300 sm:table-cell">${custodyLabel}</td>
@@ -201,6 +202,8 @@ export function openEditUserModal(userId) {
   document.getElementById('editUserName').value = u.name || '';
   document.getElementById('editUserUsername').value = u.username || '';
   document.getElementById('editUserEmail').value = u.email || '';
+  const phoneInput = document.getElementById('editUserPhone');
+  if (phoneInput) phoneInput.value = u.phone_number || '';
   setEditUserMessage('', false);
   openModal('editUserModal');
 }
@@ -210,10 +213,12 @@ export async function submitEditUserForm(event) {
   if (!pendingEditUserId) return;
   setEditUserMessage('', false);
 
+  const phoneInput = document.getElementById('editUserPhone');
   const payload = {
     name: document.getElementById('editUserName').value,
     username: document.getElementById('editUserUsername').value,
     email: document.getElementById('editUserEmail').value,
+    phone_number: phoneInput ? (phoneInput.value || null) : null,
   };
 
   try {
@@ -244,6 +249,59 @@ export async function deleteProfile(userId, userName) {
     refreshDashboard();
   } catch (err) {
     alert(err.message);
+  }
+}
+
+// ---- Revoke Login Access (Super Admin/Admin and Manager -- "the reverse
+// of Outsider -> User", see components/outsiders.js's
+// openConvertOutsiderModal()/submitConvertOutsiderForm() and
+// services/user_service.py -> convert_user_to_outsider()) ----
+let pendingRevokeUserId = null;
+
+function setRevokeUserMessage(text, isError) {
+  const msgEl = document.getElementById('revokeUserMessage');
+  if (!msgEl) return;
+  msgEl.textContent = text || '';
+  msgEl.classList.toggle('hidden', !text);
+  msgEl.classList.toggle('text-rose-400', !!isError);
+  msgEl.classList.toggle('text-emerald-400', !isError);
+}
+
+export function openRevokeUserModal(userId, userName) {
+  const u = usersById[userId];
+  pendingRevokeUserId = userId;
+  document.getElementById('revokeUserTargetName').textContent = userName || (u && u.name) || '';
+  document.getElementById('revokeUserEmail').value = (u && u.email) || '';
+  const phoneInput = document.getElementById('revokeUserPhone');
+  if (phoneInput) phoneInput.value = (u && u.phone_number) || '';
+  document.getElementById('revokeUserCompany').value = '';
+  setRevokeUserMessage('', false);
+  openModal('revokeUserModal');
+}
+
+export async function submitRevokeUserForm(event) {
+  event.preventDefault();
+  if (!pendingRevokeUserId) return;
+  setRevokeUserMessage('', false);
+
+  const phoneInput = document.getElementById('revokeUserPhone');
+  const payload = {
+    email: document.getElementById('revokeUserEmail').value || null,
+    phone_number: phoneInput ? (phoneInput.value || null) : null,
+    company: document.getElementById('revokeUserCompany').value || null,
+  };
+
+  try {
+    const result = await apiRequest(`/users/${pendingRevokeUserId}/convert-to-outsider`, {
+      method: 'POST', body: JSON.stringify(payload),
+    });
+    closeModal('revokeUserModal');
+    alert(result.message);
+    loadUsers();
+    refreshDashboard();
+    pendingRevokeUserId = null;
+  } catch (err) {
+    setRevokeUserMessage(err.message, true);
   }
 }
 
@@ -337,7 +395,8 @@ function renderDeletedUsersTable(users) {
 
   tbody.innerHTML = users.map(u => {
     const initials = u.name.split(' ').map(p => p[0]).join('').slice(0, 2).toUpperCase();
-    const actionButtons = `<button data-action="restore-user" data-user-id="${u.id}" data-user-name="${escapeHtml(u.name)}" class="rounded-md border border-emerald-500/30 px-2.5 py-1.5 text-[12px] font-medium text-emerald-400 transition hover:border-emerald-500 hover:bg-emerald-500/10">Restore</button>`;
+    const actionButtons = `<button data-action="restore-user" data-user-id="${u.id}" data-user-name="${escapeHtml(u.name)}" class="rounded-md border border-emerald-500/30 px-2.5 py-1.5 text-[12px] font-medium text-emerald-400 transition hover:border-emerald-500 hover:bg-emerald-500/10">Restore</button>
+      <button data-action="purge-user" data-user-id="${u.id}" data-user-name="${escapeHtml(u.name)}" class="rounded-md border border-rose-500/30 px-2.5 py-1.5 text-[12px] font-medium text-rose-400 transition hover:border-rose-500 hover:bg-rose-500/10">Purge</button>`;
 
     return `
     <tr ${rowDetailsTrigger(escapeHtml(u.name), [
@@ -402,6 +461,25 @@ export async function restoreUser(userId, userName) {
   }
 }
 
+// Purge is deliberately a separate, more strongly-worded confirmation than
+// Restore: it's irreversible (no "unpurge") and its whole point is to erase
+// the account's email/username so a new account can reuse them -- so the
+// warning says exactly that, rather than reusing restoreUser()'s wording.
+export async function purgeUser(userId, userName) {
+  if (!confirm(
+    `Permanently purge ${userName}'s deleted account? This cannot be undone. `
+    + `Their email and username will be freed up for reuse by a new account, `
+    + `but this account can no longer be restored afterward.`
+  )) return;
+  try {
+    await apiRequest(`/users/${userId}/purge`, { method: 'POST' });
+    loadDeletedUsers();
+    refreshDashboard();
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
 // ---- Provision System User Account (Super Admin + Manager) ----
 // Managers reach this same form/handler (see admin.html/manager.html); the
 // ROLE dropdown available to them is limited to Staff/Customer directly in
@@ -411,9 +489,11 @@ export async function restoreUser(userId, userName) {
 export async function submitCreateUserForm(event) {
   event.preventDefault();
   const passwordInput = document.getElementById('newUserPassword');
+  const phoneInput = document.getElementById('newUserPhone');
   const payload = {
     name: document.getElementById('newUserName').value,
     email: document.getElementById('newUserEmail').value,
+    phone_number: phoneInput ? (phoneInput.value || null) : null,
     role: document.getElementById('newUserRole').value,
     password: passwordInput.value,
     department: document.getElementById('newUserDepartment').value || null,

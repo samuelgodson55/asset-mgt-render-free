@@ -47,7 +47,7 @@ export async function openCustodyModal(entityId, entityType = 'user') {
     const path = entityType === 'outsider' ? `/outsiders/${entityId}/items` : `/users/${entityId}/items`;
     const data = await apiRequest(path);
     const subtitle = entityType === 'outsider'
-      ? `${data.name} · ${data.contact_details}${data.company ? ' · ' + data.company : ''}`
+      ? `${data.name}${[data.email, data.phone_number].filter(Boolean).length ? ' · ' + [data.email, data.phone_number].filter(Boolean).join(' · ') : ''}${data.company ? ' · ' + data.company : ''}`
       : `${data.name} · ${data.email}`;
     document.getElementById('custodyUserName').textContent = subtitle;
     document.getElementById('custodyCount').textContent = data.assigned_items.length;

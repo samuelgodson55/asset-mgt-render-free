@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from deps import require_privileged_role
-from schemas.outsiders import OutsiderUpdateRequest
+from schemas.outsiders_schema import OutsiderUpdateRequest, OutsiderConvertToUserRequest
 import services.outsider_service as outsider_service
 
 router = APIRouter(prefix="/outsiders", tags=["outsiders"])
@@ -65,6 +65,31 @@ def update_outsider(outsider_id: int, req: OutsiderUpdateRequest, db: Session = 
     boundary applies -- see services/outsider_service.py -> update_outsider()).
     """
     return outsider_service.update_outsider(db, outsider_id, req, user)
+
+
+@router.post("/{outsider_id}/convert-to-user")
+def convert_outsider_to_user(outsider_id: int, req: OutsiderConvertToUserRequest, db: Session = Depends(get_db), user: dict = Depends(require_privileged_role)):
+    """
+    Turns an ad-hoc individual into a real, log-in-capable user account
+    (see services/outsider_service.py -> convert_outsider_to_user() for
+    the full migration/safety rationale). Available to both a Super
+    Admin/Admin and a Manager, same as the other id-based outsider
+    actions, subject to the same Manager role ceiling a brand-new
+    account provisioning gets.
+    """
+    return outsider_service.convert_outsider_to_user(db, outsider_id, req, user)
+
+
+@router.delete("/{outsider_id}")
+def delete_outsider(outsider_id: int, db: Session = Depends(get_db), user: dict = Depends(require_privileged_role)):
+    """
+    Deletes an ad-hoc individual's profile (soft delete -- see
+    services/outsider_service.py -> delete_outsider() for the full
+    rationale). Available to both a Super Admin/Admin and a Manager, same
+    as PATCH above; blocked while the profile still has items in active
+    custody.
+    """
+    return outsider_service.delete_outsider(db, outsider_id, user)
 
 
 @router.get("/{outsider_id}/items/export")

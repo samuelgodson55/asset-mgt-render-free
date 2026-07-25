@@ -61,7 +61,7 @@ from sqlalchemy.orm import Session, joinedload
 
 import models
 from config import settings
-from schemas.quotations import (
+from schemas.quotations_schema import (
     QuotationItemCreate, QuotationItemQuantityUpdate, VatUpdateRequest,
     QuotationAssignRequest, QuotationMetaUpdate, QuotationCreateRequest,
     QuotationOutsourcedItemCreate, QuotationOutsourceShortfallItem,
@@ -116,7 +116,10 @@ def _user_brief(user: Optional["models.User"]) -> Optional[dict]:
 def _outsider_brief(outsider: Optional["models.Outsider"]) -> Optional[dict]:
     if outsider is None:
         return None
-    return {"id": outsider.id, "name": outsider.name, "company": outsider.company, "contact_details": outsider.contact_details, "is_outsider": True}
+    return {
+        "id": outsider.id, "name": outsider.name, "company": outsider.company,
+        "email": outsider.email, "phone_number": outsider.phone_number, "is_outsider": True,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -884,11 +887,22 @@ def admin_create_quotation(db: Session, actor: dict, payload: QuotationCreateReq
         assigned_to_id = target.id
         assigned_label = f"{target.name} <{target.email}>"
     elif payload.assignee_type == "outsider":
-        outsider = models.Outsider(name=payload.outsider_name, contact_details=payload.outsider_contact, company=payload.outsider_company)
-        db.add(outsider)
-        db.flush()
+        if payload.outsider_id:
+            # Assign to an ad-hoc profile ALREADY on file instead of
+            # creating a new one -- same "existing vs. brand new" split as
+            # the Issue/Dispatch drawer's own Ad-Hoc route (see
+            # services/asset_service.py's checkout_advanced()).
+            outsider = db.query(models.Outsider).filter(
+                models.Outsider.id == payload.outsider_id, ~models.Outsider.is_deleted,
+            ).first()
+            if not outsider:
+                raise HTTPException(status_code=404, detail="That ad-hoc individual was not found.")
+        else:
+            outsider = models.Outsider(name=payload.outsider_name, email=payload.outsider_email, phone_number=payload.outsider_phone, company=payload.outsider_company)
+            db.add(outsider)
+            db.flush()
         assigned_outsider_id = outsider.id
-        assigned_label = f"Ad-Hoc: {outsider.name} ({payload.outsider_company or 'No Company'})"
+        assigned_label = f"Ad-Hoc: {outsider.name} ({outsider.company or 'No Company'})"
 
     quotation = models.Quotation(
         user_id=int(actor["sub"]), status="submitted", submitted_at=models.utc_now(),
@@ -940,12 +954,19 @@ def assign_quotation(db: Session, actor: dict, quotation_id: int, payload: Quota
         quotation.assigned_outsider_id = None
         target_name = f"{target.name} <{target.email}>"
     elif payload.assignee_type == "outsider":
-        outsider = models.Outsider(name=payload.outsider_name, contact_details=payload.outsider_contact, company=payload.outsider_company)
-        db.add(outsider)
-        db.flush()
+        if payload.outsider_id:
+            outsider = db.query(models.Outsider).filter(
+                models.Outsider.id == payload.outsider_id, ~models.Outsider.is_deleted,
+            ).first()
+            if not outsider:
+                raise HTTPException(status_code=404, detail="That ad-hoc individual was not found.")
+        else:
+            outsider = models.Outsider(name=payload.outsider_name, email=payload.outsider_email, phone_number=payload.outsider_phone, company=payload.outsider_company)
+            db.add(outsider)
+            db.flush()
         quotation.assigned_to_id = None
         quotation.assigned_outsider_id = outsider.id
-        target_name = f"Ad-Hoc: {outsider.name} ({payload.outsider_company or 'No Company'})"
+        target_name = f"Ad-Hoc: {outsider.name} ({outsider.company or 'No Company'})"
     else:
         quotation.assigned_to_id = None
         quotation.assigned_outsider_id = None
@@ -1382,14 +1403,17 @@ def _build_quotation_pdf(data: dict, requester_name: str):
     if assigned_outsider:
         customer_name = assigned_outsider["name"]
         company_name = assigned_outsider.get("company") or "—"
-        phone_number = assigned_outsider.get("contact_details") or "—"
+        email_address = assigned_outsider.get("email") or "—"
+        phone_number = assigned_outsider.get("phone_number") or "—"
     elif assigned_to:
         customer_name = assigned_to["name"]
         company_name = "—"
+        email_address = assigned_to.get("email") or "—"
         phone_number = "—"
     else:
         customer_name = requester_name
         company_name = "—"
+        email_address = "—"
         phone_number = "—"
 
     approved_by = data.get("approved_by")
@@ -1400,6 +1424,7 @@ def _build_quotation_pdf(data: dict, requester_name: str):
     client_fields = [
         ("Customer Name", customer_name),
         ("Company Name", company_name),
+        ("Email", email_address),
         ("Phone Number", phone_number),
         ("Manager", manager_name),
         ("Fulfiller", fulfiller_name),

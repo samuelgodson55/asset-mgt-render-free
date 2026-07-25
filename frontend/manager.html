@@ -319,7 +319,7 @@
         <thead>
           <tr class="border-b border-border bg-card2/60 text-[11px] uppercase tracking-wide text-slate-500">
             <th class="px-5 py-3 font-semibold">User</th>
-            <th class="hidden px-5 py-3 font-semibold sm:table-cell">Department Role</th>
+            <th class="hidden px-5 py-3 font-semibold sm:table-cell">Privilege Tier</th>
             <th class="hidden px-5 py-3 font-semibold sm:table-cell">Custody</th>
             <th class="hidden px-5 py-3 font-semibold text-right sm:table-cell">Actions</th>
           </tr>
@@ -363,6 +363,13 @@
           <div>
             <label class="mb-1 block text-[12px] font-medium text-slate-400">Email</label>
             <input type="email" id="newUserEmail" required placeholder="e.g. f.balogun@corp.io"
+              class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
+          </div>
+        </div>
+        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <div>
+            <label class="mb-1 block text-[12px] font-medium text-slate-400">Phone Number (optional)</label>
+            <input type="tel" id="newUserPhone" placeholder="e.g. +234 801 234 5678"
               class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
           </div>
         </div>
@@ -570,16 +577,15 @@
         <!-- Exports now run on a background worker instead of inline in
              the request (see js/components/audit.js) -- this span shows
              that job's queued/generating/ready progress next to the
-             buttons instead of leaving them looking frozen while the
+             button instead of leaving it looking frozen while the
              worker builds the file. -->
         <span id="auditExportStatus" class="text-[12px] text-slate-500"></span>
-        <button id="exportAuditBtn" class="flex items-center gap-1.5 rounded-md border border-border bg-card2 px-3 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
+        <!-- Opens #auditExportModal (date range + CSV/PDF picker) instead
+             of the browser's native prompt() dialogs -- see
+             js/components/audit.js's openAuditExportModal(). -->
+        <button data-action="open-audit-export" class="flex items-center gap-1.5 rounded-md border border-border bg-card2 px-3 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
           <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
-          Export Ledger (.CSV)
-        </button>
-        <button id="exportAuditPdfBtn" class="flex items-center gap-1.5 rounded-md border border-border bg-card2 px-3 py-1.5 text-[12px] font-medium text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
-          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
-          Export Ledger (.PDF)
+          Export Ledger
         </button>
       </div>
     </div>
@@ -645,11 +651,20 @@
         <select id="customerSelect" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60"></select>
       </div>
 
-      <div id="adhocField" class="hidden space-y-3 rounded-lg border border-border bg-card2/50 p-3">
-        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Unlinked Profile Details</p>
-        <input type="text" id="adhocName" placeholder="Full name" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
-        <input type="text" id="adhocCompany" placeholder="Company" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
-        <input type="text" id="adhocContact" placeholder="Contact (email or phone)" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+      <div id="adhocField" class="hidden space-y-3">
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">Ad-Hoc Individual</label>
+          <select id="adhocExistingSelect" data-action="toggle-adhoc-existing" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60">
+            <option value="new">+ Create New Unlinked Profile</option>
+          </select>
+        </div>
+        <div id="adhocNewFields" class="space-y-3 rounded-lg border border-border bg-card2/50 p-3">
+          <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Unlinked Profile Details</p>
+          <input type="text" id="adhocName" placeholder="Full name" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          <input type="text" id="adhocCompany" placeholder="Company" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          <input type="email" id="adhocEmail" placeholder="Email (at least one of email/phone required)" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          <input type="tel" id="adhocPhone" placeholder="Phone number" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+        </div>
       </div>
 
       <div class="grid grid-cols-2 gap-3">
@@ -882,6 +897,11 @@
         <input type="email" id="editUserEmail" required
           class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
       </div>
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Phone Number (optional)</label>
+        <input type="tel" id="editUserPhone"
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+      </div>
       <p id="editUserMessage" class="hidden text-[12px]"></p>
       <div class="flex gap-3 pt-1">
         <button type="button" data-action="close-modal" data-modal="editUserModal" class="flex-1 rounded-lg border border-border py-2.5 text-[13px] font-semibold text-slate-300 transition hover:border-slate-500">Cancel</button>
@@ -915,10 +935,17 @@
         <input type="text" id="editOutsiderName" required
           class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
       </div>
-      <div>
-        <label class="mb-1 block text-[12px] font-medium text-slate-400">Contact Details</label>
-        <input type="text" id="editOutsiderContact" required placeholder="Phone or email"
-          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+      <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">Email</label>
+          <input type="email" id="editOutsiderEmail"
+            class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+        </div>
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">Phone Number</label>
+          <input type="tel" id="editOutsiderPhone" placeholder="At least one of email/phone is required"
+            class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+        </div>
       </div>
       <div>
         <label class="mb-1 block text-[12px] font-medium text-slate-400">Company <span class="text-slate-600">(optional)</span></label>
@@ -933,6 +960,124 @@
     </form>
   </div>
 </div>
+
+<!-- ============= CONVERT AD-HOC INDIVIDUAL TO REAL USER (Super Admin/Admin and Manager) ============
+     "The outsider finally decides he wants a login". See
+     js/components/outsiders.js's openConvertOutsiderModal()/
+     submitConvertOutsiderForm() and services/outsider_service.py ->
+     convert_outsider_to_user(). Their name carries over automatically
+     (not editable here -- this is the SAME person getting a login, not a
+     chance to rename them), and every existing checkout + quotation
+     assignment moves with them. -->
+<div id="convertOutsiderModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative w-full max-w-sm overflow-y-auto sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl shadow-2xl">
+    <div class="flex items-start justify-between border-b border-border px-6 py-5">
+      <div>
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Ad-Hoc (Unlinked) Directory</p>
+        <h3 class="text-[16px] font-bold text-slate-50">Convert to Real User Account</h3>
+        <p id="convertOutsiderTargetName" class="text-[12px] text-slate-500">—</p>
+      </div>
+      <button data-action="close-modal" data-modal="convertOutsiderModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <form id="convertOutsiderForm" class="space-y-4 px-6 py-5">
+      <p class="rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-3 py-2 text-[12px] text-emerald-300/90">
+        Every checkout (active and past) and quotation assignment currently under this ad-hoc profile will move to the new account. The Ad-Hoc profile itself is retired, not deleted -- its history stays intact.
+      </p>
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Login Email</label>
+        <input type="email" id="convertOutsiderEmail" required placeholder="e.g. f.adeyemi@corp.io"
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+      </div>
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Phone Number (optional)</label>
+        <input type="tel" id="convertOutsiderPhone" placeholder="e.g. +234 801 234 5678"
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">Role</label>
+          <!-- Only Staff / Customer here -- no Manager/Admin/Super Admin
+               option exists for a Manager to even try selecting. -->
+          <select id="convertOutsiderRole" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60">
+            <option value="staff" selected>Staff</option>
+            <option value="customer">Customer</option>
+          </select>
+        </div>
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">Temporary Password</label>
+          <input type="text" id="convertOutsiderPassword" required placeholder="Set a temp password"
+            class="tag-mono w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+        </div>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">Department (optional)</label>
+          <input type="text" id="convertOutsiderDepartment" placeholder="e.g. Engineering"
+            class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+        </div>
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">Department Role (optional)</label>
+          <input type="text" id="convertOutsiderDeptRole" placeholder="e.g. Senior Engineer"
+            class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+        </div>
+      </div>
+      <p id="convertOutsiderMessage" class="hidden text-[12px]"></p>
+      <div class="flex gap-3 pt-1">
+        <button type="button" data-action="close-modal" data-modal="convertOutsiderModal" class="flex-1 rounded-lg border border-border py-2.5 text-[13px] font-semibold text-slate-300 transition hover:border-slate-500">Cancel</button>
+        <button type="submit" class="flex-1 rounded-lg bg-emerald-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-emerald-500">Convert</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div id="revokeUserModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative w-full max-w-sm overflow-y-auto sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl shadow-2xl">
+    <div class="flex items-start justify-between border-b border-border px-6 py-5">
+      <div>
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">User Directory</p>
+        <h3 class="text-[16px] font-bold text-slate-50">Revoke Login Access</h3>
+        <p id="revokeUserTargetName" class="text-[12px] text-slate-500">—</p>
+      </div>
+      <button data-action="close-modal" data-modal="revokeUserModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <form id="revokeUserForm" class="space-y-4 px-6 py-5">
+      <p class="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-[12px] text-amber-300/90">
+        This account will no longer be able to log in. Every checkout (active and past) and quotation assignment currently under it will move to a new Ad-Hoc profile -- the login itself is retired, not deleted, and its history stays intact.
+      </p>
+      <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">Email</label>
+          <input type="email" id="revokeUserEmail" placeholder="Defaults to their current login email"
+            class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+        </div>
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">Phone Number (optional)</label>
+          <input type="tel" id="revokeUserPhone" placeholder="e.g. +234 801 234 5678"
+            class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+        </div>
+      </div>
+      <div>
+        <label class="mb-1 block text-[12px] font-medium text-slate-400">Company (optional)</label>
+        <input type="text" id="revokeUserCompany" placeholder="e.g. Lagos Fintech Ltd."
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+      </div>
+      <p id="revokeUserMessage" class="hidden text-[12px]"></p>
+      <div class="flex gap-3 pt-1">
+        <button type="button" data-action="close-modal" data-modal="revokeUserModal" class="flex-1 rounded-lg border border-border py-2.5 text-[13px] font-semibold text-slate-300 transition hover:border-slate-500">Cancel</button>
+        <button type="submit" class="flex-1 rounded-lg bg-amber-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-amber-500">Revoke Access</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 
 <!-- ================= ASSET POOL DETAILS (READ-ONLY VERSION OF THE PROPERTIES HUB) ================= -->
 <div id="propsModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
@@ -1090,6 +1235,56 @@
           .CSV
         </button>
         <button data-action="export-assets-inventory" data-format="pdf"
+          class="flex-1 flex items-center justify-center gap-1.5 rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+          .PDF
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= AUDIT LEDGER EXPORT (MODAL) =================
+     Opened by the Audit Trail's "Export Ledger" button (data-action=
+     "open-audit-export" -- see js/components/audit.js's
+     openAuditExportModal()). Replaces the old back-to-back prompt()
+     dialogs (one for start date, one for end date) with a normal date-
+     range form -- prompt() blocks the whole tab, can't be styled, and
+     gives no room to explain what "blank" means for either field the
+     way this modal's helper text can. Submitting either format button
+     enqueues the same background export job as before (see
+     exportAuditLogs() in js/components/audit.js). -->
+<div id="auditExportModal" class="fixed inset-0 z-50 hidden items-end justify-center p-0 sm:items-center sm:p-4">
+  <div class="absolute inset-0 bg-black/70 backdrop"></div>
+  <div class="relative w-full max-w-sm overflow-y-auto sheet-panel w-full rounded-t-2xl border border-border bg-[#141922] sm:rounded-xl shadow-2xl">
+    <div class="flex items-start justify-between border-b border-border px-6 py-5">
+      <div>
+        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Audit Logs</p>
+        <h3 class="text-[16px] font-bold text-slate-50">Export Ledger</h3>
+      </div>
+      <button data-action="close-modal" data-modal="auditExportModal" class="rounded-md p-1.5 text-slate-500 transition hover:bg-card2 hover:text-slate-200">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="space-y-4 px-6 py-5">
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">From</label>
+          <input type="date" id="auditExportStartDate" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60" />
+        </div>
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">To</label>
+          <input type="date" id="auditExportEndDate" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60" />
+        </div>
+      </div>
+      <p class="text-[11px] text-slate-500">Leave either field blank for no start/end limit. Exports the full ledger by default.</p>
+      <div class="flex gap-3 pt-1">
+        <button data-action="export-audit-logs" data-format="csv"
+          class="flex-1 flex items-center justify-center gap-1.5 rounded-lg border border-border py-2.5 text-[13px] font-semibold text-slate-300 transition hover:border-blue-500/50 hover:text-blue-400">
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
+          .CSV
+        </button>
+        <button data-action="export-audit-logs" data-format="pdf"
           class="flex-1 flex items-center justify-center gap-1.5 rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500">
           <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15V3"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/></svg>
           .PDF
@@ -1297,10 +1492,16 @@
         <!-- Ad-Hoc assignment mini-form -- hidden until the link above is clicked. Creates a
              new Outsider row on submit, exactly like the Issue/Dispatch drawer's own Ad-Hoc
              route. See components/quotation.js's submitQuoteAssignAdhoc(). -->
-        <div id="quoteAssignAdhocForm" class="hidden mt-2 space-y-2 rounded-lg border border-border bg-card2/50 p-3">
-          <input type="text" id="quoteAssignAdhocName" placeholder="Full name" class="w-full rounded-md border border-border bg-card2 px-3 py-2 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
-          <input type="text" id="quoteAssignAdhocCompany" placeholder="Company" class="w-full rounded-md border border-border bg-card2 px-3 py-2 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
-          <input type="text" id="quoteAssignAdhocContact" placeholder="Contact (email or phone)" class="w-full rounded-md border border-border bg-card2 px-3 py-2 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+        <div id="quoteAssignAdhocForm" class="hidden mt-2 space-y-2">
+          <select id="quoteAssignAdhocExistingSelect" data-action="toggle-quote-assign-adhoc-existing" class="w-full rounded-md border border-border bg-card2 px-3 py-2 text-[12px] text-slate-200 outline-none focus:border-blue-500/60">
+            <option value="new">+ Create New Unlinked Profile</option>
+          </select>
+          <div id="quoteAssignAdhocNewFields" class="space-y-2 rounded-lg border border-border bg-card2/50 p-3">
+            <input type="text" id="quoteAssignAdhocName" placeholder="Full name" class="w-full rounded-md border border-border bg-card2 px-3 py-2 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+            <input type="text" id="quoteAssignAdhocCompany" placeholder="Company" class="w-full rounded-md border border-border bg-card2 px-3 py-2 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+            <input type="email" id="quoteAssignAdhocEmail" placeholder="Email (at least one of email/phone required)" class="w-full rounded-md border border-border bg-card2 px-3 py-2 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+            <input type="tel" id="quoteAssignAdhocPhone" placeholder="Phone number" class="w-full rounded-md border border-border bg-card2 px-3 py-2 text-[12px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          </div>
           <button type="button" data-action="submit-quote-assign-adhoc" class="w-full rounded-md bg-blue-600 px-3 py-1.5 text-[12px] font-semibold text-white transition hover:bg-blue-500">
             Assign to Ad-Hoc Individual
           </button>
@@ -1366,11 +1567,20 @@
         <select id="quoteCustomerSelect" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60"></select>
       </div>
 
-      <div id="quoteAdhocField" class="hidden space-y-3 rounded-lg border border-border bg-card2/50 p-3">
-        <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Unlinked Profile Details</p>
-        <input type="text" id="quoteAdhocName" placeholder="Full name" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
-        <input type="text" id="quoteAdhocCompany" placeholder="Company" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
-        <input type="text" id="quoteAdhocContact" placeholder="Contact (email or phone)" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+      <div id="quoteAdhocField" class="hidden space-y-3">
+        <div>
+          <label class="mb-1 block text-[12px] font-medium text-slate-400">Ad-Hoc Individual</label>
+          <select id="quoteAdhocExistingSelect" data-action="toggle-quote-adhoc-existing" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60">
+            <option value="new">+ Create New Unlinked Profile</option>
+          </select>
+        </div>
+        <div id="quoteAdhocNewFields" class="space-y-3 rounded-lg border border-border bg-card2/50 p-3">
+          <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Unlinked Profile Details</p>
+          <input type="text" id="quoteAdhocName" placeholder="Full name" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          <input type="text" id="quoteAdhocCompany" placeholder="Company" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          <input type="email" id="quoteAdhocEmail" placeholder="Email (at least one of email/phone required)" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+          <input type="tel" id="quoteAdhocPhone" placeholder="Phone number" class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none focus:border-blue-500/60" />
+        </div>
       </div>
 
       <p id="createQuoteUnassignedHint" class="text-[11px] text-slate-500">Leave unassigned to decide later -- you can assign it anytime from the Quote Detail screen.</p>

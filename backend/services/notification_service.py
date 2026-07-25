@@ -45,7 +45,7 @@ from sqlalchemy.orm import Session
 
 import models
 from config import settings
-from schemas.notifications import DigestRecipientsUpdateRequest
+from schemas.notifications_schema import DigestRecipientsUpdateRequest
 
 logger = logging.getLogger(__name__)
 

@@ -95,7 +95,7 @@
          BUILD:PROD-STRIP markers below is removed by
          build-frontend/build.js when BUILD_ENV=production (wired from
          .env's ENVIRONMENT value -- see docker-compose.yml's frontend
-         build.args and nginx/Dockerfile). It still renders normally for
+         build.args and frontend/Dockerfile). It still renders normally for
          BUILD_ENV=local and BUILD_ENV=development. Do not rely on this
          alone to keep the seeded accounts secret -- also set
          AUTO_SEED_DEMO_DATA=false in production (see backend/main.py /
@@ -118,6 +118,135 @@
       </p>
     </div>
 
+  </div>
+
+  <!-- ================= 2FA: ALREADY-ENROLLED ACCOUNT (verify code) =================
+       Shown instead of #auth-screen when POST /auth/login returns
+       mfa_required (currently only for role == super_admin -- see
+       backend/services/auth_service.py's login()). Hidden by default;
+       js/main.js's login form handler swaps screens via `hidden`, the same
+       pattern used everywhere else in this app. -->
+  <div id="mfa-verify-screen" class="hidden w-full max-w-md rounded-xl border border-border bg-card p-5 shadow-2xl space-y-5 sm:p-6 sm:space-y-6">
+    <div>
+      <h2 class="text-[15px] font-semibold text-slate-100">Two-factor authentication</h2>
+      <p class="text-[12px] text-slate-500 mt-0.5">Enter the 6-digit code from your authenticator app to finish signing in.</p>
+    </div>
+    <form id="mfa-verify-form" class="space-y-4">
+      <div>
+        <label for="mfa-verify-code" class="mb-1.5 block text-[12px] font-medium text-slate-400">Authentication code</label>
+        <input
+          type="text"
+          id="mfa-verify-code"
+          required
+          inputmode="numeric"
+          pattern="[0-9]*"
+          autocomplete="one-time-code"
+          maxlength="6"
+          placeholder="123456"
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-center text-[18px] tracking-[0.4em] text-slate-200 placeholder-slate-600 outline-none transition focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40"
+        />
+      </div>
+      <button
+        type="submit"
+        class="mt-2 w-full rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500 active:bg-blue-700 shadow-lg shadow-blue-600/10"
+      >
+        Verify &amp; Sign In
+      </button>
+      <button
+        type="button"
+        data-action="cancel-mfa"
+        class="w-full rounded-lg border border-border py-2 text-[12px] font-medium text-slate-400 transition hover:bg-card2"
+      >
+        Back to sign in
+      </button>
+    </form>
+  </div>
+
+  <!-- ================= 2FA: FIRST-TIME ENROLLMENT =================
+       Shown instead of #auth-screen when POST /auth/login returns
+       mfa_setup_required (this account has never confirmed a code before).
+       The secret/URI are shown here EXACTLY ONCE -- there is no "view my
+       2FA secret again" screen anywhere in the app, by design (see
+       models.py's User.totp_enabled docstring). -->
+  <div id="mfa-setup-screen" class="hidden w-full max-w-md rounded-xl border border-border bg-card p-5 shadow-2xl space-y-5 sm:p-6 sm:space-y-6">
+    <div>
+      <h2 class="text-[15px] font-semibold text-slate-100">Set up two-factor authentication</h2>
+      <p class="text-[12px] text-slate-500 mt-0.5">This account requires 2FA. Add it to an authenticator app (Google Authenticator, Authy, 1Password, etc.), then confirm the code it shows below.</p>
+    </div>
+    <div class="rounded-lg border border-border bg-card2/50 p-3 space-y-2">
+      <p class="text-[11px] font-medium text-slate-400">Scan with your authenticator app</p>
+      <div id="mfa-setup-qr" class="flex justify-center rounded-md bg-white p-2 [&>svg]:h-40 [&>svg]:w-40" aria-live="polite"></div>
+      <p class="text-[11px] font-medium text-slate-400 pt-2">Or enter this key manually</p>
+      <p id="mfa-setup-secret" class="tag-mono select-all break-all text-[13px] text-slate-200"></p>
+      <p class="text-[11px] text-slate-500 pt-1">Some authenticator apps also accept pasting this URI directly:</p>
+      <p id="mfa-setup-uri" class="tag-mono select-all break-all text-[11px] text-slate-500"></p>
+    </div>
+    <form id="mfa-setup-form" class="space-y-4">
+      <div>
+        <label for="mfa-setup-code" class="mb-1.5 block text-[12px] font-medium text-slate-400">Enter the code from your app to confirm</label>
+        <input
+          type="text"
+          id="mfa-setup-code"
+          required
+          inputmode="numeric"
+          pattern="[0-9]*"
+          autocomplete="one-time-code"
+          maxlength="6"
+          placeholder="123456"
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-center text-[18px] tracking-[0.4em] text-slate-200 placeholder-slate-600 outline-none transition focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40"
+        />
+      </div>
+      <button
+        type="submit"
+        class="mt-2 w-full rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500 active:bg-blue-700 shadow-lg shadow-blue-600/10"
+      >
+        Confirm &amp; Enable 2FA
+      </button>
+      <button
+        type="button"
+        data-action="cancel-mfa"
+        class="w-full rounded-lg border border-border py-2 text-[12px] font-medium text-slate-400 transition hover:bg-card2"
+      >
+        Back to sign in
+      </button>
+    </form>
+  </div>
+
+  <!-- ================= 2FA: RECOVERY CODES (shown once, post-enrollment) =================
+       Shown instead of #mfa-setup-screen the moment POST /auth/mfa/setup/confirm
+       succeeds -- the response carries `recovery_codes`, a batch of 10
+       single-use backup codes generated at that exact moment (see
+       backend/services/auth_service.py's mfa_setup_confirm()/
+       _issue_recovery_codes()). There is no "view these again" screen
+       anywhere else in the app, by design (see backend/models.py's
+       RecoveryCode docstring) -- the same freshly-generated list is also
+       shown here after POST /auth/mfa/recovery-codes/regenerate, wired
+       up wherever that gets triggered from (see js/main.js). -->
+  <div id="mfa-recovery-codes-screen" class="hidden w-full max-w-lg rounded-xl border border-border bg-card p-5 shadow-2xl space-y-5 sm:p-6 sm:space-y-6">
+    <div>
+      <h2 class="text-[15px] font-semibold text-slate-100">Save your recovery codes</h2>
+      <p class="text-[12px] text-slate-500 mt-0.5">
+        Each code works once, as a substitute for your authenticator app if you ever lose access to it.
+        Store them somewhere safe (a password manager is ideal) -- <span class="font-medium text-amber-400">they will not be shown again.</span>
+      </p>
+    </div>
+    <div id="mfa-recovery-codes-list" class="tag-mono grid grid-cols-2 gap-x-4 gap-y-2 rounded-lg border border-border bg-card2/50 p-4 text-[13px] text-slate-200"></div>
+    <div class="flex flex-col gap-2 sm:flex-row">
+      <button
+        type="button"
+        data-action="download-recovery-codes"
+        class="flex-1 rounded-lg border border-border py-2.5 text-[12px] font-medium text-slate-300 transition hover:bg-card2"
+      >
+        Download as .txt
+      </button>
+      <button
+        type="button"
+        data-action="continue-past-recovery-codes"
+        class="flex-1 rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500 active:bg-blue-700 shadow-lg shadow-blue-600/10"
+      >
+        I've saved these codes
+      </button>
+    </div>
   </div>
 </main>
 

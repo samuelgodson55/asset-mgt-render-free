@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from deps import require_privileged_role, get_current_user
-from schemas.checkouts import ReturnRequest, ExtensionRequestCreate, ExtensionDecisionRequest, DirectExtensionRequest, BulkExtendRequest
+from schemas.checkouts_schema import ReturnRequest, ExtensionRequestCreate, ExtensionDecisionRequest, DirectExtensionRequest, BulkExtendRequest
 import services.checkout_service as checkout_service
 import services.extension_service as extension_service
 

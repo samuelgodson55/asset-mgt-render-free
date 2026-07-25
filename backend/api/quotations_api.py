@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from deps import get_current_user, require_super_admin, require_privileged_role
-from schemas.quotations import (
+from schemas.quotations_schema import (
     QuotationItemCreate, QuotationItemQuantityUpdate, VatUpdateRequest,
     QuotationAssignRequest, QuotationMetaUpdate, QuotationCreateRequest,
     QuotationOutsourcedItemCreate, QuotationCheckoutRequest,

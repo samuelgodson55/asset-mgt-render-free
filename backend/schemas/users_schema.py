@@ -6,6 +6,7 @@ from security import validate_password_strength
 class UserCreateRequest(BaseModel):
     name: str
     email: str
+    phone_number: Optional[str] = None
     role: str
     password: str
     department: Optional[str] = None
@@ -19,6 +20,11 @@ class UserCreateRequest(BaseModel):
     @classmethod
     def _check_password_strength(cls, value: str) -> str:
         return validate_password_strength(value)
+
+    @field_validator("phone_number")
+    @classmethod
+    def _strip_phone(cls, value: Optional[str]) -> Optional[str]:
+        return value.strip() if value is not None else value
 
 
 class UserUpdateRequest(BaseModel):
@@ -38,6 +44,7 @@ class UserUpdateRequest(BaseModel):
     name: Optional[str] = None
     username: Optional[str] = None
     email: Optional[str] = None
+    phone_number: Optional[str] = None
 
     # A field that IS present must not be an empty/whitespace-only string --
     # that would silently blank out someone's name/username/email, which is
@@ -48,6 +55,60 @@ class UserUpdateRequest(BaseModel):
     def _reject_blank(cls, value: Optional[str]) -> Optional[str]:
         if value is not None and not value.strip():
             raise ValueError("This field cannot be blank.")
+        return value.strip() if value is not None else value
+
+    # phone_number IS nullable on the model -- an explicit empty string
+    # clears it, same as OutsiderUpdateRequest's email/phone_number/company.
+    @field_validator("phone_number")
+    @classmethod
+    def _strip_phone(cls, value: Optional[str]) -> Optional[str]:
+        return value.strip() if value is not None else value
+
+
+class UserConvertToOutsiderRequest(BaseModel):
+    """
+    Body for POST /users/{user_id}/convert-to-outsider -- the reverse of
+    schemas.outsiders.OutsiderConvertToUserRequest: revokes a real
+    account's login access and turns it into an Ad-Hoc (no-login)
+    profile instead (e.g. someone leaving the company, but who still
+    needs to be tracked as a custody holder for equipment they haven't
+    returned yet).
+
+    Every field is optional -- services/user_service.py's
+    convert_user_to_outsider() sensibly defaults `email`/`phone_number`
+    from the account being converted (its existing email/phone_number)
+    when omitted. `company` has no automatic default (a user's
+    `department` is an internal team, not an external company, so it
+    would be misleading to silently reuse it) -- leave it blank if the
+    person isn't affiliated with an outside company. `name` is
+    deliberately NOT a field here, same reasoning as
+    OutsiderConvertToUserRequest.email being tied to the source profile --
+    this is that same person losing their login, not a chance to rename
+    them mid-conversion.
+    """
+    email: Optional[str] = None
+    phone_number: Optional[str] = None
+    company: Optional[str] = None
+
+    # Same "a present-but-blank value would silently override a sensible
+    # default with nothing" guard as OutsiderUpdateRequest's fields --
+    # both email and phone_number are optional on models.Outsider, but an
+    # explicit empty string here is ambiguous (did they mean "clear it",
+    # or did the field just get submitted empty by mistake?), so treat it
+    # the same as "omitted" by rejecting it outright, forcing an
+    # intentional choice.
+    @field_validator("email", "phone_number")
+    @classmethod
+    def _reject_blank(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and not value.strip():
+            raise ValueError("This field cannot be blank.")
+        return value.strip() if value is not None else value
+
+    # Company IS nullable -- an explicit empty string clears it, same as
+    # OutsiderUpdateRequest.company.
+    @field_validator("company")
+    @classmethod
+    def _strip_company(cls, value: Optional[str]) -> Optional[str]:
         return value.strip() if value is not None else value
 
 

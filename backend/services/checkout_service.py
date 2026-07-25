@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 import models
 from models import utc_now
 from config import settings
-from schemas.checkouts import ReturnRequest
+from schemas.checkouts_schema import ReturnRequest
 from services.stock import recalculate_asset_stock
 
 logger = logging.getLogger(__name__)

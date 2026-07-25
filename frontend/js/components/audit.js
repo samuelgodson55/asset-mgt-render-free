@@ -30,7 +30,7 @@
 
 import { apiRequest, API_URL } from '../api.js';
 import { getSession } from '../auth.js';
-import { escapeHtml, formatTimestamp, renderServerPaginationBar, rowDetailsTrigger } from '../ui.js';
+import { closeModal, escapeHtml, formatTimestamp, openModal, renderServerPaginationBar, rowDetailsTrigger } from '../ui.js';
 
 const auditState = { page: 1, perPage: 5, total: 0 };
 
@@ -103,14 +103,19 @@ export function setAuditPerPage(value) {
 }
 
 // ---- Export Audit Ledger (CSV or PDF) ----
-// Prompts the user for an optional start/end date range, then runs the
-// whole export as a background job instead of generating the file inline
-// in one request:
+// Opens #auditExportModal (a real form with two <input type="date"> date
+// pickers) to collect an optional start/end date range instead of the
+// browser's native prompt() -- prompt() blocks the whole tab, can't be
+// styled to match the rest of the app, and stacking two of them back to
+// back (one for start, one for end) is an especially rough way to ask
+// for what is really a single "pick a range" input. Once the range (or
+// lack of one) and a format are chosen, the export itself still runs as
+// a background job rather than generating the file inline in one request:
 //   1. POST /audit-logs/export?format=&start_date=&end_date= enqueues the
 //      job on the Celery worker (see backend/tasks/export_tasks.py) and
 //      returns a task_id immediately -- it does NOT wait for the file.
 //   2. We poll GET /audit-logs/export/{task_id}/status every 1.2s,
-//      updating the small status text next to the buttons so the UI never
+//      updating the small status text next to the button so the UI never
 //      just sits there looking frozen while the worker builds the file
 //      (this matters most for a wide date-range PDF of an unbounded
 //      ledger, which is exactly the case that used to risk tying up the
@@ -133,16 +138,26 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Called by main.js's delegated click handler when "Export Ledger" is
+// clicked. Clears any dates left over from a previous export before
+// showing the modal, so it never silently reuses a stale range.
+export function openAuditExportModal() {
+  const startEl = document.getElementById('auditExportStartDate');
+  const endEl = document.getElementById('auditExportEndDate');
+  if (startEl) startEl.value = '';
+  if (endEl) endEl.value = '';
+  openModal('auditExportModal');
+}
+
 export async function exportAuditLogs(format = 'csv') {
   try {
-    const startDate = prompt('Export from which date? (YYYY-MM-DD, leave blank for "no start limit")', '');
-    if (startDate === null) return; // user clicked Cancel -- abort the export entirely
-    const endDate = prompt('Export up to which date? (YYYY-MM-DD, leave blank for "no end limit")', '');
-    if (endDate === null) return;
+    const startDate = document.getElementById('auditExportStartDate')?.value || '';
+    const endDate = document.getElementById('auditExportEndDate')?.value || '';
+    closeModal('auditExportModal');
 
     const params = new URLSearchParams();
-    if (startDate.trim()) params.set('start_date', startDate.trim());
-    if (endDate.trim()) params.set('end_date', endDate.trim());
+    if (startDate) params.set('start_date', startDate);
+    if (endDate) params.set('end_date', endDate);
     params.set('format', format);
 
     setExportStatus('Queuing export…');

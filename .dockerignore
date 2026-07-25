@@ -1,7 +1,7 @@
 # =============================================================================
 # .dockerignore
 # -----------------------------------------------------------------------------
-# nginx/Dockerfile's build context is the PROJECT ROOT (see docker-compose.yml
+# frontend/Dockerfile's build context is the PROJECT ROOT (see docker-compose.yml
 # -- `context: .`) so it can COPY both frontend/ and nginx/. Without this
 # file, `docker build`/`docker compose build` would transmit EVERYTHING in
 # the repo root to the Docker daemon as build context -- including a real
@@ -14,6 +14,7 @@
 .env
 .env.*
 !.env.example
+!.env.azure.example
 
 # --- Git / editors / OS -------------------------------------------------------
 .git/
@@ -37,6 +38,20 @@ Thumbs.db
 # --- Logs / misc ---------------------------------------------------------------
 *.log
 node_modules/
+
+# --- Frontend test suite -- CI/local-dev only, never shipped ----------------
+# frontend/tests/ is its own npm project (jsdom + friends) that exists
+# purely for `node --test` (see .github/workflows/ci.yml and
+# frontend/tests/package.json). build-frontend/build.js walks EVERY file
+# under frontend/ and copies anything that isn't .js/.html straight through
+# unmodified -- .test.mjs files don't end in ".js", so without this they'd
+# ship into the final image byte-for-byte, publicly served right alongside
+# the real app (e.g. /tests/login-form-wiring.test.mjs). Worse,
+# frontend/tests/node_modules/** would get walked too and fed to
+# terser/javascript-obfuscator as if it were application code, which
+# doesn't just bloat the image -- it can outright fail the build (a jsdom
+# test fixture under node_modules trips terser with a syntax error).
+frontend/tests/
 
 # --- Docs not needed inside the image ------------------------------------------
 README.md

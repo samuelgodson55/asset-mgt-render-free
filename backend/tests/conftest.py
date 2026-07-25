@@ -48,6 +48,7 @@ call time, so they transparently pick up the swap.
 
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 # --- Make `backend/` importable regardless of pytest's rootdir/cwd --------
@@ -62,17 +63,31 @@ if BACKEND_DIR not in sys.path:
 # --- Test environment configuration (see module docstring) ----------------
 # Deliberately harmless, throwaway values -- this process never talks to a
 # real SMTP server, real Redis, or real Postgres. `setdefault` so a
-# developer can still override any of these locally (e.g. to point
-# SUPER_ADMIN_PASSWORD at something else) without editing this file.
+# developer can still override any of these locally without editing this
+# file. Note there's no SUPER_ADMIN_PASSWORD anymore -- the root admin's
+# password now lives only in the `users` table (see security.py's module
+# docstring), seeded here with the same well-known demo password
+# database.py's seed_db() uses for local/dev (see _root_admin_demo_row()).
 os.environ.setdefault("ENVIRONMENT", "test")
 os.environ.setdefault("JWT_SECRET_KEY", "test-only-jwt-secret-key-do-not-use-in-production-0123456789")
 os.environ.setdefault("SUPER_ADMIN_USERNAME", "superadmin")
-os.environ.setdefault("SUPER_ADMIN_PASSWORD", "TestSuperAdmin123!")
 os.environ.setdefault("NOTIFICATIONS_ENABLED", "false")
 os.environ.setdefault("ENABLE_AUTO_BACKUP", "false")
 os.environ.setdefault("ENABLE_API_DOCS", "false")
 os.environ.setdefault("AUTO_INIT_DB", "true")
 os.environ.setdefault("AUTO_SEED_DEMO_DATA", "true")
+# config.py's default BACKUP_DIR ("/app/backups") assumes the production
+# container's filesystem layout, where /app is the app's own WORKDIR and
+# already owned by the container's runtime user. This test suite runs
+# directly on the CI runner (or a developer's machine) as a normal,
+# non-root user with no /app directory at all, so
+# services/backup_service.py's os.makedirs(settings.BACKUP_DIR) raises a
+# bare PermissionError there -- which api/backup_api.py's GET routes (by
+# design, see that module's docstring: thin wrappers, no try/except) let
+# propagate straight into a 500. Point BACKUP_DIR at a throwaway temp
+# directory instead, exactly the kind of location this process can always
+# write to regardless of who/where it's running.
+os.environ.setdefault("BACKUP_DIR", tempfile.mkdtemp(prefix="snipeit-test-backups-"))
 # Deliberately unreachable/fast-failing rather than pointed at a real Redis
 # -- see middleware/rate_limit.py's "FAIL-OPEN ON REDIS ERRORS" section:
 # login/rate-limiting still works correctly (just fails open) without a
@@ -100,7 +115,7 @@ DEMO_USERS = {
     "staff2": {"identifier": "a.bello@corp.io", "password": "Staff123!"},
     "customer": {"identifier": "d.martins@customer.io", "password": "Customer123!"},
 }
-SUPER_ADMIN = {"identifier": os.environ["SUPER_ADMIN_USERNAME"], "password": os.environ["SUPER_ADMIN_PASSWORD"]}
+SUPER_ADMIN = {"identifier": os.environ["SUPER_ADMIN_USERNAME"], "password": "RootAdmin123!"}
 
 
 @pytest.fixture()
@@ -178,10 +193,45 @@ def client(db_engine):
 
 def auth_headers(client: TestClient, identifier: str, password: str) -> dict:
     """Logs in via POST /api/auth/login and returns an Authorization header
-    dict ready to spread into any subsequent request's `headers=`."""
+    dict ready to spread into any subsequent request's `headers=`.
+
+    SECURITY: as of the TOTP 2FA change, POST /auth/login alone no longer
+    grants a session for an account that requires 2FA (currently just
+    role == super_admin -- see services/auth_service.py's login()) -- it
+    returns either mfa_setup_required (first-ever login: a fresh secret to
+    enroll with) or mfa_required (already enrolled: needs a code) instead
+    of a token. Every test's DB is freshly seeded per-test (see
+    `db_engine` above), so the super_admin row always starts unenrolled --
+    this helper completes that enrollment inline using `pyotp` to generate
+    a valid live code from the secret login() just handed back, so every
+    OTHER fixture/test can keep treating auth_headers() as "just log me
+    in" without needing to know 2FA exists at all.
+    """
     response = client.post("/api/auth/login", json={"identifier": identifier, "password": password})
     assert response.status_code == 200, f"Login failed for {identifier!r}: {response.status_code} {response.text}"
-    token = response.json().get("access_token") or client.cookies.get("access_token")
+    body = response.json()
+
+    if body.get("mfa_setup_required"):
+        import pyotp
+        code = pyotp.TOTP(body["totp_secret"]).now()
+        response = client.post(
+            "/api/auth/mfa/setup/confirm",
+            json={"mfa_setup_token": body["mfa_setup_token"], "code": code},
+        )
+        assert response.status_code == 200, f"2FA setup confirm failed: {response.status_code} {response.text}"
+        body = response.json()
+    elif body.get("mfa_required"):
+        # Not exercised today (every test DB is fresh, so the first login
+        # always takes the mfa_setup_required branch above) -- kept as an
+        # explicit, loud failure rather than silently returning an
+        # unauthenticated session if that ever changes.
+        raise AssertionError(
+            "auth_headers() hit the already-enrolled mfa_required path, which no "
+            "current fixture exercises -- extend this helper (see docstring) "
+            "before relying on it here."
+        )
+
+    token = body.get("access_token") or client.cookies.get("access_token")
     if token:
         return {"Authorization": f"Bearer {token}"}
     # POST /auth/login sets the token as an HttpOnly cookie rather than

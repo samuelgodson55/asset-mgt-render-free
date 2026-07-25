@@ -4,11 +4,16 @@ Revision ID: 0001_baseline_schema
 Revises:
 Create Date: 2026-07-08
 
-This is the ONLY migration in the project: it creates every table exactly
-as defined in models.py, in its final, current shape -- there is no
-0002/0003/... chain to apply on top of it. A fresh install (or a fresh
-`docker compose up --build` against an empty Postgres volume) only ever
-needs `alembic upgrade head` to run this one file.
+This is the baseline schema migration: it creates every table exactly as
+defined in models.py, in its final, current shape. It's still a single
+squashed baseline for the SCHEMA itself (no incremental
+0002/0003/... chain of table/column changes on top of it) -- the one file
+that now sits after it,
+alembic/versions/0002_bootstrap_root_admin.py, is a pure DATA migration
+(inserting the one hardcoded root admin row in production) and never
+touches this file's table shapes. A fresh install (or a fresh
+`docker compose up --build` against an empty Postgres volume) still only
+ever needs a single `alembic upgrade head` to run both.
 
 WHY A SINGLE SQUASHED BASELINE INSTEAD OF INCREMENTAL MIGRATIONS?
 This project previously had a short-lived chain of incremental migrations

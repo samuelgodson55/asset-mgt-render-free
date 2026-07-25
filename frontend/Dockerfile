@@ -1,21 +1,28 @@
 # =============================================================================
-# nginx/Dockerfile
+# frontend/Dockerfile
 # -----------------------------------------------------------------------------
 # Builds ONE image that serves the static frontend AND reverse-proxies /api/*
 # to the FastAPI backend -- the same image is used unmodified in local Docker
 # Compose, Render, and any cloud environment (see nginx/default.conf.template
 # for the full explanation of how per-environment config is injected).
 #
-# Build context: this Dockerfile expects to be built from the PROJECT ROOT
-# (not from inside nginx/), because it needs to COPY the frontend/ folder
-# too. docker-compose.yml is already set up this way:
+# This file lives in frontend/ (alongside the static site it builds) even
+# though the runtime half of the image is nginx -- that mirrors
+# backend/Dockerfile living in backend/: each service owns its own
+# Dockerfile, one per directory.
+#
+# Build context: this Dockerfile still expects to be built from the PROJECT
+# ROOT (not from inside frontend/), because it also needs to COPY the
+# nginx/ folder (default.conf.template, docker-entrypoint.d) and
+# build-frontend/ (the JS/HTML processing step). docker-compose.yml is
+# already set up this way:
 #     frontend:
 #       build:
 #         context: .
-#         dockerfile: nginx/Dockerfile
+#         dockerfile: frontend/Dockerfile
 # If building manually instead of via Compose, run this from the project
 # root:
-#     docker build -f nginx/Dockerfile -t snipeit-lite-frontend \
+#     docker build -f frontend/Dockerfile -t snipeit-lite-frontend \
 #         --build-arg BUILD_ENV=production .
 # =============================================================================
 
@@ -61,7 +68,7 @@ WORKDIR /build
 # this layer stays cached and is only re-run when build-frontend/package.json
 # actually changes -- not every time an application JS/HTML file changes.
 COPY build-frontend/package.json build-frontend/package-lock.json* /build/build-frontend/
-RUN cd build-frontend && npm install --no-audit --no-fund && npm cache clean --force
+RUN cd build-frontend && npm ci --no-audit --no-fund && npm cache clean --force
 
 COPY build-frontend/build.js /build/build-frontend/build.js
 
@@ -97,11 +104,21 @@ COPY nginx/default.conf.template /etc/nginx/templates/default.conf.template
 # boot if it isn't already set -- see the script's own header comment for
 # why (short version: not every platform publishes a fixed, documented
 # internal-DNS IP the way Docker Compose does, so guessing one into a
-# platform's config risks silently going stale). Deliberately left
-# NON-executable (do not chmod +x) so nginx's entrypoint sources it into
-# the same shell instead of running it as a throwaway subprocess -- see
-# that file's own comment for why that distinction matters here.
-COPY nginx/docker-entrypoint.d/15-detect-resolver-ip.sh /docker-entrypoint.d/15-detect-resolver-ip.sh
+# platform's config risks silently going stale).
+#
+# BUG FIX: this used to be named "*.sh" and was deliberately left
+# non-executable, on the (incorrect) assumption that nginx's entrypoint
+# sources non-executable ".sh" files. It doesn't -- it skips them
+# entirely, so RESOLVER_IP was never actually being exported, and
+# envsubst was leaving the literal "${RESOLVER_IP}" text in the rendered
+# config (nginx: "host not found in resolver \"${RESOLVER_IP}\""). Now
+# named ".envsh" (nginx's actual convention for "source this into my own
+# shell so its exports survive into later hook scripts") AND explicitly
+# made executable via --chmod, since nginx's entrypoint requires the
+# executable bit for BOTH ".sh" and ".envsh" alike -- see the script's own
+# header comment for the full explanation, including the exact upstream
+# source line that confirms this.
+COPY --chmod=755 nginx/docker-entrypoint.d/15-detect-resolver-ip.envsh /docker-entrypoint.d/15-detect-resolver-ip.envsh
 
 # The static site: index.html/admin.html/staff.html/manager.html/
 # customer.html and js/*. CSS/images pass through the frontend-build stage
@@ -151,6 +168,26 @@ ENV BACKEND_PORT=8000
 ENV ENABLE_API_DOCS=true
 
 EXPOSE 80
+
+# ZERO-DOWNTIME: same reasoning as backend/Dockerfile's HEALTHCHECK -- lets
+# `docker compose ps`/any orchestrator detect "nginx is running but not
+# actually answering" (a bad envsubst render, a config nginx -t would have
+# caught but didn't get run, etc.), not just "the process crashed" (which
+# `restart: unless-stopped` in docker-compose.yml already covers on its
+# own). Hits "/" -- served by the `location /` block in
+# nginx/default.conf.template, which resolves to index.html and needs no
+# backend connectivity at all, so this stays a pure LIVENESS check for
+# THIS container, mirroring the backend's own /healthz-not-/readyz split
+# (see main.py's health_check() docstring) -- nginx being unable to reach
+# the backend container is a separate, already-handled failure mode (the
+# backend's own healthcheck/restart policy), not a reason to also kill and
+# restart nginx.
+#
+# nginx:alpine ships BusyBox wget (no curl) -- shell form (not exec form)
+# so `$PORT` expands; defaults to 80 to match this Dockerfile's own
+# ENV PORT=80 above if a platform never overrides it.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD wget --quiet --tries=1 --spider "http://127.0.0.1:${PORT:-80}/" || exit 1
 
 # nginx:alpine's base image already defines the correct ENTRYPOINT
 # (docker-entrypoint.sh, which runs the envsubst templating step and then

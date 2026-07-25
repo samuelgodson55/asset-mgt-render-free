@@ -9,12 +9,16 @@ instead of an empty one.
 """
 
 import datetime
+import logging
+import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from models import Base, utc_now
 import models
-from security import hash_password
+from security import hash_password, SUPER_ADMIN_ROLE
 from config import settings
+
+logger = logging.getLogger(__name__)
 
 # Retrieve the connection string from the central `settings` object
 # (backend/config.py), which itself reads DATABASE_URL from the
@@ -109,6 +113,185 @@ def get_db():
         db.close()
 
 
+def get_schema_status() -> dict:
+    """
+    Compares the database's ACTUAL current migration revision (whatever
+    `alembic upgrade head` last left behind in its `alembic_version` table)
+    against the revision THIS CODE was built to run against (the head of
+    backend/alembic/versions/ baked into this image at build time). Powers
+    GET /readyz in main.py -- see that endpoint's docstring for why this
+    check lives there and deliberately NOT in GET /healthz.
+
+    This is the check that was missing before: the deploy pipelines
+    (.github/workflows/deploy-azure-*.yml) already run `alembic upgrade
+    head` as a separate, blocking step before rolling out a new image --
+    but nothing verified that a given RUNNING container's schema still
+    actually matches what its own code expects. If that migrate step were
+    ever skipped or bypassed (e.g. a manual `az containerapp update`
+    straight to an image tag, no pipeline involved), the old /healthz --
+    a static "yes I'm up" with no DB awareness at all -- would happily
+    report healthy against a schema the new code doesn't actually match,
+    and the first real symptom would be a request failing on a missing
+    column instead of the deploy failing up front.
+
+    Returns a dict; "ready" is False for any of:
+      - the database can't be reached at all (same causes as init_db()'s
+        startup check: wrong DATABASE_URL, missing sslmode, firewall, DB
+        not up yet)
+      - the `alembic_version` table doesn't exist yet -- `alembic upgrade
+        head` has never been run against this database
+      - `alembic_version` exists but is empty -- same as above
+      - `alembic_version`'s revision(s) don't match this build's expected
+        head(s) -- the exact "new image, old/wrong schema" scenario
+    "ready" is True only when the database's current revision(s) exactly
+    equal this code's expected head(s).
+    """
+    from sqlalchemy import inspect, text
+    from alembic.config import Config as AlembicConfig
+    from alembic.script import ScriptDirectory
+
+    # Resolve the migration(s) THIS CODE expects to be current -- reads
+    # straight from backend/alembic/versions/ as shipped in this image,
+    # completely independent of whatever the database actually contains.
+    backend_dir = os.path.dirname(os.path.abspath(__file__))
+    alembic_cfg = AlembicConfig(os.path.join(backend_dir, "alembic.ini"))
+    alembic_cfg.set_main_option("script_location", os.path.join(backend_dir, "alembic"))
+    expected_heads = set(ScriptDirectory.from_config(alembic_cfg).get_heads())
+
+    try:
+        with engine.connect() as conn:
+            if not inspect(conn).has_table("alembic_version"):
+                # BUG FIX (silent readiness failures): every "not ready"
+                # branch below used to return straight to the caller with
+                # no logging at all. That made a READINESS probe that fails
+                # forever -- e.g. the exact "new image, DB unreachable/
+                # schema mismatch" scenarios this function exists to catch
+                # -- completely invisible in Log Analytics/console logs:
+                # the replica keeps running (this isn't a liveness failure,
+                # so nothing restarts it or logs a crash), Container Apps
+                # just never routes traffic to it and eventually reports
+                # the revision as failed to activate, and `az containerapp
+                # logs show`/the console log stream shows nothing but a
+                # clean startup -- indistinguishable from a healthy
+                # container from the logs alone.
+                #
+                # Logging the exact status dict here (not a paraphrase) is
+                # deliberate, not just for humans reading Log Analytics --
+                # infra/main.bicep's `alertReadyzFailing` scheduled query
+                # rule already greps ContainerAppConsoleLogs_CL for
+                # `Log_s has "readyz" and Log_s has "\"ready\": false"`
+                # (see that resource's own comment: "Same KQL as
+                # SRE_STRATEGY.md section 2b"). That alert has been dead
+                # code since it was added -- nothing ever produced a
+                # console log line matching it, so it could never fire no
+                # matter how long /readyz stayed broken.
+                #
+                # IMPORTANT: passing the dict via `extra=status` (not
+                # embedding `json.dumps(status)` INSIDE the message
+                # string) is what actually makes this match. logging_config.py's
+                # JsonFormatter renders the whole log line as ONE JSON
+                # object; anything placed inside the "message" field's own
+                # string value gets its quotes escaped by that outer
+                # json.dumps() (`"ready": false` -> `\"ready\": false` in
+                # the raw text) -- KQL's `has "\"ready\": false"` searches
+                # for a literal, UNescaped `"` character, so an
+                # escaped-quotes version inside "message" would silently
+                # never match either, just like the original missing-log
+                # bug it's meant to fix. `extra=status` instead makes
+                # "ready"/"reason"/etc. their own TOP-LEVEL keys in the
+                # JSON payload (see JsonFormatter's extra-field folding
+                # loop), so `json.dumps` renders them with real,
+                # unescaped quote characters -- exactly the raw substring
+                # the alert's KQL is looking for.
+                status = {
+                    "ready": False,
+                    "reason": "Database has no 'alembic_version' table -- "
+                              "'alembic upgrade head' has never been run against it.",
+                    "expected_heads": sorted(expected_heads),
+                    "current_heads": [],
+                }
+                logger.warning("readyz: not ready", extra=status)
+                return status
+            current_heads = {row[0] for row in conn.execute(text("SELECT version_num FROM alembic_version"))}
+    except Exception as exc:
+        # Same "fail legibly, not with a raw traceback" reasoning as
+        # main.py's on_startup() -- an unreachable database at readiness-
+        # check time should read as "not ready yet", not crash the probe.
+        # Unlike on_startup() though, this path is hit on EVERY failed
+        # readiness poll (every 10s -- see infra/main.bicep's Readiness
+        # probe periodSeconds), not just once at boot, so exc_info=True is
+        # deliberately omitted to avoid flooding Log Analytics with a full
+        # traceback per poll -- the single-line exception message already
+        # in `reason` is enough to point at the cause (wrong host, missing
+        # sslmode, firewall) without drowning out everything else.
+        status = {
+            "ready": False,
+            "reason": f"Could not reach the database to check its migration state: {exc}",
+            "expected_heads": sorted(expected_heads),
+            "current_heads": [],
+        }
+        logger.warning("readyz: not ready", extra=status)
+        return status
+
+    if not current_heads:
+        status = {
+            "ready": False,
+            "reason": "Database's 'alembic_version' table is empty -- "
+                      "no migration has ever been recorded as applied.",
+            "expected_heads": sorted(expected_heads),
+            "current_heads": [],
+        }
+        logger.warning("readyz: not ready", extra=status)
+        return status
+
+    if current_heads != expected_heads:
+        status = {
+            "ready": False,
+            "reason": "Database schema version does not match what this build of the code "
+                      "expects -- run 'alembic upgrade head' before routing traffic to this image.",
+            "expected_heads": sorted(expected_heads),
+            "current_heads": sorted(current_heads),
+        }
+        logger.warning("readyz: not ready", extra=status)
+        return status
+
+    return {
+        "ready": True,
+        "reason": "Database schema matches this build's expected migration head.",
+        "expected_heads": sorted(expected_heads),
+        "current_heads": sorted(current_heads),
+    }
+
+
+def _root_admin_demo_row() -> "models.User":
+    """
+    Builds the LOCAL/DEV/TEST-only root admin row seed_db() inserts
+    alongside the other demo accounts (see seed_db()'s docstring). This is
+    NOT how production gets its root admin -- see
+    alembic/versions/0002_bootstrap_root_admin.py for that -- this exists
+    purely so a fresh `docker compose up` (AUTO_SEED_DEMO_DATA=true) has
+    something to log into as "super_admin" without requiring Alembic to be
+    run by hand first.
+
+    Uses a fixed, well-known demo password (same convention as every other
+    demo account below -- e.g. "Admin123!") rather than a randomly
+    generated one: unlike the production migration, this path is never
+    reachable with ENVIRONMENT=production (config.py's AUTO_SEED_DEMO_DATA
+    defaults to false there, and the two are meant to be mutually
+    exclusive ways of getting the very first root admin row), so there's
+    no real secret to protect here -- same threat model as
+    "Admin123!"/"Manager123!" below.
+    """
+    return models.User(
+        name=settings.SUPER_ADMIN_NAME,
+        email=f"{settings.SUPER_ADMIN_USERNAME}@local",
+        username=settings.SUPER_ADMIN_USERNAME,
+        role=SUPER_ADMIN_ROLE,
+        password_hash=hash_password("RootAdmin123!"),
+        is_verified=True, is_active=True,
+    )
+
+
 def seed_db():
     """
     Populate the database with a small set of realistic demo records the
@@ -126,12 +309,18 @@ def seed_db():
       Manager     -> s.chen@corp.io      / username s.chen      / Manager123!
       Staff       -> t.okafor@corp.io    / username t.okafor    / Staff123!
       Customer    -> d.martins@customer.io / username d.martins / Customer123!
+      Root Admin  -> (SUPER_ADMIN_USERNAME, default "superadmin") / RootAdmin123!
+                     -- local/dev/test only, see _root_admin_demo_row() below.
 
-    NOTE: there's no "Super Admin" row here on purpose. The Super Admin is
-    a single hardcoded identity configured via the SUPER_ADMIN_USERNAME/
-    SUPER_ADMIN_PASSWORD environment variables (see config.py and
-    security.py's super_admin_principal()) -- it's never a database row,
-    so it can't be seeded, edited, or deleted like the accounts below.
+    NOTE on the root admin: there's no "Super Admin" row created below on
+    purpose -- this function only runs when AUTO_SEED_DEMO_DATA=true
+    (local/dev/test, never production; see config.py). In production, the
+    root admin is bootstrapped exactly once by
+    alembic/versions/0002_bootstrap_root_admin.py during
+    `alembic upgrade head` instead. For local/dev/test convenience (so
+    there's still something to log into as "super_admin" without running
+    Alembic by hand), _seed_root_admin() below inserts the same singleton
+    role, but with a well-known demo password -- see its own docstring.
     """
     db = SessionLocal()
     try:
@@ -170,7 +359,7 @@ def seed_db():
             department_role="External Client Contact",
             password_hash=hash_password("Customer123!"), is_verified=True, is_active=True,
         )
-        db.add_all([admin, manager, staff_1, staff_2, customer_1])
+        db.add_all([admin, manager, staff_1, staff_2, customer_1, _root_admin_demo_row()])
         db.commit()
 
         # --- Demo asset pools ----------------------------------------------------

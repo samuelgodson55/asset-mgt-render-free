@@ -23,6 +23,31 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class MfaSetupConfirmRequest(BaseModel):
+    """POST /auth/mfa/setup/confirm -- completes 2FA enrollment. `mfa_setup_token`
+    is the short-lived token login() returned in its mfa_setup_required
+    response; `code` is the 6-digit code from the person's authenticator app."""
+    mfa_setup_token: str
+    code: str
+
+
+class MfaVerifyRequest(BaseModel):
+    """POST /auth/mfa/verify -- completes login for an already-enrolled
+    account. `mfa_pending_token` is the short-lived token login() returned
+    in its mfa_required response; `code` is the 6-digit authenticator code."""
+    mfa_pending_token: str
+    code: str
+
+
+class RecoveryCodesRegenerateRequest(BaseModel):
+    """POST /auth/mfa/recovery-codes/regenerate -- invalidates every
+    existing recovery code and issues a fresh batch. `password` is the
+    CURRENT password, re-confirmed the same way update_password() does,
+    since this is a sensitive action taken from an already-authenticated
+    session rather than a login."""
+    password: str
+
+
 class PasswordUpdateRequest(BaseModel):
     user_id: int
     new_password: str

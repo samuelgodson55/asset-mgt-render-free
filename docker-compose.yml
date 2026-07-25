@@ -12,12 +12,23 @@
 # time:
 #     cp .env.example .env
 #
-# Three services:
+# Six services:
 #   db       - PostgreSQL database that stores everything
+#   redis    - Celery broker/result backend (async exports + email), the
+#              cross-replica login rate limiter, and the scheduled-backup
+#              leader lock -- see middleware/rate_limit.py and
+#              services/backup_service.py's docstrings
 #   backend  - FastAPI app (main.py) talking to the db (not published to the
 #              host anymore -- see the "frontend" service below)
+#   worker   - Celery worker (backend/Dockerfile, unmodified) consuming the
+#              queue `backend` produces to: CSV/PDF export generation and
+#              every outbound notification email
+#   beat     - Celery Beat (same image as `worker`, different command) --
+#              fires the scheduled overdue/due-soon digest jobs on a timer.
+#              Split from `worker` so `worker` can be scaled to multiple
+#              replicas without duplicating the scheduled jobs.
 #   frontend - the static site (index.html/admin.html/js/*) PLUS an nginx
-#              reverse proxy in front of it, built from nginx/Dockerfile.
+#              reverse proxy in front of it, built from frontend/Dockerfile.
 #              nginx serves the frontend directly and transparently forwards
 #              every /api/* request to the backend container over Docker's
 #              internal network -- see nginx/default.conf.template for the
@@ -177,13 +188,17 @@ services:
       # (same .env key drives both, so this happens automatically as long
       # as you don't override just one of the two services individually).
       ENABLE_API_DOCS: ${ENABLE_API_DOCS:-}
-      # Hardcoded Super Admin (root account) -- see .env.example and
-      # backend/config.py's SUPER_ADMIN_* docstring. Defaults keep local
-      # Docker Compose working out of the box; generate a real password
-      # before deploying anywhere real.
+      # Root Administrator identity (root account) -- see .env.example and
+      # backend/config.py's SUPER_ADMIN_* docstring. These two are just the
+      # fixed identity (not a secret); the password lives in the database
+      # now, seeded by `alembic upgrade head` in production (see
+      # backend/alembic/versions/0002_bootstrap_root_admin.py) -- that
+      # migration reads ROOT_ADMIN_BOOTSTRAP_PASSWORD directly from the
+      # environment, ONCE, the very first time it runs, so it's passed
+      # through here too even though the running app never reads it itself.
       SUPER_ADMIN_USERNAME: ${SUPER_ADMIN_USERNAME:-superadmin}
       SUPER_ADMIN_NAME: ${SUPER_ADMIN_NAME:-Super Admin}
-      SUPER_ADMIN_PASSWORD: ${SUPER_ADMIN_PASSWORD:-change-this-super-admin-password}
+      ROOT_ADMIN_BOOTSTRAP_PASSWORD: ${ROOT_ADMIN_BOOTSTRAP_PASSWORD:-}
       # Email notifications (extension requests + overdue-checkout digest)
       # -- see backend/config.py's NOTIFICATIONS_ENABLED docstring. Leave
       # disabled for local dev with no mail server; the app works fine
@@ -225,6 +240,16 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # ZERO-DOWNTIME: no explicit `healthcheck:` block needed here -- this
+    # service's image (backend/Dockerfile) now bakes in its own
+    # HEALTHCHECK instruction (GET /healthz -- see that Dockerfile's own
+    # comment for the full reasoning), and Compose automatically uses an
+    # image's built-in HEALTHCHECK for any service that doesn't override
+    # it with one of its own. That's what makes `condition:
+    # service_healthy` below (on the `frontend` service's `depends_on`)
+    # meaningful: Compose won't consider this container healthy -- and
+    # therefore won't start `frontend` -- until GET /healthz is actually
+    # answering 200, not merely until the process has started.
     # NOTE: no host `ports:` mapping here anymore -- see nginx reverse-proxy
     # comment block below for why. The backend is still fully reachable by
     # the frontend container over Compose's internal network at
@@ -295,18 +320,13 @@ services:
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in your .env file -- see .env.example}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_FORMAT: ${LOG_FORMAT:-json}
-      # The worker never logs anyone in with the Super Admin account, but
-      # it shares config.py's Settings() with `backend`, and that class's
-      # startup validator (requirement #5) runs unconditionally the moment
-      # Settings() is constructed -- regardless of whether THIS process
-      # ever reads the value. Without this passthrough, SUPER_ADMIN_PASSWORD
-      # falls back to Settings' own empty-string default here, which is
-      # itself in the insecure-placeholder list, so ENVIRONMENT=production
-      # makes the worker refuse to boot even with a real password set in
-      # .env. Must stay identical to the backend service's block above.
-      SUPER_ADMIN_USERNAME: ${SUPER_ADMIN_USERNAME:-superadmin}
-      SUPER_ADMIN_NAME: ${SUPER_ADMIN_NAME:-Super Admin}
-      SUPER_ADMIN_PASSWORD: ${SUPER_ADMIN_PASSWORD:-change-this-super-admin-password}
+      # The worker never logs anyone in with the Super Admin/root account,
+      # and unlike before, config.py's Settings() no longer has a startup
+      # validator that requires a password value here at all -- the root
+      # admin's password lives only in the database now (see
+      # backend/security.py's module docstring). SUPER_ADMIN_USERNAME/NAME
+      # are harmless non-secret defaults baked into Settings() itself, so
+      # this service doesn't need to pass any of the three through anymore.
       # The worker never runs its own DB migrations/seeding -- `backend`
       # already owns that on its startup hook -- so these stay disabled
       # here regardless of the .env values used for `backend`.
@@ -335,6 +355,26 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # ZERO-DOWNTIME / BUG FIX: this service shares backend/Dockerfile's
+    # image with `backend` above (`build: ./backend`, no separate
+    # Dockerfile) -- which means it also inherits that image's baked-in
+    # HEALTHCHECK instruction (GET /healthz over HTTP) UNLESS overridden
+    # here. This container runs `celery ... worker`, not uvicorn -- there
+    # is no HTTP server listening on port 8000 in this process at all, so
+    # the inherited check would connection-refuse every single time and
+    # Compose would report this container permanently "unhealthy" despite
+    # it working perfectly correctly. Override with the standard Celery
+    # liveness check instead: `celery inspect ping` round-trips a real
+    # message through the SAME broker this worker actually consumes from
+    # (settings.REDIS_URL), so it only reports healthy if the worker
+    # process is both alive AND actually able to receive/answer control
+    # commands -- not just "the process didn't exit".
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A celery_app inspect ping --destination celery@$$HOSTNAME --timeout 10 | grep -q OK"]
+      interval: 30s
+      timeout: 15s
+      start_period: 20s
+      retries: 3
 
   # ---------------------------------------------------------------------
   # beat (Celery periodic-task scheduler -- fires the overdue/due-soon
@@ -358,14 +398,9 @@ services:
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in your .env file -- see .env.example}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_FORMAT: ${LOG_FORMAT:-json}
-      # Same reasoning as the `worker` service above: config.py's Settings()
-      # startup validator runs the instant Settings() is constructed, no
-      # matter whether `beat` itself ever logs anyone in. Without this,
-      # SUPER_ADMIN_PASSWORD falls back to the empty-string default here,
-      # which fails the production check even with a real password in .env.
-      SUPER_ADMIN_USERNAME: ${SUPER_ADMIN_USERNAME:-superadmin}
-      SUPER_ADMIN_NAME: ${SUPER_ADMIN_NAME:-Super Admin}
-      SUPER_ADMIN_PASSWORD: ${SUPER_ADMIN_PASSWORD:-change-this-super-admin-password}
+      # Same reasoning as the `worker` service above: no startup validator
+      # requires these anymore, since the root admin's password lives in
+      # the database now, not in an environment variable.
       AUTO_INIT_DB: "false"
       AUTO_SEED_DEMO_DATA: "false"
       NOTIFICATIONS_ENABLED: ${NOTIFICATIONS_ENABLED:-false}
@@ -386,16 +421,43 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # BUG FIX: same image-sharing issue as `worker` above (see that
+    # service's own `healthcheck:` comment for the full "why this needs
+    # overriding at all" explanation) -- this container also inherits
+    # backend/Dockerfile's HTTP-based HEALTHCHECK otherwise, and `celery
+    # ... beat` serves no HTTP endpoint to satisfy it either.
+    #
+    # Unlike `worker`, there's no equivalent "round-trip a real command
+    # through the broker" check available here: `celery inspect ping`
+    # only targets WORKER processes (the ones consuming task queues) --
+    # Beat doesn't run that consumer loop, so it never answers control
+    # commands at all, healthy or not. And because this app's Beat
+    # scheduler is RedBeat (celery_app.py's `beat_scheduler=
+    # "redbeat.RedBeatScheduler"`), the schedule itself lives in Redis,
+    # not in a local `celerybeat-schedule` file on disk whose mtime a
+    # healthcheck could otherwise watch for "is it still ticking".
+    # Rather than ship a low-signal check that just re-confirms the
+    # process hasn't exited (which `restart: unless-stopped` above
+    # already handles for a genuine crash -- see celery_app.py's
+    # `redbeat_lock_timeout`/`beat_max_loop_interval` comments for the
+    # one known crash-and-clean-restart case, which is a correctly
+    # handled scenario, not a gap), explicitly disable the inherited
+    # check rather than have Compose falsely report this container
+    # unhealthy forever.
+    healthcheck:
+      disable: true
 
   # ---------------------------------------------------------------------
   # frontend / nginx reverse proxy (requirement: multi-tier deployment)
   # ---------------------------------------------------------------------
   # This is no longer a bare `nginx:alpine` + bind-mounted static files --
-  # it's now built from nginx/Dockerfile, which produces ONE self-contained
-  # image bundling both the static site AND an environment-templated nginx
-  # config (see nginx/default.conf.template). That image is what gets
-  # deployed unmodified to Render and your cloud environment too; only the
-  # environment variables below change between tiers.
+  # it's now built from frontend/Dockerfile, which produces ONE
+  # self-contained image bundling both the static site AND an
+  # environment-templated nginx config (see nginx/default.conf.template).
+  # That image is what gets deployed unmodified to Render and your cloud
+  # environment too; only the environment variables below change between
+  # tiers. (backend/ owns backend/Dockerfile the same way -- each service
+  # has its own Dockerfile.)
   #
   # SECURITY: this is now the ONLY container with a host-published port.
   # The browser talks exclusively to nginx; nginx is the sole thing that
@@ -406,14 +468,14 @@ services:
   frontend:
     build:
       context: .
-      dockerfile: nginx/Dockerfile
+      dockerfile: frontend/Dockerfile
       # BUILD-TIME (not runtime) arg -- this is what actually changes what
       # ends up inside the image, since frontend/js gets transformed once,
       # during `docker compose build`, not on every container start. Reads
       # the SAME ENVIRONMENT value from .env as the backend/worker services
       # below, so there's still exactly one setting to change: local (raw
       # source), development (minified), or production (minified +
-      # obfuscated) -- see nginx/Dockerfile's frontend-build stage and
+      # obfuscated) -- see frontend/Dockerfile's frontend-build stage and
       # build-frontend/build.js for what each mode does.
       #
       # IMPORTANT: unlike the `environment:` blocks below, editing .env
@@ -449,8 +511,23 @@ services:
       ENABLE_API_DOCS: ${ENABLE_API_DOCS:-}
     ports:
       - "8080:80"
+    # ZERO-DOWNTIME: `condition: service_healthy` (not the old bare
+    # `- backend` shorthand, which only waits for the container to
+    # START, not for it to actually be ANSWERING requests) -- now that
+    # `backend` has a real HEALTHCHECK (see backend/Dockerfile), this
+    # makes Compose hold `frontend` back until GET /healthz on that
+    # container is genuinely returning 200. Without this, `docker
+    # compose up`'s first few seconds could route real traffic through
+    # nginx to a backend container that's still mid-import/mid-startup
+    # (see main.py's on_startup()) and get a connection-refused/502
+    # instead of a clean "not ready yet" -- nginx's own `resolver ...
+    # valid=10s` + per-request re-resolution (see
+    # nginx/default.conf.template) already handles the backend's IP
+    # CHANGING later during a redeploy, but it can't paper over the
+    # backend not being reachable AT ALL yet on first boot.
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
 
 volumes:
   pgdata:

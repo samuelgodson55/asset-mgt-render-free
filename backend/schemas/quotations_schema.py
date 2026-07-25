@@ -143,23 +143,30 @@ class QuotationAssignRequest(BaseModel):
     """Admin/Manager-only: designates who a submitted Quotation is for (POST
     /quotations/{id}/assign) -- either a linked Staff/Customer account
     (`assignee_type="user"`, `user_id` set) or an Ad-Hoc/unlinked individual
-    (`assignee_type="outsider"`, `outsider_name`/`outsider_contact` set,
-    `outsider_company` optional), exactly like the Issue/Dispatch drawer's
-    own Staff/Customer/Ad-Hoc split. Omit `assignee_type` (or pass
-    `user_id: null`) to clear the assignment back to \"Unassigned\"."""
+    (`assignee_type="outsider"`, `outsider_name` plus at least one of
+    `outsider_email`/`outsider_phone` set, `outsider_company` optional),
+    exactly like the Issue/Dispatch drawer's own Staff/Customer/Ad-Hoc
+    split. Omit `assignee_type` (or pass `user_id: null`) to clear the
+    assignment back to \"Unassigned\"."""
 
     assignee_type: Optional[str] = None  # "user" | "outsider" | None (clears assignment)
     user_id: Optional[int] = None
+    # Same EXISTING-vs-BRAND-NEW split as schemas/assets.py's
+    # AdvancedCheckoutRequest.outsider_id -- set this to assign to an
+    # ad-hoc profile already on file instead of creating a new one via
+    # outsider_name/outsider_email/outsider_phone/outsider_company.
+    outsider_id: Optional[int] = None
     outsider_name: Optional[str] = None
-    outsider_contact: Optional[str] = None
+    outsider_email: Optional[str] = None
+    outsider_phone: Optional[str] = None
     outsider_company: Optional[str] = None
 
     @model_validator(mode="after")
     def _validate_assignee(self) -> "QuotationAssignRequest":
         if self.assignee_type == "user" and not self.user_id:
             raise ValueError("user_id is required when assignee_type is \"user\".")
-        if self.assignee_type == "outsider" and (not self.outsider_name or not self.outsider_contact):
-            raise ValueError("outsider_name and outsider_contact are required when assignee_type is \"outsider\".")
+        if self.assignee_type == "outsider" and not self.outsider_id and (not self.outsider_name or not (self.outsider_email or self.outsider_phone)):
+            raise ValueError("outsider_id, or outsider_name plus at least one of outsider_email/outsider_phone, are required when assignee_type is \"outsider\".")
         return self
 
 
@@ -190,22 +197,27 @@ class QuotationCreateRequest(BaseModel):
     over the phone), optionally assigning it immediately -- to a linked
     Staff Member/Customer Account (`assignee_type="user"`, `assigned_user_id`
     set) or an Ad-Hoc/unlinked individual (`assignee_type="outsider"`,
-    `outsider_name`/`outsider_contact` set, `outsider_company` optional),
-    same three-way split as the Issue/Dispatch drawer. Leave `assignee_type`
-    unset to start unassigned. Starts with zero line items -- the caller
-    adds them afterward via POST /quotations/{id}/items, same as any other
-    submitted Quotation."""
+    `outsider_name` plus at least one of `outsider_email`/`outsider_phone`
+    set, `outsider_company` optional), same three-way split as the
+    Issue/Dispatch drawer. Leave `assignee_type` unset to start unassigned.
+    Starts with zero line items -- the caller adds them afterward via POST
+    /quotations/{id}/items, same as any other submitted Quotation."""
 
     assignee_type: Optional[str] = None  # "user" | "outsider" | None (starts unassigned)
     assigned_user_id: Optional[int] = None
+    # Same EXISTING-vs-BRAND-NEW split as schemas/assets.py's
+    # AdvancedCheckoutRequest.outsider_id -- see QuotationAssignRequest
+    # above for the full explanation.
+    outsider_id: Optional[int] = None
     outsider_name: Optional[str] = None
-    outsider_contact: Optional[str] = None
+    outsider_email: Optional[str] = None
+    outsider_phone: Optional[str] = None
     outsider_company: Optional[str] = None
 
     @model_validator(mode="after")
     def _validate_assignee(self) -> "QuotationCreateRequest":
         if self.assignee_type == "user" and not self.assigned_user_id:
             raise ValueError("assigned_user_id is required when assignee_type is \"user\".")
-        if self.assignee_type == "outsider" and (not self.outsider_name or not self.outsider_contact):
-            raise ValueError("outsider_name and outsider_contact are required when assignee_type is \"outsider\".")
+        if self.assignee_type == "outsider" and not self.outsider_id and (not self.outsider_name or not (self.outsider_email or self.outsider_phone)):
+            raise ValueError("outsider_id, or outsider_name plus at least one of outsider_email/outsider_phone, are required when assignee_type is \"outsider\".")
         return self

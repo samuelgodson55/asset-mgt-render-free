@@ -300,6 +300,44 @@ export function formatTimestamp(isoString) {
   return `${yyyy}-${mm}-${dd} ${hh}:${min}:${ss}`;
 }
 
+// -----------------------------------------------------------------------------
+// SCROLL RESET ON TAB SWITCH
+// -----------------------------------------------------------------------------
+// All three tab groups in this app (switchTab()'s 5 admin/manager tabs,
+// switchDashboardTab()'s 2 staff/customer tabs, and quotation.js's own
+// switchQuotationTab() Order/History pair) work by toggling a `hidden`
+// class on sibling <section>/<div> panels that all live inside one shared
+// wrapper (#swipeArea / #dashSwipeArea / #quotationSwipeArea) -- only one
+// panel is ever in the document flow at a time, so the wrapper's own
+// top-of-page position never moves when the active panel changes.
+//
+// BUG THIS FIXES: because the wrapper doesn't move, switching tabs never
+// changes the page's scroll position either -- the browser has no reason
+// to. So if you scroll deep into Tab A's content and then swipe (or tap)
+// over to Tab B, you land exactly where you were, pixel-for-pixel, which
+// now falls somewhere in the *middle* of Tab B's content instead of its
+// top. Each tab's scroll position was effectively bleeding into the next
+// tab, when tabs should always be met at their top, independent of
+// whatever scroll depth the previous tab was left at.
+//
+// Fix: after every tab switch, if the current scroll position is past the
+// wrapper's own top edge (accounting for the sticky header so it isn't
+// hidden underneath it), scroll back up so the wrapper's top -- i.e. the
+// top of whichever panel is now visible -- sits right at the top of the
+// viewport. If the scroll position is already above that point (the
+// common case: the user just tapped a tab button that was on-screen),
+// this is a no-op, so it never yanks the page around unnecessarily.
+export function resetTabScroll(containerEl) {
+  if (!containerEl) return;
+  const header = document.querySelector('header.sticky');
+  const headerHeight = header ? header.getBoundingClientRect().height : 0;
+  const containerTop = containerEl.getBoundingClientRect().top + window.scrollY;
+  const targetY = Math.max(containerTop - headerHeight, 0);
+  if (window.scrollY > targetY) {
+    window.scrollTo({ top: targetY, behavior: 'auto' });
+  }
+}
+
 export function switchTab(tab) {
   const assets = document.getElementById('assetInventorySection');
   const users = document.getElementById('userDirectorySection');
@@ -345,6 +383,7 @@ export function switchTab(tab) {
   }
 
   updateSwipeDots(tab);
+  resetTabScroll(document.getElementById('swipeArea'));
 
   // Small fade+slide-in on the freshly-revealed section, mostly noticeable
   // when this was triggered by a swipe gesture (initSwipeNav() below) --
@@ -485,6 +524,7 @@ export function switchDashboardTab(tab) {
   if (tabQuotation) { tabQuotation.classList.remove(...activeCls, ...inactiveCls); tabQuotation.classList.add(...(isItems ? inactiveCls : activeCls)); }
 
   updateDashSwipeDots(isItems ? 'items' : 'quotation');
+  resetTabScroll(document.getElementById('dashSwipeArea'));
 
   const activeSection = isItems ? itemsSection : quotationSection;
   activeSection.classList.remove('swipe-content-enter');
@@ -538,6 +578,23 @@ export function toggleRoute() {
   document.getElementById('staffField').classList.toggle('hidden', val !== 'staff');
   document.getElementById('customerField').classList.toggle('hidden', val !== 'customer');
   document.getElementById('adhocField').classList.toggle('hidden', val !== 'adhoc');
+  toggleAdhocExisting();
+}
+
+// Sub-toggle inside the "Ad-Hoc Individual" route (see toggleRoute() above):
+// #adhocExistingSelect offers a choice between every ad-hoc profile
+// already on file (populated by components/outsiders.js's
+// populateOutsiderSelects()) and a leading "+ Create New Unlinked
+// Profile" option. The Unlinked Profile Details mini-form
+// (#adhocNewFields) only needs to be shown -- and only needs its
+// name/contact filled in -- when that "create new" option is selected;
+// picking an existing profile just needs its id (see components/
+// assets.js's submitDispatchForm()).
+export function toggleAdhocExisting() {
+  const select = document.getElementById('adhocExistingSelect');
+  const newFields = document.getElementById('adhocNewFields');
+  if (!select || !newFields) return;
+  newFields.classList.toggle('hidden', select.value !== 'new');
 }
 
 export function toggleCapacityEdit() {
@@ -998,4 +1055,25 @@ export function initSearchClearButtons() {
       toggle();
     });
   });
+}
+
+// -----------------------------------------------------------------------------
+// DOWNLOAD-AS-TEXT-FILE (shared)
+// -----------------------------------------------------------------------------
+// Client-side "download as .txt" for anything that's just a list of lines --
+// currently used for 2FA recovery codes both right after enrollment
+// (js/main.js's downloadRecoveryCodes(), on the login page) and after a
+// later regeneration from an already-logged-in session
+// (js/components/profile.js's downloadRegeneratedRecoveryCodes()). Pulled
+// out here, in the one module both of those already import from, instead
+// of duplicated in each -- main.js imports FROM profile.js already, so
+// profile.js can't import back from main.js without a circular dependency.
+export function downloadTextFile(filename, text) {
+  const blob = new Blob([text], { type: 'text/plain' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
 }

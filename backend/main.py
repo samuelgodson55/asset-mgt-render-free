@@ -20,15 +20,20 @@ Authentication model:
     is calling and what they're allowed to do.
 
 Role model:
-  - "super_admin" -> full access to everything. NOT a database row -- this
-                     is a single hardcoded root identity configured via the
-                     SUPER_ADMIN_USERNAME/SUPER_ADMIN_PASSWORD environment
-                     variables (see config.py and security.py's
-                     super_admin_principal()). Exactly one exists, always;
-                     it can never be created, edited, or deleted through
-                     the app, and it never appears in the User Directory or
-                     any other listing (see deps.py + services/auth_service.py
-                     + services/user_service.py for where this is enforced).
+  - "super_admin" -> full access to everything. IS a database row now (see
+                     security.py's module docstring) -- exactly one,
+                     bootstrapped by alembic/versions/0002_bootstrap_root_admin.py
+                     during `alembic upgrade head` in production. Its
+                     IDENTITY (username/name) is fixed/hardcoded via
+                     config.py's SUPER_ADMIN_USERNAME/SUPER_ADMIN_NAME, but
+                     its password is a normal Argon2id hash, rotatable
+                     through the same self-service/admin-reset flows as any
+                     other account. It can never be created (again),
+                     edited, or deleted through the app, and it never
+                     appears in the User Directory, bulk exports, or the
+                     Audit Trail (see deps.py + services/auth_service.py +
+                     services/user_service.py + services/audit_service.py
+                     for where this is enforced).
   - "admin"       -> a normal, database-backed account with every privilege
                      "super_admin" has (see deps.py's _FULL_ADMIN_ROLES) --
                      the difference is purely how the account exists
@@ -53,26 +58,28 @@ Role model:
 
 import logging
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 
-from database import init_db, seed_db
+from database import init_db, seed_db, get_schema_status
 from config import settings
 from logging_config import configure_logging
+from middleware.error_handling import UnhandledExceptionMiddleware
 from middleware.request_context import RequestContextMiddleware
 from middleware.rate_limit import RateLimitMiddleware
 from middleware.security_headers import SecurityHeadersMiddleware
+from middleware.clean_urls import CleanUrlsMiddleware
 
-from api.auth import router as auth_router
-from api.assets import router as assets_router
-from api.users import router as users_router
-from api.outsiders import router as outsiders_router
-from api.checkouts import router as checkouts_router
-from api.audit import router as audit_router
-from api.backup import router as backup_router
-from api.quotations import router as quotations_router
-from api.notifications import router as notifications_router
+from api.auth_api import router as auth_router
+from api.assets_api import router as assets_router
+from api.users_api import router as users_router
+from api.outsiders_api import router as outsiders_router
+from api.checkouts_api import router as checkouts_router
+from api.audit_api import router as audit_router
+from api.backup_api import router as backup_router
+from api.quotations_api import router as quotations_router
+from api.notifications_api import router as notifications_router
 
 # ---------------------------------------------------------------------------
 # STRUCTURED LOGGING -- configure this FIRST, before anything else in the
@@ -192,10 +199,25 @@ def on_startup() -> None:
 #                                early as possible, so even a request that
 #                                gets rate-limited below still logs with a
 #                                proper request_id and returns X-Request-ID)
-#   RateLimitMiddleware         (added first -> innermost: only cares about
-#                                POST /auth/login; every other path is a
-#                                no-op pass-through)
+#   RateLimitMiddleware         (only cares about POST /auth/login; every
+#                                other path is a no-op pass-through)
+#   UnhandledExceptionMiddleware (added first -> INNERMOST, wrapping the
+#                                actual route dispatch directly -- see
+#                                middleware/error_handling.py's module
+#                                docstring for why this has to be the
+#                                innermost layer rather than a plain
+#                                `@app.exception_handler(Exception)`:
+#                                FastAPI/Starlette routes a handler
+#                                registered for the bare `Exception` class
+#                                to the OUTERMOST ServerErrorMiddleware --
+#                                past CORSMiddleware entirely -- so a 500
+#                                built that way would ship with no CORS
+#                                headers. Being innermost here means every
+#                                other layer above still sees a normal
+#                                response and adds its headers exactly as
+#                                it would for any other request.)
 #   -> your route handlers
+app.add_middleware(UnhandledExceptionMiddleware)
 app.add_middleware(
     RateLimitMiddleware,
     # BUG FIX: every router below is mounted with `prefix="/api"` (see
@@ -220,7 +242,22 @@ app.add_middleware(
     # without the IP-based limiter ever stepping in first to slow them
     # down, which is exactly the scenario the two layers together were
     # supposed to prevent.
-    limited_paths={"/api/auth/login"},
+    # SECURITY: the two 2FA endpoints (mfa/verify checks a 6-digit TOTP
+    # code, mfa/setup/confirm checks one during enrollment) are exactly as
+    # IP-guessable as a password -- a 6-digit code is actually a SMALLER
+    # search space than most passwords -- so they get the same outer,
+    # cross-replica IP throttle as /auth/login itself, on top of the
+    # per-account lockout counter mfa_verify() already reuses from
+    # services/auth_service.py's password path (see that function's
+    # docstring).
+    limited_paths={
+        "/api/auth/login", "/api/auth/mfa/verify", "/api/auth/mfa/setup/confirm",
+        # Requires an already-valid session to reach at all (unlike the
+        # three above), but still checks a password guess against the
+        # account -- worth the same outer IP throttle in case a session
+        # cookie were ever compromised without the password itself.
+        "/api/auth/mfa/recovery-codes/regenerate",
+    },
     max_requests=settings.LOGIN_RATE_LIMIT_MAX,
     window_seconds=settings.LOGIN_RATE_LIMIT_WINDOW_SECONDS,
 )
@@ -275,7 +312,55 @@ app.openapi = custom_openapi
 
 @app.get("/healthz")
 def health_check():
+    """
+    LIVENESS probe (infra/main.bicep's Liveness probe points here) --
+    deliberately just "is the process up and able to answer HTTP at all",
+    with NO database dependency. A liveness failure makes the platform
+    KILL and restart the container, which is the right response to "the
+    process is hung/deadlocked" but the WRONG response to "the database
+    had a brief network blip" or "migrations haven't finished yet on a
+    fresh deploy" -- neither of those is fixed by restarting this
+    container, and restarting it wouldn't help either one. See GET
+    /readyz below for the check that DOES look at the database and the
+    schema.
+    """
     return {"status": "healthy", "message": "Asset Management API is live"}
+
+
+@app.get("/readyz")
+def readiness_check(response: Response):
+    """
+    READINESS probe (infra/main.bicep's Readiness probe points here, NOT
+    at /healthz) -- unlike /healthz, this queries the database and
+    compares its current Alembic migration revision against what THIS
+    BUILD of the code expects. See database.py's get_schema_status() for
+    the full reasoning and the exact "not ready" cases it covers.
+
+    Why this is a separate endpoint instead of adding the check to
+    /healthz: a READINESS failure just stops traffic from being routed to
+    this replica while it keeps running and gets another chance next
+    poll -- correct for "database temporarily unreachable" and "this
+    replica came up before `alembic upgrade head` finished" alike, unlike
+    a liveness failure's kill-and-restart (see health_check() above).
+    It's also what closes the actual gap that motivated this endpoint:
+    the deploy-azure-*.yml pipelines already run `alembic upgrade head`
+    as its own blocking step before rolling out a new image, but nothing
+    previously verified that a given RUNNING container's schema still
+    matched its own code -- if that migrate step were ever bypassed (e.g.
+    a manual image update outside the pipeline), the old /healthz would
+    have reported healthy regardless, and the first symptom would've been
+    a request failing on a missing column instead of the rollout itself
+    failing.
+
+    Returns 200 + {"ready": true, ...} once the schema matches, or 503 +
+    {"ready": false, "reason": "..."} otherwise. 503 -- not 500 -- is
+    what tells Container Apps' readiness probe (and any load balancer or
+    external health checker) "not ready yet, try again", rather than
+    reading as an application error worth alerting on by itself.
+    """
+    status = get_schema_status()
+    response.status_code = 200 if status["ready"] else 503
+    return status
 
 
 # ---------------------------------------------------------------------------
@@ -319,16 +404,27 @@ app.include_router(notifications_router, prefix="/api")
 # the order they're registered, so every "/api/*" route (and /docs/etc.
 # above) is matched first and this StaticFiles mount only ever handles
 # whatever's left over -- the actual frontend/*.html, css/*, and js/* files.
-# `html=True` makes "/" itself resolve to frontend/index.html; every other
-# page (admin.html, manager.html, staff.html, customer.html) is requested
-# by its exact filename from the frontend's own <a>/redirect links, so no
-# further SPA-style fallback routing is needed here.
+# `html=True` makes "/" itself resolve to frontend/index.html. Every other
+# page is requested by its CLEAN url (/admin, /manager, /staff, /customer
+# -- see frontend/js/auth.js) rather than its raw filename; CleanUrlsMiddleware,
+# added just below, rewrites that clean path to the real *.html filename
+# before this mount ever sees the request.
 if settings.SERVE_FRONTEND:
     import os
 
     from fastapi.staticfiles import StaticFiles
 
     if os.path.isdir(settings.FRONTEND_DIR):
+        # Clean URLs (see middleware/clean_urls.py): rewrites "/admin" ->
+        # "admin.html" before it reaches the StaticFiles mount below, and
+        # 301-redirects any lingering "/admin.html"-style link to "/admin".
+        # Registered here (rather than unconditionally near the other
+        # app.add_middleware(...) calls above) because it only makes sense
+        # at all when there's actually a frontend mounted to rewrite paths
+        # for -- the docker-compose/multi-service deployment shape has
+        # SERVE_FRONTEND off and does the equivalent rewrite in nginx
+        # instead (see nginx/default.conf.template).
+        app.add_middleware(CleanUrlsMiddleware)
         app.mount("/", StaticFiles(directory=settings.FRONTEND_DIR, html=True), name="frontend")
     else:
         logger.warning(

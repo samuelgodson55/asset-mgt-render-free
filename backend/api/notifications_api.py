@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from deps import require_super_admin
-from schemas.notifications import DigestRecipientsUpdateRequest
+from schemas.notifications_schema import DigestRecipientsUpdateRequest
 import services.notification_service as notification_service
 
 router = APIRouter(tags=["notifications"])

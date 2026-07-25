@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from deps import get_current_user, require_super_admin, require_privileged_role
-from schemas.users import UserCreateRequest, UserUpdateRequest, UserPasswordResetRequest
+from schemas.users_schema import UserCreateRequest, UserUpdateRequest, UserPasswordResetRequest, UserConvertToOutsiderRequest
 import services.user_service as user_service
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -132,6 +132,20 @@ def delete_user(user_id: int, db: Session = Depends(get_db), user: dict = Depend
     return user_service.delete_user(db, user_id, user)
 
 
+@router.post("/{user_id}/convert-to-outsider")
+def convert_user_to_outsider(user_id: int, req: UserConvertToOutsiderRequest, db: Session = Depends(get_db), user: dict = Depends(require_privileged_role)):
+    """
+    Revokes an account's login access and turns it into an Ad-Hoc
+    (no-login) profile instead -- the reverse of POST
+    /outsiders/{outsider_id}/convert-to-user (see
+    services/user_service.py -> convert_user_to_outsider() for the full
+    migration/safety rationale). Available to both a Super Admin/Admin
+    and a Manager, same access tier as account provisioning, subject to
+    the same Manager role ceiling (Staff/Customer accounts only).
+    """
+    return user_service.convert_user_to_outsider(db, user_id, req, user)
+
+
 @router.post("/{user_id}/reset-password")
 def reset_user_password(user_id: int, req: UserPasswordResetRequest, db: Session = Depends(get_db), user: dict = Depends(require_super_admin)):
     """
@@ -146,3 +160,13 @@ def reset_user_password(user_id: int, req: UserPasswordResetRequest, db: Session
 def restore_user(user_id: int, db: Session = Depends(get_db), user: dict = Depends(require_super_admin)):
     """Reverses a soft delete: re-enables login and returns the account to the User Directory. See services/user_service.py -> restore_user()."""
     return user_service.restore_user(db, user_id, user)
+
+
+@router.post("/{user_id}/purge")
+def purge_user(user_id: int, db: Session = Depends(get_db), user: dict = Depends(require_super_admin)):
+    """
+    Permanently anonymizes a soft-deleted account's email/username so
+    they're free to be reused by a new account. Irreversible -- unlike
+    restore, there's no undo. See services/user_service.py -> purge_user().
+    """
+    return user_service.purge_user(db, user_id, user)

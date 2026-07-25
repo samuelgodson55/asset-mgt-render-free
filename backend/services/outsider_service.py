@@ -13,12 +13,14 @@ import datetime
 from typing import Optional
 
 from fastapi import HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 import models
 import services.export_service as export_service
+import services.user_service as user_service
 from services.search_utils import apply_search_filter
-from schemas.outsiders import OutsiderUpdateRequest
+from schemas.outsiders_schema import OutsiderUpdateRequest, OutsiderConvertToUserRequest
 
 # Same reasoning as user_service.DEFAULT_LIMIT/MAX_LIMIT -- bounds how many
 # ad-hoc profiles a single request can return (Data Quality & Usability
@@ -46,9 +48,14 @@ def list_outsiders(db: Session, limit: int = DEFAULT_LIMIT, offset: int = 0, sea
     limit = max(1, min(limit, MAX_LIMIT))
     offset = max(0, offset)
 
-    query = db.query(models.Outsider)
+    # Same "excludes soft-deleted rows" pattern as user_service.list_users()
+    # -- a deleted ad-hoc profile disappears from the directory (and from
+    # every "existing outsider" picker in the Dispatch drawer / Quote
+    # creation, both of which call this same GET /outsiders under the
+    # hood) but its historical checkout rows are untouched.
+    query = db.query(models.Outsider).filter(~models.Outsider.is_deleted)
     query = apply_search_filter(query, search, [
-        models.Outsider.name, models.Outsider.contact_details, models.Outsider.company,
+        models.Outsider.name, models.Outsider.email, models.Outsider.phone_number, models.Outsider.company,
     ])
     query = query.order_by(models.Outsider.id)
     total = query.count()
@@ -59,7 +66,7 @@ def list_outsiders(db: Session, limit: int = DEFAULT_LIMIT, offset: int = 0, sea
         active_checkouts = [c for c in o.checkouts if c.status == "active"]
         outstanding = sum(c.quantity - c.quantity_returned for c in active_checkouts)
         results.append({
-            "id": o.id, "name": o.name, "contact_details": o.contact_details,
+            "id": o.id, "name": o.name, "email": o.email, "phone_number": o.phone_number,
             "company": o.company, "outstanding_items": outstanding,
             # Same per-person (not per-item) alert flags as
             # user_service.list_users() -- see that function's comment for
@@ -77,7 +84,7 @@ def list_outsiders(db: Session, limit: int = DEFAULT_LIMIT, offset: int = 0, sea
 
 def update_outsider(db: Session, outsider_id: int, req: OutsiderUpdateRequest, user: dict) -> dict:
     """
-    Edits an ad-hoc individual's name, contact details, and/or company.
+    Edits an ad-hoc individual's name, email, phone number, and/or company.
     Available to both a Super Admin/Admin and a Manager (see
     deps.py's require_privileged_role, which the route sits behind), with
     no further role-based restriction beyond that -- ad-hoc profiles aren't
@@ -88,19 +95,35 @@ def update_outsider(db: Session, outsider_id: int, req: OutsiderUpdateRequest, u
 
     Only the fields actually present on the request are touched (Pydantic
     `exclude_unset`) -- omitting a field leaves it exactly as it was rather
-    than blanking it out. An explicit empty string for `company` DOES clear
-    it (company is nullable), same as leaving it blank at ad-hoc dispatch
-    time.
+    than blanking it out. An explicit empty string for `email`/
+    `phone_number`/`company` DOES clear that field (all three are
+    nullable), same as leaving it blank at ad-hoc dispatch time -- except
+    that email and phone_number can never BOTH end up blank at once (a
+    profile needs at least one way to be reached), checked below using
+    whichever of the two isn't being cleared by this same request.
     """
-    target = db.query(models.Outsider).filter(models.Outsider.id == outsider_id).first()
+    target = db.query(models.Outsider).filter(
+        models.Outsider.id == outsider_id, ~models.Outsider.is_deleted
+    ).first()
     if not target:
         raise HTTPException(status_code=404, detail="Ad-hoc individual not found")
 
     updates = req.model_dump(exclude_unset=True)
     if "name" in updates:
         target.name = updates["name"]
-    if "contact_details" in updates:
-        target.contact_details = updates["contact_details"]
+
+    # Resolve what email/phone_number would look like AFTER this update,
+    # so the "at least one must remain" check below sees the final state
+    # rather than just the field(s) actually present on this request.
+    resulting_email = updates["email"] or None if "email" in updates else target.email
+    resulting_phone = updates["phone_number"] or None if "phone_number" in updates else target.phone_number
+    if ("email" in updates or "phone_number" in updates) and not resulting_email and not resulting_phone:
+        raise HTTPException(status_code=400, detail="At least one of email or phone number is required.")
+
+    if "email" in updates:
+        target.email = updates["email"] or None
+    if "phone_number" in updates:
+        target.phone_number = updates["phone_number"] or None
     if "company" in updates:
         target.company = updates["company"] or None
 
@@ -112,7 +135,334 @@ def update_outsider(db: Session, outsider_id: int, req: OutsiderUpdateRequest, u
     db.refresh(target)
     return {
         "message": f"Profile for {target.name} updated successfully.",
-        "id": target.id, "name": target.name, "contact_details": target.contact_details, "company": target.company,
+        "id": target.id, "name": target.name, "email": target.email,
+        "phone_number": target.phone_number, "company": target.company,
+    }
+
+
+def delete_outsider(db: Session, outsider_id: int, user: dict) -> dict:
+    """
+    Deletes an ad-hoc/unlinked profile. Available to both a Super
+    Admin/Admin and a Manager -- same access tier as update_outsider()
+    above, and same reasoning: ad-hoc profiles aren't tied to a
+    system-user role, so there's no narrower boundary to enforce.
+
+    Mirrors services/user_service.py's delete_user() closely:
+      1. SOFT DELETE ONLY -- see models.Outsider.is_deleted's own comment
+         for why the row itself is never removed.
+      2. OUTSTANDING-CUSTODY BLOCK -- a profile that still has items
+         checked out to it cannot be deleted until those items are
+         returned, so a piece of equipment can never end up assigned to a
+         profile that's no longer selectable/visible anywhere in the app.
+      3. ALREADY-DELETED BLOCK -- the same 404 as a genuinely-missing id;
+         a profile that's already gone can't be deleted a second time.
+    """
+    target = db.query(models.Outsider).filter(
+        models.Outsider.id == outsider_id, ~models.Outsider.is_deleted
+    ).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Ad-hoc individual not found")
+
+    outstanding_items = sum(
+        c.quantity - c.quantity_returned for c in target.checkouts if c.status == "active"
+    )
+    if outstanding_items > 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot delete: this ad-hoc individual still has {outstanding_items} item(s) in active custody. Process their returns first.",
+        )
+
+    target.is_deleted = True
+    target.deleted_at = models.utc_now()
+
+    db.add(models.AuditLog(
+        operator=user["email"], action="OUTSIDER_DELETED", target_type="Outsider", target_id=target.id,
+        details=f"Deleted ad-hoc profile for {target.name} (checkout history preserved).",
+    ))
+    db.commit()
+    return {"message": f"Ad-hoc profile for {target.name} deleted successfully."}
+
+
+def _release_own_email_if_reclaiming(db: Session, outsider: "models.Outsider", requested_email: str, actor: dict) -> None:
+    """
+    Called only by convert_outsider_to_user() below, right before it
+    provisions a new login. Detects the specific "this ad-hoc profile
+    only exists because someone's login access was revoked, and they're
+    now reclaiming that exact same email" situation, and auto-releases
+    the old, blocking row if so.
+
+    WHY THIS IS SAFE TO DO AUTOMATICALLY (unlike a generic email
+    override): it requires ALL of the following, not just a matching
+    email string --
+      1. There must be a User row whose `converted_to_outsider_id`
+         points at THIS SPECIFIC outsider -- i.e. it wasn't just any
+         revoked account, it's PROVABLY the very account this profile
+         was created from by convert_user_to_outsider(). An unrelated
+         real account that merely happens to share an email would never
+         match this join.
+      2. That row must still be soft-deleted (`is_deleted`) -- if it was
+         somehow restored in the meantime (shouldn't normally be
+         possible for a converted row -- see restore_user()'s own
+         converted-account guard -- but checked here regardless), it's
+         a live account and must never be touched.
+      3. It must not already be purged (`purged_at IS NULL`) -- if an
+         admin already purged it deliberately, its email is already a
+         placeholder and won't match `requested_email` anyway, so this
+         is mostly a defensive no-op in that case.
+      4. The email being requested for the NEW account must match the
+         old row's email (case-insensitively, same comparison
+         _provision_user_row() itself uses) -- if the admin types a
+         DIFFERENT email while converting this person back, there's no
+         collision to resolve and nothing here should be touched.
+
+    Only when every one of those holds do we overwrite the old row's
+    email/username with a placeholder and stamp `purged_at`, using the
+    exact same anonymization shape as services/user_service.py's
+    purge_user() (kept in sync deliberately -- see that function's own
+    docstring for the full rationale on why this never hard-deletes the
+    row). The audit trail still records the original email in cleartext
+    before it's overwritten, so it's discoverable later even though the
+    `users` row itself no longer carries it.
+    """
+    origin_user = db.query(models.User).filter(
+        models.User.converted_to_outsider_id == outsider.id,
+        models.User.is_deleted,
+        models.User.purged_at.is_(None),
+    ).first()
+    if not origin_user:
+        return
+    if origin_user.email.strip().lower() != requested_email.strip().lower():
+        return
+
+    old_email = origin_user.email
+    origin_user.email = f"purged-user-{origin_user.id}@purged.invalid"
+    origin_user.username = f"purged-user-{origin_user.id}"
+    origin_user.purged_at = models.utc_now()
+
+    db.add(models.AuditLog(
+        operator=actor["email"], action="USER_PURGED", target_type="User", target_id=origin_user.id,
+        details=(
+            f"Automatically released email {old_email} from the revoked account this ad-hoc "
+            f"profile was created from, so {outsider.name} could reclaim it while converting "
+            f"back to a real login."
+        ),
+    ))
+    # Flush (not commit) -- see convert_outsider_to_user()'s call site
+    # comment for why this must stay uncommitted until the whole
+    # conversion succeeds.
+    db.flush()
+
+
+def convert_outsider_to_user(db: Session, outsider_id: int, req: OutsiderConvertToUserRequest, user: dict) -> dict:
+    """
+    "The outsider finally decides he wants a login": turns an Ad-Hoc
+    Individual (a `models.Outsider` row -- external, non-employee, no
+    account) into a real, log-in-capable `models.User` row, while keeping
+    every bit of their existing history intact and reachable from their
+    new account. Available to the same access tier as every other
+    ad-hoc-profile action (Super Admin/Admin or Manager, see
+    deps.require_privileged_role) with the same Manager role ceiling a
+    brand-new account provisioning gets (see
+    services/user_service.py's _provision_user_row() -- a Manager still
+    can't hand out "manager"/"admin" through this door either).
+
+    SAFETY / WHAT "SAFELY MIGRATE" MEANS HERE:
+      1. PROVISION FIRST, MUTATE SECOND -- _provision_user_row() runs
+         (and raises) before this function touches a single checkout or
+         quotation row, so a bad email/role/password never leaves the
+         database in a half-migrated state. `name` is always carried
+         over from the outsider's existing profile (never re-typed),
+         so the new account is unambiguously "this same person, now with
+         a login" rather than a fresh identity.
+      2. CUSTODY HISTORY MOVES, NOT COPIES -- every AssetCheckout row
+         (active AND already-returned) that pointed at
+         `outsider_id=target.id` is re-pointed at `user_id=new_user.id`
+         (and `outsider_id` cleared) in one bulk UPDATE, so their entire
+         custody trail -- not just what's currently checked out --
+         follows them into the new account and shows up in their own
+         self-service "My Items"/history exactly like anyone else's,
+         with nothing left orphaned under the old ad-hoc identity.
+         Deliberately UNLIKE delete_outsider(): that function blocks
+         while anything is still in active custody (a delete should
+         never happen while equipment would lose its assignee); this
+         one is the opposite case on purpose -- migrating those very
+         checkouts over to a real account IS the point, so there's no
+         outstanding-items block here at all.
+      3. QUOTATION ASSIGNMENTS MOVE TOO -- any Quotation this person was
+         the Ad-Hoc assignee of (`assigned_outsider_id`) is re-pointed at
+         `assigned_to_id=new_user.id` the same way, so an already
+         submitted/approved-but-not-yet-fulfilled quote still resolves to
+         the right (now real) person when it's eventually
+         bulk-checked-out.
+      4. THE OLD AD-HOC PROFILE IS RETIRED, NOT ERASED -- same
+         soft-delete flip as delete_outsider() (is_deleted/deleted_at),
+         so it drops out of the Ad-Hoc Directory and can never be picked
+         for a NEW dispatch/quote again (new ones should go straight to
+         the real account instead), but the row itself, its name/
+         contact/company, and this migration's own audit trail all stay
+         queryable forever. `converted_to_user_id` (see models.Outsider)
+         is the permanent link recording exactly which account it became.
+      5. ONE ATOMIC COMMIT FOR THE MIGRATION STEPS -- the bulk UPDATEs,
+         the outsider's soft-delete flip, and both audit log rows are
+         all flushed in the SAME commit at the end (the new user row
+         itself was already committed by _provision_user_row(), so a
+         crash between the two calls leaves an extra, but perfectly
+         valid and harmless, User row rather than any corrupted
+         checkout/quotation data).
+
+    Blocked (404, matching every other id-based outsider action) if the
+    id doesn't exist, is already soft-deleted, or was already converted
+    previously -- a profile that's already gone can't be converted a
+    second time, exactly like it can't be deleted a second time.
+
+    RECLAIMING YOUR OWN EMAIL (see _release_own_email_if_reclaiming()
+    below) -- this Outsider may itself exist because
+    services/user_service.py's convert_user_to_outsider() (login access
+    revoked) turned a real account INTO it. That old account still
+    holds its original email forever (soft-deleting never frees a
+    unique email/username -- see User.purged_at's comment), so without
+    special handling, converting this same person straight back to a
+    user with that same email would hit _provision_user_row()'s
+    existing-email check and fail with "a user with this email already
+    exists" -- even though it's unambiguously their own address. Before
+    provisioning, we check for exactly that situation (a soft-deleted,
+    not-yet-purged User row whose `converted_to_outsider_id` points at
+    THIS outsider, with the SAME email being requested) and silently
+    release it first, the same way a manual Purge would. Any OTHER
+    email collision (a genuinely different, unrelated account) is left
+    alone and still correctly blocks the conversion.
+    """
+    target = db.query(models.Outsider).filter(
+        models.Outsider.id == outsider_id, ~models.Outsider.is_deleted
+    ).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Ad-hoc individual not found")
+
+    # See docstring's "RECLAIMING YOUR OWN EMAIL" section above -- must
+    # run BEFORE _provision_user_row()'s uniqueness check below, and
+    # before it commits, so the flushed (uncommitted) release is visible
+    # to that very check within this same transaction, but rolls back
+    # automatically if anything about THIS request (bad role, weak
+    # password, a genuinely different email collision) still fails.
+    _release_own_email_if_reclaiming(db, target, req.email, user)
+
+    # Provision the real account FIRST -- see docstring point #1. Raises
+    # (400/403) before anything about `target` or its checkouts/
+    # quotations is touched if the role is disallowed or the email is
+    # already taken.
+    new_user = user_service._provision_user_row(
+        db, name=target.name, email=req.email, phone_number=(req.phone_number or target.phone_number),
+        role=req.role, password=req.password,
+        department=req.department, department_role=req.department_role, actor=user,
+    )
+
+    # Move every checkout (active AND historical) over to the new
+    # account in one bulk UPDATE -- see docstring point #2. Deliberately
+    # a raw bulk update (not a Python loop mutating loaded objects) so
+    # this scales to however many checkouts this profile has accumulated
+    # without loading them all into memory first; `synchronize_session`
+    # is safe to skip here since nothing later in this function re-reads
+    # any individual AssetCheckout object.
+    #
+    # We separately count how many of those were *active* (still
+    # outstanding) before the bulk UPDATE runs, purely for the
+    # confirmation/audit message below -- see services/user_service.py's
+    # convert_user_to_outsider() for the mirror-image fix this borrows:
+    # a flat "Migrated N checkout(s)" reads as "N items were in this
+    # person's custody", which is wrong whenever some (or all) of those N
+    # rows are long-since-returned history rather than anything currently
+    # checked out -- e.g. a profile with zero items in hand at the moment
+    # of conversion, but one closed-out checkout from months ago, used to
+    # get an audit entry that looked exactly like an active handover.
+    #
+    # SEPARATELY, "checkout(s)" here always means CHECKOUT ROWS, not
+    # physical units -- a single row can cover `quantity` > 1 (e.g. "5
+    # units of Dell UltraSharp Monitor" is ONE row). Every other place in
+    # this app that shows a person's custody (the "N items checked out"
+    # column on the User/Ad-Hoc Directory, the outstanding-items delete
+    # guard, etc.) counts UNITS, i.e. sum(quantity - quantity_returned),
+    # not rows. Reporting only the row count here reads as contradicting
+    # that unit count (a profile showing "5 items checked out" would get
+    # an audit entry saying "Migrated 1 checkout(s)"), so we additionally
+    # surface the unit total and label the row count explicitly as
+    # "checkout record(s)" rather than the ambiguous "checkout(s)".
+    active_checkouts_migrated = (
+        db.query(models.AssetCheckout)
+        .filter(models.AssetCheckout.outsider_id == target.id, models.AssetCheckout.status == "active")
+        .count()
+    )
+    active_units_migrated = (
+        db.query(func.coalesce(func.sum(models.AssetCheckout.quantity - models.AssetCheckout.quantity_returned), 0))
+        .filter(models.AssetCheckout.outsider_id == target.id, models.AssetCheckout.status == "active")
+        .scalar()
+    )
+    checkouts_migrated = (
+        db.query(models.AssetCheckout)
+        .filter(models.AssetCheckout.outsider_id == target.id)
+        .update({"outsider_id": None, "user_id": new_user.id}, synchronize_session=False)
+    )
+    historical_checkouts_migrated = checkouts_migrated - active_checkouts_migrated
+
+    # Same treatment for any Quotation this profile was the Ad-Hoc
+    # assignee of -- see docstring point #3.
+    quotations_migrated = (
+        db.query(models.Quotation)
+        .filter(models.Quotation.assigned_outsider_id == target.id)
+        .update({"assigned_outsider_id": None, "assigned_to_id": new_user.id}, synchronize_session=False)
+    )
+
+    # Retire the ad-hoc profile -- see docstring point #4.
+    target.is_deleted = True
+    target.deleted_at = models.utc_now()
+    target.converted_to_user_id = new_user.id
+
+    db.add(models.AuditLog(
+        operator=user["email"], action="OUTSIDER_CONVERTED_TO_USER", target_type="Outsider", target_id=target.id,
+        details=(
+            f"Converted ad-hoc profile for {target.name} into a real login "
+            f"(user #{new_user.id}, {new_user.email}). Migrated {checkouts_migrated} "
+            f"checkout record(s) -- {active_checkouts_migrated} active "
+            f"({active_units_migrated} unit(s) currently in custody), "
+            f"{historical_checkouts_migrated} past (already-returned) -- "
+            f"and {quotations_migrated} quotation assignment(s)."
+        ),
+    ))
+    db.add(models.AuditLog(
+        operator=user["email"], action="USER_PROVISIONED_FROM_OUTSIDER", target_type="User", target_id=new_user.id,
+        details=f"Account created from ad-hoc profile #{target.id} ({target.name}).",
+    ))
+    db.commit()
+    db.refresh(new_user)
+
+    # Build the confirmation message piece by piece so it never implies
+    # outstanding items were involved when there were none (e.g. "0 active
+    # checkout(s)" reads as a non-sequitur) -- only mention the active
+    # count at all when it's actually nonzero, and always spell out that
+    # the rest is past/returned history, not something still checked out.
+    checkout_bits = []
+    if active_checkouts_migrated:
+        checkout_bits.append(f"{active_units_migrated} currently checked-out item(s)")
+    if historical_checkouts_migrated:
+        checkout_bits.append(f"{historical_checkouts_migrated} past (already-returned) checkout record(s)")
+    checkout_summary = " and ".join(checkout_bits) if checkout_bits else "no checkout history"
+
+    return {
+        "message": (
+            f"{target.name} now has a real login ({new_user.email}). "
+            f"{checkout_summary} and {quotations_migrated} quotation "
+            f"assignment(s) were moved to their new account."
+        ),
+        "outsider_id": target.id,
+        "user_id": new_user.id,
+        "name": new_user.name,
+        "email": new_user.email,
+        "username": new_user.username,
+        "role": new_user.role,
+        "checkouts_migrated": checkouts_migrated,
+        "active_checkouts_migrated": active_checkouts_migrated,
+        "active_units_migrated": active_units_migrated,
+        "historical_checkouts_migrated": historical_checkouts_migrated,
+        "quotations_migrated": quotations_migrated,
     }
 
 
@@ -162,8 +512,8 @@ def get_outsider_assigned_items(db: Session, outsider_id: int) -> dict:
     } for c in active_checkouts]
 
     return {
-        "outsider_id": target.id, "name": target.name, "contact_details": target.contact_details,
-        "company": target.company, "assigned_items": items,
+        "outsider_id": target.id, "name": target.name, "email": target.email,
+        "phone_number": target.phone_number, "company": target.company, "assigned_items": items,
     }
 
 
@@ -215,7 +565,11 @@ def export_outsider_assigned_items(db: Session, outsider_id: int, user: dict, fm
     rows = _item_export_rows(data["assigned_items"])
     today = datetime.date.today().strftime("%Y-%m-%d")
     title = f"Properties Assigned To {data['name']} (Ad-Hoc)"
-    subtitle_bits = [data["name"], data["contact_details"]]
+    subtitle_bits = [data["name"]]
+    if data["email"]:
+        subtitle_bits.append(data["email"])
+    if data["phone_number"]:
+        subtitle_bits.append(data["phone_number"])
     if data["company"]:
         subtitle_bits.append(data["company"])
     subtitle = f"{' · '.join(subtitle_bits)} · Exported by {user['email']}"
@@ -233,16 +587,16 @@ def export_all_outsiders_items(db: Session, user: dict, fmt: str = "csv"):
     individual on file, one row per checkout (same "one row per checkout,
     not one row per profile" shape as user_service.export_all_users_items).
     """
-    outsiders = db.query(models.Outsider).order_by(models.Outsider.id).all()
+    outsiders = db.query(models.Outsider).filter(~models.Outsider.is_deleted).order_by(models.Outsider.id).all()
 
-    headers = ["Individual", "Contact", "Company", "Asset", "Category", "Vendor / Source", "Quantity", "Outstanding", "Checked Out", "Due Date"]
+    headers = ["Individual", "Email", "Phone", "Company", "Asset", "Category", "Vendor / Source", "Quantity", "Outstanding", "Checked Out", "Due Date"]
     rows = []
     for o in outsiders:
         for c in o.checkouts:
             if c.status != "active":
                 continue
             rows.append([
-                o.name, o.contact_details, o.company or "—",
+                o.name, o.email or "—", o.phone_number or "—", o.company or "—",
                 models.checkout_display_name(c),
                 c.asset.category if c.asset and c.asset.category else "—",
                 c.quantity, c.quantity - c.quantity_returned,

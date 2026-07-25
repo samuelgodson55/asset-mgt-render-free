@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from deps import get_current_user, require_super_admin, require_privileged_role
-from schemas.assets import AssetTypeCreate, ExceptionCreate, AdvancedCheckoutRequest, QuantityUpdateRequest, NameUpdateRequest, CategoryUpdateRequest, PriceUpdateRequest
+from schemas.assets_schema import AssetTypeCreate, ExceptionCreate, AdvancedCheckoutRequest, QuantityUpdateRequest, NameUpdateRequest, CategoryUpdateRequest, PriceUpdateRequest
 import services.asset_service as asset_service
 
 router = APIRouter(prefix="/assets", tags=["assets"])
@@ -42,6 +42,18 @@ def list_assets(
     user: dict = Depends(get_current_user),
 ):
     return asset_service.list_assets(db, limit, offset, search)
+
+
+@router.get("/deleted")
+def get_deleted_assets(
+    limit: int = Query(asset_service.DEFAULT_LIMIT, ge=1, le=asset_service.MAX_LIMIT, description="Max rows to return"),
+    offset: int = Query(0, ge=0, description="Rows to skip (for paging through a large list)"),
+    search: Optional[str] = Query(None, description="Case-insensitive substring match against asset pool name"),
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_super_admin),
+):
+    """Lists soft-deleted asset pools so a Super Admin can find one to restore. Placed ahead of /{asset_id}/... routes below purely for readability -- 'deleted' can never collide with a numeric {asset_id} path segment."""
+    return asset_service.list_deleted_assets(db, limit, offset, search)
 
 
 @router.get("/categories")
@@ -91,6 +103,22 @@ def update_asset_price(asset_id: int, payload: PriceUpdateRequest, db: Session =
 @router.delete("/{asset_id}")
 def delete_asset_type(asset_id: int, db: Session = Depends(get_db), user: dict = Depends(require_super_admin)):
     return asset_service.delete_asset_type(db, asset_id, user)
+
+
+@router.post("/{asset_id}/restore")
+def restore_asset_type(asset_id: int, db: Session = Depends(get_db), user: dict = Depends(require_super_admin)):
+    """Reverses a soft delete: returns the pool to active inventory. See services/asset_service.py -> restore_asset_type()."""
+    return asset_service.restore_asset_type(db, asset_id, user)
+
+
+@router.post("/{asset_id}/purge")
+def purge_asset_type(asset_id: int, db: Session = Depends(get_db), user: dict = Depends(require_super_admin)):
+    """
+    Permanently anonymizes a soft-deleted pool's name so it's free to be
+    reused by a new pool. Irreversible -- unlike restore, there's no
+    undo. See services/asset_service.py -> purge_asset_type().
+    """
+    return asset_service.purge_asset_type(db, asset_id, user)
 
 
 @router.post("/{asset_id}/exception")
