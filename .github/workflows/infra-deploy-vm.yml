@@ -118,6 +118,17 @@ jobs:
       TF_VAR_dockerhub_username: ${{ secrets.DOCKERHUB_USERNAME }}
       TF_VAR_dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      # ---- Remote state backend (versions.tf's partial `backend
+      # "azurerm" {}` block) -- NOT sensitive, just where state lives, so
+      # these are repo/environment Variables, not secrets. Created once
+      # manually per DEPLOYMENT_VM.md's "One-time Azure setup" section.
+      # `key` is derived from `inputs.environment` (not a repeated
+      # Variable) so vm-staging and prod, which share nothing else here,
+      # can never accidentally point at the same state file.
+      TF_STATE_RESOURCE_GROUP: ${{ vars.TF_STATE_RESOURCE_GROUP }}
+      TF_STATE_STORAGE_ACCOUNT: ${{ vars.TF_STATE_STORAGE_ACCOUNT }}
+      TF_STATE_CONTAINER: ${{ vars.TF_STATE_CONTAINER }}
+
     steps:
       - uses: actions/checkout@v7
 
@@ -134,7 +145,17 @@ jobs:
           terraform_version: "1.9.8"
 
       - name: terraform init
-        run: terraform init -input=false
+        # -backend-config flags fill in versions.tf's partial `backend
+        # "azurerm" {}` block. `key` is set per-environment here (not a
+        # GitHub Variable) so vm-staging and prod always land in separate
+        # state files, e.g. "vm-staging.tfstate" / "prod.tfstate", inside
+        # the one shared state storage account/container.
+        run: |
+          terraform init -input=false \
+            -backend-config="resource_group_name=${TF_STATE_RESOURCE_GROUP}" \
+            -backend-config="storage_account_name=${TF_STATE_STORAGE_ACCOUNT}" \
+            -backend-config="container_name=${TF_STATE_CONTAINER}" \
+            -backend-config="key=${{ inputs.environment }}.tfstate"
 
       - name: terraform fmt -check
         # Report-only -- a formatting nit shouldn't block an otherwise-good

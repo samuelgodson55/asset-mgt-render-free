@@ -76,6 +76,44 @@ az account set --subscription "<subscription-id-or-name>"
 az account show --query id -o tsv        # copy this — it's TF_VAR_subscription_id / AZURE_SUBSCRIPTION_ID later
 ```
 
+**Also create the Terraform remote state backend now**, before your
+first `infra-deploy-vm.yml` run — `infra-vm/versions.tf` requires one.
+Without it, state only ever lives on the GitHub Actions runner's local,
+throwaway disk, which is wiped the moment the job ends — so a run that
+fails partway (or a later, separate run) can't see what it already
+created, and re-running errors with "A resource with the ID ... already
+exists" instead of picking up where it left off:
+
+```bash
+az group create -n rg-snipeit-tfstate -l eastus
+az storage account create -n snipeitliteterraformstate \
+  --resource-group rg-snipeit-tfstate --sku Standard_LRS \
+  --min-tls-version TLS1_2 --allow-blob-public-access false
+az storage container create -n vm-state \
+  --account-name snipeitliteterraformstate --auth-mode login
+```
+
+(Storage account names are globally unique across all of Azure — if
+`snipeitliteterraformstate` is taken, pick another and use it
+consistently below.) Grant your own account, and the Azure AD App
+Registration from step 5 (once it exists), the **Storage Blob Data
+Contributor** role on this storage account, since state auth goes
+through Azure AD (`use_azuread_auth = true`), not a storage account key:
+
+```bash
+az role assignment create --role "Storage Blob Data Contributor" \
+  --assignee "<your-user-or-app-object-id>" \
+  --scope "$(az storage account show -n snipeitliteterraformstate -g rg-snipeit-tfstate --query id -o tsv)"
+```
+
+Then set `TF_STATE_RESOURCE_GROUP=rg-snipeit-tfstate`,
+`TF_STATE_STORAGE_ACCOUNT=snipeitliteterraformstate`, and
+`TF_STATE_CONTAINER=vm-state` as repo/environment **Variables** in step
+6 below — one storage account/container is shared by both the
+`vm-staging` and `prod` environments, they just write to different
+`key`s (`vm-staging.tfstate` / `prod.tfstate`) inside it automatically,
+so they can never clobber each other's state.
+
 ---
 
 ## 2. Set up Cloudflare Tunnel (no open ports, no Bastion)
@@ -96,6 +134,20 @@ $1–12/year) and move its nameservers to Cloudflare (free) before
 continuing. If you just want to confirm the app itself works behind
 Cloudflare before committing to a domain, see the "Testing without a
 domain yet" box at the end of this section.
+
+**2a-0. Enable Zero Trust / Access on the account** — this is a one-time,
+manual dashboard step that Terraform genuinely cannot do for you (it's
+account-level onboarding, not a resource): in the Cloudflare dashboard,
+open the **Zero Trust** section from the left sidebar, and follow its
+one-time setup (choose a team name — the free plan covers the small
+number of Access applications/policies this stack creates). Do this
+*before* running `infra-deploy-vm.yml`'s `apply` for the first time —
+otherwise `terraform apply` fails on both
+`cloudflare_zero_trust_access_application.ssh` and
+`cloudflare_zero_trust_access_service_token.ci` with
+`access.api.error.not_enabled: Access is not enabled`, since the
+Access API has nothing to attach an application/policy/service token to
+until Zero Trust has been switched on at least once for the account.
 
 **2a. Create a free Cloudflare account** at
 [dash.cloudflare.com/sign-up](https://dash.cloudflare.com/sign-up), then
@@ -341,6 +393,9 @@ Add these to each Environment (Secrets unless marked **Variable**):
 
 | Name | Value | Used by |
 |---|---|---|
+| `TF_STATE_RESOURCE_GROUP` (**Variable**, not secret) | `rg-snipeit-tfstate` from step 1's state backend setup | `infra-deploy-vm.yml` |
+| `TF_STATE_STORAGE_ACCOUNT` (**Variable**, not secret) | `snipeitliteterraformstate` (or whatever you named it) from step 1 | `infra-deploy-vm.yml` |
+| `TF_STATE_CONTAINER` (**Variable**, not secret) | `vm-state` from step 1 | `infra-deploy-vm.yml` |
 | `AZURE_CLIENT_ID` | App Registration's appId (step 5) | `infra-deploy-vm.yml` |
 | `AZURE_TENANT_ID` | Tenant ID (step 5) | `infra-deploy-vm.yml` |
 | `AZURE_SUBSCRIPTION_ID` | Subscription ID (step 1) | `infra-deploy-vm.yml` |

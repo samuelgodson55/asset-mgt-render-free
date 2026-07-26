@@ -55,15 +55,33 @@ terraform {
   }
 
   # ---------------------------------------------------------------------
-  # Remote state -- deliberately left commented out. Terraform defaults to
-  # a LOCAL state file (infra-vm/terraform.tfstate) if you never configure
-  # a backend, which is fine for a single person experimenting, but two
-  # people (or a human + infra-deploy-vm.yml) applying against local state
-  # WILL eventually clobber each other's changes or lose track of what's
-  # actually deployed.
+  # Remote state -- REQUIRED, not optional. Terraform defaults to a LOCAL
+  # state file (infra-vm/terraform.tfstate) if no backend is configured,
+  # which is fine for a single person experimenting locally, but every
+  # infra-deploy-vm.yml run happens on a fresh, throwaway GitHub Actions
+  # runner -- its filesystem (and any local .tfstate written to it) is
+  # deleted the moment the job ends, whether that job succeeded, failed
+  # partway through, or was cancelled. Without a remote backend, the NEXT
+  # run then starts from a totally empty state, sees the resource group
+  # (and anything else the previous run managed to create before it
+  # failed) already sitting in Azure, and errors with "A resource with
+  # the ID ... already exists" -- the exact failure this backend fixes.
+  # With a remote backend, Terraform writes state after every single
+  # resource it touches (not just at the end of a successful apply), so
+  # a run that fails on, say, resource #6 of 10 leaves state for
+  # resources #1-5 safely in blob storage for the next run to pick up
+  # from -- no more manually deleting the resource group to retry.
   #
-  # Before your first real (non-throwaway) deploy, create a small storage
-  # account for state (one-time, do this manually, NOT via this same
+  # This is a PARTIAL backend config on purpose -- resource_group_name/
+  # storage_account_name/container_name/key are deliberately left out of
+  # this file and supplied instead via `terraform init -backend-config=...`
+  # flags (see infra-deploy-vm.yml's "terraform init" step), so the same
+  # config can point vm-staging and prod at two different state files
+  # (different `key`) without editing this file, and so no account-
+  # specific storage account name is hardcoded into version control.
+  #
+  # One-time setup, before the very first real (non-throwaway) deploy,
+  # create a small storage account for state manually (NOT via this same
   # Terraform config -- state can't reliably bootstrap its own backend):
   #
   #   az group create -n rg-snipeit-tfstate -l eastus
@@ -73,18 +91,22 @@ terraform {
   #   az storage container create -n vm-state \
   #     --account-name snipeitliteterraformstate --auth-mode login
   #
-  # Then uncomment the block below (storage account name must be globally
-  # unique -- change it if the one above is taken), and run:
-  #   terraform init -migrate-state
+  # Then set these as repo/environment Variables (not secrets -- none of
+  # this is sensitive, it's just where state lives) for each of the
+  # vm-staging/prod GitHub Environments: TF_STATE_RESOURCE_GROUP,
+  # TF_STATE_STORAGE_ACCOUNT, TF_STATE_CONTAINER. See DEPLOYMENT_VM.md's
+  # "One-time Azure setup" section for the full walkthrough, including
+  # the one-off `terraform init -migrate-state` if you're moving an
+  # existing local state file into this backend rather than starting
+  # clean.
   #
-  # backend "azurerm" {
-  #   resource_group_name  = "rg-snipeit-tfstate"
-  #   storage_account_name = "snipeitliteterraformstate"
-  #   container_name       = "vm-state"
-  #   key                  = "snipeit-lite-vm.tfstate"
-  #   # use_azuread_auth = true   # recommended: auth via `az login`/OIDC,
-  #                                # not a storage account access key
-  # }
+  # use_azuread_auth = true below means auth flows through the same
+  # `az login`/OIDC session azure/login@v3 already establishes in
+  # infra-deploy-vm.yml (and your own `az login` locally) -- no storage
+  # account access key is ever generated or stored anywhere.
+  backend "azurerm" {
+    use_azuread_auth = true
+  }
 }
 
 provider "azurerm" {
