@@ -5,7 +5,7 @@
 # Runs exactly ONCE, the very first time the VM boots (Azure feeds this to
 # the VM as custom_data -- see main.tf's azurerm_linux_virtual_machine
 # resource). Rendered through Terraform's templatefile() first, so every
-# ${...} below is substituted with a real value BEFORE the VM ever sees
+# $${...} below is substituted with a real value BEFORE the VM ever sees
 # this file -- nothing here is a live Terraform reference at runtime.
 #
 # What it does, in order:
@@ -55,7 +55,7 @@ write_files:
       ${indent(6, cloudflare_origin_cert_key)}
 
   # ---------------------------------------------------------------------
-  # /opt/snipeit/.env -- every value docker-compose.vm.yml's ${...}
+  # /opt/snipeit/.env -- every value docker-compose.vm.yml's $${...}
   # substitutions read. Written with 0600 perms (below, in `runcmd`)
   # since it holds real secrets (DB password, JWT signing key, etc).
   # ---------------------------------------------------------------------

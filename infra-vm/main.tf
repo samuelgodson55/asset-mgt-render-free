@@ -221,10 +221,23 @@ resource "cloudflare_zero_trust_tunnel_cloudflared" "this" {
 # CLOUDFLARE_TUNNEL_TOKEN -- this, not the raw secret above, is what
 # `cloudflared tunnel run` in docker-compose.vm.yml actually authenticates
 # with.
-data "cloudflare_zero_trust_tunnel_cloudflared_token" "this" {
-  account_id = var.cloudflare_account_id
-  tunnel_id  = cloudflare_zero_trust_tunnel_cloudflared.this.id
-}
+#
+# BUG FIX: this used to be read from a separate
+# `data "cloudflare_zero_trust_tunnel_cloudflared_token"` block. That data
+# source is a v5-only addition -- it does not exist anywhere in the v4.x
+# provider line (confirmed against the v4.52.8 source directly: no
+# data_source_tunnel_token.go exists, and the
+# cloudflare_zero_trust_tunnel_cloudflared data source's schema has no
+# token attribute at all), which is what `terraform validate`/`plan`'s
+# "Invalid data source ... does not support data source" error was
+# actually reporting -- widening the version constraint earlier fixed the
+# *previous* validate error but couldn't fix this one, since no v4.x
+# release has it to widen into. In v4, the token is instead a computed,
+# sensitive attribute directly on the resource itself (see
+# tunnel_token in schema_cloudflare_tunnel.go / docs/resources/
+# zero_trust_tunnel_cloudflared.md), so it's read straight off
+# cloudflare_zero_trust_tunnel_cloudflared.this below with no separate
+# data source needed.
 
 resource "cloudflare_zero_trust_tunnel_cloudflared_config" "this" {
   account_id = var.cloudflare_account_id
@@ -397,7 +410,7 @@ resource "azurerm_linux_virtual_machine" "this" {
     caddyfile                         = file("${path.module}/../Caddyfile")
     admin_username                    = var.admin_username
     domain                            = local.effective_domain
-    cloudflare_tunnel_token           = data.cloudflare_zero_trust_tunnel_cloudflared_token.this.token
+    cloudflare_tunnel_token           = cloudflare_zero_trust_tunnel_cloudflared.this.tunnel_token
     cloudflare_origin_cert            = var.cloudflare_origin_cert
     cloudflare_origin_cert_key        = var.cloudflare_origin_cert_key
     dockerhub_backend_image           = var.dockerhub_backend_image

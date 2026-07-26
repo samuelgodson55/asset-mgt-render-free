@@ -64,7 +64,7 @@ variable "admin_username" {
 }
 
 variable "ssh_public_key" {
-  description = "Your SSH PUBLIC key contents (e.g. the contents of ~/.ssh/id_ed25519.pub). Still required -- Azure needs SOME auth method on the VM (password auth is disabled entirely) -- but this key is only ever presented through the Cloudflare Tunnel's SSH route (see the \"Cloudflare Tunnel\" section of main.tf), never over the public internet, since no inbound NSG rule for port 22 exists by default (see ssh_allowed_source_ips below). Generate a dedicated deploy key pair with: ssh-keygen -t ed25519 -C \"snipeit-lite-vm-deploy\" -f ./snipeit_vm_deploy_key -N \"\" -- then pass the .pub file's contents here and keep the private half for the VM_SSH_PRIVATE_KEY GitHub secret (see DEPLOYMENT_VM.md step 5)."
+  description = "Your SSH PUBLIC key contents (e.g. the contents of ~/.ssh/id_rsa.pub). Still required -- Azure needs SOME auth method on the VM (password auth is disabled entirely) -- but this key is only ever presented through the Cloudflare Tunnel's SSH route (see the \"Cloudflare Tunnel\" section of main.tf), never over the public internet, since no inbound NSG rule for port 22 exists by default (see ssh_allowed_source_ips below). Generate a dedicated deploy key pair with: ssh-keygen -t rsa -b 4096 -C \"snipeit-lite-vm-deploy\" -f ./snipeit_vm_deploy_key -N \"\" -- then pass the .pub file's contents here and keep the private half for the VM_SSH_PRIVATE_KEY GitHub secret (see DEPLOYMENT_VM.md step 5). MUST be RSA -- Azure's admin_ssh_key rejects ed25519 keys outright (\\\"Only RSA SSH keys are supported by Azure\\\")."
   type        = string
 }
 

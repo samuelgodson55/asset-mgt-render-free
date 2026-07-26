@@ -29,11 +29,28 @@ terraform {
       # Cloudflare renames Zero Trust resources fairly often between major
       # versions (e.g. cloudflare_argo_tunnel -> cloudflare_tunnel ->
       # cloudflare_zero_trust_tunnel_cloudflared). This stack targets the
-      # v4 resource names below -- if `terraform init` pulls a newer major
-      # and `plan` complains about unknown resource types, check
-      # https://registry.terraform.io/providers/cloudflare/cloudflare/latest/docs
-      # for the current names before bumping this constraint.
-      version = "~> 4.41"
+      # v4 resource/data-source names below -- v5 is a from-scratch,
+      # OpenAPI-generated rewrite that renames/removes several of them
+      # (notably: as of this writing v5 has no working way to read a
+      # tunnel's token at all -- see
+      # https://github.com/cloudflare/terraform-provider-cloudflare/issues/5009)
+      # so v5 is explicitly excluded below, matching Cloudflare's own
+      # "Deploy Tunnels with Terraform" guide.
+      #
+      # BUG FIX (round 1): this used to be pinned to "~> 4.41", which --
+      # because that's a two-part version, so Terraform's `~>` only floats
+      # the PATCH digit -- locked to the single 4.41.x patch series for no
+      # real reason. Widened here to the full v4 line (still excluding
+      # v5.x) to track Cloudflare's own recommended range instead of an
+      # arbitrarily narrow one. This alone did NOT fix the "Invalid data
+      # source ... does not support data source
+      # cloudflare_zero_trust_tunnel_cloudflared_token" validate error,
+      # though -- see the note in main.tf next to the tunnel resource for
+      # round 2, which found the actual cause: that data source has never
+      # existed in any v4.x release (confirmed against the v4.52.8
+      # provider source directly), only in v5. The tunnel token is read
+      # off the resource itself in v4, not a separate data source.
+      version = ">= 4.40.0, < 5.0.0"
     }
   }
 
