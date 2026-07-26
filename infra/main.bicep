@@ -128,12 +128,16 @@
 // their OWN Container Apps Managed Environment (own delegated subnet, own
 // NSG) purely for network segmentation -- see the git history for that
 // version's "SECURITY FIX" comment. In practice that hit a hard wall:
-// `Microsoft.App/managedEnvironments` is capped by a per-region,
-// per-subscription quota (`MaxNumberOfRegionalEnvironmentsInSubExceeded`),
-// and on most subscription tiers that quota is far too low to spend three
-// of it on one app. Three environments is a deploy-time failure on those
-// subscriptions, not just a theoretical concern -- this is the fix for
-// exactly that failure.
+// `Microsoft.App/managedEnvironments` is capped by a per-subscription
+// quota, and on Free Trial/starter subscriptions that cap is exactly 1 --
+// and it's GLOBAL across every region, not per-region: the 2nd environment
+// fails with `MaxNumberOfRegionalEnvironmentsInSubExceeded` if you land in
+// a region that already has one, and the 3rd still fails with
+// `MaxNumberOfGlobalEnvironmentsInSubExceeded` even in a brand-new region,
+// because the limit counts environments subscription-wide. Switching
+// regions cannot work around this. Three environments is a deploy-time
+// failure on those subscriptions, not just a theoretical concern -- this
+// is the fix for exactly that failure.
 //
 // Consolidated back to ONE environment (`env` below), one subnet, one NSG.
 // `frontend`, `backend`, `redis`, and the `migrate` Job all share it (Postgres
@@ -175,7 +179,11 @@
 //     Docker Hub plan or to keep one of the two public -- default is BOTH
 //     public, zero registry cost/credentials either way)
 //   - No Key Vault -- plain Container Apps secrets
-//   - No managed identity, no Application Insights
+//   - No managed identity, no Application Insights BY DEFAULT -- Application
+//     Insights is now available as an opt-in (see `otelAzureMonitorEnabled`
+//     param) for OpenTelemetry distributed tracing; see "WHAT WAS REMOVED...
+//     AND WHY IT'S SAFE HERE" below for why turning it on no longer
+//     conflicts with this file's cost-optimized design
 //   - `redis` unchanged: official Docker Hub image, internal-only, pinned
 //     to exactly 1 replica, no persistent volume
 // =============================================================================
@@ -226,8 +234,16 @@
 //   - Key Vault -> plain Container Apps secrets.
 //   - User-assigned managed identity -> removed (nothing left to authenticate
 //     once ACR and Key Vault are both gone, assuming public Docker Hub repos).
-//   - Application Insights -> removed (its own ingestion cost on top of Log
-//     Analytics).
+//   - Application Insights -> removed by default (its own ingestion cost on
+//     top of Log Analytics) -- now available as an OPT-IN via
+//     `otelAzureMonitorEnabled` (default false, so nothing changes unless
+//     you ask for it) for OpenTelemetry distributed tracing
+//     (backend/telemetry.py). Workspace-based on the SAME `logAnalytics`
+//     below rather than a second standalone resource, so turning it on
+//     adds usage-based cost only (Application Insights' first 5GB/month is
+//     free per billing account -- see that param's own @description and
+//     README.md's "Distributed Tracing" section), not a second fixed
+//     floor.
 //   Postgres itself was NOT removed/downgraded -- see "WHY POSTGRES IS A
 //   MANAGED SERVICE" at the top of this file for why that one piece stays
 //   a managed service even in an otherwise cost-optimized design.
@@ -449,6 +465,27 @@ param backupHoursUtc string = '3'
 @description('How many local backup files to keep before deleting the oldest. Matches .env.example\'s BACKUP_RETENTION_COUNT.')
 param backupRetentionCount int = 7
 
+// --- Distributed tracing (OpenTelemetry -- Operations & Observability
+// requirement #4; see backend/telemetry.py's module docstring) ------------
+@description('Master switch for OpenTelemetry distributed tracing on `backend` (and its embedded Celery worker/beat). Off by default -- zero cost, zero behavior change, matching every other opt-in flag in this file. Does NOT by itself provision anything in Azure -- see otelAzureMonitorEnabled below for that. Turning this on with no exporter destination configured (otelAzureMonitorEnabled=false AND otelExporterOtlpEndpoint empty) just means spans are created and immediately discarded -- harmless, but pointless. Matches .env.azure.example\'s OTEL_ENABLED.')
+param otelEnabled bool = false
+
+@description('service.name resource attribute every span from `backend` carries -- what identifies this app in your tracing backend\'s UI. Matches .env.example\'s OTEL_SERVICE_NAME.')
+param otelServiceName string = 'snipeit-lite-backend'
+
+@description('Generic OTLP/HTTP collector endpoint (self-hosted otel-collector, Grafana Cloud, Honeycomb, ...) spans are exported to, e.g. "https://otel-collector.example.com". Leave empty (the default) if you\'re using otelAzureMonitorEnabled below instead, or if otelEnabled is false. Matches .env.azure.example\'s OTEL_EXPORTER_OTLP_ENDPOINT.')
+param otelExporterOtlpEndpoint string = ''
+
+@secure()
+@description('Comma-separated key=value auth headers sent with every OTLP export request to otelExporterOtlpEndpoint above (e.g. an API key some SaaS tracing backends require). Stored as a Container Apps secret, never a plain env var, since it commonly carries a credential. Matches .env.azure.example\'s OTEL_EXPORTER_OTLP_HEADERS.')
+param otelExporterOtlpHeaders string = ''
+
+@description('Fraction (0.0-1.0) of traces actually sampled/exported. 1.0 (the default) traces everything -- fine at this app\'s scale; lower it if trace export volume/cost ever becomes a concern. Bicep has no native float param type, so this is a string parsed by backend/config.py\'s OTEL_TRACES_SAMPLE_RATIO. Matches .env.azure.example\'s OTEL_TRACES_SAMPLE_RATIO.')
+param otelTracesSampleRatio string = '1.0'
+
+@description('Provisions a `Microsoft.Insights/components` (Application Insights) resource, workspace-based on the SAME `logAnalytics` this file already provisions for container console logs (see that resource\'s own comment) -- no second fixed-cost resource, purely usage-based billing on top of it. Off by default, consistent with this file\'s cost-optimized design (see top-of-file comment) -- but reasonable to turn on even for a small deployment: Application Insights\' first 5GB of data ingested per month is free per BILLING ACCOUNT (shared across everything else in that account using Log Analytics/Application Insights too, not exclusive to this app -- see README.md\'s "Distributed Tracing" section for the full cost picture and a link to Microsoft\'s current pricing page), and 90 days of that data\'s retention is included at no extra charge. When true, this also wires the resulting connection string onto `backend` as the APPLICATIONINSIGHTS_CONNECTION_STRING secret (see `sharedSecrets` below) -- you still need otelEnabled=true too for anything to actually be sent there (see that param\'s own description).')
+param otelAzureMonitorEnabled bool = false
+
 var namePrefix = '${appBaseName}-${environmentName}'
 var suffix = uniqueString(resourceGroup().id, environmentName)
 var storageAccountName = take(replace('${appBaseName}${environmentName}st${take(suffix, 6)}', '-', ''), 24)
@@ -459,7 +496,12 @@ var frontendImage = '${dockerHubFrontendImage}:${initialImageTag}'
 
 // ---------------------------------------------------------------------------
 // Monitoring -- one Log Analytics workspace for every container app's
-// console/system logs. No Application Insights (see top-of-file comment).
+// console/system logs. Application Insights is OPT-IN (see
+// `otelAzureMonitorEnabled` param above) rather than always-on -- see that
+// param's own @description for the reasoning this file's original
+// "No Application Insights" design (see top-of-file comment) no longer
+// fully applies now that distributed tracing (backend/telemetry.py) is a
+// real Operations & Observability requirement, not a hypothetical.
 // ---------------------------------------------------------------------------
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
   name: '${namePrefix}-logs'
@@ -467,6 +509,34 @@ resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
   properties: {
     sku: { name: 'PerGB2018' }
     retentionInDays: 30 // shortest retention Log Analytics allows -- cheapest option; console logs are also always live-streamable via `az containerapp logs show` regardless of this setting
+  }
+}
+
+// Workspace-based (points WorkspaceResourceId at `logAnalytics` above,
+// rather than the older "classic" standalone mode) -- this is what lets
+// Application Insights ride on that SAME Log Analytics workspace's
+// pay-for-what-you-ingest billing instead of provisioning a second
+// separate resource with its own cost floor. Only deployed at all when
+// `otelAzureMonitorEnabled` is true; leave that at its default `false` and
+// this section creates nothing and costs nothing, same as before it
+// existed (identical opt-in pattern to `alertingEnabled`/
+// `alertActionGroup` immediately below).
+resource appInsights 'Microsoft.Insights/components@2020-02-02' = if (otelAzureMonitorEnabled) {
+  name: '${namePrefix}-insights'
+  location: location
+  kind: 'web'
+  properties: {
+    Application_Type: 'web'
+    WorkspaceResourceId: logAnalytics.id
+    IngestionMode: 'LogAnalytics'
+    // This app's `backend` (a FastAPI/Celery service, not a browser page)
+    // never loads Application Insights' JS snippet -- nothing here would
+    // ever use it regardless of this setting, but disabling it explicitly
+    // avoids Azure defaulting a public-web-facing setting on for a
+    // service that has no public web frontend of its own (`frontend` is
+    // the public-facing app, and it isn't the one instrumented with
+    // OpenTelemetry -- see backend/telemetry.py's module docstring).
+    DisableIpMasking: false
   }
 }
 
@@ -1002,6 +1072,11 @@ var databaseUrl = 'postgresql://${postgresUsername}:${uriComponent(postgresPassw
 var redisUrl = 'redis://:${redisPassword}@redis:6379/0'
 var frontendFqdn = 'frontend.${env.properties.defaultDomain}'
 var publicOrigin = empty(customDomain) ? 'https://${frontendFqdn}' : 'https://${customDomain}'
+// Only a valid expression to evaluate when `appInsights` actually exists
+// (otelAzureMonitorEnabled=true) -- the ternary's false branch never
+// touches the conditionally-deployed resource, which is what makes this
+// safe to reference even when it wasn't provisioned this deploy.
+var appInsightsConnectionString = otelAzureMonitorEnabled ? appInsights.properties.ConnectionString : ''
 
 var sharedEnv = [
   { name: 'ENVIRONMENT', value: 'production' }
@@ -1042,6 +1117,16 @@ var sharedEnv = [
   { name: 'BACKUP_GDRIVE_ENABLED', value: string(gdriveBackupEnabled) }
   { name: 'BACKUP_GDRIVE_OAUTH_CLIENT_ID', value: gdriveOauthClientId }
   { name: 'BACKUP_GDRIVE_FOLDER_ID', value: gdriveFolderId }
+  // Operations & Observability requirement #4: distributed tracing -- see
+  // backend/telemetry.py's module docstring and the `otelEnabled`/
+  // `otelAzureMonitorEnabled` params above. OTEL_EXPORTER_OTLP_HEADERS and
+  // APPLICATIONINSIGHTS_CONNECTION_STRING are NOT here -- both commonly
+  // carry a credential, so they're Container Apps secrets instead (see
+  // `sharedSecrets`/`sharedSecretEnvRefs` below).
+  { name: 'OTEL_ENABLED', value: string(otelEnabled) }
+  { name: 'OTEL_SERVICE_NAME', value: otelServiceName }
+  { name: 'OTEL_EXPORTER_OTLP_ENDPOINT', value: otelExporterOtlpEndpoint }
+  { name: 'OTEL_TRACES_SAMPLE_RATIO', value: otelTracesSampleRatio }
 ]
 
 var sharedSecrets = concat([
@@ -1052,6 +1137,8 @@ var sharedSecrets = concat([
   { name: 'smtp-password', value: empty(smtpPassword) ? 'unset' : smtpPassword }
   { name: 'gdrive-oauth-client-secret', value: empty(gdriveOauthClientSecret) ? 'unset' : gdriveOauthClientSecret }
   { name: 'gdrive-oauth-refresh-token', value: empty(gdriveOauthRefreshToken) ? 'unset' : gdriveOauthRefreshToken }
+  { name: 'otel-exporter-otlp-headers', value: empty(otelExporterOtlpHeaders) ? 'unset' : otelExporterOtlpHeaders }
+  { name: 'applicationinsights-connection-string', value: empty(appInsightsConnectionString) ? 'unset' : appInsightsConnectionString }
 ], usePrivateDockerHubRepo ? [
   { name: 'dockerhub-token', value: dockerHubToken }
 ] : [])
@@ -1068,6 +1155,8 @@ var sharedSecretEnvRefs = [
   { name: 'SMTP_PASSWORD', secretRef: 'smtp-password' }
   { name: 'BACKUP_GDRIVE_OAUTH_CLIENT_SECRET', secretRef: 'gdrive-oauth-client-secret' }
   { name: 'BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN', secretRef: 'gdrive-oauth-refresh-token' }
+  { name: 'OTEL_EXPORTER_OTLP_HEADERS', secretRef: 'otel-exporter-otlp-headers' }
+  { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', secretRef: 'applicationinsights-connection-string' }
 ]
 
 var registries = usePrivateDockerHubRepo ? [
@@ -1361,3 +1450,12 @@ output postgresServerFqdn string = postgresServer.properties.fullyQualifiedDomai
 output redisAppName string = redisApp.name
 output migrateJobName string = migrateJob.name
 output logAnalyticsWorkspaceId string = logAnalytics.id
+// Empty string (not an error) when otelAzureMonitorEnabled=false -- the
+// resource simply wasn't provisioned this deploy. Deliberately NOT
+// outputting the connection string itself here -- `az deployment group
+// show` outputs land in plain-text GitHub Actions logs/local shell
+// history, the exact thing `sharedSecrets` above avoids for every other
+// credential in this file. Look it up instead with:
+//   az monitor app-insights component show --app <output below> \
+//     --resource-group <your-rg> --query connectionString -o tsv
+output appInsightsName string = otelAzureMonitorEnabled ? appInsights.name : ''

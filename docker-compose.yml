@@ -36,6 +36,20 @@
 #              piece: the exact same image runs on Render/cloud too, just
 #              with different BACKEND_HOST/BACKEND_PORT env vars.
 #
+# Plus one OPT-IN seventh service, behind a Compose profile so it never
+# starts unless you ask for it:
+#   jaeger   - local distributed-tracing UI (Operations & Observability
+#              requirement #4 -- see backend/telemetry.py's module
+#              docstring). `docker compose up` alone never starts this;
+#              run `docker compose --profile tracing up` instead, and set
+#              OTEL_ENABLED=true in your .env (see .env.example) -- every
+#              backend/worker/beat env block below already points
+#              OTEL_EXPORTER_OTLP_ENDPOINT at it, zero extra config
+#              needed. Browse traces at http://localhost:16686 once both
+#              are on. See README.md's "Distributed Tracing" section for
+#              a full walkthrough (what a trace looks like, what to click
+#              on, how this differs from the plain container logs).
+#
 # Once running, everything is served from ONE origin:
 #   App + API:        http://localhost:8080          (nginx)
 #   API docs:          http://localhost:8080/docs     (proxied by nginx)
@@ -172,6 +186,32 @@ services:
       LEAN_MODE: ${LEAN_MODE:-}
       # Operations & Observability requirement #2: structured logging.
       LOG_FORMAT: ${LOG_FORMAT:-json}
+      # Operations & Observability requirement #4: distributed tracing
+      # (OpenTelemetry) -- see backend/telemetry.py's module docstring for
+      # what this instruments and why. Off by default, matching every
+      # other opt-in flag in this file; flip OTEL_ENABLED to "true" in
+      # your .env and traces flow to the `jaeger` service below with NO
+      # other change needed -- OTEL_EXPORTER_OTLP_ENDPOINT already points
+      # at it. Remember `jaeger` itself only starts with `docker compose
+      # --profile tracing up` (see this file's top comment) -- setting
+      # OTEL_ENABLED=true without that profile just means spans are
+      # created and immediately dropped (harmless, but pointless).
+      OTEL_ENABLED: ${OTEL_ENABLED:-false}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-snipeit-lite-backend}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://jaeger:4318}
+      OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
+      OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-http/protobuf}
+      OTEL_TRACES_SAMPLE_RATIO: ${OTEL_TRACES_SAMPLE_RATIO:-1.0}
+      # Noisy (prints every span to stdout too) -- off by default even in
+      # local dev; flip to "true" for a first no-Jaeger-needed smoke test
+      # ("is instrumentation actually firing"), see telemetry.py.
+      OTEL_CONSOLE_EXPORTER: ${OTEL_CONSOLE_EXPORTER:-false}
+      # Alternative/additional export target -- see .env.azure.example and
+      # README.md's "Distributed Tracing" section for how to get this
+      # value from an Azure Application Insights resource. Empty here by
+      # default since local docker-compose has no Azure resource to point
+      # at; `jaeger` above is the local-dev equivalent.
+      APPLICATIONINSIGHTS_CONNECTION_STRING: ${APPLICATIONINSIGHTS_CONNECTION_STRING:-}
       # Operations & Observability requirement #3: login rate limiting.
       LOGIN_RATE_LIMIT_MAX: ${LOGIN_RATE_LIMIT_MAX:-5}
       LOGIN_RATE_LIMIT_WINDOW_SECONDS: ${LOGIN_RATE_LIMIT_WINDOW_SECONDS:-60}
@@ -320,6 +360,23 @@ services:
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in your .env file -- see .env.example}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_FORMAT: ${LOG_FORMAT:-json}
+      # Operations & Observability requirement #4: distributed tracing --
+      # see the `backend` service's own OTEL_* block above for the full
+      # comment (identical here on purpose: a trace that starts in a
+      # `backend` HTTP request and finishes as a task run HERE needs both
+      # processes exporting to the SAME collector to show up as one
+      # continuous trace). celery_app.py appends "-worker" to
+      # OTEL_SERVICE_NAME automatically, so this container's spans are
+      # still easy to tell apart from `backend`'s in the Jaeger/Azure UI
+      # despite sharing the same env var value.
+      OTEL_ENABLED: ${OTEL_ENABLED:-false}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-snipeit-lite-backend}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://jaeger:4318}
+      OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
+      OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-http/protobuf}
+      OTEL_TRACES_SAMPLE_RATIO: ${OTEL_TRACES_SAMPLE_RATIO:-1.0}
+      OTEL_CONSOLE_EXPORTER: ${OTEL_CONSOLE_EXPORTER:-false}
+      APPLICATIONINSIGHTS_CONNECTION_STRING: ${APPLICATIONINSIGHTS_CONNECTION_STRING:-}
       # The worker never logs anyone in with the Super Admin/root account,
       # and unlike before, config.py's Settings() no longer has a startup
       # validator that requires a password value here at all -- the root
@@ -398,6 +455,20 @@ services:
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in your .env file -- see .env.example}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_FORMAT: ${LOG_FORMAT:-json}
+      # Operations & Observability requirement #4: distributed tracing --
+      # see the `backend` service's own OTEL_* block for the full
+      # comment. celery_app.py appends "-beat" to OTEL_SERVICE_NAME
+      # automatically for this process specifically (via `beat_init`, not
+      # `worker_process_init` -- see that file's own comment for why
+      # Beat needs its own separate signal).
+      OTEL_ENABLED: ${OTEL_ENABLED:-false}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-snipeit-lite-backend}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://jaeger:4318}
+      OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
+      OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-http/protobuf}
+      OTEL_TRACES_SAMPLE_RATIO: ${OTEL_TRACES_SAMPLE_RATIO:-1.0}
+      OTEL_CONSOLE_EXPORTER: ${OTEL_CONSOLE_EXPORTER:-false}
+      APPLICATIONINSIGHTS_CONNECTION_STRING: ${APPLICATIONINSIGHTS_CONNECTION_STRING:-}
       # Same reasoning as the `worker` service above: no startup validator
       # requires these anymore, since the root admin's password lives in
       # the database now, not in an environment variable.
@@ -446,6 +517,81 @@ services:
     # unhealthy forever.
     healthcheck:
       disable: true
+
+  # ---------------------------------------------------------------------
+  # jaeger (local distributed-tracing UI -- Operations & Observability
+  # requirement #4; see backend/telemetry.py's module docstring)
+  # ---------------------------------------------------------------------
+  # OPT-IN: `profiles: [tracing]` means plain `docker compose up` never
+  # starts this -- you have to explicitly ask for it:
+  #     docker compose --profile tracing up
+  # (add `-d` as usual to run it in the background). If you `docker
+  # compose up` without `--profile tracing`, this container never even
+  # starts, backend/worker/beat still try to export spans to
+  # "jaeger:4318" and simply fail silently in the background (their
+  # BatchSpanProcessor swallows the connection errors) -- this is the
+  # single most common "why is Jaeger empty" cause, so always double
+  # check you actually used the `--profile tracing` flag before anything
+  # else. Every backend/worker/beat service's OTEL_EXPORTER_OTLP_ENDPOINT
+  # above already points at "http://jaeger:4318" by default, so the only
+  # other thing needed to see traces locally is OTEL_ENABLED=true in your
+  # .env (see .env.example) -- no Jaeger-specific config on your end.
+  #
+  # BUG FIX (image tag): this used to pin "jaegertracing/all-in-one:1.62"
+  # -- that tag does not exist on Docker Hub (Jaeger has never published
+  # a bare "1.62" tag, only fully-qualified three-part tags like
+  # "1.62.0"), so `docker compose --profile tracing up` failed outright
+  # at the image-pull step with a "manifest not found" error. Even fixed
+  # to "1.62.0" though, Jaeger v1 reached end-of-life on 2025-12-31 and
+  # no longer receives updates -- so this now runs the CURRENT stable
+  # release line instead: Jaeger v2 (a from-scratch rewrite built on the
+  # OpenTelemetry Collector). Pinned to a specific version (never
+  # "latest") so a `docker compose pull` months from now can't silently
+  # hand you a different, untested release.
+  #
+  # WHY v2 "JUST WORKS" HERE WITH NO OTHER CHANGES: v1's all-in-one image
+  # needed `COLLECTOR_OTLP_ENABLED=true` (removed below -- v2 doesn't
+  # read Jaeger-specific environment variables like this at all; see
+  # v2's "Configuration" docs) to turn on its OTLP receiver. v2's
+  # all-in-one role has OTLP enabled on 4317 (gRPC) and 4318 (HTTP) BY
+  # DEFAULT, no flag needed -- exactly the endpoint
+  # OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318 above already points
+  # at, so backend/telemetry.py needed zero changes to work against it.
+  #
+  # Still one self-contained image bundling the collector, in-memory
+  # storage, and query UI -- the right choice for "one developer, one
+  # laptop, traces don't need to outlive `docker compose down`"
+  # (restarting this container discards whatever traces it was holding,
+  # same trade-off this file already makes for `redis`'s queued jobs). It
+  # is deliberately NOT what infra/main.bicep provisions for production
+  # Azure use -- see that file's `otelAzureMonitorEnabled` param and
+  # README.md's "Distributed Tracing" section for the Application
+  # Insights path instead, which actually persists traces.
+  jaeger:
+    image: jaegertracing/jaeger:2.19.0
+    container_name: snipeit_lite_jaeger
+    profiles: ["tracing"]
+    restart: unless-stopped
+    ports:
+      # Jaeger UI -- open http://localhost:16686 once both this and
+      # `backend` (with OTEL_ENABLED=true) are running, and click any
+      # request you just made through http://localhost:8080 to see its
+      # full span waterfall (HTTP request -> SQL queries -> any Celery
+      # task it enqueued).
+      - "16686:16686"
+      # OTLP/HTTP receiver -- what OTEL_EXPORTER_OTLP_ENDPOINT above
+      # actually talks to. Published to the host too (not strictly
+      # needed for backend/worker/beat, which reach it over the internal
+      # "jaeger:4318" service name instead) purely so you can also point
+      # a one-off local script/`curl` at "http://localhost:4318" while
+      # debugging, without editing this file.
+      - "4318:4318"
+      # OTLP/gRPC receiver -- not used by this app (backend/telemetry.py
+      # defaults OTEL_EXPORTER_OTLP_PROTOCOL to "http/protobuf", see that
+      # setting's own comment for why), but published anyway since v2
+      # enables it by default and it's occasionally handy for a one-off
+      # gRPC-based debugging tool.
+      - "4317:4317"
 
   # ---------------------------------------------------------------------
   # frontend / nginx reverse proxy (requirement: multi-tier deployment)

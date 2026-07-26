@@ -44,6 +44,7 @@ streaming/performance caveats) so it stays lightweight and beginner-legible:
 
 import uuid
 
+from opentelemetry import trace
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from logging_config import request_id_var
@@ -74,6 +75,21 @@ class RequestContextMiddleware:
 
         request_id = incoming_id or str(uuid.uuid4())
         token = request_id_var.set(request_id)
+
+        # Tie this request's log-correlation ID to its trace, in BOTH
+        # directions: telemetry.py's LoggingInstrumentor already stamps
+        # otelTraceID/otelSpanID onto every log line (see that module's
+        # docstring); this stamps request_id onto the span itself, so
+        # looking up a request_id a user reported ("Reference: b3f1...")
+        # in your tracing backend's UI is just as possible as looking it
+        # up in your log aggregator. `is_recording()` is false whenever
+        # OTEL_ENABLED is off (settings.OTEL_ENABLED -- see telemetry.py)
+        # or this span was sampled out, so this is a no-op in the
+        # overwhelmingly common case and never worth an extra
+        # settings-import here just to skip it.
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute("app.request_id", request_id)
 
         async def send_with_request_id(message):
             # Inject the header into the outgoing response's "start" event

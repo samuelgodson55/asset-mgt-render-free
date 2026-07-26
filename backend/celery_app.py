@@ -29,6 +29,7 @@ app with no Django-style "installed apps" list to scan.
 import datetime
 
 from celery import Celery
+from celery.signals import beat_init, worker_process_init
 
 from config import settings
 from logging_config import configure_logging
@@ -138,6 +139,74 @@ celery_app.conf.update(
     # embedded-worker deployment shapes already get for free.
     worker_hijack_root_logger=False,
 )
+
+# ---------------------------------------------------------------------------
+# DISTRIBUTED TRACING (OpenTelemetry, Operations & Observability requirement)
+# ---------------------------------------------------------------------------
+# A no-op when settings.OTEL_ENABLED is false (the default) -- see
+# telemetry.py's module docstring for the full "why" and exactly what gets
+# instrumented.
+#
+# WHY THIS ISN'T JUST `setup_tracing(settings)` AT PLAIN MODULE LEVEL
+# ------------------------------------------------------------------
+# `configure_logging(settings)` above already runs unconditionally at
+# import time, and that file's own comment notes it's "safe to also run a
+# second time when the `backend` API container imports this module (as a
+# producer)". Tracing setup is NOT safe to copy that same pattern, for two
+# separate reasons:
+#
+#   1. IDENTITY: if `setup_tracing()` ran here at plain import time, the
+#      `backend` API process would ALSO run it -- api/audit_api.py imports
+#      this module just to call `.delay(...)`, and that import happens
+#      before main.py gets a chance to call its OWN `setup_tracing()` (see
+#      main.py's imports at the top of that file). Whichever call runs
+#      first wins (telemetry.py's `_tracing_configured` guard makes the
+#      second a no-op) -- so `backend`'s own spans would end up wrongly
+#      labeled with THIS file's "-worker" service name instead of
+#      settings.OTEL_SERVICE_NAME.
+#   2. FORK SAFETY: Celery's default (prefork) worker pool imports this
+#      module exactly ONCE in the parent/arbiter process, then calls
+#      `os.fork()` to create its actual task-executing child processes.
+#      OpenTelemetry's BatchSpanProcessor runs a background thread that
+#      batches and periodically flushes spans to the exporter -- a thread
+#      started in the parent BEFORE that fork does not reliably survive
+#      being forked (the child gets a copy of the thread's stack but not a
+#      running copy of the thread itself), silently dropping every span
+#      the child ever creates.
+#
+# `worker_process_init` is Celery's own documented fix for exactly this:
+# it fires once inside EACH forked child process, after the fork has
+# already happened -- so setting up the TracerProvider there guarantees
+# every child gets a live, working background flush thread of its own.
+# This is also the exact pattern opentelemetry-instrumentation-celery's
+# own documentation recommends. `beat_init` covers the separate case of a
+# standalone `celery beat` process (docker-compose.yml's dedicated `beat`
+# service) -- that process never forks a worker pool at all, so
+# `worker_process_init` would never fire there, but it still enqueues
+# tasks (Redis `PUBLISH`/`LPUSH` calls this app's `instrument_redis()`
+# below will trace) and deserves its own service name to tell it apart
+# from `worker` in a trace waterfall view.
+@worker_process_init.connect(weak=False)
+def _init_worker_tracing(**_kwargs) -> None:
+    from telemetry import instrument_celery, instrument_redis, instrument_sqlalchemy_engine, setup_tracing
+    setup_tracing(settings, service_name=f"{settings.OTEL_SERVICE_NAME}-worker")
+    instrument_celery(settings)
+    instrument_redis(settings)
+    # Imported here, not at module level, so this module still imports
+    # cleanly even if `database.py` isn't reachable for some reason (e.g.
+    # a future consumer of this file that only cares about the Celery app
+    # object itself) -- `database.engine` is only ever needed at the exact
+    # moment a worker process is actually about to run task code against it.
+    from database import engine as db_engine
+    instrument_sqlalchemy_engine(db_engine, settings)
+
+
+@beat_init.connect(weak=False)
+def _init_beat_tracing(**_kwargs) -> None:
+    from telemetry import instrument_redis, setup_tracing
+    setup_tracing(settings, service_name=f"{settings.OTEL_SERVICE_NAME}-beat")
+    instrument_redis(settings)
+
 
 # ---------------------------------------------------------------------------
 # CELERY BEAT SCHEDULE -- Email + Dashboard Notifications requirement

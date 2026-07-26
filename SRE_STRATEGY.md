@@ -20,13 +20,42 @@ limiting that's replica-safe, RedBeat so `beat` never double-fires
 across replicas, a migrate → deploy → smoke-test → auto-rollback
 pipeline, structured JSON logs with a correlation ID, and both local +
 off-box (Google Drive) backups. The strategy below is mostly about
-**using that machinery on a schedule**. Both gaps this document
-originally flagged are now closed at the code level: alerting on top of
-the Log Analytics data you're already paying for is implemented in
-`infra/main.bicep`, opt-in behind one secret (see §2), and automated
-dependency updates are already running via `.github/dependabot.yml` (see
-§4). What's left for both is cadence and turning the one secret on, not
-missing tooling.
+**using that machinery on a schedule**. All three gaps this document
+originally flagged (or has since grown to cover) are now closed at the
+code level: alerting on top of the Log Analytics data you're already
+paying for is implemented in `infra/main.bicep`, opt-in behind one
+secret (see §2); automated dependency updates are already running via
+`.github/dependabot.yml` (see §4); and distributed tracing
+(OpenTelemetry, `backend/telemetry.py`) — which answers the question
+alerting and logs can't, "which *part* of a slow/failing request was
+actually slow" — is opt-in behind `OTEL_ENABLED` (see §3's weekly
+cadence and §6.5). What's left for all three is cadence and turning the
+relevant flag on, not missing tooling. `docker-compose.yml`'s local
+`jaeger` service now runs current-stable Jaeger v2 (v1 is EOL as of
+2025-12-31 — see that service's own comment for the full migration
+note), and §6.6 below adds a request-ID-first fast path
+(`scripts/trace-request.sh` / `scripts/tail-errors.sh`) for triaging an
+error in seconds using nothing but `docker compose logs`, whether or not
+tracing itself is even turned on yet.
+
+---
+
+## Table of contents
+
+1. [Service Level Objectives](#1-service-level-objectives-keep-these-small-and-honest)
+2. [Close the alerting gap](#2-close-the-alerting-gap-do-this-once-first)
+3. [The continuous cadence](#3-the-continuous-cadence)
+4. [Dependency-update gap — closed](#4-dependency-update-gap-closed)
+5. [Runbooks](#5-runbooks-write-these-down-before-you-need-them)
+6. [Troubleshooting `az containerapp exec`](#6-troubleshooting-az-containerapp-exec)
+   - [6.1 Notification emails silently never sending](#61-postmortem-notification-emails-silently-never-sending-despite-correct-smtp-secrets)
+   - [6.2 A running replica gets pulled out from under an open `exec` session](#62-a-running-replica-gets-pulled-out-from-under-an-open-exec-session)
+   - [6.3 `ClusterExecFailure` / websocket `close 1011` on an interactive shell](#63-clusterexecfailure-websocket-close-1011-on-an-interactive-shell)
+   - [6.4 Rehearsing the partition-drop runbook safely](#64-rehearsing-the-partition-drop-runbook-safely)
+   - [6.5 Using distributed traces to find where time actually went](#65-using-distributed-traces-to-find-where-time-actually-went)
+   - [6.6 Fast request-ID triage without opening Jaeger](#66-fast-request-id-triage-without-opening-jaeger)
+7. [Audit log partitioning & annual archive](#7-audit-log-partitioning-annual-archive)
+8. [What to deliberately *not* do](#8-what-to-deliberately-not-do)
 
 ---
 
@@ -39,7 +68,7 @@ Three numbers are enough to know if you're drifting:
 |---|---|---|
 | Availability | 99.5% monthly (~3.6 hrs/month) | `/healthz` probe success rate (already polled by Container Apps) |
 | Readiness | 99% monthly | `/readyz` — catches "schema doesn't match code" and DB blips separately from liveness |
-| Checkout-path latency | p95 < 800ms | Log Analytics on `backend`'s request logs (see queries below) |
+| Checkout-path latency | p95 < 800ms | Log Analytics on `backend`'s request logs (see queries below) — once you know it's drifting, §6.5 covers how to find *which part* of the request is actually slow via distributed tracing |
 | Backup freshness | A restorable backup < 25 hrs old, always | `services/backup_service.py`'s daily job + Drive upload succeeding |
 
 If you blow through the availability target two months running, that's
@@ -141,6 +170,11 @@ put it in a recurring calendar block or a lightweight ticket template.
   a jump means something reverted to storing export files in Redis).
 - [ ] Review the GitHub Actions run history for `ci.yml` — any flaky
   test worth fixing before it becomes "everyone just re-runs it"?
+- [ ] *(if `OTEL_ENABLED=true` — see §6.5)* Sort the last week's traces
+  by duration (Application Insights: **Performance** blade, or Jaeger:
+  sort by Duration) and skim the slowest handful. Catches a
+  quietly-degrading query or dependency before it's slow enough to blow
+  the p95 SLO above and trigger an actual incident.
 
 ### Monthly (~1 hour)
 - [ ] **Restore drill**: download the latest backup and restore it into
@@ -273,6 +307,283 @@ value is almost entirely in the "did we do the follow-up action" part.
 
 ---
 
+## 6. Troubleshooting `az containerapp exec`
+
+Real incidents from operating the staging environment, kept here (rather
+than only in a closed support ticket) because both the root causes and
+the workarounds are non-obvious and worth not re-discovering from
+scratch next time.
+
+### 6.1 Postmortem: notification emails silently never sending, despite correct SMTP secrets
+
+**Symptom:** `NOTIFICATIONS_ENABLED=true`, `SMTP_HOST`/`SMTP_USERNAME`/
+`SMTP_PASSWORD`/`SMTP_FROM_EMAIL` all correctly set (confirmed both as
+GitHub Actions secrets and, after re-running `infra-deploy.yml`, as live
+Container App env vars/secrets) — no emails ever arrived, not the daily
+digest, not extension-request notifications, with nothing useful in
+`az containerapp logs show` beyond the normal uvicorn boot lines.
+
+**Root cause:** two files named `start.sh` existed in the repo — one at
+the project root (correctly launching the embedded Celery worker+beat
+when `RUN_EMBEDDED_WORKER=true`) and the stale original at
+`backend/start.sh` (missing that logic entirely, uvicorn-only). The
+backend CI build (`.github/workflows/deploy-azure-staging.yml` /
+`deploy-azure-production.yml`) builds with `context: backend`, so
+`backend/Dockerfile`'s `COPY . /app/` only ever picked up
+`backend/start.sh` — the *wrong* one. `infra/main.bicep` correctly sets
+`RUN_EMBEDDED_WORKER=true` on the `backend` Container App, but the script
+actually running inside the shipped image never read that variable, so
+`celery_app.py`'s `.delay(...)` calls (`tasks.send_email_task`, the daily
+digest/due-soon Beat jobs, audit exports) all queued into Redis with
+**no worker ever consuming them** — silent, not loud, and completely
+invisible from `NOTIFICATIONS_ENABLED`/SMTP config alone, because those
+settings were never the problem.
+
+**Fix:** the corrected `start.sh` now lives at (and only at)
+`backend/start.sh` — the one path the Docker build context can actually
+see — and the confusing root-level duplicate was deleted so this can't
+silently drift again. Confirm the fix landed by checking for this line
+near the top of a fresh `az containerapp logs show` output, right before
+the uvicorn line:
+```
+start.sh: RUN_EMBEDDED_WORKER=true -- launching embedded Celery worker+beat in the background (low priority)
+```
+No such line (or a boot log jumping straight to `start.sh: lean mode
+enabled ...`) means the embedded worker isn't starting, regardless of
+what SMTP/notification settings say.
+
+**Takeaway for future changes to `backend/start.sh` / `render-start.sh`:**
+before trusting a fix to either script, verify with `find . -iname
+start.sh` (or equivalent) that there isn't a second copy elsewhere in the
+tree that the actual Docker build context is silently preferring instead.
+
+**Separately worth remembering:** `deploy-azure-staging.yml` /
+`deploy-azure-production.yml` only ever run `az containerapp update
+--image ...` — they never touch env vars or secrets. All SMTP/
+notification/Google-Drive configuration is applied exclusively by
+`infra-deploy.yml` (a separate, manually-triggered `workflow_dispatch`
+pipeline). Updating a GitHub *secret* alone does nothing until
+`infra-deploy.yml` is re-run — a normal push to `develop`/`main` will
+**not** pick up a changed SMTP secret on its own.
+
+### 6.2 A running replica gets pulled out from under an open `exec` session
+
+**Symptom:** `az containerapp exec --name backend ... --command /bin/sh`
+connects successfully (`INFO: Successfully connected to container...`),
+then dies mid-session with:
+```
+ERROR: {"Error":{"Code":"ClusterExecFailure","Message":"...websocket: close 1011 (internal server error)...code: 500."}}
+```
+
+**Root cause (confirmed via `az containerapp logs show --type system`):**
+staging's `backend` runs with `backendMinReplicas: 0` (see
+`infra-deploy.yml`'s replica-floor logic). `az containerapp exec` does
+**not** count as activity that resets KEDA's idle timer — only real HTTP
+traffic through ingress does — so if nothing hits `/api/*` while you're
+in the shell, KEDA scales the replica to zero underneath you:
+```
+"Msg": "Deactivated apps/v1.Deployment k8se-apps/backend--0000015 from 1 to 0", "Reason": "KEDAScaleTargetDeactivated", "EventSource": "KEDA"
+"Msg": "Container 'backend' was terminated with exit code '' and reason 'ManuallyStopped'"
+```
+
+**Fix — float the floor for the duration of the session:**
+```bash
+az containerapp update --name backend --resource-group rg-snipeit-lite-staging --min-replicas 1
+# ...do your work...
+az containerapp update --name backend --resource-group rg-snipeit-lite-staging --min-replicas 0
+```
+Always set it back to `0` afterward — staging is deliberately scale-to-
+zero for cost, and this is the one thing that overrides it.
+
+### 6.3 `ClusterExecFailure` / websocket `close 1011` on an interactive shell
+
+**Symptom:** even with `min-replicas: 1` and a freshly-created, healthy
+replica (`healthState: Healthy`, no restarts, clean application logs —
+Celery worker connected to Redis, `beat: Acquired lock`, nothing
+resembling an OOM kill or crash), `/bin/sh` still fails instantly with
+the exact same `ClusterExecFailure` / `websocket: close 1011` error as
+§6.2, on three separate revisions in a row.
+
+**Root cause:** an Azure Container Apps platform-side quirk in how
+`az containerapp exec` handles interactive TTY sessions specifically —
+not an application or resource-pressure issue (ruled out: app logs were
+completely clean, no memory/restart signal anywhere). Multiple
+near-identical reports exist against `microsoft/azure-container-apps` on
+GitHub with the same signature and no published root cause; this is a
+known platform gap, not something fixable from the app side.
+
+**Workaround that reliably works — skip the interactive shell, run a
+single non-interactive command instead:**
+```bash
+az containerapp exec --name backend --resource-group rg-snipeit-lite-staging \
+  --command "python scripts/audit_partition_status.py"
+```
+This succeeded cleanly every time it was tried, where `--command /bin/sh`
+never did. Use this pattern (one full command per `exec` call) for any
+one-off diagnostic/admin script instead of dropping into an interactive
+shell on Azure. If you genuinely need an interactive session, try the
+Azure Portal's Container App → Console tab first (different client path,
+sometimes succeeds where the CLI's websocket implementation doesn't), or
+update the CLI/extension (`az upgrade && az extension add --name
+containerapp --upgrade`) before assuming it's something else.
+
+**Shell-quoting note:** don't try to inline multi-line Python through
+`--command "python -c \"...\""` — surviving MINGW64/bash → `az exec` →
+container-shell → Python quoting all at once is not worth the fight (see
+`scripts/dev_seed_fake_old_partition.py`'s existence, §6.4, which is a
+direct result of exactly this pain). Write a real script and call it by
+path instead.
+
+### 6.4 Rehearsing the partition-drop runbook safely
+
+Section 7's annual retirement runbook is deliberately never automated
+against real data — which also means there was previously no safe way to
+practice the actual `DROP TABLE` step without either waiting for a real
+year to need retiring, or improvising raw SQL by hand through the
+`exec`/shell-quoting minefield above. `scripts/dev_seed_fake_old_partition.py`
+exists specifically to close that gap: it creates one obviously-fake old
+year (`audit_logs_y2020` by default) with a handful of disposable,
+clearly-tagged rows (`FAKE_SEED_DATA_FOR_PARTITION_DROP_TESTING`), and
+hard-refuses to run at all if `ENVIRONMENT=production` — see that
+script's own module docstring. Combine it with §6.3's non-interactive
+`--command` pattern:
+```bash
+az containerapp exec --name backend --resource-group rg-snipeit-lite-staging \
+  --command "python scripts/dev_seed_fake_old_partition.py"
+
+az containerapp exec --name backend --resource-group rg-snipeit-lite-staging \
+  --command "python scripts/audit_partition_status.py"
+```
+then follow Section 7's Step 2 (`psql "$DATABASE_URL"` →
+`DROP TABLE audit_logs_y2020;`) exactly as you would for a real year, and
+re-run `audit_partition_status.py` once more to confirm it's gone.
+
+### 6.5 Using distributed traces to find where time actually went
+
+§2's alerts and §1's SLOs both tell you *that* something is wrong (error
+rate spiked, p95 latency drifted) — neither tells you *where* the time
+actually went inside a single slow/failing request. That gap is what
+distributed tracing (`backend/telemetry.py`, `OTEL_ENABLED`) closes; it's
+off by default, so this section assumes you've turned it on for at least
+one environment (README.md's **Distributed Tracing** section covers the
+one-time setup, locally via Jaeger or in Azure via
+`otelAzureMonitorEnabled`).
+
+**Two gotchas that silently produce "tracing looks completely
+non-functional" with no error anywhere, worth ruling out first if a
+trace you expect to exist isn't showing up:**
+- `OTEL_ENABLED` defaults to `false` in `.env.example` — copying the
+  template alone does NOT turn tracing on, that line has to be flipped
+  to `true` explicitly. Confirm it actually took by grepping
+  `docker compose logs backend | grep "OpenTelemetry:"` — you should see
+  `OTLP span exporter configured (...)`; if that line never appears,
+  the exporter never even armed itself, and nothing below this point
+  will find anything.
+- Locally, `jaeger` only starts with `docker compose --profile tracing
+  up` — plain `docker compose up` never starts it at all, and
+  `backend`/`worker`/`beat` will still try (and silently fail) to export
+  spans to a container that was never running. `docker-compose.yml`'s
+  `jaeger` service now runs current-stable **Jaeger v2**
+  (`jaegertracing/jaeger:2.19.0` — v1 hit end-of-life on 2025-12-31 and
+  is no longer receiving updates); see that service's own comment for
+  the full "why v2" reasoning if you're pinning a newer patch release
+  later.
+
+**Scenario: §2's backend error-rate alert fired, or checkout-path p95
+drifted above 800ms.**
+
+1. Get a concrete `request_id` to start from — either from the alert
+   query's `Log_s` output directly (§2a already tells you to `| project
+   TimeGenerated, Log_s`), or from a user/support ticket (every error
+   response body includes the `request_id` that produced it, thanks to
+   `middleware/error_handling.py`'s global safety net).
+2. Every structured log line for that request also carries `otelTraceID`
+   (see `telemetry.py`'s module docstring for exactly how logs and
+   traces get tied together) — grep the same log window for that
+   `request_id` once to pull the matching `otelTraceID` out alongside it.
+3. Open that trace:
+   - **Jaeger** (local): paste the trace ID into the search box at
+     `http://localhost:16686`, or just click through from a recent trace
+     list if you were already looking at one.
+   - **Application Insights** (Azure): **Investigate → Transaction
+     search**, paste the trace ID, or run the KQL from README.md's
+     **Distributed Tracing** section (`union requests, dependencies |
+     where operation_Id == "<trace id>"`).
+4. Read the waterfall top-down. The HTTP request span is the outermost
+   bar; everything nested under it — SQL query spans, an enqueued Celery
+   task span if this request kicked one off — is a candidate for "this
+   is where the time went." A single 600ms SQL span buried under an
+   otherwise-fast request points at a missing index or an N+1 query
+   loop in that specific service function; a request that finishes fast
+   itself but whose *child* Celery task span (in `backend-worker`,
+   visible as a continuation of the SAME trace — see `telemetry.py`'s
+   "WHAT GETS INSTRUMENTED" section for why Celery propagates trace
+   context across the Redis broker) runs long points you at
+   `tasks/`/`services/` instead of `api/`.
+5. If the slow span is a SQL query with no obvious index problem, cross-
+   reference it against Postgres itself: Flexible Server's own **Query
+   Performance Insight** (Azure Portal, on the `postgresServer`
+   resource) shows the same query ranked by total time across ALL
+   requests, not just this one trace — useful for telling "this one
+   request hit a cold cache" apart from "this query is slow for
+   everyone, every time."
+
+**What this does NOT replace:** the structured JSON logs
+(`LOG_FORMAT=json`) and §2's alerts are still the first thing to check —
+they're always-on (well, logs are; alerts need `ALERT_EMAIL_ADDRESS` set)
+and need no extra setup. Tracing is the *second* step once you already
+know roughly which request/time-window to look at, not a replacement for
+having logs/alerts in the first place.
+
+---
+
+### 6.6 Fast request-ID triage without opening Jaeger
+
+§6.5 above is the *full* answer once you're comfortable with tracing set
+up end-to-end. Day-to-day, especially locally or mid-incident when every
+second counts toward the zero-downtime goal, `scripts/trace-request.sh`
+and `scripts/tail-errors.sh` get you most of the way there using nothing
+but `docker compose logs` — no Jaeger/Application Insights required, and
+they work identically whether or not `OTEL_ENABLED` is even turned on
+(they just won't have a `trace=` ID to show you if it isn't).
+
+**Live triage while deploying, load-testing, or just keeping watch** —
+run this in a spare terminal:
+```
+scripts/tail-errors.sh
+```
+Every ERROR/CRITICAL log line from `backend`/`worker`/`beat` prints the
+moment it happens, colorized, with its `request_id` (and `trace_id` if
+tracing is on) pulled to the front — so you see an incident starting
+within seconds, with the exact ID you need for the next step already in
+hand, instead of waiting for a user to report it.
+
+**Given one ID — from `tail-errors.sh` above, an alert's `Log_s`
+output (§2a), or a user/support ticket** (every error response body
+includes its own `request_id`, see `middleware/error_handling.py`):
+```
+scripts/trace-request.sh <request_id_or_trace_id>
+scripts/trace-request.sh <request_id_or_trace_id> --since 2h   # further back
+scripts/trace-request.sh <request_id_or_trace_id> --follow      # keep watching for it
+```
+This pulls every log line that request touched, in order, across
+`backend`/`worker`/`beat` — the request arriving, every service-layer log
+line in between, and the full exception traceback if it errored — in one
+command, whether it stayed in `backend` alone or spilled into a queued
+`worker` task. It matches a `request_id` from an error body just as
+well as a `trace_id`/`span_id` copied out of the Jaeger UI, so it's the
+same command either way you got the ID.
+
+**Where this fits relative to §6.5:** reach for these two scripts first
+— they need no setup and answer "what happened on this one request" in
+one command. Reach for the full Jaeger/Application Insights waterfall in
+§6.5 when the *log lines themselves* don't explain the slowness (e.g. a
+SQL span taking 600ms with nothing obviously wrong in the surrounding
+log messages) and you need to see actual nested span durations, not just
+the fact that something happened.
+
+---
+
 ## 7. Audit log partitioning & annual archive
 
 **What changed:** `audit_logs` is an append-only ledger — nothing is
@@ -321,6 +632,24 @@ oldest/newest entry — read-only, changes nothing. Use it to decide which
 year (if any) is actually worth retiring; a partition sitting at a few
 hundred KB isn't costing you anything, so don't drop one just because it's
 old — drop one because disk space actually requires it.
+
+**Rehearsing this runbook without real data to retire yet:** see
+[§6.4](#64-rehearsing-the-partition-drop-runbook-safely) for the full
+context. In short, `scripts/dev_seed_fake_old_partition.py` creates one
+obviously-fake old year (2020 by default) with a handful of disposable,
+clearly-tagged rows, so you can practice Step 2's `DROP TABLE` against
+something that isn't production data. It refuses to run at all if
+`ENVIRONMENT=production` — same non-interactive command pattern as Step 0
+above:
+```bash
+# docker compose (VM/server)
+docker compose exec backend python scripts/dev_seed_fake_old_partition.py
+
+# Azure Container Apps
+az containerapp exec --name backend --resource-group rg-snipeit-lite-staging \
+  --command "python scripts/dev_seed_fake_old_partition.py"
+```
+Then run Step 0 again to see it, and Step 2 below to drop it.
 
 **Azure caveat:** `backend` is a scale-to-zero Container App by default
 (`backendMinReplicas`, `infra/main.bicep`) — `az containerapp exec` needs a

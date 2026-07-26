@@ -35,15 +35,16 @@ real production deployment.
 10. [Roles & Permissions Model](#roles--permissions-model)
 11. [Database & Migrations (Alembic)](#database--migrations-alembic)
 12. [Backups](#backups)
-13. [Full API Reference](#full-api-reference)
-14. [File & Function Reference](#file--function-reference)
-15. [Making Changes Safely (A Guide For Beginners)](#making-changes-safely-a-guide-for-beginners)
-16. [Testing Your Changes](#testing-your-changes)
-17. [Security Model](#security-model)
-18. [Running In Production](#running-in-production)
-19. [Safely Updating An Existing Production Deployment (CI/CD)](#safely-updating-an-existing-production-deployment-cicd)
-20. [Suggested Future Features](#suggested-future-features)
-21. [Troubleshooting](#troubleshooting)
+13. [Distributed Tracing (OpenTelemetry)](#distributed-tracing-opentelemetry)
+14. [Full API Reference](#full-api-reference)
+15. [File & Function Reference](#file--function-reference)
+16. [Making Changes Safely (A Guide For Beginners)](#making-changes-safely-a-guide-for-beginners)
+17. [Testing Your Changes](#testing-your-changes)
+18. [Security Model](#security-model)
+19. [Running In Production](#running-in-production)
+20. [Safely Updating An Existing Production Deployment (CI/CD)](#safely-updating-an-existing-production-deployment-cicd)
+21. [Suggested Future Features](#suggested-future-features)
+22. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -1693,6 +1694,121 @@ Without Docker" above), install it yourself (e.g.
 `sudo apt install postgresql-client` on Debian/Ubuntu, `brew install
 postgresql` on macOS) or backups/restores will fail with a clear
 "pg_dump is not installed" error.
+
+## Distributed Tracing (OpenTelemetry)
+
+Structured logs (`LOG_FORMAT=json`, see the Environment Variables
+Reference) answer "what happened, on this one request, in this one
+process". They can't easily answer "this request was slow — was that
+time spent in our own code, in a Postgres query, or waiting on a queued
+Celery task?", because that needs the timing of nested operations across
+process boundaries, not a flat list of log lines. That's what tracing
+(`backend/telemetry.py`) is for: every HTTP request, SQL query, Celery
+task, and Redis command becomes a "span" with a start/end time and a
+parent, and every structured log line gets tagged with the trace/span
+that produced it (`otelTraceID`/`otelSpanID`), so you can jump from "a
+user reported error X, here's their `request_id`" straight to the exact
+trace that produced it.
+
+**Off by default** — `OTEL_ENABLED=false`, matching every other opt-in
+flag in this app. Turning it on costs nothing until you also point it at
+somewhere to send spans.
+
+### Try it locally in 3 steps (no Azure account needed)
+
+1. Set `OTEL_ENABLED=true` in your `.env` (see `.env.example`).
+2. `docker compose --profile tracing up` — this also starts a local
+   Jaeger UI (`docker-compose.yml`'s `jaeger` service), which every
+   backend/worker/beat container already points at by default.
+3. Use the app for a bit (log in, check something out, trigger an
+   export), then open **http://localhost:16686**. Pick `backend` (or
+   `backend-worker`) from the Service dropdown, click Find Traces, and
+   click into any one trace to see its full waterfall — the HTTP
+   request span at the top, its child SQL query spans nested underneath,
+   and (if it enqueued one) the Celery task span it kicked off, all in
+   one continuous timeline even though the task ran in a different
+   container.
+
+### Running it in Azure (Application Insights)
+
+`infra/main.bicep` can provision an Application Insights resource for
+you — it's **off by default** (`otelAzureMonitorEnabled=false`), same
+reasoning as everything else in that file's cost-optimized design (see
+its top-of-file comment): nothing is provisioned, and nothing costs
+anything, unless you ask for it.
+
+**On the free tier question:** Application Insights includes **5 GB of
+free data ingestion per month, per Azure billing account** (not per
+resource — it's shared across everything else in that billing account
+already using Log Analytics/Application Insights), with the first 90
+days of retention included at no extra cost on top of that. Past 5 GB,
+it's billed per-GB ingested (roughly a few dollars/GB — check
+[Azure's current Application Insights pricing page](https://azure.microsoft.com/en-us/pricing/details/monitor/)
+for the exact number, since it does change). For an app at this project's
+scale (a small team's asset-tracking tool, not a high-traffic public
+service), 5 GB/month of trace data is a generous amount of headroom —
+you would need a sustained, meaningfully busy workload to get anywhere
+near it. `otelTracesSampleRatio` (default `1.0`, trace everything) is
+there to dial down ingestion further if you ever do.
+
+**To turn it on:**
+
+1. In your GitHub repo, set the **Variable** (not Secret —
+   see `.github/workflows/infra-deploy.yml`'s own comment on why this
+   one isn't sensitive) `OTEL_AZURE_MONITOR_ENABLED=true` and
+   `OTEL_ENABLED=true` (Settings → Secrets and variables → Actions →
+   Variables tab).
+2. Push/re-run `infra-deploy.yml`. This provisions the Application
+   Insights resource (reusing the SAME Log Analytics workspace the app
+   already provisions for container console logs — no second fixed-cost
+   resource) and wires its connection string onto `backend` as a
+   Container Apps secret automatically. You never copy/paste a
+   connection string yourself.
+3. Use the app for a bit, then go monitor it (see below).
+
+**How to actually find your traces once they're flowing (Azure Portal):**
+
+1. Azure Portal → your resource group → the Application Insights
+   resource (named `<your-app-name>-<env>-insights` — also printed as
+   this deploy's `appInsightsName` output, see "Show outputs" in
+   `infra-deploy.yml`'s run).
+2. Left sidebar → **Investigate → Transaction search** (or
+   **Application Map** for a visual service-to-service view, or
+   **Performance** to sort by slowest operations first) — any of these
+   let you search/filter and click into an individual trace's full
+   waterfall, the same view Jaeger showed locally.
+3. For your own queries: left sidebar → **Logs** (this opens a Log
+   Analytics query pane, since Application Insights is workspace-based
+   here — see `infra/main.bicep`'s `appInsights` resource comment). A
+   couple of starting points:
+
+   ```kusto
+   // Slowest 20 backend operations in the last 24 hours
+   requests
+   | where timestamp > ago(24h)
+   | top 20 by duration desc
+   | project timestamp, name, duration, resultCode, cloud_RoleName
+
+   // Follow one specific trace end-to-end (paste a trace ID from the
+   // Transaction search UI, or from a structured log line's otelTraceID)
+   union requests, dependencies
+   | where operation_Id == "<paste trace id here>"
+   | order by timestamp asc
+   | project timestamp, itemType, name, duration, cloud_RoleName
+   ```
+
+   This is the same Log Analytics workspace/query experience
+   `SRE_STRATEGY.md`'s existing alert queries already use for container
+   logs — traces just show up as more tables (`requests`, `dependencies`)
+   in the same place.
+
+### Using something other than Jaeger/Application Insights
+
+`OTEL_EXPORTER_OTLP_ENDPOINT`/`OTEL_EXPORTER_OTLP_HEADERS` (see
+`.env.example`) point at any OTLP/HTTP-compatible collector instead —
+Grafana Cloud, Honeycomb, a self-hosted otel-collector, etc. — and can be
+used alongside Application Insights, not just instead of it, if you want
+spans in two places at once.
 
 ## Full API Reference
 
