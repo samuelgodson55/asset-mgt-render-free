@@ -565,6 +565,81 @@ class Settings(BaseSettings):
     # a Shared Drive, per the docstring above.
     BACKUP_GDRIVE_FOLDER_ID: str = ""
 
+    # --- Distributed tracing (OpenTelemetry) -------------------------------
+    # See backend/telemetry.py's module docstring for the full "why" and
+    # how these wire up. Short version: OTEL_ENABLED is the single master
+    # switch (default OFF -- zero cost, zero behavior/performance change,
+    # matching every other opt-in flag in this file). Flip it on and point
+    # OTEL_EXPORTER_OTLP_ENDPOINT at ANY OTLP/HTTP-compatible backend --
+    # a local Jaeger/otel-collector (see docker-compose.yml's `jaeger`
+    # service), Application Insights' own OTLP ingestion endpoint, Grafana
+    # Cloud, Honeycomb, etc. -- and every FastAPI request, SQLAlchemy
+    # query, Celery task, and Redis command in this process starts
+    # emitting spans automatically, correlated with the existing
+    # structured logs (see logging_config.py's module docstring) via
+    # trace_id/span_id.
+    OTEL_ENABLED: bool = False
+    # service.name resource attribute every span from this process carries
+    # -- what you'll see identifying this app in your tracing backend's UI.
+    # main.py appends nothing to this (it's already "the backend"); the
+    # embedded Celery worker/beat processes append their own "-worker"/
+    # "-beat" suffix on top of this value (see celery_app.py) so a trace
+    # that crosses from an API request into a queued background task is
+    # still easy to tell apart by service name in a trace waterfall view.
+    OTEL_SERVICE_NAME: str = "snipeit-lite-backend"
+    # Free-text version tag attached as the service.version resource
+    # attribute -- bump this alongside CHANGELOG.md/git tags if you want
+    # traces groupable by release; purely cosmetic otherwise.
+    OTEL_SERVICE_VERSION: str = "0.1.0"
+    # The OTLP/HTTP collector endpoint spans are exported to, e.g.
+    # "http://localhost:4318" for a local Jaeger/otel-collector, or your
+    # tracing backend's own OTLP ingestion URL. Empty (the default) means
+    # "nowhere to export to" -- see OTEL_CONSOLE_EXPORTER below for a
+    # zero-infrastructure way to see spans locally instead. Only read at
+    # all when OTEL_ENABLED is true.
+    OTEL_EXPORTER_OTLP_ENDPOINT: str = ""
+    # Comma-separated key=value pairs sent as extra HTTP headers on every
+    # export request -- e.g. "x-honeycomb-team=<api-key>" or
+    # "Authorization=Bearer <token>", whatever your tracing backend's OTLP
+    # endpoint requires for auth. Treated as a secret everywhere this app
+    # is deployed (Container Apps `secrets`, a git-ignored `.env`) since it
+    # commonly carries an API key.
+    OTEL_EXPORTER_OTLP_HEADERS: str = ""
+    # "http/protobuf" (the default, talks to the endpoint above over plain
+    # HTTPS/HTTP -- no extra native dependency, works through any outbound
+    # HTTP proxy/firewall) or "grpc" (lower overhead, but requires the
+    # grpcio package and a raw HTTP/2 connection some corporate networks
+    # block). See telemetry.py's setup_tracing() for where this is read.
+    OTEL_EXPORTER_OTLP_PROTOCOL: str = "http/protobuf"
+    # Fraction of traces actually sampled and exported, applied at the ROOT
+    # span of each trace (ParentBased -- any request whose parent span was
+    # already sampled upstream is always sampled too, regardless of this
+    # ratio, so a trace is never split across sampled/unsampled pieces).
+    # 1.0 (the default) exports every trace; lower it (e.g. 0.1 for ~10%)
+    # if export volume/cost ever becomes a concern at higher traffic.
+    OTEL_TRACES_SAMPLE_RATIO: float = 1.0
+    # Also print every span to stdout as it finishes, in addition to (or
+    # instead of) exporting to OTEL_EXPORTER_OTLP_ENDPOINT. Handy for a
+    # first local smoke-test ("is instrumentation actually firing at all")
+    # with zero collector/Jaeger setup -- noisy, so leave this off anywhere
+    # you're also shipping structured logs to a real aggregator.
+    OTEL_CONSOLE_EXPORTER: bool = False
+    # Routes spans straight to an Azure Application Insights resource
+    # instead of (or alongside) OTEL_EXPORTER_OTLP_ENDPOINT -- the
+    # standard env var name Azure's own tooling (App Service, Azure
+    # Functions, the Azure Monitor OpenTelemetry Distro) already looks
+    # for, kept identical here on purpose so a value copied from the
+    # Azure Portal or `az monitor app-insights component show` just
+    # works. Looks like
+    # "InstrumentationKey=<guid>;IngestionEndpoint=https://<region>.in.applicationinsights.azure.com/".
+    # See infra/main.bicep's `otelAzureMonitorEnabled` param for the
+    # one-line way to have Azure provision the resource and this value
+    # for you, and README.md's "Distributed Tracing" section for how to
+    # actually find your traces once they're flowing. Empty (the
+    # default) skips this exporter entirely -- only read at all when
+    # OTEL_ENABLED is true.
+    APPLICATIONINSIGHTS_CONNECTION_STRING: str = ""
+
     # --- Audit log partition maintenance (services/audit_partition_service.py) --
     # `audit_logs` is a native Postgres table PARTITIONED BY RANGE on
     # `timestamp`, one partition per calendar year (see
@@ -697,6 +772,25 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"Refusing to start: DISPLAY_TIMEZONE '{self.DISPLAY_TIMEZONE}' is not a "
                 "recognized IANA timezone name (e.g. 'Africa/Lagos', 'America/New_York', 'UTC')."
+            )
+        return self
+
+    # -----------------------------------------------------------------
+    # STARTUP CHECK: OTEL_TRACES_SAMPLE_RATIO is a valid fraction
+    # -----------------------------------------------------------------
+    # Same fail-fast-at-import-time reasoning as _enforce_prod_jwt_secret
+    # above: TraceIdRatioBased (see telemetry.py) raises its own ValueError
+    # for an out-of-range ratio, but only the first time OTEL_ENABLED=true
+    # actually builds a TracerProvider -- which could be well after boot.
+    # Checking it here means a typo'd value (e.g. "1.5" or a negative
+    # number) fails the container at startup instead, regardless of
+    # whether OTEL_ENABLED even ends up true.
+    @model_validator(mode="after")
+    def _validate_otel_sample_ratio(self) -> "Settings":
+        if not 0.0 <= self.OTEL_TRACES_SAMPLE_RATIO <= 1.0:
+            raise ValueError(
+                f"Refusing to start: OTEL_TRACES_SAMPLE_RATIO must be between 0.0 and "
+                f"1.0 (got {self.OTEL_TRACES_SAMPLE_RATIO})."
             )
         return self
 

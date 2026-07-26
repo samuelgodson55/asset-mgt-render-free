@@ -56,7 +56,13 @@
 # mode you just built -- that's the "real-time build characteristics" this
 # stage exists to surface.
 # =============================================================================
-FROM node:20-alpine AS frontend-build
+# Node 20 reached end-of-life 2026-04-30 -- no more upstream security
+# patches for it or its Alpine base. Node 22 is the current LTS. This stage
+# is discarded before the image ships (see Stage 2 below), so it never
+# itself sets off the release pipeline's Trivy scan on the final image --
+# bumped anyway so an EOL toolchain isn't quietly used to build every
+# release.
+FROM node:22-alpine AS frontend-build
 
 ARG BUILD_ENV=development
 ENV BUILD_ENV=${BUILD_ENV}
@@ -88,8 +94,18 @@ RUN node build-frontend/build.js /build/frontend-src /build/frontend-out
 # COPY now pulls from the frontend-build stage's *output* directory instead
 # of the raw frontend/ folder on disk -- everything else about how this
 # image serves the site and proxies /api/* is identical.
+#
+# THIS is the image release.yml's Trivy scan actually checks (backend/
+# Dockerfile succeeded fine -- python:3.12-slim is still actively
+# maintained). `nginx:1.27-alpine` is a retired line: nginx has moved on to
+# 1.30 (stable)/1.31 (mainline), so that tag stopped receiving fresh Alpine
+# base rebuilds, and its now-frozen Alpine base accumulated a fixable
+# CRITICAL CVE that a currently-maintained line doesn't have. Pinned to the
+# current stable line instead -- ci.yml's Trivy step now blocks on CRITICAL
+# too (was report-only), so this class of failure surfaces on a normal push
+# instead of only at `git tag` time.
 # =============================================================================
-FROM nginx:1.27-alpine
+FROM nginx:1.30-alpine
 
 # Drop nginx's stock default site -- we ship our own (see below).
 RUN rm -f /etc/nginx/conf.d/default.conf

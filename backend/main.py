@@ -62,9 +62,10 @@ from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 
-from database import init_db, seed_db, get_schema_status
+from database import init_db, seed_db, get_schema_status, engine as db_engine
 from config import settings
 from logging_config import configure_logging
+from telemetry import setup_tracing, shutdown_tracing, instrument_fastapi_app, instrument_sqlalchemy_engine
 from middleware.error_handling import UnhandledExceptionMiddleware
 from middleware.request_context import RequestContextMiddleware
 from middleware.rate_limit import RateLimitMiddleware
@@ -88,6 +89,30 @@ from api.notifications_api import router as notifications_router
 # ---------------------------------------------------------------------------
 configure_logging(settings)
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# DISTRIBUTED TRACING (OpenTelemetry, Operations & Observability requirement)
+# ---------------------------------------------------------------------------
+# A no-op when settings.OTEL_ENABLED is false (the default) -- see
+# telemetry.py's module docstring for the full "why" and exactly what gets
+# instrumented. Deliberately called here, right after configure_logging()
+# and before anything else touches the database or builds `app`: the
+# SQLAlchemy instrumentation below needs the global TracerProvider to
+# already exist to patch `db_engine` correctly, and every span this app
+# would ever create (FastAPI requests, SQL queries) needs the SAME
+# TracerProvider instance, set exactly once.
+#
+# NOTE on uvicorn's `--workers N` (production, see start.sh): each worker
+# process re-imports this ENTIRE module independently (uvicorn's built-in
+# multi-worker mode is genuinely N separate Python processes, each doing
+# its own fresh top-to-bottom import of `main:app` -- not one process
+# forking after this module already ran), so calling setup_tracing() here
+# at plain module level is safe and correctly gives every worker its own
+# TracerProvider. Contrast with celery_app.py, where the SAME call would
+# NOT be safe at plain import time -- see that file's own comment for why
+# Celery's prefork pool needs a `worker_process_init` signal instead.
+setup_tracing(settings)
+instrument_sqlalchemy_engine(db_engine, settings)
 
 app = FastAPI(
     title="Custom Snipe-IT API",
@@ -177,6 +202,19 @@ def on_startup() -> None:
     import services.backup_service as backup_service
 
     backup_service.start_backup_scheduler()
+
+
+@app.on_event("shutdown")
+def on_shutdown() -> None:
+    # Flushes any spans still buffered by telemetry.py's BatchSpanProcessor
+    # and stops its background export thread -- a no-op when
+    # settings.OTEL_ENABLED is false, see shutdown_tracing()'s own
+    # docstring for exactly what this fixes (losing the last few seconds
+    # of spans, and a background-thread-vs-interpreter-teardown race that
+    # otherwise surfaces as a noisy "I/O operation on closed file" error
+    # right as the process exits -- most visible running `pytest` locally
+    # with OTEL_CONSOLE_EXPORTER=true).
+    shutdown_tracing()
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +314,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(SecurityHeadersMiddleware)
+
+# TRACING -- deliberately called LAST, after every `app.add_middleware(...)`
+# call above: per this file's own "MIDDLEWARE STACK" comment, the LAST
+# middleware added ends up OUTERMOST, seeing every request first and every
+# response last. FastAPIInstrumentor.instrument_app() adds its own ASGI
+# middleware the same way (add_middleware under the hood) -- placing it
+# here makes the resulting span cover the FULL request lifecycle (CORS,
+# rate limiting, security headers, and the actual route handler alike),
+# not just whatever happened to run after some earlier-added layer. A
+# no-op when settings.OTEL_ENABLED is false -- see telemetry.py.
+instrument_fastapi_app(app, settings)
 
 # --- OPENAPI CLEANUP ---
 # FastAPI auto-names the CSV-import endpoint's implicit multipart schema
