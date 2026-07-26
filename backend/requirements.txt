@@ -6,7 +6,7 @@ pwdlib[argon2]==0.2.1
 pyjwt==2.9.0
 pyotp==2.9.0
 cryptography==43.0.1
-python-multipart==0.0.9
+python-multipart==0.0.32
 pydantic-settings==2.4.0
 alembic==1.13.2
 reportlab==4.2.5
