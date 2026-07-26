@@ -94,24 +94,24 @@ jobs:
       TF_VAR_postgres_password: ${{ secrets.POSTGRES_PASSWORD }}
       TF_VAR_jwt_secret_key: ${{ secrets.JWT_SECRET_KEY }}
       TF_VAR_root_admin_bootstrap_password: ${{ secrets.ROOT_ADMIN_BOOTSTRAP_PASSWORD }}
-      TF_VAR_notifications_enabled: ${{ vars.NOTIFICATIONS_ENABLED }}
+      TF_VAR_notifications_enabled: ${{ vars.NOTIFICATIONS_ENABLED || 'false' }}
       TF_VAR_smtp_host: ${{ secrets.SMTP_HOST }}
       TF_VAR_smtp_username: ${{ secrets.SMTP_USERNAME }}
       TF_VAR_smtp_password: ${{ secrets.SMTP_PASSWORD }}
       TF_VAR_smtp_from_email: ${{ secrets.SMTP_FROM_EMAIL }}
       TF_VAR_admin_notification_emails: ${{ secrets.ADMIN_NOTIFICATION_EMAILS }}
-      TF_VAR_enable_auto_backup: ${{ vars.ENABLE_AUTO_BACKUP }}
-      TF_VAR_backup_gdrive_enabled: ${{ vars.BACKUP_GDRIVE_ENABLED }}
+      TF_VAR_enable_auto_backup: ${{ vars.ENABLE_AUTO_BACKUP || 'true' }}
+      TF_VAR_backup_gdrive_enabled: ${{ vars.BACKUP_GDRIVE_ENABLED || 'false' }}
       TF_VAR_backup_gdrive_oauth_client_id: ${{ secrets.BACKUP_GDRIVE_OAUTH_CLIENT_ID }}
       TF_VAR_backup_gdrive_oauth_client_secret: ${{ secrets.BACKUP_GDRIVE_OAUTH_CLIENT_SECRET }}
       TF_VAR_backup_gdrive_oauth_refresh_token: ${{ secrets.BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN }}
       TF_VAR_backup_gdrive_folder_id: ${{ secrets.BACKUP_GDRIVE_FOLDER_ID }}
-      TF_VAR_otel_enabled: ${{ vars.OTEL_ENABLED }}
+      TF_VAR_otel_enabled: ${{ vars.OTEL_ENABLED || 'false' }}
       TF_VAR_otel_service_name: ${{ vars.OTEL_SERVICE_NAME }}
       TF_VAR_otel_exporter_otlp_endpoint: ${{ vars.OTEL_EXPORTER_OTLP_ENDPOINT }}
       TF_VAR_otel_exporter_otlp_headers: ${{ secrets.OTEL_EXPORTER_OTLP_HEADERS }}
       TF_VAR_otel_traces_sample_ratio: ${{ vars.OTEL_TRACES_SAMPLE_RATIO }}
-      TF_VAR_otel_console_exporter: ${{ vars.OTEL_CONSOLE_EXPORTER }}
+      TF_VAR_otel_console_exporter: ${{ vars.OTEL_CONSOLE_EXPORTER || 'false' }}
       TF_VAR_applicationinsights_connection_string: ${{ secrets.APPLICATIONINSIGHTS_CONNECTION_STRING }}
       TF_VAR_dockerhub_backend_image: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend${{ inputs.environment == 'vm-staging' && '-staging' || '' }}
       TF_VAR_dockerhub_frontend_image: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-frontend${{ inputs.environment == 'vm-staging' && '-staging' || '' }}
