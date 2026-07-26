@@ -105,7 +105,7 @@ RUN node build-frontend/build.js /build/frontend-src /build/frontend-out
 # too (was report-only), so this class of failure surfaces on a normal push
 # instead of only at `git tag` time.
 # =============================================================================
-FROM nginx:1.30-alpine
+FROM nginx:1.31-alpine
 
 # Drop nginx's stock default site -- we ship our own (see below).
 RUN rm -f /etc/nginx/conf.d/default.conf
