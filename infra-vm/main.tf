@@ -477,7 +477,12 @@ resource "azurerm_recovery_services_vault" "this" {
   resource_group_name = azurerm_resource_group.this.name
   location            = azurerm_resource_group.this.location
   sku                 = "Standard"
-  soft_delete_enabled = false
+  # Azure now makes soft delete mandatory on new Recovery Services Vaults --
+  # trying to disable it (soft_delete_enabled = false, the old default here)
+  # fails the vault's create/update call with
+  # BMSUserErrorDisablingSoftDeleteStateNotAllowed. Leave it enabled (the
+  # provider default -- explicit here just to document why).
+  soft_delete_enabled = true
   tags                = local.common_tags
 }
 
