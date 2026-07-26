@@ -51,10 +51,10 @@ jobs:
       ENV_NAME: ${{ github.event.inputs.target == 'production' && 'prod' || 'staging' }}
       ENV_SUFFIX: ${{ github.event.inputs.target == 'production' && '' || '-staging' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Azure login (OIDC, no secret)
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -158,6 +158,17 @@ jobs:
       # never set any of them. Set only the ones you want to change from
       # their .env.example default; everything else keeps working exactly
       # as before these lines existed.
+      #
+      # OTEL_ENABLED / OTEL_AZURE_MONITOR_ENABLED / OTEL_SERVICE_NAME /
+      # OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_TRACES_SAMPLE_RATIO follow that
+      # same repo-Variables pattern -- distributed tracing (see
+      # backend/telemetry.py's module docstring) stays off by default,
+      # matching every other opt-in flag deployed by this workflow.
+      # OTEL_EXPORTER_OTLP_HEADERS is the one exception, read from Secrets
+      # instead (it commonly carries an API key -- see
+      # infra/main.bicep's `otelExporterOtlpHeaders` param). See
+      # README.md's "Distributed Tracing" section for what to actually set
+      # here to turn this on end-to-end.
       - name: Deploy Bicep
         run: |
           az deployment group create \
@@ -211,7 +222,13 @@ jobs:
               currencyCode="${{ vars.CURRENCY_CODE || 'NGN' }}" \
               catalogShowStockToStaffCustomer=${{ vars.CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER == 'true' }} \
               backupHoursUtc="${{ vars.BACKUP_HOURS_UTC || '3' }}" \
-              backupRetentionCount=${{ vars.BACKUP_RETENTION_COUNT || 7 }}
+              backupRetentionCount=${{ vars.BACKUP_RETENTION_COUNT || 7 }} \
+              otelEnabled=${{ vars.OTEL_ENABLED == 'true' }} \
+              otelServiceName="${{ vars.OTEL_SERVICE_NAME || 'snipeit-lite-backend' }}" \
+              otelExporterOtlpEndpoint="${{ vars.OTEL_EXPORTER_OTLP_ENDPOINT }}" \
+              otelExporterOtlpHeaders="${{ secrets.OTEL_EXPORTER_OTLP_HEADERS }}" \
+              otelTracesSampleRatio="${{ vars.OTEL_TRACES_SAMPLE_RATIO || '1.0' }}" \
+              otelAzureMonitorEnabled=${{ vars.OTEL_AZURE_MONITOR_ENABLED == 'true' }}
 
       - name: Show outputs
         run: |

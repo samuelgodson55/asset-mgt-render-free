@@ -51,7 +51,7 @@ jobs:
       frontend: ${{ steps.filter.outputs.frontend }}
       infra: ${{ steps.filter.outputs.infra }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Need real history to diff against, not just the tip commit
           # actions/checkout gives you by default (fetch-depth: 1).
@@ -124,9 +124,9 @@ jobs:
     if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '20'
           cache: 'npm'
@@ -205,9 +205,9 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
           cache: 'pip'
@@ -261,11 +261,11 @@ jobs:
     name: Gitleaks secret scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Gitleaks
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -288,7 +288,7 @@ jobs:
     # Runs in ~10 seconds, well ahead of build-and-scan-images' multi-minute
     # Docker build, so a broken nginx config fails fast.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install nginx + gettext (envsubst)
         run: sudo apt-get update -qq && sudo apt-get install -y -qq nginx-light gettext-base
@@ -322,7 +322,7 @@ jobs:
       (needs.changes.outputs.backend == 'true' || needs.changes.outputs.frontend == 'true') &&
       needs.backend.result != 'failure' && needs.frontend.result != 'failure' && needs.nginx-config.result != 'failure'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Build backend image
         run: docker build -t snipeit-backend:ci ./backend
@@ -395,19 +395,52 @@ jobs:
         # v0.35.0 predates the compromise and is protected by GitHub's
         # immutable-releases feature. See
         # https://github.com/advisories/GHSA-69fq-xp46-6x23
+        #
+        # exit-code now blocks on CRITICAL (was report-only for everything)
+        # -- see release.yml's Trivy step for why: a floating/retired base
+        # image tag (nginx:1.27-alpine) accumulated a CRITICAL CVE that
+        # this report-only gate never caught, so it only ever surfaced at
+        # `git tag` time in release.yml, which DOES block. Catching it here
+        # too means a push fails fast instead of a `git tag` push
+        # discovering it hours/days later. HIGH stays report-only (there's
+        # a real backlog to triage before blocking on it). ignore-unfixed
+        # skips CVEs with no available patch yet -- those can't be
+        # resolved by bumping anything, so failing on them would just
+        # block releases indefinitely with no actionable fix.
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
         with:
           image-ref: snipeit-backend:ci
-          severity: 'CRITICAL,HIGH'
-          exit-code: '0' # report, don't hard-fail CI on findings -- tighten to '1' once the backlog is triaged
+          severity: 'CRITICAL'
+          exit-code: '1'
+          ignore-unfixed: true
+          format: 'table'
+
+      - name: Trivy scan -- backend (HIGH, report-only)
+        # Separate non-blocking step so HIGH findings still show up in
+        # logs without failing CI -- see the comment above.
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          image-ref: snipeit-backend:ci
+          severity: 'HIGH'
+          exit-code: '0'
           format: 'table'
 
       - name: Trivy scan -- frontend
-        # See the backend Trivy step above for why this is pinned to a SHA.
+        # See the backend Trivy step above for why this is pinned to a SHA,
+        # and why CRITICAL now blocks here instead of only at release time.
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
         with:
           image-ref: snipeit-frontend:ci
-          severity: 'CRITICAL,HIGH'
+          severity: 'CRITICAL'
+          exit-code: '1'
+          ignore-unfixed: true
+          format: 'table'
+
+      - name: Trivy scan -- frontend (HIGH, report-only)
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          image-ref: snipeit-frontend:ci
+          severity: 'HIGH'
           exit-code: '0'
           format: 'table'
 
@@ -418,7 +451,7 @@ jobs:
     if: needs.changes.outputs.infra == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: az bicep build (syntax + type check)
         run: |
           az bicep build --file infra/main.bicep --stdout > /dev/null
