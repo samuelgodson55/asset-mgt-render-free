@@ -62,7 +62,7 @@
 # itself sets off the release pipeline's Trivy scan on the final image --
 # bumped anyway so an EOL toolchain isn't quietly used to build every
 # release.
-FROM node:22-alpine AS frontend-build
+FROM node:26-alpine AS frontend-build
 
 ARG BUILD_ENV=development
 ENV BUILD_ENV=${BUILD_ENV}
