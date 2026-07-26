@@ -996,6 +996,48 @@ resource postgresDatabase 'Microsoft.DBforPostgreSQL/flexibleServers/databases@2
   }
 }
 
+// "Allow public access from Azure services" -- the well-known 0.0.0.0/0.0.0.0
+// magic range Azure recognizes specifically for this purpose (it does NOT
+// open the server to the public internet at large; only to Azure's own
+// backbone, which is what `backend`/`migrate` connect over as Container
+// Apps). This is the simplest way for `env`'s Container Apps -- which do
+// NOT have static outbound IPs on the Consumption plan -- to reach a
+// publicly-networked Flexible Server without VNet integration.
+resource postgresFirewallAllowAzure 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2024-08-01' = {
+  parent: postgresServer
+  name: 'AllowAllAzureServicesAndResourcesWithinAzureIps'
+  properties: {
+    startIpAddress: '0.0.0.0'
+    endIpAddress: '0.0.0.0'
+  }
+}
+
+// Optional extra firewall rule for direct `psql`/pgAdmin/etc. access from
+// your own machine -- see `postgresAdminClientIp`'s param description.
+// Skipped entirely (no resource created) when that parameter is left empty.
+resource postgresFirewallAllowAdminIp 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2024-08-01' = if (!empty(postgresAdminClientIp)) {
+  parent: postgresServer
+  name: 'AllowAdminClientIp'
+  properties: {
+    startIpAddress: postgresAdminClientIp
+    endIpAddress: postgresAdminClientIp
+  }
+}
+
+// The actual application database. Flexible Server provisions a default
+// `postgres` database on create, but this app's `DATABASE_URL` (below)
+// always points at `asset_db` specifically -- same name the old `db`
+// Container App used, and same name local Docker Compose/Render use, so
+// no application code needed to change.
+resource postgresDatabase 'Microsoft.DBforPostgreSQL/flexibleServers/databases@2024-08-01' = {
+  parent: postgresServer
+  name: 'asset_db'
+  properties: {
+    charset: 'UTF8'
+    collation: 'en_US.utf8'
+  }
+}
+
 // ---------------------------------------------------------------------------
 // `redis` -- official image from Docker Hub. Internal-only TCP ingress
 // (`ingress.external: false`), in the shared `env` -- never gets a public
