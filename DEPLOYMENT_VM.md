@@ -149,10 +149,28 @@ You now have everything steps 6-9 need: `CLOUDFLARE_API_TOKEN`,
 `SSH_ACCESS_ALLOWED_EMAILS`, `CLOUDFLARE_ORIGIN_CERT`,
 `CLOUDFLARE_ORIGIN_CERT_KEY`, and `CUSTOM_DOMAIN`.
 
-> **Testing without a domain yet.** Cloudflare's free "Quick Tunnel" needs
-> no account or zone at all:
+> **Testing without a domain yet.** This is a **local-machine smoke test,
+> not a VM/Terraform step** — nothing here needs a VM provisioned, a
+> Cloudflare account, or any of steps 2a-2d's credentials. Cloudflare's
+> free "Quick Tunnel" needs no account or zone at all; it just needs the
+> app already running via the *root* `docker-compose.yml` (not
+> `docker-compose.vm.yml`) on your own machine:
 > ```bash
-> docker run --rm --network <project>_default cloudflare/cloudflared:2025.6.1 \
+> docker compose up --build -d      # from the repo root, if it isn't already running
+> docker compose ps                 # confirm "frontend" is Up
+> ```
+> `<project>_default` in the command below is a placeholder for Compose's
+> auto-generated network name, which depends on the name of the folder
+> you cloned this repo into — it is **not** literally the word
+> `<project>`. Find the real value with:
+> ```bash
+> docker network ls | grep default
+> ```
+> (typically `<folder-name>_default`, e.g. `snipe-it-lite_default` if you
+> cloned into a folder called `snipe-it-lite` — Compose lowercases the
+> folder name and strips characters outside `[a-z0-9_-]`). Then run:
+> ```bash
+> docker run --rm --network <the-network-name-from-above> cloudflare/cloudflared:2025.6.1 \
 >   tunnel --url http://frontend:80
 > ```
 > This prints a random `https://<random-words>.trycloudflare.com` URL you
@@ -161,7 +179,9 @@ You now have everything steps 6-9 need: `CLOUDFLARE_API_TOKEN`,
 > the setup above: the hostname changes every restart, and Cloudflare
 > Access (the SSH gate in step 2d) can't attach to a hostname outside a
 > zone you control. Treat it as a smoke test while you register/migrate a
-> real domain, not as the deployed configuration.
+> real domain, not as the deployed configuration — it doesn't provision
+> anything, doesn't touch Terraform state, and the tunnel disappears the
+> moment you Ctrl-C it (`--rm`).
 
 **Once you've applied Terraform (step 8), reaching the VM looks like
 this** — install
@@ -189,8 +209,19 @@ public internet, since there's no inbound rule for port 22 on the NSG by
 default.
 
 ```bash
-ssh-keygen -t ed25519 -C "snipeit-lite-vm-deploy" -f ./snipeit_vm_deploy_key -N ""
+ssh-keygen -t rsa -b 4096 -C "snipeit-lite-vm-deploy" -f ./snipeit_vm_deploy_key -N ""
 ```
+
+> **Why RSA, not ed25519:** Azure's `admin_ssh_key` (the field
+> `azurerm_linux_virtual_machine` writes this into) only accepts RSA
+> public keys — the Azure Compute API rejects ed25519 outright with
+> `the provided ssh-ed25519 SSH key is not supported. Only RSA SSH keys
+> are supported by Azure`, even though ed25519 works everywhere else in
+> this stack (Cloudflare Access, GitHub, etc.). If you already generated
+> an ed25519 key by mistake, just re-run the command above and re-paste
+> the resulting `.pub` into `VM_SSH_PUBLIC_KEY` before your next
+> `terraform apply`.
+
 
 This produces two files in your current directory:
 
