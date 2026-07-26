@@ -1,0 +1,172 @@
+# .github/workflows/infra-deploy-vm.yml
+# -----------------------------------------------------------------------------
+# Provisions/updates/destroys the Azure VM infra stack in infra-vm/ via
+# Terraform. Deliberately NOT triggered by a plain `git push` (unlike
+# ci.yml) -- infra changes here are rarer, higher-blast-radius, and each
+# apply's plan output should be read before it runs, so this is
+# workflow_dispatch-only, mirroring infra-deploy.yml's own pattern for the
+# Container Apps/Bicep path.
+#
+# Every variable infra-vm/variables.tf declares is supplied here as a
+# TF_VAR_<name> environment variable sourced from a GitHub Environment's
+# encrypted secrets -- Terraform automatically maps TF_VAR_foo to a
+# variable named "foo", so no generated .tfvars file (and no risk of one
+# accidentally being committed) is needed at all.
+# -----------------------------------------------------------------------------
+name: Deploy VM Infrastructure (Terraform)
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Which environment to target -- selects both the GitHub Environment secrets are read from AND infra-vm/variables.tf''s environment_name. Deliberately named "vm-staging", not "staging" -- the Container Apps path (infra-deploy.yml) already owns a GitHub Environment literally called "staging", and reusing that name here would mean both paths fight over the same AZURE_CLIENT_ID/AZURE_TENANT_ID/AZURE_SUBSCRIPTION_ID (and POSTGRES_PASSWORD, JWT_SECRET_KEY, etc.) secret values -- see DEPLOYMENT_VM.md''s "Using both deployment targets" section.'
+        required: true
+        type: choice
+        options: [vm-staging, prod]
+      action:
+        description: 'Terraform action to run.'
+        required: true
+        type: choice
+        options: [plan, apply, destroy]
+        default: plan
+
+concurrency:
+  # Only one Terraform run per environment at a time -- two concurrent
+  # applies against the same state corrupt each other's plan.
+  group: infra-vm-${{ inputs.environment }}
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+defaults:
+  run:
+    working-directory: infra-vm
+
+jobs:
+  terraform:
+    name: terraform ${{ inputs.action }} (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+    # Per-environment secrets ("vm-staging" vs "prod" use separate Azure AD
+    # App Registrations/federated credentials and separate app secrets,
+    # never shared -- and "vm-staging" is a distinct GitHub Environment
+    # from the Container Apps path's own "staging", precisely so the two
+    # paths never fight over the same secret values; see this workflow's
+    # `environment` input description above) -- see
+    # deploy-azure-staging.yml's `migrate`/`deploy` jobs for why declaring
+    # `environment:` here is what actually makes GitHub inject that
+    # Environment's secrets into this job at all.
+    environment: ${{ inputs.environment }}
+    env:
+      # ---- Terraform provider auth (via `az login` below, use_cli = true
+      # in infra-vm/versions.tf -- no client secret ever touches disk) ----
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # ---- Every infra-vm/variables.tf input, minus the ones with a
+      # sensible default left alone (location, vm_size, disk sizes, etc --
+      # override any of those too by adding more TF_VAR_* lines here if a
+      # given environment needs to differ) ----
+      TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      # infra-vm/variables.tf's environment_name only accepts "prod" or
+      # "staging" (it feeds Azure resource names, e.g.
+      # rg-snipeit-lite-staging-vm -- see that variable's own validation
+      # block) -- NOT "vm-staging", which is a GitHub-Environment-secrets
+      # concept only. This maps the GitHub Environment name back down to
+      # the Terraform-internal one.
+      TF_VAR_environment_name: ${{ inputs.environment == 'prod' && 'prod' || 'staging' }}
+      TF_VAR_ssh_public_key: ${{ secrets.VM_SSH_PUBLIC_KEY }}
+      # OPTIONAL break-glass only -- leave this secret unset entirely for
+      # the normal case (no inbound port 22 on the NSG at all, reached
+      # instead via the Cloudflare Tunnel below). Only set
+      # SSH_ALLOWED_SOURCE_IPS if you specifically want a temporary
+      # direct-SSH fallback -- see infra-vm/variables.tf's
+      # ssh_allowed_source_ips comment.
+      TF_VAR_ssh_allowed_source_ips: ${{ secrets.SSH_ALLOWED_SOURCE_IPS || '[]' }} # JSON list, e.g. ["203.0.113.4/32"] -- break-glass only, see variables.tf
+      TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      TF_VAR_cloudflare_account_id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      TF_VAR_cloudflare_zone_id: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      TF_VAR_cloudflare_zone_name: ${{ vars.CLOUDFLARE_ZONE_NAME }} # repo/environment Variable, not a secret -- e.g. "example.com"
+      TF_VAR_ssh_access_allowed_emails: ${{ secrets.SSH_ACCESS_ALLOWED_EMAILS }} # JSON list, e.g. ["you@example.com"]
+      TF_VAR_cloudflare_origin_cert: ${{ secrets.CLOUDFLARE_ORIGIN_CERT }}
+      TF_VAR_cloudflare_origin_cert_key: ${{ secrets.CLOUDFLARE_ORIGIN_CERT_KEY }}
+      TF_VAR_custom_domain: ${{ vars.CUSTOM_DOMAIN }} # repo/environment Variable, not a secret -- REQUIRED now, must be a hostname in the cloudflare_zone_id zone above
+      TF_VAR_postgres_password: ${{ secrets.POSTGRES_PASSWORD }}
+      TF_VAR_jwt_secret_key: ${{ secrets.JWT_SECRET_KEY }}
+      TF_VAR_root_admin_bootstrap_password: ${{ secrets.ROOT_ADMIN_BOOTSTRAP_PASSWORD }}
+      TF_VAR_notifications_enabled: ${{ vars.NOTIFICATIONS_ENABLED }}
+      TF_VAR_smtp_host: ${{ secrets.SMTP_HOST }}
+      TF_VAR_smtp_username: ${{ secrets.SMTP_USERNAME }}
+      TF_VAR_smtp_password: ${{ secrets.SMTP_PASSWORD }}
+      TF_VAR_smtp_from_email: ${{ secrets.SMTP_FROM_EMAIL }}
+      TF_VAR_admin_notification_emails: ${{ secrets.ADMIN_NOTIFICATION_EMAILS }}
+      TF_VAR_enable_auto_backup: ${{ vars.ENABLE_AUTO_BACKUP }}
+      TF_VAR_backup_gdrive_enabled: ${{ vars.BACKUP_GDRIVE_ENABLED }}
+      TF_VAR_backup_gdrive_oauth_client_id: ${{ secrets.BACKUP_GDRIVE_OAUTH_CLIENT_ID }}
+      TF_VAR_backup_gdrive_oauth_client_secret: ${{ secrets.BACKUP_GDRIVE_OAUTH_CLIENT_SECRET }}
+      TF_VAR_backup_gdrive_oauth_refresh_token: ${{ secrets.BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN }}
+      TF_VAR_backup_gdrive_folder_id: ${{ secrets.BACKUP_GDRIVE_FOLDER_ID }}
+      TF_VAR_otel_enabled: ${{ vars.OTEL_ENABLED }}
+      TF_VAR_otel_service_name: ${{ vars.OTEL_SERVICE_NAME }}
+      TF_VAR_otel_exporter_otlp_endpoint: ${{ vars.OTEL_EXPORTER_OTLP_ENDPOINT }}
+      TF_VAR_otel_exporter_otlp_headers: ${{ secrets.OTEL_EXPORTER_OTLP_HEADERS }}
+      TF_VAR_otel_traces_sample_ratio: ${{ vars.OTEL_TRACES_SAMPLE_RATIO }}
+      TF_VAR_otel_console_exporter: ${{ vars.OTEL_CONSOLE_EXPORTER }}
+      TF_VAR_applicationinsights_connection_string: ${{ secrets.APPLICATIONINSIGHTS_CONNECTION_STRING }}
+      TF_VAR_dockerhub_backend_image: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend${{ inputs.environment == 'vm-staging' && '-staging' || '' }}
+      TF_VAR_dockerhub_frontend_image: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-frontend${{ inputs.environment == 'vm-staging' && '-staging' || '' }}
+      TF_VAR_dockerhub_username: ${{ secrets.DOCKERHUB_USERNAME }}
+      TF_VAR_dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Azure login (federated OIDC -- no client secret)
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+
+      - name: terraform init
+        run: terraform init -input=false
+
+      - name: terraform fmt -check
+        # Report-only -- a formatting nit shouldn't block an otherwise-good
+        # apply, but it's worth seeing in the log. Run `terraform fmt
+        # infra-vm/` locally before pushing to keep this quiet.
+        run: terraform fmt -check -recursive || true
+
+      - name: terraform validate
+        run: terraform validate
+
+      - name: terraform plan
+        if: inputs.action == 'plan' || inputs.action == 'apply'
+        run: terraform plan -input=false -out=tfplan
+
+      - name: terraform apply
+        if: inputs.action == 'apply'
+        run: terraform apply -input=false -auto-approve tfplan
+
+      - name: terraform destroy
+        if: inputs.action == 'destroy'
+        # No -auto-approve safety net removed here on purpose -- the
+        # `environment: ${{ inputs.environment }}` above is exactly what
+        # lets you attach a GitHub Environment protection rule (required
+        # reviewer) to "prod" so a destroy against production needs a
+        # second person's approval before this step ever runs, not just a
+        # Terraform flag.
+        run: terraform destroy -input=false -auto-approve
+
+      - name: Print outputs
+        if: inputs.action == 'apply'
+        run: |
+          echo "## Terraform outputs" >> "$GITHUB_STEP_SUMMARY"
+          terraform output -json | jq -r 'to_entries[] | "- **\(.key)**: `\(.value.value)`"' >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Next: set VM_HOST to the ssh_hostname output above (NOT public_ip_address/azure_fqdn -- those are break-glass only, see infra-vm/outputs.tf), plus CF_ACCESS_CLIENT_ID/CF_ACCESS_CLIENT_SECRET (cloudflare_ci_service_token_id/_secret outputs above) as secrets for deploy-azure-vm.yml, then run that workflow -- see DEPLOYMENT_VM.md steps 7-9." >> "$GITHUB_STEP_SUMMARY"

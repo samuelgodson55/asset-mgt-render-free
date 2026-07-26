@@ -40,3 +40,4 @@ npm-debug.log*
 # --- Local database dumps / backups, if you ever pull one down for debugging ---
 *.sql
 *.dump
+snipeit_vm_deploy_key*

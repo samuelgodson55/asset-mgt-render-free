@@ -110,6 +110,27 @@ services:
 
   backend:
     build: ./backend
+    # BUG FIX -- worker container logging "ModuleNotFoundError: No module
+    # named 'telemetry'" (or any other import that exists in backend/ but
+    # not in the worker's running container) after a rebuild that only
+    # touched `backend`. Root cause: `backend`, `worker`, and `beat` all
+    # build from the exact same Dockerfile/context (`build: ./backend`),
+    # but WITHOUT an explicit `image:` name, Compose tags each service's
+    # build output separately (e.g. `<project>-backend`, `<project>-
+    # worker`, `<project>-beat`) -- three independently cached images
+    # that happen to start out identical, but have no way to stay that
+    # way. Running `docker compose build backend` (or `up --build
+    # backend`) alone -- a completely reasonable thing to do when only
+    # iterating on API code -- rebuilds ONLY that one tag; `worker`/`beat`
+    # keep running whatever they were last built from, however stale,
+    # and silently miss anything added to backend/ since (a new module
+    # like telemetry.py, a new dependency in requirements.txt, ...).
+    #
+    # Fix: give all three the SAME explicit `image:` tag below. Compose
+    # then builds it once and every service that references this tag
+    # runs that identical, freshly-built image -- there is no longer a
+    # separate `worker`/`beat` image that CAN go stale on its own.
+    image: snipeit-lite-backend:local
     # NOTE: no `container_name` here (unlike the single-instance `db` and
     # `redis` services above) -- a fixed container name can only ever be
     # used by ONE running container at a time, which blocks `docker
@@ -326,6 +347,10 @@ services:
   # directly, only via the job queue.
   worker:
     build: ./backend
+    # Same explicit tag as `backend` above -- see that service's own
+    # comment for the full "why": this is what actually prevents `worker`
+    # from ever running a stale image relative to `backend` again.
+    image: snipeit-lite-backend:local
     # No `container_name` here either (see `backend` service's comment
     # above) -- this is what lets you run
     # `docker compose up --scale worker=3` during peak load (see
@@ -446,6 +471,9 @@ services:
   # safe to scale to N replicas above.
   beat:
     build: ./backend
+    # Same explicit tag as `backend`/`worker` above -- see `backend`'s own
+    # comment for the full "why".
+    image: snipeit-lite-backend:local
     restart: unless-stopped
     command: ["celery", "-A", "celery_app", "beat", "--loglevel=info"]
     environment:

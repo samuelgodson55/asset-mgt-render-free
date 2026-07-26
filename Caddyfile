@@ -1,0 +1,93 @@
+# =============================================================================
+# Caddyfile
+# -----------------------------------------------------------------------------
+# Caddy's ONLY reachable path in is the `cloudflared` container over the
+# internal Docker network (see docker-compose.vm.yml's `cloudflared` service
+# and infra-vm/main.tf's "Cloudflare Tunnel" section) -- there is, on
+# purpose, no host port published for Caddy anymore, and no inbound NSG
+# rule on the VM for 80/443 either. Real visitors' TLS terminates at
+# Cloudflare's edge (free, automatic); Caddy then presents a Cloudflare
+# Origin CA certificate for the SECOND, inner hop from cloudflared to here
+# -- "Full (strict)" end-to-end encryption, with no ACME/Let's Encrypt step
+# on this VM at all since nothing but Cloudflare's edge ever validates that
+# cert. See DEPLOYMENT_VM.md's "Set up Cloudflare Tunnel" section for how
+# cloudflare-origin.pem/-key.pem (mounted below) get onto this VM.
+# =============================================================================
+
+{$DOMAIN} {
+	# Cloudflare's Origin CA cert -- a 15-year cert that only Cloudflare's
+	# edge (not real browsers) is ever asked to validate, since browsers
+	# only ever see Cloudflare's OWN edge certificate for {$DOMAIN}. Written
+	# by cloud-init from the cloudflare_origin_cert/_key Terraform
+	# variables; regenerate and redeploy both files together if this ever
+	# needs rotating (Cloudflare's dashboard shows no expiry warning of its
+	# own for these -- track the 15-year date yourself).
+	tls /etc/caddy/certs/cloudflare-origin.pem /etc/caddy/certs/cloudflare-origin-key.pem
+
+	# Everything the app needs -- the SPA, its static assets, and /api/* --
+	# is already served by ONE upstream (`frontend`'s nginx, which proxies
+	# /api/* on to `backend:8000` itself -- see
+	# nginx/default.conf.template). Caddy only needs to know about that
+	# single upstream; it never talks to `backend` directly.
+	reverse_proxy frontend:80 {
+		# CF-Connecting-IP is the real visitor's IP as Cloudflare's edge
+		# saw it -- {remote_host} here would just be the `cloudflared`
+		# container's internal Docker IP, since that's now the only thing
+		# that ever connects to Caddy directly. This is what the app's own
+		# request logs and rate limiter (see backend/config.py's
+		# LOGIN_RATE_LIMIT_* settings) see as the client IP.
+		header_up X-Real-IP {header.CF-Connecting-IP}
+		header_up X-Forwarded-For {header.CF-Connecting-IP}
+		header_up X-Forwarded-Proto {scheme}
+	}
+
+	encode gzip zstd
+
+	# A handful of hardening headers Caddy doesn't set by default. HSTS in
+	# particular tells browsers to remember "always use HTTPS for this
+	# domain" for 6 months -- fine here since Cloudflare's edge (and this
+	# inner hop) are the only paths in, ever.
+	header {
+		Strict-Transport-Security "max-age=15552000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}
+
+# -----------------------------------------------------------------------------
+# TESTING ONLY: plain HTTP, for Cloudflare Quick Tunnels
+# -----------------------------------------------------------------------------
+# Used only when docker-compose.vm.yml's `cloudflared` falls back to a free
+# *.trycloudflare.com Quick Tunnel (no CLOUDFLARE_TUNNEL_TOKEN set yet --
+# e.g. before you own a domain or have wired up the full Cloudflare Tunnel
+# in main.tf). A Quick Tunnel still terminates real TLS at Cloudflare's
+# edge for the visitor, so this plain-HTTP inner hop is no less safe than
+# the {$DOMAIN} block above's HTTPS inner hop -- both are equally
+# unreachable by anyone except the `cloudflared` container itself, since
+# neither port is ever published to the host (see docker-compose.vm.yml).
+# It's plain HTTP purely because a Quick Tunnel's hostname is random and
+# throwaway, so there's no stable name to issue an Origin CA cert for.
+#
+# Once you've got custom_domain wired up in terraform.tfvars and
+# CLOUDFLARE_TUNNEL_TOKEN is set, `cloudflared` stops using this block
+# entirely and switches to the named Tunnel + {$DOMAIN} above -- see
+# DEPLOYMENT_VM.md's "Test with a free Cloudflare subdomain first" section.
+# -----------------------------------------------------------------------------
+:80 {
+	reverse_proxy frontend:80 {
+		header_up X-Real-IP {header.CF-Connecting-IP}
+		header_up X-Forwarded-For {header.CF-Connecting-IP}
+		header_up X-Forwarded-Proto https
+	}
+	encode gzip zstd
+	log {
+		output stdout
+		format json
+	}
+}

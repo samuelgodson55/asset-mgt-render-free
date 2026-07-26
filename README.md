@@ -535,10 +535,36 @@ snipe-it-lite/
 │       │                                # scan already done by release.yml, and
 │       │                                # automatic rollback on a failed smoke
 │       │                                # test
-│       └── infra-deploy.yml            # One-time/occasional: provisions or
-│                                          # updates infra/main.bicep itself
-│                                          # (separate from the workflows
-│                                          # above, which only ship new images)
+│       ├── infra-deploy.yml            # One-time/occasional: provisions or
+│       │                                  # updates infra/main.bicep itself
+│       │                                  # (separate from the workflows
+│       │                                  # above, which only ship new images)
+│       ├── deploy-azure-vm.yml         # VM-path equivalent of
+│       │                                  # deploy-azure-staging.yml/
+│       │                                  # deploy-azure-production.yml above --
+│       │                                  # build + push both images, blocking
+│       │                                  # Trivy scan, SSH over the Cloudflare
+│       │                                  # Tunnel, sync docker-compose.vm.yml/
+│       │                                  # Caddyfile, migrate, smoke test
+│       ├── infra-deploy-vm.yml         # VM-path equivalent of infra-deploy.yml --
+│       │                                  # provisions the VM itself via
+│       │                                  # infra-vm/'s Terraform
+│       ├── sync-secrets-vm.yml         # Pushes updated .env values out to an
+│       │                                  # already-running VM without a full
+│       │                                  # image redeploy
+│       └── dependabot.yml              # Weekly PR for every package manifest +
+│                                          # both Dockerfiles' base images (see
+│                                          # "Automated Dependency Updates" below)
+│
+├── scripts/                    # Manual operator scripts (not run by Docker) --
+│   │                              # see "Distributed Tracing" below for the
+│   │                              # full walkthrough of both
+│   ├── tail-errors.sh             # Live-tails ERROR/CRITICAL structured logs
+│   │                                # across every backend-side container,
+│   │                                # request_id/trace_id pulled to the front
+│   └── trace-request.sh           # Given a request_id or trace_id, greps
+│                                     # every backend-side container's logs for
+│                                     # it and prints the full story in order
 │
 ├── CHANGELOG.md                # One dated section per `git tag v*.*.*`
 │                                  # release, generated and inserted
@@ -546,6 +572,11 @@ snipe-it-lite/
 ├── DEPLOYMENT.md              # Companion to this file: production safety
 │                                # checklist, scaling, backups, and the full
 │                                # Azure Container Apps walkthrough
+├── DEPLOYMENT_VM.md            # Same companion role as DEPLOYMENT.md, but
+│                                 # for the single-Azure-VM path end-to-end:
+│                                 # Terraform setup, Cloudflare Tunnel, secrets,
+│                                 # rollback, backups, cost -- see "Azure VM"
+│                                 # below
 ├── infra/
 │   └── main.bicep              # Azure Container Apps infra, cost-optimized:
 │                                  # 4 container apps (frontend, backend, db,
@@ -558,6 +589,28 @@ snipe-it-lite/
 │                                # shape (db/redis as internal container
 │                                # apps, frontend/backend split, Container-
 │                                # Apps-secret-backed secrets)
+│
+├── infra-vm/                   # Azure VM path's infra -- Terraform, not
+│   │                             # Bicep (this target has no Container
+│   │                             # Apps control plane to describe)
+│   ├── main.tf                    # The VM itself, its managed data disk,
+│   │                                # NSG, and the Cloudflare Tunnel/DNS
+│   │                                # resources -- see DEPLOYMENT_VM.md
+│   ├── variables.tf                # vm_size, disk size, region, etc.
+│   ├── outputs.tf                   # ssh_hostname and friends, consumed by
+│   │                                  # deploy-azure-vm.yml
+│   ├── versions.tf                   # Provider/Terraform version pins
+│   └── terraform.tfvars.example       # Copy to terraform.tfvars and fill in
+│                                         # (see DEPLOYMENT_VM.md step 7)
+├── docker-compose.vm.yml       # The VM path's compose file -- same six
+│                                 # services as docker-compose.yml below,
+│                                 # plus caddy (TLS re-presentation) and
+│                                 # cloudflared (the Tunnel); images pulled
+│                                 # by tag from Docker Hub instead of built
+│                                 # locally -- see DEPLOYMENT_VM.md
+├── Caddyfile                    # caddy's config for docker-compose.vm.yml --
+│                                  # presents a free Cloudflare Origin CA cert
+│                                  # for the inner hop from cloudflared
 │
 ├── docker-compose.yml        # 6 services: db, redis, backend, worker, beat,
 │                                # frontend -- worker/beat are split apart
@@ -1802,6 +1855,31 @@ there to dial down ingestion further if you ever do.
    logs — traces just show up as more tables (`requests`, `dependencies`)
    in the same place.
 
+### Fast paths that don't require opening Jaeger at all
+
+Two scripts in `scripts/` cover the two most common "something's wrong,
+what happened?" moments without needing the Jaeger/Application Insights
+UI open first:
+
+- **`scripts/tail-errors.sh`** — live-tails ERROR/CRITICAL structured logs
+  across every backend-side container (`backend`/`worker`/`beat`) as they
+  happen, with each line's `request_id` (and `trace_id`, once
+  `OTEL_ENABLED=true`) pulled to the front so you can copy it straight
+  into the next script.
+- **`scripts/trace-request.sh <id>`** — given a `request_id` (from a
+  user's error toast, a support ticket, or the `X-Request-ID` response
+  header) or a `trace_id`/`span_id` copied out of the Jaeger/Application
+  Insights UI, greps every backend-side container's logs for that exact
+  ID and prints the full story — request arriving, every SQL/service log
+  line in between, and the exact traceback if it errored — in order, in
+  one shot, whether the request stayed in `backend` or spilled into
+  `worker`. Supports `--since <duration>` and `--follow`.
+
+Both work identically against `docker-compose.yml` (local dev) and
+`docker-compose.vm.yml` (the Azure VM path) — see `SRE_STRATEGY.md`'s
+"Fast request-ID triage without opening Jaeger" section for a worked
+example.
+
 ### Using something other than Jaeger/Application Insights
 
 `OTEL_EXPORTER_OTLP_ENDPOINT`/`OTEL_EXPORTER_OTLP_HEADERS` (see
@@ -2922,7 +3000,7 @@ A checklist before you deploy this anywhere real:
 
 ## Safely Updating An Existing Production Deployment (CI/CD)
 
-**This repo ships five GitHub Actions workflows** in `.github/workflows/`:
+**This repo ships eight GitHub Actions workflows** in `.github/workflows/`:
 [`ci.yml`](.github/workflows/ci.yml) (ruff lint, the real
 `pytest backend/tests` suite against real Postgres/Redis service
 containers — including the actual `alembic upgrade head`/`downgrade` chain
@@ -2933,7 +3011,7 @@ config job that renders `nginx/default.conf.template`, `nginx -t`s it,
 then actually boots it and curls every clean-URL/redirect/static-asset
 path (see `nginx/test-config.sh`), image build + Trivy scan, and
 `infra/main.bicep` validation — runs on every push/PR, and
-is also invoked as a reusable `workflow_call` by the deploy workflows
+is also invoked as a reusable `workflow_call` by every deploy workflow
 below; coverage isn't 100% of the app yet, see [Suggested Future
 Features](#suggested-future-features) for what's still missing),
 [`deploy-azure-staging.yml`](.github/workflows/deploy-azure-staging.yml)
@@ -2950,8 +3028,27 @@ version to deploy, or manually via `workflow_dispatch` for a redeploy/
 rollback; blocking Trivy scan already ran in `release.yml`, and this
 workflow still auto-rolls-back on a failed smoke test) — plus
 [`infra-deploy.yml`](.github/workflows/infra-deploy.yml), run separately and
-occasionally, for provisioning/updating `infra/main.bicep` itself. All five
-already follow the same rule, which is what makes any of this genuinely
+occasionally, for provisioning/updating `infra/main.bicep` itself. All of
+these target the **Azure Container Apps** path.
+
+The **Azure VM** path (see below) has its own three, self-contained
+workflows instead: [`infra-deploy-vm.yml`](.github/workflows/infra-deploy-vm.yml)
+(provisions the VM itself via `infra-vm/`'s Terraform — the VM-path
+equivalent of `infra-deploy.yml` above),
+[`deploy-azure-vm.yml`](.github/workflows/deploy-azure-vm.yml) (build both
+images → Trivy scan → SSH over the Cloudflare Tunnel → sync
+`docker-compose.vm.yml`/`Caddyfile` → `docker compose up -d` → migrate →
+smoke test — same `git tag v1.x.x`-triggers-production shape as
+`release.yml`/`deploy-azure-production.yml` above, just without a
+Container Apps control plane in the middle), and
+[`sync-secrets-vm.yml`](.github/workflows/sync-secrets-vm.yml) (pushes
+updated `.env` values out to the running VM without a full redeploy). The
+two paths are independent — use one, the other, or both side by side —
+and never share GitHub Environment secrets (see
+[DEPLOYMENT_VM.md](DEPLOYMENT_VM.md)'s "Using both deployment targets"
+section).
+
+All of these already follow the same rule, which is what makes any of this genuinely
 *safe* to automate rather than just fast:
 
 > **Migrate first, deploy second, and only ever ADD to the schema —
@@ -2974,6 +3071,25 @@ Deployment** section rather than being duplicated here. Short version: push
 to `develop` and staging updates itself; push a `git tag v1.x.x` off `main`
 and production updates itself (merging to `main` alone no longer deploys
 anything); nothing manual after the one-time setup.
+
+### Azure VM
+
+A second, self-contained deployment target for a single Azure VM instead
+of Container Apps — `infra-vm/`'s Terraform provisions the VM, a
+Cloudflare Tunnel replaces both inbound SSH and any open inbound app port
+(no public IP ever has port 22/80/443 listening on it), and `docker
+compose -f docker-compose.vm.yml` runs the same six services as local dev
+as plain containers pulled by tag from Docker Hub, plus `caddy` (TLS
+re-presentation) and `cloudflared` (the tunnel). Same "push a version tag,
+it ships itself" shape as the Container Apps path above, just over SSH
+instead of `az containerapp update`. Full one-time setup (Cloudflare
+account, Terraform apply, GitHub OIDC federation, secrets) and day-2
+tasks (rollback, growing the data disk, Google Drive backups, updating
+secrets on a running VM) live in their entirety in
+[`DEPLOYMENT_VM.md`](DEPLOYMENT_VM.md) — pick this path over Container
+Apps if you'd rather manage one predictably-priced VM than a serverless
+control plane, or don't have an Azure subscription tier that supports
+Container Apps at all.
 
 ### Render
 

@@ -1,0 +1,103 @@
+# =============================================================================
+# infra-vm/terraform.tfvars.example
+# -----------------------------------------------------------------------------
+# Copy this to infra-vm/terraform.tfvars and fill in real values, OR (better,
+# for anything beyond local experimentation) leave terraform.tfvars out
+# entirely and pass every one of these as -var / TF_VAR_ environment
+# variables from infra-deploy-vm.yml instead, sourced from GitHub encrypted
+# secrets -- see DEPLOYMENT_VM.md step 6 for exactly how that workflow does
+# it. Either way, terraform.tfvars itself is listed in infra-vm/.gitignore
+# and must never be committed -- it contains real passwords/keys.
+# =============================================================================
+
+subscription_id  = "00000000-0000-0000-0000-000000000000" # az account show --query id -o tsv
+environment_name = "prod"                                  # or "staging"
+location         = "eastus"
+app_base_name    = "snipeit-lite"
+
+vm_size           = "Standard_B2s" # 2 vCPU / 4 GiB RAM -- see DEPLOYMENT_VM.md Cost section for sizing
+os_disk_size_gb   = 30
+data_disk_size_gb = 32
+
+admin_username = "azureuser"
+ssh_public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... snipeit-lite-vm-deploy"
+# Leave this EMPTY (the default) -- no inbound port 22 on the NSG at all.
+# Reached instead via the Cloudflare Tunnel (below). Only set this to your
+# own IP as a temporary break-glass measure -- see DEPLOYMENT_VM.md's
+# "No open ports" section.
+ssh_allowed_source_ips = []
+
+# ---- No open ports at all (Cloudflare Tunnel instead of Tailscale/Bastion) ----
+# See DEPLOYMENT_VM.md's "Set up Cloudflare Tunnel" section for how to get
+# each of these values (API token scopes, account/zone IDs, Origin CA cert).
+cloudflare_api_token       = "CHANGE-ME" # Zone:DNS:Edit + Account:Cloudflare Tunnel:Edit + Account:Access:Apps and Policies:Edit
+cloudflare_account_id      = "CHANGE-ME" # Dashboard -> any domain's overview -> right sidebar
+cloudflare_zone_id         = "CHANGE-ME" # Dashboard -> assets.example.com's overview -> right sidebar
+cloudflare_zone_name       = "example.com"
+ssh_access_allowed_emails  = ["you@example.com"]
+cloudflare_origin_cert     = <<-EOT
+  -----BEGIN CERTIFICATE-----
+  CHANGE-ME (Dashboard -> SSL/TLS -> Origin Server -> Create Certificate)
+  -----END CERTIFICATE-----
+EOT
+cloudflare_origin_cert_key = <<-EOT
+  -----BEGIN PRIVATE KEY-----
+  CHANGE-ME (from the same "Create Certificate" step, shown once)
+  -----END PRIVATE KEY-----
+EOT
+
+# ---- Domain ---------------------------------------------------------------
+# Must be a hostname inside the Cloudflare zone identified by
+# cloudflare_zone_id above -- Cloudflare creates the DNS record itself
+# (main.tf's cloudflare_record.app), don't create your own.
+custom_domain = "assets.example.com"
+
+# ---- Application secrets -------------------------------------------------
+postgres_user     = "admin"
+postgres_password = "CHANGE-ME"     # openssl rand -base64 24
+postgres_db       = "asset_db"
+jwt_secret_key    = "CHANGE-ME-TOO" # openssl rand -hex 32
+
+root_admin_bootstrap_password = "" # leave blank to auto-generate; see backend logs after first deploy
+site_name                     = "Snipe-IT Lite"
+enable_api_docs               = false
+
+notifications_enabled     = false
+smtp_host                  = ""
+smtp_port                  = 587
+smtp_username              = ""
+smtp_password              = ""
+smtp_from_email            = ""
+admin_notification_emails  = ""
+
+display_timezone = "Africa/Lagos"
+currency_code    = "NGN"
+
+enable_auto_backup = true
+
+# ---- Distributed tracing (OpenTelemetry) ------------------------------
+# Off by default -- see infra-vm/variables.tf's otel_* variables and
+# docker-compose.vm.yml's `jaeger` service comment for the full picture.
+otel_enabled                = false
+otel_service_name           = "snipeit-lite-backend"
+otel_exporter_otlp_endpoint = "http://jaeger:4318"
+otel_exporter_otlp_headers  = ""
+otel_traces_sample_ratio    = "1.0"
+otel_console_exporter       = false
+applicationinsights_connection_string = ""
+
+# ---- Container images ------------------------------------------------
+dockerhub_backend_image  = "yourusername/snipeit-lite-backend"
+dockerhub_frontend_image = "yourusername/snipeit-lite-frontend"
+initial_image_tag        = "latest"
+# Only needed if the two repos above are PRIVATE:
+dockerhub_username = ""
+dockerhub_token     = ""
+
+# ---- Snapshots -------------------------------------------------------
+enable_data_disk_snapshots = true
+snapshot_retention_days    = 7
+
+tags = {
+  project = "snipeit-lite"
+}

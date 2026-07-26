@@ -1,0 +1,363 @@
+# .github/workflows/deploy-azure-vm.yml
+# -----------------------------------------------------------------------------
+# Application deploy pipeline for the VM target: run CI -> build+push both
+# images to Docker Hub -> SSH into the VM through the Cloudflare Tunnel's
+# ssh.<domain> hostname, authenticated as a Cloudflare Access service token
+# (no inbound port ever opened on the VM's NSG -- see infra-vm/main.tf's
+# "Cloudflare Tunnel" section and docker-compose.vm.yml's `cloudflared`
+# service) -> sync docker-compose.vm.yml/Caddyfile -> `docker compose up -d`
+# with the new tag -> run migrations -> smoke test.
+# Mirrors deploy-azure-staging.yml's shape (same reusable ci.yml call,
+# same workflow_dispatch image_tag/skip_migrate escape hatch) but the
+# "deploy" step is SSH + docker compose instead of `az containerapp
+# update`, since there's no Container Apps control plane on this path --
+# just a VM.
+#
+# Required repo/environment secrets (see DEPLOYMENT_VM.md step 5-9 and
+# its "Set up Cloudflare Tunnel" section for how each one is produced):
+#   DOCKERHUB_USERNAME, DOCKERHUB_TOKEN  - already used by deploy-azure-*.yml
+#   CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET
+#                                         - the Access service token this
+#                                           runner authenticates as (the
+#                                           cloudflare_ci_service_token_id/
+#                                           _secret Terraform outputs from
+#                                           infra-deploy-vm.yml's apply) --
+#                                           lets `cloudflared access ssh`
+#                                           through Access non-interactively,
+#                                           no browser/human login involved
+#   VM_HOST                              - the VM's ssh.<domain> Tunnel
+#                                           hostname (the ssh_hostname
+#                                           Terraform output) -- NOT the
+#                                           public IP; there's nothing
+#                                           listening on port 22 at the
+#                                           public IP
+#   VM_SSH_USER                          - matches infra-vm's admin_username
+#                                           (default "azureuser")
+#   VM_SSH_PRIVATE_KEY                   - private half of the key pair
+#                                           whose public half was passed as
+#                                           ssh_public_key to Terraform
+# -----------------------------------------------------------------------------
+name: Deploy to Azure VM
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*'] # pushing `git tag vX.Y.Z && git push origin vX.Y.Z` is
+    # THE way to cut a real, named, rollback-able release on this path --
+    # see DEPLOYMENT_VM.md's "Tagging & Versioning" section. Mirrors
+    # release.yml's `on.push.tags` trigger for the Container Apps path,
+    # kept independent/self-contained here rather than calling into that
+    # workflow, since the two deploy targets can be used separately or
+    # together without depending on each other.
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment. "vm-staging", not "staging" -- kept deliberately distinct from the Container Apps path''s "staging" GitHub Environment (deploy-azure-staging.yml/infra-deploy.yml) so the two paths never share AZURE_CLIENT_ID or other environment-scoped secrets. See DEPLOYMENT_VM.md''s "Using both deployment targets" section.'
+        required: true
+        type: choice
+        options: [vm-staging, prod]
+        default: prod
+      image_tag:
+        description: 'Existing tag on Docker Hub to redeploy -- a version (e.g. "v1.4.2", for a rollback: see DEPLOYMENT_VM.md "Tagging & Versioning" -> Rollback), a commit SHA from a prior run, or "latest". Leave blank to build fresh from this branch.'
+        required: false
+        type: string
+      skip_migrate:
+        description: 'Skip running alembic upgrade head (only safe if no migration changed since image_tag was built)'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-vm-${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) && 'prod' || (inputs.environment || 'prod') }}
+  cancel-in-progress: false
+
+env:
+  # A version TAG push always targets prod, exactly like release.yml's
+  # equivalent trigger does for the Container Apps path -- there's no
+  # such thing as a "staging" named release.
+  IS_VERSION_TAG: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
+  ENVIRONMENT: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) && 'prod' || (inputs.environment || 'prod') }}
+  # IMAGE_TAG is the literal Docker tag pulled/deployed. VERSION is the
+  # human-facing release name recorded on the VM and in this run's
+  # summary (see the "Write release marker" step below) -- for a version
+  # tag push they're identical; for a plain branch push or a
+  # workflow_dispatch without image_tag, VERSION stays "unversioned"
+  # even though IMAGE_TAG still resolves to a real, pullable SHA tag.
+  # This is what makes `cat /opt/snipeit/CURRENT_RELEASE` on the VM
+  # trustworthy for "is this a stable named release or a dev build".
+  IMAGE_TAG: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) && github.ref_name || (inputs.image_tag || github.sha) }}
+  VERSION: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) && github.ref_name || (inputs.image_tag != '' && inputs.image_tag || 'unversioned') }}
+  BACKEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend${{ (inputs.environment || 'prod') == 'vm-staging' && '-staging' || '' }}
+  FRONTEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-frontend${{ (inputs.environment || 'prod') == 'vm-staging' && '-staging' || '' }}
+  REUSE_EXISTING_IMAGE: ${{ github.event_name == 'workflow_dispatch' && inputs.image_tag != '' }}
+
+jobs:
+  ci:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.image_tag == '' }}
+    uses: ./.github/workflows/ci.yml
+
+  build-push:
+    name: Build + push both images
+    needs: [ci]
+    if: ${{ always() && (needs.ci.result == 'success' || needs.ci.result == 'skipped') && (github.event_name != 'workflow_dispatch' || inputs.image_tag == '') }}
+    runs-on: ubuntu-latest
+    strategy:
+      # See release.yml's matching comment: fail-fast defaults to true,
+      # which would let one image's failure cancel the other mid-build/push.
+      fail-fast: false
+      matrix:
+        include:
+          - service: backend
+            dockerfile: backend/Dockerfile
+            context: backend
+            image_env: BACKEND_IMAGE
+          - service: frontend
+            dockerfile: frontend/Dockerfile
+            context: .
+            image_env: FRONTEND_IMAGE
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Docker Hub login
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Resolve image name
+        id: img
+        run: echo "name=${{ matrix.image_env == 'BACKEND_IMAGE' && env.BACKEND_IMAGE || env.FRONTEND_IMAGE }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build + push ${{ matrix.service }} image
+        # Three tags on the same build, same convention release.yml uses
+        # for the Container Apps path: the human-facing tag ($IMAGE_TAG --
+        # a real vX.Y.Z for a version-tag push, else a SHA), the raw
+        # commit SHA (always present, so a build is traceable back to
+        # exact source even for a plain branch push where $IMAGE_TAG and
+        # the SHA are already the same value -- harmless duplicate push
+        # in that case), and `latest`.
+        run: |
+          docker build -f ${{ matrix.dockerfile }} \
+                       --label org.opencontainers.image.version="$VERSION" \
+                       --label org.opencontainers.image.revision="${{ github.sha }}" \
+                       --label org.opencontainers.image.created="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                       --label org.opencontainers.image.source="${{ github.server_url }}/${{ github.repository }}" \
+                       -t ${{ steps.img.outputs.name }}:$IMAGE_TAG \
+                       -t ${{ steps.img.outputs.name }}:${{ github.sha }} \
+                       -t ${{ steps.img.outputs.name }}:latest \
+                       ${{ matrix.context }}
+          docker push ${{ steps.img.outputs.name }}:$IMAGE_TAG
+          docker push ${{ steps.img.outputs.name }}:${{ github.sha }}
+          docker push ${{ steps.img.outputs.name }}:latest
+
+      - name: Trivy scan (blocking on CRITICAL -- see ci.yml's backend Trivy step)
+        # ignore-unfixed skips CVEs with no available patch yet -- those
+        # can't be resolved by bumping anything, so failing on them would
+        # just block deploys indefinitely with no actionable fix.
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          image-ref: ${{ steps.img.outputs.name }}:${{ env.IMAGE_TAG }}
+          severity: 'CRITICAL'
+          exit-code: '1'
+          ignore-unfixed: true
+          format: 'table'
+
+      - name: Trivy scan (HIGH, report-only)
+        # Separate non-blocking step so HIGH findings still show up in logs
+        # without failing the deploy -- there's a real backlog to triage
+        # before blocking on it, same as ci.yml.
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          image-ref: ${{ steps.img.outputs.name }}:${{ env.IMAGE_TAG }}
+          severity: 'HIGH'
+          exit-code: '0'
+
+  deploy:
+    name: Deploy over SSH + migrate
+    needs: [build-push]
+    if: ${{ always() && (needs.build-push.result == 'success' || needs.build-push.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment || 'prod' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install cloudflared
+        # The same client Cloudflare ships for `cloudflared access ssh` --
+        # this runner needs it locally to proxy the SSH connection below
+        # through the Tunnel; it does NOT join anything persistent (unlike
+        # the old ephemeral Tailscale node), it's a one-shot outbound
+        # connection per SSH session, torn down when the job ends.
+        run: |
+          curl -fsSL --output /tmp/cloudflared.deb \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i /tmp/cloudflared.deb
+
+      - name: Set up SSH (proxied through Cloudflare Access)
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.VM_SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # Every `ssh`/`scp` call below targets $VM_HOST as if it were a
+          # normal, directly reachable host -- this ProxyCommand is what
+          # actually routes the connection through the Cloudflare Tunnel,
+          # authenticated as the CI service token (non-interactive, no
+          # browser/SSO prompt). `StrictHostKeyChecking accept-new`
+          # (rather than a blind `=no`) still pins whatever host key the
+          # VM presents on first connect and fails loudly on a mismatch
+          # later -- the usual MITM protection ssh-keyscan gave us before,
+          # just set inline since ssh-keyscan itself can't see through a
+          # ProxyCommand.
+          cat >> ~/.ssh/config <<SSHCONFIG
+          Host $VM_HOST
+            StrictHostKeyChecking accept-new
+            ProxyCommand cloudflared access ssh --hostname %h --service-token-id $CF_ACCESS_CLIENT_ID --service-token-secret $CF_ACCESS_CLIENT_SECRET
+          SSHCONFIG
+          chmod 600 ~/.ssh/config
+
+      - name: Sync docker-compose.vm.yml + Caddyfile to the VM
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_SSH_USER: ${{ secrets.VM_SSH_USER }}
+        run: |
+          scp -i ~/.ssh/deploy_key \
+              docker-compose.vm.yml Caddyfile \
+              "$VM_SSH_USER@$VM_HOST:/opt/snipeit/"
+
+      - name: Update IMAGE_TAG on the VM and pull new images
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_SSH_USER: ${{ secrets.VM_SSH_USER }}
+        # Using an UNQUOTED heredoc delimiter (<<EOF, not <<'EOF') is what
+        # lets the RUNNER's own shell expand $IMAGE_TAG below into a
+        # literal value before the command is ever sent over SSH -- the
+        # remote VM's shell never needs to know about GITHUB_ENV/IMAGE_TAG
+        # at all, it just receives the already-substituted sed command.
+        run: |
+          ssh -i ~/.ssh/deploy_key "$VM_SSH_USER@$VM_HOST" bash -s <<EOF
+            set -euo pipefail
+            cd /opt/snipeit
+            if grep -q '^IMAGE_TAG=' .env; then
+              sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=$IMAGE_TAG/" .env
+            else
+              echo "IMAGE_TAG=$IMAGE_TAG" >> .env
+            fi
+            docker compose -f docker-compose.vm.yml pull
+          EOF
+
+      - name: Roll out (docker compose up -d)
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_SSH_USER: ${{ secrets.VM_SSH_USER }}
+        run: |
+          ssh -i ~/.ssh/deploy_key "$VM_SSH_USER@$VM_HOST" \
+            "cd /opt/snipeit && docker compose -f docker-compose.vm.yml up -d --remove-orphans"
+
+      - name: Run alembic upgrade head
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.skip_migrate) }}
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_SSH_USER: ${{ secrets.VM_SSH_USER }}
+        run: |
+          ssh -i ~/.ssh/deploy_key "$VM_SSH_USER@$VM_HOST" \
+            "cd /opt/snipeit && docker compose -f docker-compose.vm.yml run --rm backend alembic upgrade head"
+
+      - name: Reclaim disk space (drop superseded image layers)
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_SSH_USER: ${{ secrets.VM_SSH_USER }}
+        run: |
+          ssh -i ~/.ssh/deploy_key "$VM_SSH_USER@$VM_HOST" \
+            "docker image prune -af --filter 'until=72h'"
+
+      - name: Smoke test
+        id: smoke
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_SSH_USER: ${{ secrets.VM_SSH_USER }}
+        run: |
+          DOMAIN=$(ssh -i ~/.ssh/deploy_key "$VM_SSH_USER@$VM_HOST" "grep '^DOMAIN=' /opt/snipeit/.env | cut -d= -f2")
+          echo "Testing https://$DOMAIN"
+          curl -f -s -S --connect-timeout 15 --max-time 60 \
+               --retry 5 --retry-delay 5 --retry-connrefused --retry-max-time 300 \
+               -o /dev/null -w "HTTP %{http_code} in %{time_total}s\n" \
+               "https://$DOMAIN/"
+
+          curl -f -s -S --connect-timeout 15 --max-time 30 \
+               "https://$DOMAIN/api/auth/me" -o /dev/null -w "HTTP %{http_code} in %{time_total}s\n" \
+               | grep -qE "200|401" || {
+                 echo "::error::GET /api/auth/me did not return 200 or 401"
+                 exit 1
+               }
+
+      - name: Write release marker on the VM
+        # Deliberately AFTER the smoke test, not before -- this file is
+        # meant to answer "what version is CONFIRMED RUNNING and
+        # healthy", not "what was the last attempted deploy". If the
+        # smoke test above fails, this step never runs and
+        # /opt/snipeit/CURRENT_RELEASE keeps pointing at the previous
+        # good deploy -- see DEPLOYMENT_VM.md's "Tagging & Versioning"
+        # section for how this file is used to answer "what version is
+        # production running" and to plan a rollback.
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_SSH_USER: ${{ secrets.VM_SSH_USER }}
+        run: |
+          DEPLOYED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          ssh -i ~/.ssh/deploy_key "$VM_SSH_USER@$VM_HOST" bash -s <<EOF
+            cat > /opt/snipeit/CURRENT_RELEASE <<RELEASE_EOF
+          VERSION=$VERSION
+          IMAGE_TAG=$IMAGE_TAG
+          GIT_SHA=${{ github.sha }}
+          BACKEND_IMAGE=$BACKEND_IMAGE
+          FRONTEND_IMAGE=$FRONTEND_IMAGE
+          DEPLOYED_AT=$DEPLOYED_AT
+          DEPLOYED_BY=${{ github.actor }}
+          DEPLOYED_VIA=${{ github.workflow }} (run ${{ github.run_id }})
+          RUN_URL=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RELEASE_EOF
+          EOF
+
+      - name: Summarize this deploy
+        if: always()
+        run: |
+          {
+            echo "## Deployed to Azure VM (${{ env.ENVIRONMENT }})"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| **Version** | \`${{ env.VERSION }}\` |"
+            echo "| **Image tag** | \`${{ env.IMAGE_TAG }}\` |"
+            echo "| **Commit** | [\`${GITHUB_SHA:0:7}\`](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}) |"
+            echo "| **Deployed by** | @${{ github.actor }} |"
+            if [ "${{ env.VERSION }}" = "unversioned" ]; then
+              echo ""
+              echo "> This deploy has no version tag -- it won't show up as a named"
+              echo "> release in \`git tag\`/Docker Hub/CHANGELOG.md. See"
+              echo "> DEPLOYMENT_VM.md's \"Tagging & Versioning\" section if you want"
+              echo "> this to become a real, rollback-able release: \`git tag"
+              echo "> vX.Y.Z && git push origin vX.Y.Z\`."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Dump container status + recent logs (on failure)
+        if: failure()
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_SSH_USER: ${{ secrets.VM_SSH_USER }}
+        run: |
+          ssh -i ~/.ssh/deploy_key "$VM_SSH_USER@$VM_HOST" bash -s <<'EOF'
+            cd /opt/snipeit
+            echo "::group::docker compose ps"
+            docker compose -f docker-compose.vm.yml ps
+            echo "::endgroup::"
+            for svc in db redis backend worker beat frontend caddy; do
+              echo "::group::logs: $svc (last 100 lines)"
+              docker compose -f docker-compose.vm.yml logs --tail 100 "$svc" || true
+              echo "::endgroup::"
+            done
+          EOF

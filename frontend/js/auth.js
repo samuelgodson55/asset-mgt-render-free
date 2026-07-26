@@ -10,7 +10,7 @@
 // import between the two files resolves fine under ES modules.
 // =============================================================================
 
-import { API_URL } from './api.js';
+import { API_URL, buildErrorMessage } from './api.js';
 
 // ---------------------------------------------------------------------------
 // SESSION HELPERS
@@ -103,7 +103,7 @@ export async function login(identifier, password) {
     credentials: 'include',
   });
   const data = await response.json();
-  if (!response.ok) throw new Error(data.detail || 'Invalid email/username or password');
+  if (!response.ok) throw new Error(buildErrorMessage(response, data, 'Invalid email/username or password'));
 
   // SECURITY: an account that requires 2FA (currently just super_admin --
   // see backend/services/auth_service.py's login()) does NOT get a real
@@ -143,7 +143,7 @@ export async function confirmMfaSetup(mfaSetupToken, code) {
     credentials: 'include',
   });
   const data = await response.json();
-  if (!response.ok) throw new Error(data.detail || 'Incorrect code. Please try again.');
+  if (!response.ok) throw new Error(buildErrorMessage(response, data, 'Incorrect code. Please try again.'));
 
   persistSession({
     user_id: data.user_id,
@@ -169,7 +169,7 @@ export async function verifyMfa(mfaPendingToken, code) {
     credentials: 'include',
   });
   const data = await response.json();
-  if (!response.ok) throw new Error(data.detail || 'Incorrect code. Please try again.');
+  if (!response.ok) throw new Error(buildErrorMessage(response, data, 'Incorrect code. Please try again.'));
 
   persistSession({
     user_id: data.user_id,

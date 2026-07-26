@@ -62,8 +62,35 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # services/backup_service.py (database backup/restore). psycopg2-binary
 # (in requirements.txt) is a Python DB driver and does NOT include these
 # command-line binaries.
+#
+# BUG FIX -- restores failing with "unrecognized configuration parameter
+# \"transaction_timeout\"" (see backup_service.py's restore_backup() for
+# the full write-up). Root cause: this used to install the generic,
+# unversioned `postgresql-client` package, which just pulls in whatever
+# major version is newest in the base image's own apt repos at build
+# time -- NOT necessarily the version docker-compose.yml's `db` service
+# (postgres:16-alpine) actually runs. When that resolved to a 17.x
+# client, its `pg_dump` started writing `SET transaction_timeout = 0;`
+# into every dump's preamble (that GUC is PG17+-only), which a 16.x
+# server then rejects outright on restore.
+#
+# Fix: add the official PostgreSQL (PGDG) apt repo and install the
+# EXACT major version `postgresql-client-16`, so the client always
+# matches the server regardless of what the base image's own repos
+# happen to carry on any given build day. If docker-compose.yml's `db`
+# image tag above the `db:` service is ever bumped to a different major
+# version, this "16" must be bumped to match -- a mismatch here is
+# exactly the bug this fix exists to prevent.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends postgresql-client ca-certificates && \
+    apt-get install -y --no-install-recommends ca-certificates wget gnupg lsb-release && \
+    install -d /usr/share/postgresql-common/pgdg && \
+    wget -qO /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+        https://www.postgresql.org/media/keys/ACCC4CF8.asc && \
+    echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+        > /etc/apt/sources.list.d/pgdg.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends postgresql-client-16 && \
+    apt-get purge -y --auto-remove wget gnupg lsb-release && \
     rm -rf /var/lib/apt/lists/*
 
 # The installed dependencies -- and ONLY the installed dependencies, none

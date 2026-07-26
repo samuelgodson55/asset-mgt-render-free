@@ -32,6 +32,14 @@ up and running, see [POST_DEPLOYMENT.md](POST_DEPLOYMENT.md) for the
 optional next steps: SMTP, Google Drive backup uploads, and mapping a
 custom domain.
 
+**Deploying to a single Azure VM instead?** See
+[DEPLOYMENT_VM.md](DEPLOYMENT_VM.md) for that path end-to-end: Terraform
+(`infra-vm/`) provisions the VM itself, a Cloudflare Tunnel replaces both
+inbound SSH and any open inbound app port, and
+`.github/workflows/deploy-azure-vm.yml` builds/pushes both images and
+rolls them out over that tunnel with the same migrate → deploy → smoke
+test shape as the Container Apps path above.
+
 ---
 
 ## Table of Contents

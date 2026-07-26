@@ -23,6 +23,7 @@ from fastapi.responses import FileResponse
 
 from deps import require_true_super_admin
 import services.backup_service as backup_service
+from services.backup_service import RestoreInProgressError
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,26 @@ def delete_backup(filename: str, user: dict = Depends(require_true_super_admin))
     return {"deleted": filename}
 
 
+@router.get("/restore-status")
+def restore_status(user: dict = Depends(require_true_super_admin)):
+    """
+    Poll target for the MOST RECENT restore's real outcome ("running" /
+    "succeeded" / "failed" / "none") -- exists specifically because a
+    restore keeps running to completion server-side even if the HTTP
+    response from POST /restore/{filename} never reaches the caller (a
+    closed browser tab, a dropped proxy connection, a CI/CD pipeline's
+    own timeout). See services.backup_service.restore_backup()'s
+    docstring for the full reasoning. Safe to poll repeatedly -- this
+    only reads a small local JSON file, no database or subprocess
+    involved.
+    """
+    try:
+        return backup_service.get_restore_status()
+    except Exception as exc:
+        logger.exception("backup: failed to load restore status")
+        raise HTTPException(status_code=500, detail=f"Failed to load restore status: {exc}")
+
+
 @router.post("/restore/{filename}")
 def restore_from_local(filename: str, user: dict = Depends(require_true_super_admin)):
     """
@@ -111,6 +132,12 @@ def restore_from_local(filename: str, user: dict = Depends(require_true_super_ad
         raise HTTPException(status_code=404, detail=str(exc))
     try:
         result = backup_service.restore_backup(filepath)
+    except RestoreInProgressError as exc:
+        # Distinct 409 (not 500) -- this isn't a failure of THIS request,
+        # it's a correct refusal because another restore is already
+        # running. The caller should poll GET /restore-status rather than
+        # retry, which is exactly what this status code + message says.
+        raise HTTPException(status_code=409, detail=str(exc))
     except Exception as exc:
         logger.exception("backup: restore from local backup failed")
         raise HTTPException(status_code=500, detail=f"Restore failed: {exc}")
@@ -141,6 +168,8 @@ async def restore_from_upload(
 
     try:
         result = backup_service.restore_from_upload(contents, file.filename)
+    except RestoreInProgressError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     except Exception as exc:
         logger.exception("backup: restore from uploaded file failed")
         raise HTTPException(status_code=500, detail=f"Restore failed: {exc}")

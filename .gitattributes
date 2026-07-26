@@ -7,3 +7,4 @@
 # contributor's machine. See .github/workflows/ci.yml's nginx-config job
 # for the belt-and-suspenders `chmod +x` fallback in CI itself.
 *.sh text eol=lf executable
+* text=auto eol=lf

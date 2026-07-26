@@ -48,13 +48,13 @@ export async function apiRequest(path, options = {}) {
   // Some endpoints (CSV export) return a raw file, not JSON.
   const contentType = response.headers.get('content-type') || '';
   if (!contentType.includes('application/json')) {
-    if (!response.ok) throw new Error('Request failed.');
+    if (!response.ok) throw new Error(buildErrorMessage(response, {}));
     return response;
   }
 
   const data = await response.json();
   if (!response.ok) {
-    throw new Error(formatErrorDetail(data.detail));
+    throw new Error(buildErrorMessage(response, data));
   }
   return data;
 }
@@ -65,13 +65,33 @@ export async function apiRequest(path, options = {}) {
 // -- e.g. the password-strength or due-date validators in schemas/*.py.
 // Without this, `new Error(anArray)` would stringify to something useless
 // like "[object Object]" instead of the actual validation message.
-function formatErrorDetail(detail) {
-  if (!detail) return 'Request failed.';
+function formatErrorDetail(detail, fallback = 'Request failed.') {
+  if (!detail) return fallback;
   if (typeof detail === 'string') return detail;
   if (Array.isArray(detail)) {
     return detail
       .map((item) => (item && typeof item === 'object' && 'msg' in item ? item.msg : String(item)))
       .join(' ');
   }
-  return 'Request failed.';
+  return fallback;
+}
+
+// Builds the message actually shown to the person, with the request's
+// correlation ID appended when one is available -- see
+// backend/middleware/error_handling.py's module docstring: its whole point
+// is to hand the caller a `request_id` they can give to support, but that
+// only helps if the UI actually surfaces it instead of quietly dropping it
+// (which is exactly what this function used to do before this fix).
+// backend/middleware/request_context.py stamps an `X-Request-ID` response
+// header onto EVERY response (success or failure -- not just the generic
+// unhandled-exception 500 whose JSON body also happens to carry
+// `request_id`), so reading it off the response here works uniformly for
+// any failed request. Exported so js/auth.js's few raw (non-apiRequest)
+// fetch calls -- login(), confirmMfaSetup(), verifyMfa(), which run before
+// a session/Authorization header exists -- can build the same kind of
+// message instead of dropping the ID like they used to.
+export function buildErrorMessage(response, data, fallback) {
+  const detailMessage = formatErrorDetail(data && data.detail, fallback);
+  const requestId = (data && data.request_id) || (response && response.headers && response.headers.get('x-request-id'));
+  return requestId ? `${detailMessage} (Reference: ${requestId})` : detailMessage;
 }

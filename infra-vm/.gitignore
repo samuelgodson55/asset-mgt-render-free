@@ -1,0 +1,18 @@
+# Terraform local state + working files -- never commit these. Real state
+# should live in the azurerm remote backend (see versions.tf's commented-out
+# backend block) once you move past solo experimentation.
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+crash.log
+crash.*.log
+
+# Real variable values (secrets!) -- only terraform.tfvars.example is tracked.
+terraform.tfvars
+*.auto.tfvars
+*.auto.tfvars.json
+
+# SSH keys, if generated inside this directory
+*_deploy_key
+*_deploy_key.pub

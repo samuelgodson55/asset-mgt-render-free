@@ -154,6 +154,57 @@ server {
     # talks to that same "/api"-prefixed FastAPI app directly with no nginx
     # in front of it at all.
     # =========================================================================
+    # ---- backup/restore: needs much longer timeouts than the rest of the
+    # API -------------------------------------------------------------------
+    # BUG FIX -- "Restore failed: Request failed." with NO request ID shown,
+    # even after api.js/auth.js were fixed to surface one. Root cause was
+    # here, not in either of those files: services/backup_service.py gives
+    # pg_dump up to 600s, the pre-restore schema reset up to 120s, and the
+    # actual restore's psql up to 900s (see that file's `timeout=` args) --
+    # all comfortably longer than the generic /api/ location's 60s
+    # proxy_send_timeout/proxy_read_timeout below. On anything bigger than a
+    # tiny demo database, nginx gave up on the backend and returned ITS OWN
+    # bare 504 page before the backend could ever respond -- which means the
+    # request never finished inside RequestContextMiddleware/
+    # UnhandledExceptionMiddleware at all, so there was no JSON body and no
+    # X-Request-ID header for the frontend to read: exactly the "Request
+    # failed." with no reference the person saw. A longer backend timeout
+    # can never fix this on its own -- nginx sits in front and enforces its
+    # own limit independently, so this location needs to match it. Placed
+    # ahead of the generic /api/ location below purely for readability --
+    # nginx picks the LONGEST matching plain-prefix location for a given
+    # request regardless of declaration order, so /api/backup/... always
+    # matches here rather than the generic block either way.
+    location /api/backup/ {
+        set $backend_upstream ${BACKEND_HOST}:${BACKEND_PORT};
+
+        proxy_pass http://$backend_upstream$request_uri;
+
+        proxy_http_version 1.1;
+
+        proxy_set_header Host $backend_upstream;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Request-ID $request_id;
+
+        # 920s gives every backend subprocess timeout above (largest: 900s
+        # for restore) a little headroom to finish -- and to return its own
+        # proper JSON error (with request_id) -- before nginx would ever cut
+        # the connection itself.
+        proxy_connect_timeout 5s;
+        proxy_send_timeout 920s;
+        proxy_read_timeout 920s;
+
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        # restore-upload accepts a full database dump, not just a CSV --
+        # give it more headroom than the generic 10m used elsewhere.
+        client_max_body_size 200m;
+    }
+
     location /api/ {
         set $backend_upstream ${BACKEND_HOST}:${BACKEND_PORT};
 

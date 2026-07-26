@@ -110,7 +110,34 @@ def get_db():
     try:
         yield db
     finally:
-        db.close()
+        # BUG FIX: a plain `db.close()` here was masking the REAL error on
+        # any request whose own connection got forcibly killed mid-request
+        # -- currently only services/backup_service.py's restore_backup(),
+        # which (deliberately, as of its own fix) runs `pg_terminate_backend`
+        # against every OTHER connection to the database, including this
+        # very request's own session, right before resetting the schema
+        # (see that function's comment for why). `Session.close()` still
+        # tries to ROLLBACK the underlying DBAPI connection as part of
+        # closing it -- but that connection's socket was already killed
+        # server-side, so the rollback itself raises
+        # `psycopg2.OperationalError: server closed the connection
+        # unexpectedly`. Uncaught, that replaced/chained on top of
+        # whatever real error the route had already raised (e.g. restore's
+        # own clear "Restore failed: ..." RuntimeError), so the person and
+        # the logs saw a confusing SECOND traceback about a dead
+        # connection instead of the actual, more useful failure reason.
+        # Closing a session whose connection is already gone is expected
+        # and harmless here -- just let it go instead of letting a
+        # cleanup-time error overwrite/obscure the request's real outcome.
+        try:
+            db.close()
+        except Exception:
+            logger.warning(
+                "database.get_db: session cleanup failed (connection was likely already "
+                "terminated server-side) -- ignoring, since this must not override the "
+                "request's real error/response.",
+                exc_info=True,
+            )
 
 
 def get_schema_status() -> dict:

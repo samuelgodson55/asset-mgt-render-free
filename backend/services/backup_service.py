@@ -36,12 +36,14 @@ import gzip
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 import threading
 import time
 import datetime
+import uuid
 from typing import Optional
 from urllib.parse import urlparse, parse_qs, unquote
 
@@ -397,7 +399,121 @@ def get_status() -> dict:
 # ---------------------------------------------------------------------------
 
 
-def restore_backup(filepath: str, take_safety_backup: bool = True) -> dict:
+RESTORE_LOCK_KEY = "backup:restore-lock"
+# Generous ceiling above the real worst case (600s pre-restore safety
+# pg_dump + 120s schema-reset timeout + 900s restore timeout + however
+# long alembic upgrade/stamp takes) so that even a replica that crashed
+# outright mid-restore (no chance to run the `finally` release below)
+# still self-clears eventually, rather than wedging every future restore
+# behind a lock nobody will ever release.
+RESTORE_LOCK_TTL_SECONDS = 2700
+RESTORE_STATUS_FILENAME = "restore_status.json"
+
+
+class RestoreInProgressError(RuntimeError):
+    """Raised when a restore is requested while another is already running (see _acquire_restore_lock)."""
+
+
+def _acquire_restore_lock(token: str) -> None:
+    """
+    Distributed lock so that a SECOND restore request can never start
+    while one is already running -- across replicas (via Redis, same as
+    _acquire_scheduled_backup_lock above) AND within a single replica.
+
+    This matters specifically because a restore keeps running to
+    completion in its own worker thread even after the HTTP request that
+    started it is gone (a closed browser tab, or nginx's default
+    `proxy_ignore_client_abort off` tearing down the upstream connection
+    on client disconnect -- neither one can or does kill the underlying
+    OS thread/subprocess). Without this lock, an admin (or a CI/CD
+    pipeline retrying a request it never got a response for) who
+    re-triggers a restore they *think* failed could start a SECOND
+    `DROP SCHEMA public CASCADE` / `psql` restore racing the first one
+    still in flight against the very same database -- corruption, not a
+    harmless duplicate.
+
+    `SET key token NX EX ttl` is atomic: exactly one caller can ever
+    acquire this for a given window, no matter how close together two
+    requests arrive.
+
+    Deliberately FAILS CLOSED if Redis itself is unreachable -- the
+    opposite choice from _acquire_scheduled_backup_lock's fail-open,
+    because that lock's worst failure mode is a harmless duplicate
+    backup, while this one's is a corrupting concurrent destructive
+    restore. Refusing to restore blind is the safer of the two bad
+    options here.
+    """
+    try:
+        acquired = _get_redis_client().set(RESTORE_LOCK_KEY, token, nx=True, ex=RESTORE_LOCK_TTL_SECONDS)
+    except redis.RedisError as exc:
+        raise RuntimeError(
+            "Could not verify that no other restore is already running (Redis is "
+            "unreachable) -- refusing to start a second destructive restore blind. "
+            "Retry once Redis is reachable again."
+        ) from exc
+    if not acquired:
+        raise RestoreInProgressError(
+            "A restore is already in progress. Check GET /api/backup/restore-status "
+            "for its outcome instead of retrying -- starting a second restore while "
+            "one is still running risks corrupting the database."
+        )
+
+
+def _release_restore_lock(token: str) -> None:
+    """
+    Only deletes the lock if it still holds THIS restore's own token --
+    guards against the edge case where this restore ran long enough for
+    RESTORE_LOCK_TTL_SECONDS to expire and a DIFFERENT restore has since
+    legitimately acquired the key; without the token check, this call
+    would delete that other restore's still-valid lock out from under it.
+    Failure here just means the lock self-expires via its TTL instead of
+    clearing immediately -- logged, not raised, since we're already in a
+    `finally` and the restore's real result has already been decided.
+    """
+    lua = "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end"
+    try:
+        _get_redis_client().eval(lua, 1, RESTORE_LOCK_KEY, token)
+    except redis.RedisError:
+        logger.warning(
+            "backup_service: failed to release restore lock in Redis -- it will "
+            "self-expire via TTL in at most %ds.", RESTORE_LOCK_TTL_SECONDS, exc_info=True,
+        )
+
+
+def _restore_status_path() -> str:
+    return os.path.join(_ensure_backup_dir(), RESTORE_STATUS_FILENAME)
+
+
+def _write_restore_status(status: dict) -> None:
+    """Atomic write (tmp + os.replace), same pattern as _save_index -- never leaves restore_status.json half-written for a poller to read mid-write."""
+    path = _restore_status_path()
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(status, f, indent=2, default=str)
+    os.replace(tmp_path, path)
+
+
+def get_restore_status() -> dict:
+    """
+    Powers GET /api/backup/restore-status -- the thing a caller (CI/CD
+    pipeline, or an admin whose browser dropped mid-restore) actually
+    polls instead of depending on the one HTTP response from POST
+    /restore/{filename} ever arriving. Reflects the MOST RECENT restore
+    attempt only, whether it's still running, succeeded, or failed.
+    """
+    path = _restore_status_path()
+    if not os.path.exists(path):
+        return {"status": "none", "detail": "No restore has been run yet."}
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        logger.warning("backup_service: restore_status.json is missing/corrupt.")
+        return {"status": "unknown", "detail": "restore_status.json is missing or corrupt."}
+
+
+
+def _restore_backup_impl(filepath: str, take_safety_backup: bool = True) -> dict:
     """
     Destructive: drops and recreates the `public` schema, then replays the
     given gzip-compressed SQL dump into it via `psql`. Works identically
@@ -425,11 +541,47 @@ def restore_backup(filepath: str, take_safety_backup: bool = True) -> dict:
 
     conn = _db_connection_kwargs()
 
+    # BUG FIX -- "Restore failed: ... 'DROP SCHEMA public CASCADE; CREATE
+    # SCHEMA public;'] timed out after 120 seconds", and the app appearing
+    # to hang / "can't connect" for the whole 120s while this ran. Root
+    # cause: `DROP SCHEMA ... CASCADE` needs an ACCESS EXCLUSIVE lock on
+    # every object in the schema, which has to wait for every OTHER
+    # session with an open transaction touching any of those objects to
+    # finish -- and THIS VERY REQUEST already has one. This route depends
+    # on `require_true_super_admin` -> `get_current_user`
+    # (see deps.py), which runs `db.query(models.User)...first()` on a
+    # `Session` from `Depends(get_db)` -- SQLAlchemy 2.0 auto-begins a
+    # transaction on that first query and does NOT end it until
+    # `get_db()`'s `finally: db.close()` runs, which only happens after
+    # the ENTIRE request (including this synchronous call into
+    # restore_backup()) finishes. So the DROP SCHEMA below wound up
+    # waiting on a lock that could only be released once THIS SAME
+    # request finished -- which it never would, since it was busy waiting
+    # on the DROP SCHEMA. Not a Postgres-detected deadlock (nothing on the
+    # DB side was itself waiting on anything), just an unbreakable wait
+    # from Postgres's point of view -- hence sitting there until the
+    # subprocess timeout below finally killed it.
+    #
+    # Any OTHER concurrent request/tab with its own open transaction on a
+    # public-schema table would cause the exact same hang, not just this
+    # one -- and a "replace the ENTIRE database" operation (see this
+    # route's own confirmation modal in the frontend) makes every other
+    # session's in-flight view of the data moot anyway. So the fix here
+    # terminates every OTHER backend connection using this same DB role
+    # (a role can always terminate its own other sessions, no extra
+    # privilege needed) immediately before the reset -- covering this
+    # request's own self-held lock AND any other concurrent one in a
+    # single, simple statement.
+    terminate_others_sql = (
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+        "WHERE datname = current_database() AND pid <> pg_backend_pid();"
+    )
+
     # Reset the schema instead of dropping/recreating the whole database --
     # DROP DATABASE can't run inside the same connection pool this app is
     # actively using, while `DROP SCHEMA ... CASCADE` can run as a normal
     # statement over a plain psql connection to that same database.
-    reset_sql = "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
+    reset_sql = terminate_others_sql + " DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
     reset_cmd = [
         "psql",
         "--host", conn["host"],
@@ -437,6 +589,28 @@ def restore_backup(filepath: str, take_safety_backup: bool = True) -> dict:
         "--username", conn["user"],
         "--dbname", conn["dbname"],
         "--quiet",
+        # BUG FIX -- restore appeared to "succeed" (200 OK, no error shown
+        # anywhere) but left the app unusable afterward (e.g. login
+        # throwing an unhandled 500 with `relation "users" does not
+        # exist`, or similar). Root cause: by default `psql` does NOT stop
+        # on a failing statement -- it logs the error to stderr and keeps
+        # going, then still exits 0 once it reaches the end of the
+        # script/command. `reset_result.returncode != 0` below therefore
+        # never caught anything, because a single `DROP SCHEMA ... CREATE
+        # SCHEMA` pair essentially can't partially fail in a way that
+        # still exits 0 -- but the SAME missing flag on restore_cmd below
+        # is what actually let a broken restore look like a clean one:
+        # if e.g. an early CREATE TABLE/CREATE TYPE statement in the dump
+        # failed (a permissions error, a leftover object from a half-
+        # dropped schema, an out-of-order FK reference), psql just moved
+        # on to the next statement -- INSERTs for a table that was never
+        # created fail too, silently, and psql still exits 0 at the end.
+        # `--set ON_ERROR_STOP=1` makes psql abort with a non-zero exit
+        # code the moment ANY statement fails, so `returncode != 0` below
+        # actually means what the code assumes it means. Added here too
+        # (even though a single --command is low-risk) so both psql
+        # invocations in this function share the same fail-loud behavior.
+        "--set", "ON_ERROR_STOP=1",
         "--command", reset_sql,
     ]
     reset_result = subprocess.run(reset_cmd, capture_output=True, env=conn["env"], timeout=120)
@@ -450,9 +624,70 @@ def restore_backup(filepath: str, take_safety_backup: bool = True) -> dict:
         "--username", conn["user"],
         "--dbname", conn["dbname"],
         "--quiet",
+        # See reset_cmd's comment above -- ON_ERROR_STOP is the flag that
+        # actually matters here, since the restore is many statements, not
+        # one.
+        #
+        # BUG FIX -- "Restore failed: ... ERROR: unrecognized configuration
+        # parameter \"transaction_timeout\" / STATEMENT: SET
+        # transaction_timeout = 0;", restore aborting immediately every
+        # time. This USED to also pass --single-transaction (wrapping the
+        # whole restore in one BEGIN/COMMIT so a detected failure rolls
+        # back cleanly instead of leaving a half-restored schema) -- good
+        # in principle, but psql 17+ clients automatically prepend
+        # `SET transaction_timeout = 0;` whenever --single-transaction is
+        # used (to stop a SERVER-side transaction_timeout from aborting a
+        # long-running restore mid-way). `transaction_timeout` is itself a
+        # Postgres 17+ GUC -- if the actual DB SERVER predates 17 (very
+        # common; this app doesn't pin a minimum Postgres version anywhere
+        # -- see docker-compose.yml/.env.*.example), it doesn't recognize
+        # that parameter at all and rejects the SET outright, which
+        # (correctly, thanks to ON_ERROR_STOP) aborts the ENTIRE restore
+        # before a single real statement from the dump even runs. This is
+        # a psql-CLIENT-version-vs-Postgres-SERVER-version mismatch, not a
+        # server-configurable/data problem -- there's no flag to suppress
+        # just that one auto-SET, so --single-transaction is dropped
+        # entirely rather than pinning/detecting exact client/server
+        # versions here. ON_ERROR_STOP=1 alone still catches and reports
+        # any real mid-restore failure correctly (see reset_cmd's comment
+        # above); the only difference is a failure now leaves whatever ran
+        # before it committed rather than cleanly rolling back to empty --
+        # the pre-restore safety backup taken above remains the recovery
+        # path either way.
+        "--set", "ON_ERROR_STOP=1",
     ]
     with gzip.open(filepath, "rb") as gz_in:
         sql_bytes = gz_in.read()
+
+    # BUG FIX -- "Restore failed partway through: ERROR: unrecognized
+    # configuration parameter \"transaction_timeout\"", even with
+    # --single-transaction long since removed above (see that comment).
+    # Root cause turned out to be one level further back than the psql
+    # invocation itself: backend/Dockerfile used to install the generic,
+    # unversioned `postgresql-client` package, which resolved to a 17.x
+    # pg_dump -- and pg_dump 17.x writes `SET transaction_timeout = 0;`
+    # into the STANDARD PREAMBLE of every dump it produces, regardless of
+    # --single-transaction. `transaction_timeout` is itself a PG17+-only
+    # GUC, so a 16.x (or older) server -- like docker-compose.yml's
+    # `db: postgres:16-alpine` -- rejects that SET outright, and
+    # ON_ERROR_STOP correctly aborts the entire restore before a single
+    # real statement from the dump runs.
+    #
+    # The Dockerfile now pins postgresql-client to major version 16 (see
+    # its own comment) so this line never gets written into FUTURE
+    # backups. But every backup already taken with the old, mismatched
+    # image -- on disk or already uploaded to Drive -- already has this
+    # line baked into its bytes, and rebuilding the image doesn't rewrite
+    # backups that already exist. So this strips any such line here too,
+    # unconditionally, on every restore: a no-op for dumps that never had
+    # it (new backups, or ones taken by psql <17 to begin with), and the
+    # difference between "restorable" and "permanently broken" for the
+    # ones that do. Anchored to start-of-line and requires the trailing
+    # semicolon so it can only ever match pg_dump's own auto-generated
+    # SET statement, not e.g. a value inside a COPY block that happens to
+    # contain this text.
+    sql_bytes = re.sub(rb"(?im)^SET transaction_timeout = .*?;\r?\n?", b"", sql_bytes)
+
     result = subprocess.run(
         restore_cmd,
         input=sql_bytes,
@@ -465,10 +700,204 @@ def restore_backup(filepath: str, take_safety_backup: bool = True) -> dict:
         raise RuntimeError(f"Restore failed partway through: {result.stderr.decode(errors='replace')[:2000]}")
 
     logger.warning("backup_service: RESTORE COMPLETE from %s -- database has been replaced.", os.path.basename(filepath))
+
+    # BUG FIX -- restore "succeeded" (200 OK) but the app was broken
+    # immediately afterward: /admin came back blank, and logging back in
+    # (specifically as the root Super Admin) failed with an unhandled 500.
+    # Root cause: `pg_dump`/`psql` only ever move DATA -- a backup captures
+    # the schema exactly as it existed AT BACKUP TIME, with no awareness of
+    # which alembic revision that was. If the restored file predates a
+    # migration this running code already depends on (e.g.
+    # 0008_super_admin_totp.py's `users.totp_enabled`/
+    # `totp_secret_encrypted` -- read unconditionally by
+    # services/auth_service.py's login() for the super_admin role;
+    # 0009_recovery_codes.py's whole `recovery_codes` table; or
+    # 0010_partition_audit_logs.py's partitioned `audit_logs`), the restore
+    # would quietly leave the database on an OLDER schema than this code
+    # expects -- the DROP SCHEMA/reload above has no concept of "old" vs
+    # "new" schema, it just replays whatever SQL the file contains. The
+    # very next query that touches a newer column/table then fails at the
+    # database level (e.g. `UndefinedColumn: users.totp_enabled does not
+    # exist`), surfacing as an opaque unhandled 500 with no indication the
+    # ROOT problem was a stale backup, not a broken restore mechanism.
+    #
+    # Fix: reconcile the schema immediately after loading the dump, the
+    # same way a fresh deploy does -- run `alembic upgrade head` against
+    # the now-restored database so its schema matches what THIS running
+    # code actually expects, while keeping every row the backup brought
+    # back. `database.get_schema_status()` (already used by GET /readyz)
+    # is reused here before/after so the caller gets a clear, structured
+    # answer instead of a bare pass/fail -- and so a restore whose
+    # migration step itself fails (e.g. a destructive/irreversible
+    # migration between the backup's era and now) raises a specific,
+    # actionable error instead of returning a falsely "successful" restore
+    # that's still broken.
+    from alembic import command
+    from alembic.config import Config as AlembicConfig
+    from sqlalchemy import inspect as sa_inspect
+    import database as database_module
+
+    # BUG (caught before shipping): this file lives at
+    # backend/services/backup_service.py, so it needs to go up TWO
+    # directories to reach backend/ (where alembic.ini and the alembic/
+    # script location actually are) -- database.py's own
+    # get_schema_status() only needs ONE `os.path.dirname()` because
+    # database.py itself already lives directly in backend/. Copy-pasting
+    # that single-dirname call here would silently point alembic_cfg at
+    # backend/services/ instead, and AlembicConfig("backend/services/"
+    # + "alembic.ini") would fail to find alembic.ini at all.
+    backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    alembic_cfg = AlembicConfig(os.path.join(backend_dir, "alembic.ini"))
+    alembic_cfg.set_main_option("script_location", os.path.join(backend_dir, "alembic"))
+
+    schema_status_before = database_module.get_schema_status()
+    if not schema_status_before["ready"]:
+        logger.warning(
+            "backup_service: restored schema is behind this build (%s) -- running "
+            "'alembic upgrade head' to bring it current before declaring the restore done.",
+            schema_status_before["reason"],
+        )
+        # BUG FIX -- "Restore loaded the backup's data successfully, but
+        # bringing its schema up to date (alembic upgrade head) failed:
+        # (psycopg2.errors.DuplicateTable) relation \"asset_types\" already
+        # exists". Root cause: schema_status_before["ready"] is False for
+        # TWO meaningfully different situations, and this used to treat
+        # them identically:
+        #   1. the schema is genuinely empty (a brand-new/blank database)
+        #      -- current_heads == [] because alembic_version has never
+        #      been written, AND no other tables exist either. Replaying
+        #      the full migration chain from scratch is exactly right
+        #      here.
+        #   2. the schema already has every real table (asset_types,
+        #      users, ...) -- just restored from the dump's own CREATE
+        #      TABLE statements -- but STILL has current_heads == [],
+        #      because the database this backup came from was bootstrapped
+        #      via AUTO_INIT_DB's init_db()/create_all() (see database.py's
+        #      own docstring on init_db()), a deliberately supported
+        #      alternative to Alembic that builds every table straight
+        #      from models.py and never stamps `alembic_version` at all.
+        # `alembic upgrade head` can't tell these apart on its own -- it
+        # just sees no recorded revision and replays 0001_baseline_schema's
+        # `CREATE TABLE asset_types (...)` from scratch, which collides
+        # with the identical table the restore already recreated.
+        #
+        # Fix: check for actual pre-existing tables ourselves before
+        # deciding which of the two situations this is. Real schema
+        # content (case 2) means create_all() already built something
+        # that matches THIS build's models.py -- i.e. it's already
+        # equivalent to head in substance, it just never got the
+        # `alembic_version` row saying so -- so `alembic stamp head`
+        # (record the revision without running any DDL) is the correct
+        # move, not `upgrade`. An actually empty schema (case 1) still
+        # goes through the real `upgrade(head)` path below, unchanged.
+        #
+        # Deliberately NOT applied when current_heads is non-empty (the
+        # "revision mismatch" branch of get_schema_status(), e.g. an
+        # older-but-Alembic-tracked backup) -- there, alembic_version DOES
+        # already correctly describe the existing tables' real revision,
+        # and `upgrade(head)` applying only the INCREMENTAL migrations on
+        # top of that is exactly right; stamping would wrongly skip them.
+        try:
+            with database_module.engine.connect() as _conn:
+                existing_tables = set(sa_inspect(_conn).get_table_names()) - {"alembic_version"}
+
+            if schema_status_before["current_heads"] or not existing_tables:
+                command.upgrade(alembic_cfg, "head")
+            else:
+                logger.warning(
+                    "backup_service: restored schema already has %d table(s) despite "
+                    "missing/empty 'alembic_version' -- treating this as an "
+                    "AUTO_INIT_DB/create_all()-bootstrapped backup and running 'alembic "
+                    "stamp head' instead of replaying migrations against tables that "
+                    "already exist.",
+                    len(existing_tables),
+                )
+                command.stamp(alembic_cfg, "head")
+        except Exception as exc:
+            logger.exception("backup_service: post-restore schema reconciliation failed")
+            raise RuntimeError(
+                "Restore loaded the backup's data successfully, but bringing its schema "
+                f"up to date failed: {exc}. The database is on an older or otherwise "
+                "unreconciled schema than this app expects and may not work correctly "
+                "until this is resolved -- restore the pre-restore safety backup above "
+                "if you need to revert."
+            ) from exc
+
+    # Existing pooled connections were opened against the schema as it
+    # stood before the DROP SCHEMA/reload/migrate above -- dispose them so
+    # every request after this one grabs a fresh connection against the
+    # now-current schema instead of a stale one, belt-and-suspenders
+    # alongside pool_pre_ping (see database.py's engine setup).
+    database_module.engine.dispose()
+
+    schema_status_after = database_module.get_schema_status()
+    logger.warning(
+        "backup_service: post-restore schema status -- ready=%s (%s)",
+        schema_status_after["ready"], schema_status_after["reason"],
+    )
+
     return {
         "restored_from": os.path.basename(filepath),
         "safety_backup": safety_entry,
+        "schema_status": schema_status_after,
     }
+
+
+def restore_backup(filepath: str, take_safety_backup: bool = True) -> dict:
+    """
+    Public entry point for a restore -- wraps _restore_backup_impl() (the
+    actual pg_terminate_backend/DROP SCHEMA/psql/alembic work, unchanged)
+    with two things that matter specifically because a restore keeps
+    running to completion in its own thread even after the HTTP request
+    that triggered it is gone (closed browser tab, or nginx's default
+    `proxy_ignore_client_abort off` dropping the upstream connection on
+    client disconnect -- see RestoreInProgressError's docstring):
+
+      1. A distributed lock (_acquire_restore_lock) so a second restore
+         request -- e.g. a CI/CD pipeline reasonably retrying one it
+         never got a response for -- can't start while this one is still
+         running and race it against the same database.
+      2. A persisted status file (restore_status.json, via
+         _write_restore_status) that a caller can poll via GET
+         /api/backup/restore-status for the REAL outcome, instead of
+         depending on that one HTTP response ever arriving.
+
+    Raises RestoreInProgressError (unchanged, propagates straight
+    through) if another restore already holds the lock -- the caller
+    (backup_api.py) turns that into a 409, distinct from every other
+    failure here which is a 500.
+    """
+    token = uuid.uuid4().hex
+    _acquire_restore_lock(token)  # raises RestoreInProgressError / RuntimeError -- nothing written yet if so
+    started_at = datetime.datetime.now(datetime.timezone.utc)
+    _write_restore_status({
+        "status": "running",
+        "restore_from": os.path.basename(filepath),
+        "started_at": started_at.isoformat(),
+        "finished_at": None,
+    })
+    try:
+        result = _restore_backup_impl(filepath, take_safety_backup=take_safety_backup)
+    except Exception as exc:
+        _write_restore_status({
+            "status": "failed",
+            "restore_from": os.path.basename(filepath),
+            "started_at": started_at.isoformat(),
+            "finished_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "error": str(exc),
+        })
+        raise
+    else:
+        _write_restore_status({
+            "status": "succeeded",
+            "restore_from": os.path.basename(filepath),
+            "started_at": started_at.isoformat(),
+            "finished_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "result": result,
+        })
+        return result
+    finally:
+        _release_restore_lock(token)
 
 
 def restore_from_upload(file_bytes: bytes, original_filename: str) -> dict:

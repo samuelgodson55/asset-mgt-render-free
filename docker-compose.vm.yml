@@ -1,0 +1,535 @@
+# =============================================================================
+# docker-compose.vm.yml
+# -----------------------------------------------------------------------------
+# The VM deployment target's compose file. Deliberately mirrors
+# docker-compose.yml's SIX services one-for-one -- db, redis, backend,
+# worker, beat, frontend -- as separate containers, exactly like local dev
+# and the Container Apps path. Nothing is merged or refactored into fewer
+# containers; only four things differ from docker-compose.yml:
+#
+#   1. `image:` (pulled from Docker Hub, tagged by CI) instead of `build:` --
+#      the VM never builds images itself, it only ever runs ones
+#      deploy-azure-vm.yml already built and pushed.
+#   2. Every service gets a `mem_limit`/`mem_reservation` ceiling (see the
+#      table below) so one runaway container (e.g. a big CSV export, or a
+#      slow query) can't starve the others of RAM and take the whole VM
+#      down -- Compose enforces these as real cgroup limits even outside
+#      Swarm mode, unlike `deploy.resources.limits` which Swarm ignores.
+#   3. A `caddy` service replaces the host port publish on `frontend` --
+#      Caddy reverse-proxies to `frontend:80` internally and presents a
+#      free Cloudflare Origin CA certificate for whatever domain DOMAIN
+#      resolves to (see DEPLOYMENT_VM.md's "Set up Cloudflare Tunnel"
+#      section).
+#   4. A `cloudflared` service is the ONLY thing that ever connects
+#      outbound -- it's the Cloudflare Tunnel that replaces both Tailscale
+#      (for SSH) and any open inbound port at all (for the app). See that
+#      service's own comment below.
+#
+# Plus one OPT-IN ninth service, behind a Compose profile so it never
+# starts unless you ask for it:
+#   jaeger   - local distributed-tracing UI (Operations & Observability
+#              requirement #4 -- see backend/telemetry.py's module
+#              docstring), identical role/config to docker-compose.yml's
+#              own `jaeger` service. Plain `docker compose -f
+#              docker-compose.vm.yml up -d` never starts this; SSH in and
+#              run `docker compose -f docker-compose.vm.yml --profile
+#              tracing up -d` instead, with OTEL_ENABLED=true in
+#              /opt/snipeit/.env (see .env.example) -- every
+#              backend/worker/beat env block below already points
+#              OTEL_EXPORTER_OTLP_ENDPOINT at it. Browse traces at
+#              http://<vm>:16686 over the Cloudflare Tunnel's SSH route
+#              (nothing here publishes 16686/4318 to the public internet --
+#              see that service's own comment). See README.md's
+#              "Distributed Tracing" section.
+#
+# Memory budget (Standard_B2s = 4 GiB RAM total, the default vm_size in
+# infra-vm/variables.tf) -- limits sum to ~2.9 GiB, leaving ~1.1 GiB
+# headroom for the OS, Docker's own daemon, and page cache:
+#
+#   service    limit   reservation   why
+#   --------   -----   -----------   ---------------------------------------
+#   db         768m    256m          Postgres; grows with data volume
+#   redis      256m    128m          small queue + short-lived export blobs
+#   backend    768m    256m          FastAPI/uvicorn, UVICORN_WORKERS procs
+#   worker     640m    256m          Celery worker; CSV/PDF export jobs
+#   beat       128m    64m           scheduler only, no request handling
+#   frontend   128m    64m           nginx serving static assets + proxy
+#   caddy      160m    64m           TLS re-presentation (Origin CA cert)
+#   cloudflared 128m   32m           outbound-only Tunnel connector
+#   --------   -----   -----------
+#   total      2976m   1120m
+#
+#   jaeger     256m    96m           OPT-IN (profile: tracing) -- not part
+#                                    of the always-on total above; only
+#                                    counts against the ~1.1 GiB headroom
+#                                    while you've deliberately started it.
+#
+# Running Standard_B2ms (8 GiB) instead? Double every number below, or set
+# the *_MEM_LIMIT / *_MEM_RESERVATION overrides in .env -- every value here
+# reads from .env first, same pattern as docker-compose.yml, so nothing
+# needs editing in this file itself for that.
+#
+# Deployed to /opt/snipeit/docker-compose.vm.yml on the VM by cloud-init on
+# first boot, and re-synced there by deploy-azure-vm.yml on every deploy
+# after that (see infra-vm/cloud-init.yaml and that workflow).
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------
+  # db (identical role to docker-compose.yml's db)
+  # ---------------------------------------------------------------------
+  db:
+    image: postgres:16-alpine
+    container_name: snipeit_lite_db
+    restart: unless-stopped
+    mem_limit: ${DB_MEM_LIMIT:-768m}
+    mem_reservation: ${DB_MEM_RESERVATION:-256m}
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
+    volumes:
+      # Bind-mounted (not a named volume) to the data disk cloud-init
+      # mounts at /mnt/docker-data -- see that file's comments on why a
+      # SEPARATE managed disk backs application data instead of the OS
+      # disk, and infra-vm/main.tf's azurerm_managed_disk resource.
+      - /mnt/docker-data/volumes/pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-admin} -d ${POSTGRES_DB:-asset_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------
+  # redis (identical role to docker-compose.yml's redis)
+  # ---------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: snipeit_lite_redis
+    restart: unless-stopped
+    mem_limit: ${REDIS_MEM_LIMIT:-256m}
+    mem_reservation: ${REDIS_MEM_RESERVATION:-128m}
+    # Cap Redis's OWN internal memory below the container's cgroup limit
+    # (256m) so Redis evicts old export results gracefully under
+    # maxmemory-policy instead of the OOM killer ending the process
+    # outright when the two limits are identical.
+    command: ["redis-server", "--maxmemory", "192mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - /mnt/docker-data/volumes/redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------
+  # backend (identical role to docker-compose.yml's backend)
+  # ---------------------------------------------------------------------
+  backend:
+    image: ${DOCKERHUB_BACKEND_IMAGE}:${IMAGE_TAG:-latest}
+    container_name: snipeit_lite_backend
+    restart: unless-stopped
+    mem_limit: ${BACKEND_MEM_LIMIT:-768m}
+    mem_reservation: ${BACKEND_MEM_RESERVATION:-256m}
+    volumes:
+      - /mnt/docker-data/volumes/backup_data:/app/backups
+      - /mnt/docker-data/volumes/export_data:/app/export_results
+    environment:
+      ENVIRONMENT: production
+      UVICORN_WORKERS: ${UVICORN_WORKERS:-2}
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379/0
+      EXPORT_RESULT_DIR: /app/export_results
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      JWT_EXPIRY_HOURS: ${JWT_EXPIRY_HOURS:-12}
+      CORS_ORIGINS: ${CORS_ORIGINS:-https://${DOMAIN}}
+      SITE_NAME: ${SITE_NAME:-Snipe-IT Lite}
+      LEAN_MODE: "false"
+      LOG_FORMAT: json
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Operations & Observability requirement #4: distributed tracing
+      # (OpenTelemetry) -- see backend/telemetry.py's module docstring and
+      # docker-compose.yml's identical block for the full comment. Off by
+      # default; flip OTEL_ENABLED to "true" in /opt/snipeit/.env and
+      # traces flow to the `jaeger` service below with no other change
+      # needed -- remember `jaeger` itself only starts with `docker
+      # compose -f docker-compose.vm.yml --profile tracing up -d` (see
+      # this file's top comment).
+      OTEL_ENABLED: ${OTEL_ENABLED:-false}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-snipeit-lite-backend}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://jaeger:4318}
+      OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
+      OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-http/protobuf}
+      OTEL_TRACES_SAMPLE_RATIO: ${OTEL_TRACES_SAMPLE_RATIO:-1.0}
+      OTEL_CONSOLE_EXPORTER: ${OTEL_CONSOLE_EXPORTER:-false}
+      # Alternative/additional export target -- see .env.azure.example and
+      # README.md's "Distributed Tracing" section. Empty by default since
+      # this VM path provisions no Application Insights resource of its
+      # own (that's the Container Apps path's infra/main.bicep) -- set it
+      # yourself if you have an Application Insights resource elsewhere
+      # you want this VM's traces to reach.
+      APPLICATIONINSIGHTS_CONNECTION_STRING: ${APPLICATIONINSIGHTS_CONNECTION_STRING:-}
+      LOGIN_RATE_LIMIT_MAX: ${LOGIN_RATE_LIMIT_MAX:-5}
+      LOGIN_RATE_LIMIT_WINDOW_SECONDS: ${LOGIN_RATE_LIMIT_WINDOW_SECONDS:-60}
+      ACCOUNT_LOCKOUT_MAX_ATTEMPTS: ${ACCOUNT_LOCKOUT_MAX_ATTEMPTS:-5}
+      ACCOUNT_LOCKOUT_DURATION_MINUTES: ${ACCOUNT_LOCKOUT_DURATION_MINUTES:-15}
+      ENABLE_API_DOCS: ${ENABLE_API_DOCS:-false}
+      SUPER_ADMIN_USERNAME: ${SUPER_ADMIN_USERNAME:-superadmin}
+      SUPER_ADMIN_NAME: ${SUPER_ADMIN_NAME:-Super Admin}
+      ROOT_ADMIN_BOOTSTRAP_PASSWORD: ${ROOT_ADMIN_BOOTSTRAP_PASSWORD:-}
+      NOTIFICATIONS_ENABLED: ${NOTIFICATIONS_ENABLED:-false}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
+      SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-}
+      ADMIN_NOTIFICATION_EMAILS: ${ADMIN_NOTIFICATION_EMAILS:-}
+      OVERDUE_NOTIFICATION_INTERVAL_HOURS: ${OVERDUE_NOTIFICATION_INTERVAL_HOURS:-24}
+      DUE_SOON_REMINDER_DAYS: ${DUE_SOON_REMINDER_DAYS:-2}
+      DUE_SOON_NOTIFICATION_INTERVAL_HOURS: ${DUE_SOON_NOTIFICATION_INTERVAL_HOURS:-24}
+      SEND_INDIVIDUAL_HOLDER_REMINDERS: ${SEND_INDIVIDUAL_HOLDER_REMINDERS:-true}
+      ENABLE_AUTO_BACKUP: ${ENABLE_AUTO_BACKUP:-true}
+      BACKUP_HOURS_UTC: ${BACKUP_HOURS_UTC:-3}
+      BACKUP_DIR: /app/backups
+      BACKUP_RETENTION_COUNT: ${BACKUP_RETENTION_COUNT:-7}
+      BACKUP_GDRIVE_ENABLED: ${BACKUP_GDRIVE_ENABLED:-false}
+      BACKUP_GDRIVE_OAUTH_CLIENT_ID: ${BACKUP_GDRIVE_OAUTH_CLIENT_ID:-}
+      BACKUP_GDRIVE_OAUTH_CLIENT_SECRET: ${BACKUP_GDRIVE_OAUTH_CLIENT_SECRET:-}
+      BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN: ${BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN:-}
+      BACKUP_GDRIVE_FOLDER_ID: ${BACKUP_GDRIVE_FOLDER_ID:-}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # No host `ports:` -- reached only via `frontend`'s nginx reverse proxy
+    # (see nginx/default.conf.template), same as docker-compose.yml.
+
+  # ---------------------------------------------------------------------
+  # worker (identical role to docker-compose.yml's worker)
+  # ---------------------------------------------------------------------
+  worker:
+    image: ${DOCKERHUB_BACKEND_IMAGE}:${IMAGE_TAG:-latest}
+    container_name: snipeit_lite_worker
+    restart: unless-stopped
+    mem_limit: ${WORKER_MEM_LIMIT:-640m}
+    mem_reservation: ${WORKER_MEM_RESERVATION:-256m}
+    command: ["celery", "-A", "celery_app", "worker", "--loglevel=info", "--concurrency=2"]
+    volumes:
+      - /mnt/docker-data/volumes/export_data:/app/export_results
+    environment:
+      ENVIRONMENT: production
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379/0
+      EXPORT_RESULT_DIR: /app/export_results
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_FORMAT: json
+      # Operations & Observability requirement #4: distributed tracing --
+      # see the `backend` service's own OTEL_* block above for the full
+      # comment. celery_app.py appends "-worker" to OTEL_SERVICE_NAME
+      # automatically, so this container's spans are still easy to tell
+      # apart from `backend`'s in the Jaeger UI despite sharing the same
+      # env var value.
+      OTEL_ENABLED: ${OTEL_ENABLED:-false}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-snipeit-lite-backend}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://jaeger:4318}
+      OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
+      OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-http/protobuf}
+      OTEL_TRACES_SAMPLE_RATIO: ${OTEL_TRACES_SAMPLE_RATIO:-1.0}
+      OTEL_CONSOLE_EXPORTER: ${OTEL_CONSOLE_EXPORTER:-false}
+      APPLICATIONINSIGHTS_CONNECTION_STRING: ${APPLICATIONINSIGHTS_CONNECTION_STRING:-}
+      AUTO_INIT_DB: "false"
+      AUTO_SEED_DEMO_DATA: "false"
+      NOTIFICATIONS_ENABLED: ${NOTIFICATIONS_ENABLED:-false}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
+      SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-}
+      ADMIN_NOTIFICATION_EMAILS: ${ADMIN_NOTIFICATION_EMAILS:-}
+      OVERDUE_NOTIFICATION_INTERVAL_HOURS: ${OVERDUE_NOTIFICATION_INTERVAL_HOURS:-24}
+      DUE_SOON_REMINDER_DAYS: ${DUE_SOON_REMINDER_DAYS:-2}
+      DUE_SOON_NOTIFICATION_INTERVAL_HOURS: ${DUE_SOON_NOTIFICATION_INTERVAL_HOURS:-24}
+      SEND_INDIVIDUAL_HOLDER_REMINDERS: ${SEND_INDIVIDUAL_HOLDER_REMINDERS:-true}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A celery_app inspect ping --destination celery@$$HOSTNAME --timeout 10 | grep -q OK"]
+      interval: 30s
+      timeout: 15s
+      start_period: 20s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------
+  # beat (identical role to docker-compose.yml's beat -- kept as its own
+  # single, never-scaled container for the exact reason documented there:
+  # more than one Beat process fires duplicate notification emails)
+  # ---------------------------------------------------------------------
+  beat:
+    image: ${DOCKERHUB_BACKEND_IMAGE}:${IMAGE_TAG:-latest}
+    container_name: snipeit_lite_beat
+    restart: unless-stopped
+    mem_limit: ${BEAT_MEM_LIMIT:-128m}
+    mem_reservation: ${BEAT_MEM_RESERVATION:-64m}
+    command: ["celery", "-A", "celery_app", "beat", "--loglevel=info"]
+    environment:
+      ENVIRONMENT: production
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_FORMAT: json
+      # Operations & Observability requirement #4: distributed tracing --
+      # see the `backend` service's own OTEL_* block for the full
+      # comment. celery_app.py appends "-beat" to OTEL_SERVICE_NAME
+      # automatically for this process specifically (via `beat_init`, not
+      # `worker_process_init` -- see that file's own comment for why Beat
+      # needs its own separate signal).
+      OTEL_ENABLED: ${OTEL_ENABLED:-false}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-snipeit-lite-backend}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://jaeger:4318}
+      OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
+      OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-http/protobuf}
+      OTEL_TRACES_SAMPLE_RATIO: ${OTEL_TRACES_SAMPLE_RATIO:-1.0}
+      OTEL_CONSOLE_EXPORTER: ${OTEL_CONSOLE_EXPORTER:-false}
+      APPLICATIONINSIGHTS_CONNECTION_STRING: ${APPLICATIONINSIGHTS_CONNECTION_STRING:-}
+      AUTO_INIT_DB: "false"
+      AUTO_SEED_DEMO_DATA: "false"
+      NOTIFICATIONS_ENABLED: ${NOTIFICATIONS_ENABLED:-false}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
+      SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-}
+      ADMIN_NOTIFICATION_EMAILS: ${ADMIN_NOTIFICATION_EMAILS:-}
+      OVERDUE_NOTIFICATION_INTERVAL_HOURS: ${OVERDUE_NOTIFICATION_INTERVAL_HOURS:-24}
+      DUE_SOON_REMINDER_DAYS: ${DUE_SOON_REMINDER_DAYS:-2}
+      DUE_SOON_NOTIFICATION_INTERVAL_HOURS: ${DUE_SOON_NOTIFICATION_INTERVAL_HOURS:-24}
+      SEND_INDIVIDUAL_HOLDER_REMINDERS: ${SEND_INDIVIDUAL_HOLDER_REMINDERS:-true}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------
+  # frontend (identical role to docker-compose.yml's frontend -- nginx
+  # serving the built SPA + proxying /api/* to backend:8000 internally,
+  # per nginx/default.conf.template baked into the image)
+  # ---------------------------------------------------------------------
+  frontend:
+    image: ${DOCKERHUB_FRONTEND_IMAGE}:${IMAGE_TAG:-latest}
+    container_name: snipeit_lite_frontend
+    restart: unless-stopped
+    mem_limit: ${FRONTEND_MEM_LIMIT:-128m}
+    mem_reservation: ${FRONTEND_MEM_RESERVATION:-64m}
+    environment:
+      PORT: "80"
+      BACKEND_HOST: backend
+      BACKEND_PORT: "8000"
+      RESOLVER_IP: 127.0.0.11
+      ENABLE_API_DOCS: ${ENABLE_API_DOCS:-false}
+    # NO host `ports:` publish here (unlike docker-compose.yml's
+    # "8080:80") -- `caddy` below is the only container bound to the
+    # host's 80/443, and reaches this one over the internal Compose
+    # network at "frontend:80" instead. Keeping the SPA/API entry point
+    # itself completely unpublished mirrors the same "shrink the public
+    # attack surface to one hardened entry point" reasoning
+    # docker-compose.yml already applies to `backend`.
+    depends_on:
+      backend:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------
+  # caddy -- reverse proxy + security headers, presenting a Cloudflare
+  # Origin CA certificate for the inner hop from `cloudflared` below (real
+  # visitors' TLS terminates at Cloudflare's edge for free -- there's no
+  # ACME/Let's Encrypt step on this VM at all anymore). See Caddyfile for
+  # the actual proxy/TLS config, and DEPLOYMENT_VM.md's "Set up Cloudflare
+  # Tunnel" section for how DOMAIN and the Origin CA cert get set.
+  # ---------------------------------------------------------------------
+  caddy:
+    image: caddy:2-alpine
+    container_name: snipeit_lite_caddy
+    restart: unless-stopped
+    mem_limit: ${CADDY_MEM_LIMIT:-160m}
+    mem_reservation: ${CADDY_MEM_RESERVATION:-64m}
+    # DELIBERATELY no `ports:` here -- the only thing that ever reaches
+    # Caddy is the `cloudflared` container below, over the internal
+    # Docker network by service name ("caddy:443"). No host port is
+    # published, so there is nothing for the VM's NSG or UFW to have to
+    # open for this service at all -- see the Caddyfile's top comment and
+    # infra-vm/main.tf's "Cloudflare Tunnel" section.
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - /mnt/docker-data/volumes/caddy_data:/data
+      - /mnt/docker-data/volumes/caddy_config:/config
+      # Cloudflare Origin CA cert/key -- written by cloud-init from the
+      # cloudflare_origin_cert/_key Terraform variables (see Caddyfile).
+      - /opt/snipeit/certs:/etc/caddy/certs:ro
+    depends_on:
+      frontend:
+        condition: service_started
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------
+  # cloudflared -- the ONLY thing on this VM that ever makes a connection
+  # to the outside world on the app/SSH's behalf, and it's always OUTBOUND
+  # (to Cloudflare's edge). This is the substitute for both Tailscale (SSH)
+  # and the old open-80/443 Caddy/Let's Encrypt path -- see
+  # infra-vm/main.tf's "Cloudflare Tunnel" section for how the tunnel and
+  # its two routed hostnames (the app, and ssh.<domain>) get created, and
+  # DEPLOYMENT_VM.md's "Set up Cloudflare Tunnel" section for the one-time
+  # setup. Ingress rules themselves live in Cloudflare's config (pushed by
+  # Terraform), not in a local config.yml here -- that's what
+  # `tunnel run` (rather than `tunnel --config ... run`) picks up.
+  # ---------------------------------------------------------------------
+  cloudflared:
+    image: cloudflare/cloudflared:2025.6.1
+    container_name: snipeit_lite_cloudflared
+    restart: unless-stopped
+    mem_limit: ${CLOUDFLARED_MEM_LIMIT:-128m}
+    mem_reservation: ${CLOUDFLARED_MEM_RESERVATION:-32m}
+    # Two modes, chosen automatically by whether CLOUDFLARE_TUNNEL_TOKEN is
+    # set in /opt/snipeit/.env:
+    #   - SET (normal/production): runs the named Tunnel Terraform created
+    #     (main.tf), whose ingress rules route {$DOMAIN} -> caddy:443 and
+    #     ssh.{$DOMAIN} -> this VM's sshd, gated by Cloudflare Access.
+    #   - UNSET (testing, e.g. before you own a domain -- see
+    #     DEPLOYMENT_VM.md's "Test with a free Cloudflare subdomain first"
+    #     section): falls back to a free, account-less Quick Tunnel
+    #     against Caddy's plain-HTTP `:80` testing block, and prints a
+    #     random *.trycloudflare.com URL to this container's own logs
+    #     (`docker compose -f docker-compose.vm.yml logs -f cloudflared`).
+    #     That hostname is throwaway -- it changes every time this
+    #     container restarts, there's no SSH route or Access gating in
+    #     this mode, and Cloudflare explicitly doesn't support Quick
+    #     Tunnels for anything but short-lived testing. Don't point real
+    #     users or real data at it.
+    command: >
+      sh -c '
+      if [ -n "$$TUNNEL_TOKEN" ]; then
+        exec cloudflared tunnel --no-autoupdate run;
+      else
+        echo "CLOUDFLARE_TUNNEL_TOKEN not set -- starting a temporary Quick Tunnel for testing only. Watch this log for the https://*.trycloudflare.com URL.";
+        exec cloudflared tunnel --no-autoupdate --url http://caddy:80;
+      fi'
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    extra_hosts:
+      # Lets this container reach the VM HOST's own sshd (a normal
+      # systemd service, not a container) for the ssh.<domain> ingress
+      # rule -- "host-gateway" is Docker's own resolved address for the
+      # host, supported natively on Linux since Docker 20.10. Unused in
+      # Quick Tunnel mode (no SSH route exists there), harmless to keep.
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      caddy:
+        condition: service_started
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------
+  # jaeger (local distributed-tracing UI -- Operations & Observability
+  # requirement #4; see backend/telemetry.py's module docstring and
+  # docker-compose.yml's identical service for the full comment on why
+  # in-memory-only storage is the right trade-off here)
+  # ---------------------------------------------------------------------
+  # OPT-IN: `profiles: [tracing]` means this never starts on a normal
+  # `docker compose -f docker-compose.vm.yml up -d` -- SSH to the VM
+  # (DEPLOYMENT_VM.md's "No open SSH port" section) and explicitly run:
+  #     docker compose -f docker-compose.vm.yml --profile tracing up -d
+  # with OTEL_ENABLED=true in /opt/snipeit/.env (see .env.example).
+  #
+  # DELIBERATELY no host `ports:` publish here, unlike docker-compose.yml's
+  # version (which is fine publishing to localhost on a developer's own
+  # laptop) -- this is a shared VM, and Jaeger's UI/OTLP receiver ship with
+  # no authentication of their own. Reach the UI over the same Cloudflare
+  # Tunnel used for SSH instead (see DEPLOYMENT_VM.md), e.g.
+  # `ssh -L 16686:localhost:16686 <ssh_hostname>` for the UI; backend/worker/
+  # beat above already reach the OTLP receiver over the internal
+  # "jaeger:4318" service name and need no port publish at all.
+  #
+  # BUG FIX (image tag): this used to pin "jaegertracing/all-in-one:1.62"
+  # -- that tag was never published to Docker Hub (only fully-qualified
+  # three-part tags like "1.62.0" exist), so starting this profile failed
+  # outright with a "manifest not found" error. Even fixed to "1.62.0"
+  # though, Jaeger v1 reached end-of-life on 2025-12-31 -- so this now runs
+  # Jaeger v2 instead (a from-scratch rewrite on the OpenTelemetry
+  # Collector), pinned to a specific version rather than "latest". v2's
+  # all-in-one role has OTLP enabled on 4317 (gRPC) and 4318 (HTTP) by
+  # default -- no `COLLECTOR_OTLP_ENABLED` env var needed (v1 required it,
+  # v2 doesn't read that variable at all) -- so backend/telemetry.py needed
+  # zero changes to work against it. See docker-compose.yml's identical
+  # service for the full writeup.
+  jaeger:
+    image: jaegertracing/jaeger:2.19.0
+    container_name: snipeit_lite_jaeger
+    profiles: ["tracing"]
+    restart: unless-stopped
+    mem_limit: ${JAEGER_MEM_LIMIT:-256m}
+    mem_reservation: ${JAEGER_MEM_RESERVATION:-96m}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# No top-level `volumes:` block -- every volume above is an explicit BIND
+# MOUNT into /mnt/docker-data (the separate managed data disk cloud-init
+# formats and mounts), not a Compose-managed named volume. This is what
+# makes the data trivially findable/backup-able/snapshot-able as one plain
+# directory tree from the host side, and what infra-vm/main.tf's optional
+# daily disk-snapshot policy actually protects.
