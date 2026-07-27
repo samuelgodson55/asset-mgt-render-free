@@ -522,9 +522,22 @@ In GitHub: **Actions → Deploy VM Infrastructure (Terraform) → Run workflow**
   local plan. Re-run the workflow with `action: apply` once you're happy.
 
 `apply` takes 3-5 minutes. When it finishes, open the run's **Summary**
-tab — it prints every Terraform output, including:
+tab (not a step's raw log) — the "Print outputs" step writes a markdown
+table there with every Terraform output, including:
 
-- `public_ip_address` — the VM's static IP (break-glass only — no SSH or app traffic here by default)
+- `public_ip_address` — the VM's static IP. Not used for normal traffic
+  at all: both the app (`app_url`) and SSH (`ssh_command`) go through the
+  Cloudflare Tunnel instead, which is an *outbound-only* connection the
+  VM itself initiates to Cloudflare — nothing needs to reach this IP
+  directly, which is also why `ssh_allowed_source_ips` is empty (no
+  inbound ports open) by default. It's kept around for two reasons: (1)
+  break-glass access via `ssh_command_break_glass` if Cloudflare's
+  network is ever unreachable from where you are (only works once you've
+  temporarily set `ssh_allowed_source_ips`, see Troubleshooting), and (2)
+  it's what Azure's own tooling (Portal, `az vm show`, diagnostics/
+  monitoring) references the VM by, regardless of how you actually route
+  traffic to it. Not something to open in a browser or SSH into day to
+  day.
 - `azure_fqdn` — `<label>.<region>.cloudapp.azure.com` (break-glass reference only)
 - `app_domain` — the domain Caddy actually serves on (your `CUSTOM_DOMAIN`)
 - `app_url` — `https://<app_domain>` — not reachable yet, the app isn't deployed until step 10
@@ -532,6 +545,19 @@ tab — it prints every Terraform output, including:
 - `ssh_command` — exact command to SSH in through the Tunnel/Access (see step 2's last box)
 - `ssh_command_break_glass` — direct SSH over the public IP; only works if you've temporarily set `ssh_allowed_source_ips` (see step 2 / Troubleshooting)
 - `cloudflare_ci_service_token_id` / `cloudflare_ci_service_token_secret` — needed for step 9's `CF_ACCESS_CLIENT_ID`/`CF_ACCESS_CLIENT_SECRET`
+
+> **If you instead expand a step's raw log** (e.g. "terraform apply"),
+> you'll see an `env:` listing at the top with most `TF_VAR_*` lines
+> showing `***` and some showing nothing at all — that's normal, not
+> anything going wrong. GitHub Actions always shows this env context for
+> every step, and always masks any value that matches a registered repo/
+> environment secret (which is most of these), while the blank ones are
+> just optional variables (`admin_notification_emails`, the OTel/App
+> Insights ones, backup GDrive OAuth fields, etc.) nobody set. It's
+> unrelated to the actual Terraform outputs above — those live only on
+> the Summary tab, not in any step's raw log, and aren't masked (they're
+> freshly generated values, not copies of anything already registered as
+> a secret).
 
 The VM is already running the six-container stack + Caddy at this point
 (cloud-init brings it up on first boot using `initial_image_tag`, default
@@ -545,9 +571,7 @@ build.
 
 From step 8's Summary tab, copy the `ssh_hostname`,
 `cloudflare_ci_service_token_id`, and `cloudflare_ci_service_token_secret`
-outputs (the last one only shows once `terraform apply` created it — if
-you've lost it, `terraform taint cloudflare_zero_trust_access_service_token.ci`
-and re-apply to get a fresh one). In GitHub: **Settings → Environments →
+outputs. In GitHub: **Settings → Environments →
 prod → Secrets** → add:
 
 | Name | Value |
@@ -558,6 +582,30 @@ prod → Secrets** → add:
 
 Don't use `public_ip_address` here — nothing listens on port 22 there by
 default (see step 2).
+
+**If you lose `cloudflare_ci_service_token_secret` later** (didn't copy
+it in time, or `CF_ACCESS_CLIENT_SECRET` got deleted from GitHub) —
+Cloudflare only ever reveals a service token's secret once, at creation,
+so there's no "retrieve it again" API call. The fix is to force
+Terraform to create a brand new token and rewire GitHub to match:
+
+1. Locally (or via a one-off `workflow_dispatch` step you add
+   temporarily), run:
+   ```bash
+   terraform taint cloudflare_zero_trust_access_service_token.ci
+   ```
+   `taint` just marks this one resource for recreation on the next
+   `apply` — it doesn't touch the VM, the tunnel, DNS, or anything else.
+2. Run `infra-deploy-vm.yml` with `action: apply` again. This destroys
+   the old service token (instantly invalidating the old
+   `CF_ACCESS_CLIENT_ID`/`CF_ACCESS_CLIENT_SECRET` pair — `deploy-azure-
+   vm.yml`/`sync-secrets-vm.yml` will fail to authenticate until step 3
+   below) and creates a new one.
+3. Copy the fresh `cloudflare_ci_service_token_id`/
+   `cloudflare_ci_service_token_secret` from this new run's Summary tab,
+   and update the `CF_ACCESS_CLIENT_ID`/`CF_ACCESS_CLIENT_SECRET` repo/
+   environment secrets to match — same as the table above, just
+   overwriting the existing secrets instead of adding new ones.
 
 ---
 
@@ -1147,6 +1195,56 @@ own error message names the exact resource address (e.g.
 ```bash
 terraform import cloudflare_record.app <zone_id>/<dns_record_id>
 ```
+
+**I need to change `LOCATION`/region after already applying, and Azure
+won't let me move an existing resource group in place** — resist the
+urge to wipe or reset the whole state file to force this through. State
+is **one shared file covering every provider in this config** — Azure
+*and* Cloudflare together, not scoped per-provider — so wiping it also
+un-tracks the tunnel, DNS records, and Access application/policies/
+service token, none of which actually depend on region and didn't need
+to change. That just recreates this doc's entire "already exists"
+problem class, now for Cloudflare resources that were working fine.
+Scope the reset to only the Azure resources that actually need
+recreating instead:
+```bash
+terraform state rm azurerm_resource_group.this
+terraform state rm azurerm_linux_virtual_machine.this
+# ...and any other azurerm_* resource whose location can't change in place
+```
+then `terraform apply` — Terraform recreates just those, in the new
+region, while every `cloudflare_*` resource stays untouched and tracked.
+If a full state reset already happened, see the next entry.
+
+**A previous state reset (or a run that failed before this doc's remote
+backend existed) left real Cloudflare resources — tunnel, DNS records,
+Access application/policy/service token — orphaned from state** — same
+underlying pattern as the resource-group case above, just for
+Cloudflare. Since none of these are expensive or risky to keep, `import`
+them back into the fresh state rather than deleting and recreating them
+again:
+```bash
+terraform import cloudflare_zero_trust_tunnel_cloudflared.this <account_id>/<tunnel_id>
+terraform import cloudflare_zero_trust_tunnel_cloudflared_config.this <account_id>/<tunnel_id>
+terraform import cloudflare_record.app <zone_id>/<app_record_id>
+terraform import cloudflare_record.ssh <zone_id>/<ssh_record_id>
+terraform import cloudflare_zero_trust_access_application.ssh <account_id>/<app_id>
+terraform import cloudflare_zero_trust_access_policy.ssh_humans <account_id>/<app_id>/<policy_id>
+terraform import cloudflare_zero_trust_access_service_token.ci <account_id>/<service_token_id>
+terraform import cloudflare_zero_trust_access_policy.ssh_ci <account_id>/<app_id>/<ci_policy_id>
+```
+(IDs come from the Cloudflare dashboard or `cloudflare` provider's own
+API — each resource's Terraform Registry page documents its exact
+import ID format if one of these doesn't match what you have.) Once
+imported, these stay tracked in the shared state going forward, same as
+every Azure resource.
+
+**Lost `cloudflare_ci_service_token_secret` / need to rotate
+`CF_ACCESS_CLIENT_SECRET`** — Cloudflare only reveals a service token's
+secret once, at creation; there's no API to fetch it again later. See
+step 9's "If you lose `cloudflare_ci_service_token_secret` later"
+callout for the full `terraform taint` + re-apply + secret-update
+procedure.
 
 **Site unreachable after `apply` but before the first `deploy-azure-vm.yml`
 run** — expected; `initial_image_tag` defaults to `latest`, which may not
