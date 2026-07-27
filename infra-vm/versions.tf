@@ -85,11 +85,11 @@ terraform {
   # Terraform config -- state can't reliably bootstrap its own backend):
   #
   #   az group create -n rg-snipeit-tfstate -l eastus
-  #   az storage account create -n snipeitliteterraformstate \
+  #   az storage account create -n snipeittfstate01 \
   #     --resource-group rg-snipeit-tfstate --sku Standard_LRS \
   #     --min-tls-version TLS1_2 --allow-blob-public-access false
   #   az storage container create -n vm-state \
-  #     --account-name snipeitliteterraformstate --auth-mode login
+  #     --account-name snipeittfstate01 --auth-mode login
   #
   # Then set these as repo/environment Variables (not secrets -- none of
   # this is sensitive, it's just where state lives) for each of the

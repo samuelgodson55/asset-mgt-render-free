@@ -86,28 +86,23 @@ exists" instead of picking up where it left off:
 
 ```bash
 az group create -n rg-snipeit-tfstate -l eastus
-az storage account create -n snipeitliteterraformstate \
+az storage account create -n snipeittfstate01 \
   --resource-group rg-snipeit-tfstate --sku Standard_LRS \
   --min-tls-version TLS1_2 --allow-blob-public-access false
 az storage container create -n vm-state \
-  --account-name snipeitliteterraformstate --auth-mode login
+  --account-name snipeittfstate01 --auth-mode login
 ```
 
-(Storage account names are globally unique across all of Azure — if
-`snipeitliteterraformstate` is taken, pick another and use it
-consistently below.) Grant your own account, and the Azure AD App
-Registration from step 5 (once it exists), the **Storage Blob Data
-Contributor** role on this storage account, since state auth goes
-through Azure AD (`use_azuread_auth = true`), not a storage account key:
-
-```bash
-az role assignment create --role "Storage Blob Data Contributor" \
-  --assignee "<your-user-or-app-object-id>" \
-  --scope "$(az storage account show -n snipeitliteterraformstate -g rg-snipeit-tfstate --query id -o tsv)"
-```
+(Storage account names must be 3-24 characters, lowercase letters and
+numbers only, and globally unique across all of Azure -- if
+`snipeittfstate01` is taken, or you'd rather use your own name, just
+keep it within that length/character limit and use it consistently
+below.) You'll grant the CI service principal access to
+this storage account in step 5, once it exists — see that step's
+"Also grant it access to the Terraform state storage account" callout.
 
 Then set `TF_STATE_RESOURCE_GROUP=rg-snipeit-tfstate`,
-`TF_STATE_STORAGE_ACCOUNT=snipeitliteterraformstate`, and
+`TF_STATE_STORAGE_ACCOUNT=snipeittfstate01`, and
 `TF_STATE_CONTAINER=vm-state` as repo/environment **Variables** in step
 6 below — one storage account/container is shared by both the
 `vm-staging` and `prod` environments, they just write to different
@@ -336,6 +331,25 @@ az role assignment create \
   --scope /subscriptions/<subscription-id>
 ```
 
+**Also grant it access to the Terraform state storage account from step
+1 now** — Contributor above is an Azure Resource Manager (control-plane)
+role and deliberately does **not** include data-plane blob access, so
+without this separate grant `terraform init` fails with `Failed to get
+existing workspaces: ... AuthorizationPermissionMismatch` the first time
+this app registration's OIDC identity tries to read/write state:
+
+```bash
+az role assignment create --role "Storage Blob Data Contributor" \
+  --assignee <appId> \
+  --scope "$(az storage account show -n snipeittfstate01 -g rg-snipeit-tfstate --query id -o tsv)"
+```
+
+(Substitute your own state resource group/storage account names from
+step 1 if you changed them. RBAC role assignments can take a minute or
+two to propagate — if `terraform init` still fails immediately after
+running this, wait a moment and re-run the workflow before assuming
+something else is wrong.)
+
 Add federated credentials — one per environment/workflow combination that
 needs to authenticate. At minimum, for `infra-deploy-vm.yml` (triggered by
 `workflow_dispatch`, GitHub Environment `prod` or `vm-staging` — see the
@@ -394,7 +408,7 @@ Add these to each Environment (Secrets unless marked **Variable**):
 | Name | Value | Used by |
 |---|---|---|
 | `TF_STATE_RESOURCE_GROUP` (**Variable**, not secret) | `rg-snipeit-tfstate` from step 1's state backend setup | `infra-deploy-vm.yml` |
-| `TF_STATE_STORAGE_ACCOUNT` (**Variable**, not secret) | `snipeitliteterraformstate` (or whatever you named it) from step 1 | `infra-deploy-vm.yml` |
+| `TF_STATE_STORAGE_ACCOUNT` (**Variable**, not secret) | `snipeittfstate01` (or whatever you named it) from step 1 | `infra-deploy-vm.yml` |
 | `TF_STATE_CONTAINER` (**Variable**, not secret) | `vm-state` from step 1 | `infra-deploy-vm.yml` |
 | `AZURE_CLIENT_ID` | App Registration's appId (step 5) | `infra-deploy-vm.yml` |
 | `AZURE_TENANT_ID` | Tenant ID (step 5) | `infra-deploy-vm.yml` |
