@@ -59,9 +59,26 @@ jobs:
     # Environment's secrets into this job at all.
     environment: ${{ inputs.environment }}
     env:
-      # ---- Terraform provider auth (via `az login` below, use_cli = true
-      # in infra-vm/versions.tf -- no client secret ever touches disk) ----
+      # ---- Terraform provider + backend auth, via GitHub Actions OIDC
+      # federation directly -- no `az login` CLI session, no client
+      # secret ever touches disk. Both infra-vm/versions.tf's azurerm
+      # `provider` block and its `backend "azurerm"` block pick these
+      # ARM_* variables up automatically once `id-token: write` (above)
+      # lets the job request an OIDC token from GitHub.
+      #
+      # This replaces a previous az-CLI-session approach (`azure/login`
+      # + `use_cli = true`), which worked fine for the provider but broke
+      # `terraform init` on the backend with "Authenticating using the
+      # Azure CLI is only supported as a User (not a Service Principal)"
+      # -- the backend's CLI-based auth explicitly rejects a service-
+      # principal CLI session, which is exactly what a federated
+      # `az login` produces. OIDC auth sidesteps that restriction
+      # entirely rather than working around it, and covers both the
+      # provider and the backend with one auth path.
+      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      ARM_USE_OIDC: "true"
 
       # ---- Every infra-vm/variables.tf input, minus the ones with a
       # sensible default left alone (location, vm_size, disk sizes, etc --
@@ -131,13 +148,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-
-      - name: Azure login (federated OIDC -- no client secret)
-        uses: azure/login@v3
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3

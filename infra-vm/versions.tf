@@ -100,10 +100,17 @@ terraform {
   # existing local state file into this backend rather than starting
   # clean.
   #
-  # use_azuread_auth = true below means auth flows through the same
-  # `az login`/OIDC session azure/login@v3 already establishes in
-  # infra-deploy-vm.yml (and your own `az login` locally) -- no storage
-  # account access key is ever generated or stored anywhere.
+  # use_azuread_auth = true below means auth flows through Azure AD
+  # rather than a storage account access key (none is ever generated or
+  # stored anywhere). In infra-deploy-vm.yml this comes from the job's
+  # ARM_CLIENT_ID/ARM_TENANT_ID/ARM_SUBSCRIPTION_ID/ARM_USE_OIDC=true
+  # env vars -- direct GitHub Actions OIDC federation, no `az login` CLI
+  # session involved (the backend's Azure-CLI auth path only supports a
+  # User account, not the Service Principal a federated `az login`
+  # produces -- see that workflow's auth env-var comment for the full
+  # story). Running `terraform init`/`plan` locally instead, just run
+  # `az login` first -- the backend falls back to that CLI session fine
+  # when it's a real user, just not when it's a service principal.
   backend "azurerm" {
     use_azuread_auth = true
   }
@@ -126,10 +133,13 @@ provider "azurerm" {
     }
   }
 
-  # `use_cli = true` (the default) authenticates using whatever `az login`
-  # session is already active -- either your own (local `terraform apply`)
-  # or the one azure/login@v2 establishes in infra-deploy-vm.yml via OIDC.
-  # No client secret is ever stored in this repo or in Terraform state.
+  # No explicit auth attributes here on purpose -- the provider picks up
+  # ARM_CLIENT_ID/ARM_TENANT_ID/ARM_SUBSCRIPTION_ID/ARM_USE_OIDC from the
+  # environment automatically. In infra-deploy-vm.yml those come from
+  # direct GitHub Actions OIDC federation (see that workflow's auth
+  # env-var comment); locally, run `az login` first and it falls back to
+  # that CLI session instead. No client secret is ever stored in this
+  # repo or in Terraform state either way.
   subscription_id = var.subscription_id
 }
 
