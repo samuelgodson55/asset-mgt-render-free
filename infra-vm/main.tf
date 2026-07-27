@@ -181,15 +181,31 @@ resource "azurerm_network_interface" "this" {
 # on the same Tunnel, used for SSH instead of a separate mesh network.
 # -----------------------------------------------------------------------------
 locals {
-  effective_domain     = var.custom_domain
-  effective_ssh_domain = "ssh.${var.custom_domain}"
+  effective_domain = var.custom_domain
 
   # DNS record names are relative to the zone, e.g. custom_domain
   # "assets.example.com" in zone "example.com" needs record name "assets"
-  # (and "ssh.assets" for the SSH hostname); an apex custom_domain (equal
+  # (and "ssh-assets" for the SSH hostname); an apex custom_domain (equal
   # to cloudflare_zone_name) needs the record name "@" instead.
   effective_dns_record_name = local.effective_domain == var.cloudflare_zone_name ? "@" : trimsuffix(local.effective_domain, ".${var.cloudflare_zone_name}")
-  effective_ssh_dns_record_name = local.effective_domain == var.cloudflare_zone_name ? "ssh" : "ssh.${local.effective_dns_record_name}"
+
+  # BUG FIX: this used to be "ssh.${local.effective_dns_record_name}" /
+  # "ssh.${var.custom_domain}", which puts the SSH hostname TWO DNS labels
+  # deep from the zone apex whenever custom_domain is itself a subdomain
+  # (e.g. custom_domain "assets.example.com" -> "ssh.assets.example.com").
+  # Cloudflare's default Universal SSL certificate is a single-level
+  # wildcard ("*.example.com") and does NOT cover a second label, so the
+  # edge had no cert to present for that SNI and failed the TLS handshake
+  # before cloudflared/Access/the Tunnel were ever reached (confirmed via
+  # `openssl s_client -connect ssh.assets.example.com:443 -servername
+  # ssh.assets.example.com` -> handshake failure, while the same command
+  # against assets.example.com itself succeeds). Using a HYPHEN instead of
+  # a DOT keeps the SSH hostname to a single label under the zone apex
+  # ("ssh-assets.example.com"), which the default wildcard does cover, so
+  # no dashboard-only "Total TLS" dependency is needed. Apex custom_domain
+  # (record name "@") still gets the simple "ssh" record name.
+  effective_ssh_dns_record_name = local.effective_dns_record_name == "@" ? "ssh" : "ssh-${local.effective_dns_record_name}"
+  effective_ssh_domain          = "${local.effective_ssh_dns_record_name}.${var.cloudflare_zone_name}"
 }
 
 # -----------------------------------------------------------------------------

@@ -439,35 +439,33 @@ services:
     restart: unless-stopped
     mem_limit: ${CLOUDFLARED_MEM_LIMIT:-128m}
     mem_reservation: ${CLOUDFLARED_MEM_RESERVATION:-32m}
-    # Two modes, chosen automatically by whether CLOUDFLARE_TUNNEL_TOKEN is
-    # set in /opt/snipeit/.env:
-    #   - SET (normal/production): runs the named Tunnel Terraform created
-    #     (main.tf), whose ingress rules route {$DOMAIN} -> caddy:443 and
-    #     ssh.{$DOMAIN} -> this VM's sshd, gated by Cloudflare Access.
-    #   - UNSET (testing, e.g. before you own a domain -- see
-    #     DEPLOYMENT_VM.md's "Test with a free Cloudflare subdomain first"
-    #     section): falls back to a free, account-less Quick Tunnel
-    #     against Caddy's plain-HTTP `:80` testing block, and prints a
-    #     random *.trycloudflare.com URL to this container's own logs
-    #     (`docker compose -f docker-compose.vm.yml logs -f cloudflared`).
-    #     That hostname is throwaway -- it changes every time this
-    #     container restarts, there's no SSH route or Access gating in
-    #     this mode, and Cloudflare explicitly doesn't support Quick
-    #     Tunnels for anything but short-lived testing. Don't point real
-    #     users or real data at it.
-    command: >
-      sh -c '
-      if [ -n "$$TUNNEL_TOKEN" ]; then
-        exec cloudflared tunnel --no-autoupdate run;
-      else
-        echo "CLOUDFLARE_TUNNEL_TOKEN not set -- starting a temporary Quick Tunnel for testing only. Watch this log for the https://*.trycloudflare.com URL.";
-        exec cloudflared tunnel --no-autoupdate --url http://caddy:80;
-      fi'
+    # BUG FIX (ENTRYPOINT/CMD stacking + no shell in image): the image
+    # bakes in ENTRYPOINT ["cloudflared", "--no-autoupdate"]. Compose's
+    # `command:` only ever replaces CMD, never ENTRYPOINT, so a shell
+    # script here doesn't run standalone -- it gets appended as literal
+    # arguments to that entrypoint (`cloudflared --no-autoupdate sh -c
+    # '...'`), which cloudflared doesn't understand as a subcommand and
+    # exits after printing its Quick Tunnel help. `docker inspect` also
+    # confirms this image ships with no /bin/sh at all, so no
+    # `entrypoint: ["/bin/sh", "-c"]` override could ever have worked
+    # either. Fix: use the plain `tunnel run` subcommand as `command:` --
+    # it stacks cleanly onto the baked-in entrypoint
+    # (`cloudflared --no-autoupdate tunnel run`) and `cloudflared` reads
+    # TUNNEL_TOKEN from `environment:` below natively, so no shell/
+    # conditional is needed for the normal/production path.
+    #
+    # NOTE: this removes the old shell-based fallback to an
+    # account-less Quick Tunnel when CLOUDFLARE_TUNNEL_TOKEN is unset
+    # (there is no shell available to run that conditional in). For
+    # local testing without a domain/token yet, run a Quick Tunnel from
+    # outside this compose file instead, e.g.:
+    #   docker run --rm cloudflare/cloudflared:2025.6.1 tunnel --no-autoupdate --url http://localhost:8080
+    command: ["tunnel", "run"]
     environment:
-      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?Set CLOUDFLARE_TUNNEL_TOKEN in .env}
     extra_hosts:
       # Lets this container reach the VM HOST's own sshd (a normal
-      # systemd service, not a container) for the ssh.<domain> ingress
+      # systemd service, not a container) for the SSH ingress
       # rule -- "host-gateway" is Docker's own resolved address for the
       # host, supported natively on Linux since Docker 20.10. Unused in
       # Quick Tunnel mode (no SSH route exists there), harmless to keep.

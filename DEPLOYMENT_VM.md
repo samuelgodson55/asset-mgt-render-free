@@ -245,11 +245,11 @@ this** — install
 locally, then add to `~/.ssh/config`:
 
 ```
-Host ssh.example.com
+Host ssh-assets.example.com
   ProxyCommand cloudflared access ssh --hostname %h
 ```
 
-The first `ssh azureuser@ssh.example.com` opens a browser for Access SSO
+The first `ssh azureuser@ssh-assets.example.com` opens a browser for Access SSO
 login (must be one of `SSH_ACCESS_ALLOWED_EMAILS`); after that it's cached
 for 24h. This is exactly the `ssh_command` Terraform output from step 8.
 
@@ -452,7 +452,7 @@ Add these to each Environment (Secrets unless marked **Variable**):
 | `CUSTOM_DOMAIN` (**Variable**, not secret) | REQUIRED — a hostname in the `CLOUDFLARE_ZONE_ID` zone, e.g. `assets.example.com` | `infra-deploy-vm.yml` |
 | `VM_SIZE` (**Variable**, not secret) | Optional — overrides `variables.tf`'s `Standard_B2s` default. E.g. `Standard_D2s_v3` if `Standard_B2s` isn't available in your region (see Troubleshooting) | `infra-deploy-vm.yml` |
 | `LOCATION` (**Variable**, not secret) | Optional — overrides `variables.tf`'s `eastus` default region. E.g. `southafricanorth` for South Africa North (region *names* like "South Africa North" shown in the Portal map to lowercase, no-space *slugs* like this for `az`/Terraform — `az account list-locations -o table` shows every region's slug) | `infra-deploy-vm.yml` |
-| `VM_HOST` | Filled in AFTER step 8 (see step 9) — this is the VM's **Cloudflare Tunnel SSH hostname** (`ssh.<CUSTOM_DOMAIN>`), not its public IP; nothing listens on port 22 at the public IP by default | `deploy-azure-vm.yml`, `sync-secrets-vm.yml` |
+| `VM_HOST` | Filled in AFTER step 8 (see step 9) — this is the VM's **Cloudflare Tunnel SSH hostname** (`ssh-<label>.<CLOUDFLARE_ZONE_NAME>`, e.g. `ssh-assets.example.com` for `CUSTOM_DOMAIN=assets.example.com`; `ssh.<CLOUDFLARE_ZONE_NAME>` if `CUSTOM_DOMAIN` is the zone apex), not its public IP; nothing listens on port 22 at the public IP by default | `deploy-azure-vm.yml`, `sync-secrets-vm.yml` |
 
 Optional (leave unset if you don't use them yet):
 `NOTIFICATIONS_ENABLED` (**Variable**), `SMTP_HOST`, `SMTP_USERNAME`,
@@ -542,7 +542,7 @@ table there with every Terraform output, including:
 - `azure_fqdn` — `<label>.<region>.cloudapp.azure.com` (break-glass reference only)
 - `app_domain` — the domain Caddy actually serves on (your `CUSTOM_DOMAIN`)
 - `app_url` — `https://<app_domain>` — not reachable yet, the app isn't deployed until step 10
-- `ssh_hostname` — `ssh.<app_domain>`, the Cloudflare Access-gated hostname — this is what `VM_HOST` becomes in step 9
+- `ssh_hostname` — the Cloudflare Access-gated SSH hostname, kept to a single DNS label under the zone apex (e.g. `ssh-assets.example.com`, not `ssh.assets.example.com`) so it's covered by Cloudflare's default wildcard cert — this is what `VM_HOST` becomes in step 9
 - `ssh_command` — exact command to SSH in through the Tunnel/Access (see step 2's last box)
 - `ssh_command_break_glass` — direct SSH over the public IP; only works if you've temporarily set `ssh_allowed_source_ips` (see step 2 / Troubleshooting)
 - `cloudflare_ci_service_token_id` / `cloudflare_ci_service_token_secret` — needed for step 9's `CF_ACCESS_CLIENT_ID`/`CF_ACCESS_CLIENT_SECRET`
@@ -577,7 +577,7 @@ prod → Secrets** → add:
 
 | Name | Value |
 |---|---|
-| `VM_HOST` | the `ssh_hostname` output value (e.g. `ssh.assets.example.com`) |
+| `VM_HOST` | the `ssh_hostname` output value (e.g. `ssh-assets.example.com`) |
 | `CF_ACCESS_CLIENT_ID` | the `cloudflare_ci_service_token_id` output value |
 | `CF_ACCESS_CLIENT_SECRET` | the `cloudflare_ci_service_token_secret` output value |
 
@@ -644,7 +644,7 @@ ssh -i snipeit_vm_deploy_key azureuser@<VM_HOST> \
 ```
 
 (`<VM_HOST>` here is the `ssh_hostname` output from step 8, e.g.
-`ssh.assets.example.com` — same value everywhere else in this doc that
+`ssh-assets.example.com` — same value everywhere else in this doc that
 shows `<VM_HOST>`.)
 
 Log in as `superadmin` with that password, then change it immediately
@@ -1268,7 +1268,7 @@ recommended.
 
 ## Security
 
-- **SSH: no open inbound port, no Bastion**. `ssh_allowed_source_ips` defaults to `[]`, so `main.tf`'s `AllowSSH` NSG rule doesn't exist at all by default — there is nothing to port-scan or brute-force on port 22 from the public internet. Access is instead through the Cloudflare Tunnel (step 2): the VM only ever makes an outbound connection to Cloudflare's edge, and Cloudflare Access (step 2d) gates who/what can reach `ssh.<domain>` from there — email SSO for humans, a service token for CI, both independent of OpenSSH's own key auth. Auth itself is still key-only underneath that (no password auth at all — `disable_password_authentication = true` in `main.tf`). Only set `ssh_allowed_source_ips` as a deliberate, temporary break-glass measure (see Troubleshooting below).
+- **SSH: no open inbound port, no Bastion**. `ssh_allowed_source_ips` defaults to `[]`, so `main.tf`'s `AllowSSH` NSG rule doesn't exist at all by default — there is nothing to port-scan or brute-force on port 22 from the public internet. Access is instead through the Cloudflare Tunnel (step 2): the VM only ever makes an outbound connection to Cloudflare's edge, and Cloudflare Access (step 2d) gates who/what can reach the SSH hostname from there — email SSO for humans, a service token for CI, both independent of OpenSSH's own key auth. Auth itself is still key-only underneath that (no password auth at all — `disable_password_authentication = true` in `main.tf`). Only set `ssh_allowed_source_ips` as a deliberate, temporary break-glass measure (see Troubleshooting below).
 - **Two independent gates on SSH, not one**: even a leaked deploy private key isn't enough on its own — the connection also has to pass Cloudflare Access first (an allow-listed email via browser SSO, or the CI service token), and vice versa: knowing/guessing the Access service token without the SSH private key still gets you nowhere. Defense-in-depth was the whole point of adding Access here rather than just relying on the Tunnel being obscure.
 - **fail2ban**: bans an IP after 5 failed SSH attempts within 10 minutes (`/etc/fail2ban/jail.local`, written by cloud-init) — defense-in-depth for the break-glass path above, since Tunnel-originated connections aren't exposed to internet-wide brute-force attempts to begin with.
 - **UFW**: OS-level firewall mirroring the NSG, as a second layer.
@@ -1499,7 +1499,7 @@ itself, re-check the linked issue for a fixed release, bump
 `CLOUDFLARED_VERSION` to it in both workflow files, and confirm a real
 CI deploy succeeds before trusting the bump.
 
-**Locked out of `ssh.<domain>` by Cloudflare Access itself** (not a
+**Locked out of the SSH hostname by Cloudflare Access itself** (not a
 Tunnel problem — the Tunnel's up, but Access rejects you) — either your
 email isn't in `SSH_ACCESS_ALLOWED_EMAILS` (add it, re-apply Terraform),
 or the CI service token was rotated/deleted and `CF_ACCESS_CLIENT_ID`/
