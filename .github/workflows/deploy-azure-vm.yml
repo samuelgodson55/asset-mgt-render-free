@@ -187,10 +187,27 @@ jobs:
         # through the Tunnel; it does NOT join anything persistent (unlike
         # the old ephemeral Tailscale node), it's a one-shot outbound
         # connection per SSH session, torn down when the job ends.
+        #
+        # PINNED, not `releases/latest` -- 2026.6.0 shipped a regression
+        # (cloudflare/cloudflared#1673) where `access ssh`/`access tcp`
+        # ignore --service-token-id/--service-token-secret entirely and
+        # fall through to an interactive browser-auth flow on every
+        # connection attempt instead, which a non-interactive CI runner
+        # can never complete -- the ProxyCommand dies immediately and ssh/
+        # scp see it as a bare "remote error: tls: handshake failure" /
+        # "Connection closed by UNKNOWN port 65535", exactly like this
+        # step used to fail before it was pinned. 2026.5.1 is the last
+        # version confirmed to honor service-token auth correctly, so
+        # that's what's installed here -- bump this deliberately (and
+        # retest an actual CI deploy) once a fixed release ships, rather
+        # than silently riding `latest` again.
+        env:
+          CLOUDFLARED_VERSION: '2026.5.1'
         run: |
           curl -fsSL --output /tmp/cloudflared.deb \
-            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+            "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-amd64.deb"
           sudo dpkg -i /tmp/cloudflared.deb
+          cloudflared --version
 
       - name: Set up SSH (proxied through Cloudflare Access)
         env:

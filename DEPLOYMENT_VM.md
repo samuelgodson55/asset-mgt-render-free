@@ -1316,6 +1316,30 @@ fallbacks, in order of preference:
    close it again — it's meant as a short-lived escape hatch, not a
    standing access method.
 
+**CI's `deploy-azure-vm.yml`/`sync-secrets-vm.yml` fails at "Sync
+docker-compose.vm.yml + Caddyfile to the VM" (or any other `ssh`/`scp`
+step) with `remote error: tls: handshake failure`, followed by
+`Connection closed by UNKNOWN port 65535`/`scp: Connection closed`** —
+this is not a Tunnel, Access, or NSG problem; the Tunnel/Access
+config in `main.tf` is correct as-is. It's the *client-side*
+`cloudflared` binary these workflows install fresh on every run (the
+"Install cloudflared" step): `cloudflared` 2026.6.0 shipped a
+regression ([cloudflare/cloudflared#1673](https://github.com/cloudflare/cloudflared/issues/1673))
+where `access ssh`/`access tcp` silently ignore
+`--service-token-id`/`--service-token-secret` and fall through to an
+interactive browser-auth flow on every connection attempt instead — a
+non-interactive GitHub Actions runner can never complete that flow, so
+the `ProxyCommand` process dies immediately, and `ssh`/`scp` surface
+that death as the generic `remote error: tls: handshake failure`
+rather than anything mentioning Access or browser auth. Both
+"Install cloudflared" steps pin `CLOUDFLARED_VERSION: '2026.5.1'` (the
+last release confirmed to honor service-token auth correctly) instead
+of pulling `cloudflared/releases/latest` for exactly this reason — if
+you've reverted that pin, or the failure comes back on `2026.5.1`
+itself, re-check the linked issue for a fixed release, bump
+`CLOUDFLARED_VERSION` to it in both workflow files, and confirm a real
+CI deploy succeeds before trusting the bump.
+
 **Locked out of `ssh.<domain>` by Cloudflare Access itself** (not a
 Tunnel problem — the Tunnel's up, but Access rejects you) — either your
 email isn't in `SSH_ACCESS_ALLOWED_EMAILS` (add it, re-apply Terraform),
