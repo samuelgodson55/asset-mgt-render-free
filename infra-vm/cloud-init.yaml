@@ -239,6 +239,55 @@ write_files:
       sysctl -w vm.swappiness=10
 
   # ---------------------------------------------------------------------
+  # First-boot scripts, run from `runcmd` below by PATH rather than as
+  # inline `- |` blocks. Cloud-init concatenates every inline runcmd
+  # block into ONE script and executes it with `#!/bin/sh` (dash on
+  # Ubuntu) -- which does NOT support `set -o pipefail`, so any inline
+  # block using it would abort the *entire* runcmd script at that line,
+  # silently skipping everything after it. Giving each script its own
+  # `#!/usr/bin/env bash` shebang and invoking it by path (same pattern
+  # already used for create-swap.sh above) guarantees it runs under bash
+  # regardless of what shell cloud-init's own wrapper script uses.
+  # ---------------------------------------------------------------------
+  - path: /opt/snipeit/scripts/setup-disk.sh
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      DISK=/dev/disk/azure/scsi1/lun0
+      for i in $(seq 1 30); do [ -e "$DISK" ] && break; sleep 2; done
+      if ! blkid "$DISK" >/dev/null 2>&1; then
+        mkfs.ext4 -F "$DISK"
+      fi
+      mkdir -p /mnt/docker-data
+      UUID=$(blkid -s UUID -o value "$DISK")
+      grep -q "$UUID" /etc/fstab || echo "UUID=$UUID /mnt/docker-data ext4 defaults,nofail 0 2" >> /etc/fstab
+      mount -a
+      mkdir -p /mnt/docker-data/docker \
+               /mnt/docker-data/volumes/pgdata \
+               /mnt/docker-data/volumes/redisdata \
+               /mnt/docker-data/volumes/backup_data \
+               /mnt/docker-data/volumes/export_data \
+               /mnt/docker-data/volumes/caddy_data \
+               /mnt/docker-data/volumes/caddy_config
+
+  - path: /opt/snipeit/scripts/install-docker.sh
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      install -m 0755 -d /etc/apt/keyrings
+      curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+      chmod a+r /etc/apt/keyrings/docker.asc
+      echo \
+        "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+        $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+      apt-get update -y
+      apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+      systemctl enable --now docker
+      usermod -aG docker ${admin_username}
+
+  # ---------------------------------------------------------------------
   # systemd unit so the stack comes back up automatically after a VM
   # reboot (Azure host maintenance, `AutomaticByPlatform` patch reboot,
   # or you manually rebooting for any reason) -- `docker compose up -d`
@@ -275,24 +324,7 @@ runcmd:
   #    particular boot -- using the /dev/sdX name directly here would be
   #    fragile across VM resizes/reboots.
   # -----------------------------------------------------------------------
-  - |
-    set -euo pipefail
-    DISK=/dev/disk/azure/scsi1/lun0
-    for i in $(seq 1 30); do [ -e "$DISK" ] && break; sleep 2; done
-    if ! blkid "$DISK" >/dev/null 2>&1; then
-      mkfs.ext4 -F "$DISK"
-    fi
-    mkdir -p /mnt/docker-data
-    UUID=$(blkid -s UUID -o value "$DISK")
-    grep -q "$UUID" /etc/fstab || echo "UUID=$UUID /mnt/docker-data ext4 defaults,nofail 0 2" >> /etc/fstab
-    mount -a
-    mkdir -p /mnt/docker-data/docker \
-             /mnt/docker-data/volumes/pgdata \
-             /mnt/docker-data/volumes/redisdata \
-             /mnt/docker-data/volumes/backup_data \
-             /mnt/docker-data/volumes/export_data \
-             /mnt/docker-data/volumes/caddy_data \
-             /mnt/docker-data/volumes/caddy_config
+  - /opt/snipeit/scripts/setup-disk.sh
 
   - systemctl daemon-reload
   - systemctl enable --now create-swap.service
@@ -304,18 +336,7 @@ runcmd:
   #    Docker for the first time, so it comes up already pointed at the
   #    data disk -- no separate "stop docker, move data, restart" dance.
   # -----------------------------------------------------------------------
-  - |
-    set -euo pipefail
-    install -m 0755 -d /etc/apt/keyrings
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-    chmod a+r /etc/apt/keyrings/docker.asc
-    echo \
-      "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
-      $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
-    apt-get update -y
-    apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-    systemctl enable --now docker
-    usermod -aG docker ${admin_username}
+  - /opt/snipeit/scripts/install-docker.sh
 
   # -----------------------------------------------------------------------
   # 3. Firewall -- UFW mirrors the NSG (main.tf) at the OS level, a second

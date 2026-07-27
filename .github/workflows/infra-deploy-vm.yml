@@ -29,6 +29,11 @@ on:
         type: choice
         options: [plan, apply, destroy]
         default: plan
+      replace_target:
+        description: 'Optional: force-replace ONE resource instead of a normal plan/apply -- e.g. azurerm_linux_virtual_machine.this to rebuild just the VM (data disk, NIC, public IP, and all Cloudflare resources are untouched). Leave blank for a normal run. See DEPLOYMENT_VM.md''s "Rebuilding just the VM" section.'
+        required: false
+        type: string
+        default: ''
 
 concurrency:
   # Only one Terraform run per environment at a time -- two concurrent
@@ -188,7 +193,13 @@ jobs:
 
       - name: terraform plan
         if: inputs.action == 'plan' || inputs.action == 'apply'
-        run: terraform plan -input=false -out=tfplan
+        run: |
+          if [ -n "${{ inputs.replace_target }}" ]; then
+            echo "Planning a targeted replace of: ${{ inputs.replace_target }}"
+            terraform plan -input=false -replace="${{ inputs.replace_target }}" -out=tfplan
+          else
+            terraform plan -input=false -out=tfplan
+          fi
 
       - name: terraform apply
         if: inputs.action == 'apply'

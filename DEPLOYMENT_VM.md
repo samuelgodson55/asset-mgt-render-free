@@ -45,6 +45,7 @@ with no Azure resources yet.
 - [Per-service memory limits](#per-service-memory-limits)
 - [Backups + restore](#backups--restore)
 - [Growing the data disk](#growing-the-data-disk)
+- [Rebuilding just the VM (recovering from a broken first boot)](#rebuilding-just-the-vm-recovering-from-a-broken-first-boot)
 - [Cost](#cost)
 - [Security](#security)
 - [Troubleshooting](#troubleshooting)
@@ -1121,6 +1122,124 @@ Azure managed disks can only grow, never shrink. To grow:
 
 ---
 
+## Rebuilding just the VM (recovering from a broken first boot)
+
+Cloud-init (`infra-vm/cloud-init.yaml`) only ever runs once, on the VM's
+very first boot. If something in it was broken at the time (the classic
+symptom: `docker`/`docker compose` are missing entirely, nothing in
+`/opt/snipeit` came up, and every deploy/SSH step fails with `remote
+error: tls: handshake failure` because `cloudflared` — which only starts
+as part of the app stack — never got a chance to run), fixing the file
+and re-running `infra-deploy-vm.yml`'s normal `apply` **won't help**:
+`main.tf`'s VM resource has `lifecycle.ignore_changes = [custom_data]`
+specifically so routine applies don't perpetually want to rebuild the VM
+just because `IMAGE_TAG` drifted — which also means Terraform won't
+notice your cloud-init fix on its own. The VM needs to be destroyed and
+recreated so cloud-init gets a genuine first boot again.
+
+**You do NOT need to, and should not, run `terraform destroy` or delete
+anything by hand in the Azure/Cloudflare consoles.** Everything else this
+stack owns — the data disk (and anything already written to it), the
+NIC, the static public IP, the NSG, the Cloudflare Tunnel, its DNS
+records, and the Access application/policies — has no dependency
+pointing *at* the VM, so it's all left completely alone. Only the VM
+resource itself (plus the disk-attachment record, and the backup-vault
+registration if `enable_data_disk_snapshots` is on — both cheap,
+non-destructive to recreate) gets replaced.
+
+### Where to run this: GitHub Actions, not your PC
+
+Same reasoning as steps 7-8 above: state and run history should live in
+one place your whole team can see, not on whoever's laptop happened to
+run it. `infra-deploy-vm.yml` has a `replace_target` input for exactly
+this case, so the whole thing runs the same way a normal `apply` does —
+nothing to install or run locally at all.
+
+1. Make sure the fixed `infra-vm/cloud-init.yaml` is committed on the
+   branch this workflow checks out (usually `main`).
+2. **Actions → Deploy VM Infrastructure (Terraform) → Run workflow**:
+   - `environment`: `prod` (or `vm-staging`) — whichever actually has the broken VM
+   - `action`: `plan`
+   - `replace_target`: `azurerm_linux_virtual_machine.this`
+3. Read the plan. It should show `-/+` (destroy-and-recreate) on exactly:
+   - `azurerm_linux_virtual_machine.this`
+   - `azurerm_virtual_machine_data_disk_attachment.data` (just re-attaches the *same* disk to the new VM's ID — no data loss)
+   - `azurerm_backup_protected_vm.this[0]` (only present if `enable_data_disk_snapshots = true` — re-registers the new VM with the existing backup vault/policy)
+
+   and **nothing else** — no Cloudflare resources, no NSG, no public IP,
+   no managed disk itself. If you see anything beyond that trio, stop and
+   figure out why before applying.
+4. Re-run the same workflow with `action: apply` and the same
+   `replace_target`. Takes the usual 3-5 minutes — cloud-init runs fresh
+   on the new VM, and this time it should actually install Docker, mount
+   the data disk, and bring the stack up.
+5. The new VM keeps the same static IP and `ssh_hostname`, so nothing in
+   step 9's `VM_HOST` secret needs to change. Do re-run
+   `deploy-azure-vm.yml` once (step 10) afterward anyway, so the app is
+   running the exact image tag your last real release used, rather than
+   whatever `initial_image_tag` cloud-init happened to bring up.
+6. Confirm the Cloudflare Zero Trust dashboard (Networks → Tunnels) shows
+   `Status: Active` with one connector before considering this done.
+
+### terraform.tfvars — nothing new to fill in
+
+This is a targeted repair of infrastructure that was already provisioned
+once, in an environment that already has every secret it needs sitting
+in GitHub (steps 2-6). You don't need to add or change a single value in
+`terraform.tfvars` or in GitHub's secrets for this — the same
+`environment_name`, `ssh_public_key`, Cloudflare token/IDs, domain, and
+application secrets already stored there are exactly what the rebuilt VM
+needs again.
+
+If you'd rather eyeball the plan locally first (optional, same spirit as
+step 7), reuse that exact recipe but point it at the **same remote state**
+the CI run uses — otherwise a local plan against a fresh local state file
+would show it wanting to create *everything*, not just replace the VM:
+
+```bash
+cd infra-vm
+az login
+terraform init -input=false \
+  -backend-config="resource_group_name=rg-snipeit-tfstate" \
+  -backend-config="storage_account_name=<your TF_STATE_STORAGE_ACCOUNT>" \
+  -backend-config="container_name=vm-state" \
+  -backend-config="key=prod.tfstate"   # or vm-staging.tfstate
+
+# Same TF_VAR_* exports as step 7 -- the same values already sitting in
+# your GitHub Environment secrets, not new ones:
+export TF_VAR_subscription_id="<from step 1>"
+export TF_VAR_ssh_public_key="$(cat ../snipeit_vm_deploy_key.pub)"
+export TF_VAR_postgres_password="<from step 4>"
+export TF_VAR_jwt_secret_key="<from step 4>"
+export TF_VAR_cloudflare_api_token="<from step 2b>"
+export TF_VAR_cloudflare_account_id="<from step 2a>"
+export TF_VAR_cloudflare_zone_id="<from step 2a>"
+export TF_VAR_cloudflare_zone_name="example.com"
+export TF_VAR_ssh_access_allowed_emails='["you@example.com"]'
+export TF_VAR_cloudflare_origin_cert="$(cat /path/to/origin-cert.pem)"
+export TF_VAR_cloudflare_origin_cert_key="$(cat /path/to/origin-key.pem)"
+export TF_VAR_custom_domain="assets.example.com"
+export TF_VAR_dockerhub_backend_image="yourusername/snipeit-lite-backend"
+export TF_VAR_dockerhub_frontend_image="yourusername/snipeit-lite-frontend"
+
+terraform plan -replace="azurerm_linux_virtual_machine.this"
+```
+
+Read it, confirm it matches the three-resource list in step 3 above, then
+**apply through the workflow (step 4), not locally** — same rule as step
+7: let one place (CI) own every real state-changing apply, so there's
+never a question of whose local state is authoritative.
+
+(Prefer a `terraform.tfvars` file over exports for this local review
+instead? Copy `infra-vm/terraform.tfvars.example` to
+`infra-vm/terraform.tfvars` and fill in the exact same values listed
+above — nothing in that example file needs to change for this recovery,
+it's already a complete match for `variables.tf`. Just remember it's
+`.gitignore`'d and must never be committed, and delete it again once
+you're done reviewing.)
+
+---
+
 ## Cost
 
 Rough Azure retail pricing, `eastus`, US$/month (check the
@@ -1335,6 +1454,26 @@ fallbacks, in order of preference:
    temporarily. **Remove the secret and re-apply once you're done** to
    close it again — it's meant as a short-lived escape hatch, not a
    standing access method.
+
+**Same `tls: handshake failure` as below, but `docker`/`docker compose`
+turn out to be missing entirely on the VM** (check via Serial Console:
+`which docker; dpkg -l | grep -i docker`) — this is a different problem
+from the cloudflared-client-version one right below: cloud-init itself
+never actually finished on first boot, so `cloudflared` never started at
+all (rather than starting and later losing its connection). A common
+cause: cloud-init concatenates every `runcmd` entry into one script and
+runs it with `#!/bin/sh` (dash on Ubuntu), which doesn't support `set -o
+pipefail` — if a `runcmd` block used it inline, dash aborts the *entire*
+combined script right there, silently skipping every step after it
+(disk mount, Docker install, everything). Confirm with `bash -n
+/var/lib/cloud/instance/scripts/runcmd` and `cat
+/var/log/cloud-init-output.log` over the Serial Console. Fix: give any
+such `runcmd` block its own file with a real `#!/usr/bin/env bash`
+shebang (written via `write_files`, same pattern `create-swap.sh` in
+`infra-vm/cloud-init.yaml` already uses) and call it by path from
+`runcmd` instead of inlining it — then see [Rebuilding just the
+VM](#rebuilding-just-the-vm-recovering-from-a-broken-first-boot) above to
+get a genuine first boot with the fix in place.
 
 **CI's `deploy-azure-vm.yml`/`sync-secrets-vm.yml` fails at "Sync
 docker-compose.vm.yml + Caddyfile to the VM" (or any other `ssh`/`scp`
