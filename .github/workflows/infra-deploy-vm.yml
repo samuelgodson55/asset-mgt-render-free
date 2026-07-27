@@ -92,6 +92,16 @@ jobs:
       # concept only. This maps the GitHub Environment name back down to
       # the Terraform-internal one.
       TF_VAR_environment_name: ${{ inputs.environment == 'prod' && 'prod' || 'staging' }}
+      # Optional overrides for infra-vm/variables.tf's own defaults --
+      # left unset, Terraform just uses those defaults (Standard_B2s /
+      # eastus). Set these repo/environment Variables if you hit
+      # `SkuNotAvailable`/`SkuNotAvailableForLocation` -- Azure capacity
+      # for a given VM size in a given region shifts over time and isn't
+      # something Terraform can retry around; picking a different size
+      # (e.g. Standard_B2ms -- see DEPLOYMENT_VM.md's Cost section) or a
+      # nearby region is the actual fix.
+      TF_VAR_vm_size: ${{ vars.VM_SIZE || 'Standard_B2s' }}
+      TF_VAR_location: ${{ vars.LOCATION || 'eastus' }}
       TF_VAR_ssh_public_key: ${{ secrets.VM_SSH_PUBLIC_KEY }}
       # OPTIONAL break-glass only -- leave this secret unset entirely for
       # the normal case (no inbound port 22 on the NSG at all, reached

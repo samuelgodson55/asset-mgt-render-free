@@ -161,8 +161,16 @@ Access application/policy that gates SSH:
   Tokens](https://dash.cloudflare.com/profile/api-tokens) → **Create
   Token** → **Create Custom Token**.
 - Permissions: **Account → Cloudflare Tunnel → Edit**, **Account →
-  Access: Apps and Policies → Edit**, **Zone → DNS → Edit** (scoped to
-  your zone from 2a).
+  Access: Apps and Policies → Edit**, **Account → Access: Service
+  Tokens → Edit**, **Zone → DNS → Edit** (scoped to
+  your zone from 2a). The Service Tokens permission is easy to miss
+  since it's a separate scope from Access: Apps and Policies — leaving
+  it out doesn't block `cloudflare_zero_trust_access_application` or
+  `cloudflare_zero_trust_access_policy` (those only need Apps and
+  Policies), it only breaks `cloudflare_zero_trust_access_service_token`
+  specifically, with a generic `error creating access service token:
+  Authentication error (10000)` rather than anything mentioning
+  permissions directly.
 - Copy the generated token — this is `CLOUDFLARE_API_TOKEN` in step 6's
   secrets table. (Shown only once — if you lose it, create a new one.)
 
@@ -403,6 +411,15 @@ is what makes `infra-deploy-vm.yml`'s `destroy` action require a second
 person's approval before it can run (see that workflow's comment on the
 `terraform destroy` step).
 
+Opening an Environment shows two separate sections, **Environment
+secrets** and **Environment variables** — each row in the table below is
+tagged **Variable** or left as a (default) **Secret**; add it under the
+matching section, both live on the same Environment page, just click
+**Add secret** or **Add variable** as appropriate. A **Variable** isn't
+sensitive (it's plain text, visible to anyone with repo read access) —
+that's exactly why non-secret settings like `VM_SIZE`/`LOCATION` below
+use it instead of a secret.
+
 Add these to each Environment (Secrets unless marked **Variable**):
 
 | Name | Value | Used by |
@@ -432,6 +449,8 @@ Add these to each Environment (Secrets unless marked **Variable**):
 | `DOCKERHUB_USERNAME` | Your Docker Hub username | both workflows |
 | `DOCKERHUB_TOKEN` | A Docker Hub [Personal Access Token](https://app.docker.com/settings/personal-access-tokens) (not your password) | both workflows |
 | `CUSTOM_DOMAIN` (**Variable**, not secret) | REQUIRED — a hostname in the `CLOUDFLARE_ZONE_ID` zone, e.g. `assets.example.com` | `infra-deploy-vm.yml` |
+| `VM_SIZE` (**Variable**, not secret) | Optional — overrides `variables.tf`'s `Standard_B2s` default. E.g. `Standard_D2s_v3` if `Standard_B2s` isn't available in your region (see Troubleshooting) | `infra-deploy-vm.yml` |
+| `LOCATION` (**Variable**, not secret) | Optional — overrides `variables.tf`'s `eastus` default region. E.g. `southafricanorth` for South Africa North (region *names* like "South Africa North" shown in the Portal map to lowercase, no-space *slugs* like this for `az`/Terraform — `az account list-locations -o table` shows every region's slug) | `infra-deploy-vm.yml` |
 | `VM_HOST` | Filled in AFTER step 8 (see step 9) — this is the VM's **Cloudflare Tunnel SSH hostname** (`ssh.<CUSTOM_DOMAIN>`), not its public IP; nothing listens on port 22 at the public IP by default | `deploy-azure-vm.yml`, `sync-secrets-vm.yml` |
 
 Optional (leave unset if you don't use them yet):
@@ -1099,6 +1118,35 @@ recommended.
 `local.dns_label` (derived from `app_base_name`+`environment_name`) must
 be globally unique across all of Azure. Change `app_base_name` slightly
 (e.g. add your initials) and re-apply.
+
+**`terraform apply` fails with `SkuNotAvailable`/
+`SkuNotAvailableForLocation`** — Azure has no current capacity for that
+VM size in that region; this is regional capacity, not anything wrong
+with the config, and it shifts over time (a size unavailable today may
+free up later). Set the `VM_SIZE` and/or `LOCATION` repo/environment
+Variables (step 6) to something else — e.g. `Standard_B2ms`, or a nearby
+region — and re-apply. `az vm list-skus --location <region> --size
+Standard_B --output table` shows what's actually available/restricted
+in a given region before you guess.
+
+**`terraform apply` fails with "already exists"/"already be present"
+for a resource Terraform doesn't have in state (resource group, Cloudflare
+Tunnel, DNS record, etc.)** — this means something got created in a
+*previous* run whose state Terraform lost track of (most commonly:
+state genuinely wasn't being persisted yet — see `versions.tf`'s remote
+backend requirement above — or a run failed partway and left one
+resource behind that a later, unrelated change then collided with).
+Once the remote backend (this doc's step 1) is correctly configured,
+new failures stop causing this — but any resource created *before* it
+was working still needs one-time manual cleanup: either delete the
+specific leftover resource in the Portal/Cloudflare dashboard and let
+Terraform recreate it fresh on the next apply, or `terraform import` it
+into state instead if you'd rather keep the existing one. Terraform's
+own error message names the exact resource address (e.g.
+`cloudflare_record.app`) to import, if you go that route:
+```bash
+terraform import cloudflare_record.app <zone_id>/<dns_record_id>
+```
 
 **Site unreachable after `apply` but before the first `deploy-azure-vm.yml`
 run** — expected; `initial_image_tag` defaults to `latest`, which may not
