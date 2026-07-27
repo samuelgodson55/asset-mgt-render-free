@@ -372,7 +372,7 @@ jobs:
             echo "::group::docker compose ps"
             docker compose -f docker-compose.vm.yml ps
             echo "::endgroup::"
-            for svc in db redis backend worker beat frontend caddy; do
+            for svc in db redis backend worker beat frontend caddy cloudflared; do
               echo "::group::logs: $svc (last 100 lines)"
               docker compose -f docker-compose.vm.yml logs --tail 100 "$svc" || true
               echo "::endgroup::"

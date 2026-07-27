@@ -62,6 +62,12 @@ output "cloudflare_ci_service_token_secret" {
   sensitive   = true
 }
 
+output "cloudflare_tunnel_token" {
+  description = "The current, live token for this Tunnel -- what CLOUDFLARE_TUNNEL_TOKEN in /opt/snipeit/.env on the VM must match for the `cloudflared` container to authenticate. cloud-init writes this in ONLY ONCE, at VM creation time -- if the Tunnel resource is ever recreated by a later `terraform apply` (e.g. a config change that forces replacement), the VM's .env keeps the OLD, now-invalid token and cloudflared silently fails to connect (Tunnel shows 'Inactive' with zero connectors in the Zero Trust dashboard, and every ssh/scp through it fails identically, generically, e.g. `remote error: tls: handshake failure`, however far downstream the real cause is). Recover by pulling this value (`terraform output -raw cloudflare_tunnel_token`) and setting it by hand over the Azure Serial Console (SSH itself is unusable while the Tunnel is down): update the `CLOUDFLARE_TUNNEL_TOKEN=` line in /opt/snipeit/.env, then `docker compose -f /opt/snipeit/docker-compose.vm.yml up -d cloudflared` to restart it with the corrected token. See DEPLOYMENT_VM.md's Troubleshooting section."
+  value       = cloudflare_zero_trust_tunnel_cloudflared.this.tunnel_token
+  sensitive   = true
+}
+
 output "data_disk_id" {
   description = "Resource ID of the managed data disk -- referenced if you ever need to detach/reattach it manually, or take an ad-hoc snapshot outside the automatic policy."
   value       = azurerm_managed_disk.data.id

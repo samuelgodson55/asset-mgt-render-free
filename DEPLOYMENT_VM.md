@@ -1286,10 +1286,30 @@ early. Options, in order of likelihood:
    `CLOUDFLARE_TUNNEL_TOKEN` in `/opt/snipeit/.env` doesn't match the
    Tunnel `cloudflare_zero_trust_tunnel_cloudflared.this` in your current
    Terraform state — this can happen if the VM was provisioned before a
-   later `terraform apply` recreated the Tunnel resource. Re-run
-   `sync-secrets-vm.yml` to push the current token, or by hand: `docker
-   compose -f /opt/snipeit/docker-compose.vm.yml up -d cloudflared` after
-   fixing the `.env` line, sourced from `terraform output` in `infra-vm`.
+   later `terraform apply` recreated the Tunnel resource (cloud-init
+   only writes this token in ONCE, at VM creation; it's never refreshed
+   automatically after that). The Zero Trust dashboard's **Networks →
+   Tunnels → this tunnel → Overview** tab confirms it fast: `Status:
+   Inactive` with an empty Connectors table means this is exactly what's
+   happening, and every `ssh`/`scp` through the Tunnel will fail
+   identically (e.g. as a generic `remote error: tls: handshake
+   failure`, regardless of how far downstream the CI step actually is)
+   since there's no live connection to route through at all. Fix it by
+   re-running `sync-secrets-vm.yml` to push the current token -- **but
+   note that workflow also connects over this same Tunnel, so it can't
+   help while the Tunnel itself is down.** With the Tunnel down, do it
+   by hand instead, over the Azure Serial Console (VM → Support +
+   troubleshooting → Serial console -- no network path, so it works
+   regardless of Tunnel state):
+   ```bash
+   # 1. On your machine, in infra-vm/, get the current live token:
+   terraform output -raw cloudflare_tunnel_token
+   # 2. In the Serial Console, on the VM:
+   sudo nano /opt/snipeit/.env   # update the CLOUDFLARE_TUNNEL_TOKEN= line
+   cd /opt/snipeit && docker compose -f docker-compose.vm.yml up -d cloudflared
+   ```
+   Confirm the fix in the dashboard -- `Status` should flip to `Active`
+   with one connector listed -- before retrying any CI deploy.
 2. Outbound internet from the VM is somehow blocked — `cloudflared` needs
    to reach Cloudflare's edge; this project's NSG never restricts
    outbound traffic, so this would point at something unusual in your
