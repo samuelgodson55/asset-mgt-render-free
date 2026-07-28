@@ -436,6 +436,18 @@ resource "azurerm_linux_virtual_machine" "this" {
     dockerhub_token                   = var.dockerhub_token
     postgres_user                     = var.postgres_user
     postgres_password                 = var.postgres_password
+    # DATABASE_URL-safe copies -- Terraform's urlencode() is this VM path's
+    # equivalent of infra/main.bicep's uriComponent(postgresPassword) (see
+    # that file's databaseUrl comment). Needed because
+    # openssl rand -base64 24 (DEPLOYMENT_VM.md step 4) routinely produces
+    # `+`/`/` (and occasionally `=`), any of which breaks postgresql://
+    # URL syntax if dropped in unescaped -- see docker-compose.vm.yml's
+    # DATABASE_URL comment and backend/services/backup_service.py's
+    # _db_connection_kwargs() docstring for the same class of bug on the
+    # read side. POSTGRES_USER is encoded too on the same principle, even
+    # though the default "admin" needs no escaping.
+    postgres_user_urlencoded          = urlencode(var.postgres_user)
+    postgres_password_urlencoded      = urlencode(var.postgres_password)
     postgres_db                       = var.postgres_db
     jwt_secret_key                    = var.jwt_secret_key
     root_admin_bootstrap_password     = var.root_admin_bootstrap_password

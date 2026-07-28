@@ -78,6 +78,15 @@ write_files:
       POSTGRES_PASSWORD=${postgres_password}
       POSTGRES_DB=${postgres_db}
 
+      # Pre-encoded so docker-compose.vm.yml can use it verbatim instead of
+      # rebuilding a postgresql:// URL from the raw POSTGRES_USER/
+      # POSTGRES_PASSWORD above -- a raw base64 password (DEPLOYMENT_VM.md
+      # step 4's `openssl rand -base64 24`) routinely contains `+`/`/`/`=`,
+      # any of which corrupts URL parsing (e.g. a `:` or `@` landing where
+      # host/port is expected) if substituted in unescaped. See
+      # docker-compose.vm.yml's DATABASE_URL comment for the full story.
+      DATABASE_URL=postgresql://${postgres_user_urlencoded}:${postgres_password_urlencoded}@db:5432/${postgres_db}
+
       JWT_SECRET_KEY=${jwt_secret_key}
       JWT_ALGORITHM=HS256
       JWT_EXPIRY_HOURS=12
