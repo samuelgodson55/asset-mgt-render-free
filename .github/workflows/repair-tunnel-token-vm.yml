@@ -1,0 +1,218 @@
+# .github/workflows/repair-tunnel-token-vm.yml
+# -----------------------------------------------------------------------------
+# Bug 3 mitigation -- automates the manual recovery path documented in
+# infra-vm/outputs.tf's `cloudflare_tunnel_token` output and
+# DEPLOYMENT_VM.md's Troubleshooting section: if `cloudflare_zero_trust_
+# tunnel_cloudflared.this` is ever recreated by a later `terraform apply`
+# (e.g. a change that forces replacement), the VM's /opt/snipeit/.env keeps
+# the OLD, now-invalid CLOUDFLARE_TUNNEL_TOKEN -- cloud-init only ever
+# writes it once, at VM creation time (see main.tf's `custom_data` /
+# `lifecycle.ignore_changes = [custom_data]`). The `cloudflared` container
+# then fails to connect, the Tunnel shows "Inactive" with zero connectors,
+# and every ssh/scp through it -- including deploy-azure-vm.yml and
+# sync-secrets-vm.yml, and even this repo's own guidance for fixing it --
+# fails identically and generically ("remote error: tls: handshake
+# failure"), however far downstream the real cause is. Previously the only
+# way out was pulling the new token with `terraform output -raw
+# cloudflare_tunnel_token` and pasting it into .env BY HAND over the Azure
+# Serial Console, since SSH itself is unusable while the Tunnel is down.
+#
+# This workflow does the same repair, scripted, over a path that never
+# touches the Tunnel at all: it reads the CURRENT token straight out of
+# Terraform state (the same source of truth `terraform output` uses) and
+# pushes it to the VM with `az vm run-command invoke`, which runs over
+# Azure's own control plane (VM extension channel), not SSH/cloudflared --
+# so it works even when the token is stale enough to have broken the very
+# Tunnel that ssh/scp depend on. No inbound NSG port is opened to make this
+# work; run-command doesn't need one.
+#
+# When to run this: Tunnel shows "Inactive"/zero connectors in the Zero
+# Trust dashboard, or deploy-azure-vm.yml / sync-secrets-vm.yml suddenly
+# fail their "Set up SSH" or first ssh/scp step with a handshake-failure-
+# style error, and nothing else about the deploy changed. Run this first,
+# then re-run whichever workflow failed.
+#
+# Required repo/environment secrets (same Azure OIDC federation
+# infra-deploy-vm.yml already uses, plus that workflow's TF_STATE_* repo
+# Variables for locating state):
+#   AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID
+#                                         - same federated App Registration
+#                                           infra-deploy-vm.yml uses for
+#                                           `terraform init`/OIDC; also used
+#                                           here to `az login` so
+#                                           `az vm run-command invoke` is
+#                                           authorized against the VM
+#   TF_STATE_RESOURCE_GROUP, TF_STATE_STORAGE_ACCOUNT, TF_STATE_CONTAINER
+#                                         - repo/environment Variables,
+#                                           same ones infra-deploy-vm.yml
+#                                           uses to find the right state
+#                                           file (see that workflow's
+#                                           `terraform init` step)
+# -----------------------------------------------------------------------------
+name: Repair Cloudflare Tunnel token on Azure VM
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Which environment''s VM to repair. "vm-staging", not "staging" -- see infra-deploy-vm.yml''s identical `environment` input description for why.'
+        required: true
+        type: choice
+        options: [vm-staging, prod]
+        default: prod
+
+concurrency:
+  # Shares infra-vm-<environment>'s group with infra-deploy-vm.yml -- this
+  # workflow only READS Terraform state (no apply/plan writes it), but it
+  # still shouldn't race a concurrent `terraform apply` against the same
+  # state file, e.g. one that's mid-way through recreating the very Tunnel
+  # resource this workflow is trying to read a token for.
+  group: infra-vm-${{ inputs.environment }}
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+defaults:
+  run:
+    working-directory: infra-vm
+
+jobs:
+  repair:
+    name: Repair tunnel token (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    env:
+      # ---- Terraform backend auth -- read-only use here (init + output),
+      # but same OIDC mechanism as infra-deploy-vm.yml for the same reason
+      # (CLI-based backend auth rejects a service-principal session). ----
+      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      ARM_USE_OIDC: "true"
+      TF_STATE_RESOURCE_GROUP: ${{ vars.TF_STATE_RESOURCE_GROUP }}
+      TF_STATE_STORAGE_ACCOUNT: ${{ vars.TF_STATE_STORAGE_ACCOUNT }}
+      TF_STATE_CONTAINER: ${{ vars.TF_STATE_CONTAINER }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+
+      - name: terraform init
+        # Same -backend-config flags / per-environment `key` as
+        # infra-deploy-vm.yml's own init step -- this MUST resolve to the
+        # exact same state file that workflow's applies write to, or the
+        # token/resource-group/vm-name read below would just be wrong.
+        run: |
+          terraform init -input=false \
+            -backend-config="resource_group_name=${TF_STATE_RESOURCE_GROUP}" \
+            -backend-config="storage_account_name=${TF_STATE_STORAGE_ACCOUNT}" \
+            -backend-config="container_name=${TF_STATE_CONTAINER}" \
+            -backend-config="key=${{ inputs.environment }}.tfstate"
+
+      - name: Read live tunnel token + VM identity from Terraform state
+        id: tf
+        # No `plan`/`apply` here on purpose -- `terraform output` reads
+        # already-applied state directly, so this works even if the VM or
+        # Tunnel is currently unreachable/broken (the exact situation this
+        # workflow exists for) and never risks changing infrastructure.
+        run: |
+          TOKEN=$(terraform output -raw cloudflare_tunnel_token)
+          RG=$(terraform output -raw resource_group_name)
+          VM=$(terraform output -raw vm_name)
+          if [ -z "$TOKEN" ] || [ -z "$RG" ] || [ -z "$VM" ]; then
+            echo "::error::One or more Terraform outputs came back empty -- is '${{ inputs.environment }}.tfstate' actually applied? Run infra-deploy-vm.yml first."
+            exit 1
+          fi
+          # Mask immediately, before it can appear in any later log line.
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+          echo "resource_group=$RG" >> "$GITHUB_OUTPUT"
+          echo "vm_name=$VM" >> "$GITHUB_OUTPUT"
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Write the render script
+        # A file rather than an inline --scripts string so the token never
+        # has to be interpolated into the `az` command line itself (which
+        # GitHub Actions echoes to the step's own command log before any
+        # masking of THIS step applies) -- it's passed as a run-command
+        # --parameters value instead (next step), which az keeps out of
+        # that command-line echo.
+        run: |
+          cat > repair-tunnel-token.sh <<'SCRIPT'
+          #!/bin/bash
+          set -euo pipefail
+          NEW_TOKEN="$1"
+          cd /opt/snipeit
+          if [ ! -f .env ]; then
+            echo "No /opt/snipeit/.env on this VM -- is it actually provisioned?" >&2
+            exit 1
+          fi
+          cp .env ".env.bak.$(date +%Y%m%d-%H%M%S)"
+          # Keep only the 5 most recent backups, same retention
+          # sync-secrets-vm.yml already uses for its own .env backups.
+          ls -1t .env.bak.* 2>/dev/null | tail -n +6 | xargs -r rm --
+          if grep -q '^CLOUDFLARE_TUNNEL_TOKEN=' .env; then
+            sed -i "s|^CLOUDFLARE_TUNNEL_TOKEN=.*|CLOUDFLARE_TUNNEL_TOKEN=${NEW_TOKEN}|" .env
+          else
+            echo "CLOUDFLARE_TUNNEL_TOKEN=${NEW_TOKEN}" >> .env
+          fi
+          # `up -d` on just this one service re-reads .env's interpolated
+          # ${CLOUDFLARE_TUNNEL_TOKEN} (see docker-compose.vm.yml's
+          # `cloudflared` service) and recreates only that container --
+          # db/backend/frontend/etc are untouched.
+          docker compose -f docker-compose.vm.yml up -d cloudflared
+          sleep 5
+          echo "---- cloudflared logs (last 20 lines) ----"
+          docker compose -f docker-compose.vm.yml logs --tail 20 cloudflared
+          SCRIPT
+
+      - name: Push token via az vm run-command (bypasses SSH/Tunnel entirely)
+        env:
+          RESOURCE_GROUP: ${{ steps.tf.outputs.resource_group }}
+          VM_NAME: ${{ steps.tf.outputs.vm_name }}
+          NEW_TOKEN: ${{ steps.tf.outputs.token }}
+        # run-command executes over the Azure VM Agent/extension channel,
+        # entirely separate from network reachability to sshd or the
+        # Cloudflare Tunnel -- this is what lets it repair a token stale
+        # enough to have broken the Tunnel, unlike every other workflow
+        # here (deploy-azure-vm.yml, sync-secrets-vm.yml), which all
+        # require the Tunnel to already be healthy just to connect.
+        # RunShellScript runs as root on the VM by default, so no `sudo`
+        # is needed inside the script for the docker compose calls.
+        run: |
+          az vm run-command invoke \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "$VM_NAME" \
+            --command-id RunShellScript \
+            --scripts @repair-tunnel-token.sh \
+            --parameters "$NEW_TOKEN" \
+            --query 'value[].message' -o tsv
+
+      - name: Clean up local secret material
+        if: always()
+        run: rm -f repair-tunnel-token.sh
+
+      - name: Summary
+        if: success()
+        run: |
+          {
+            echo "## Repaired Cloudflare Tunnel token (${{ inputs.environment }})"
+            echo ""
+            echo "Pushed the current \`cloudflare_tunnel_token\` from \`${{ inputs.environment }}.tfstate\` to \`/opt/snipeit/.env\` on \`${{ steps.tf.outputs.vm_name }}\` via \`az vm run-command\`, and restarted the \`cloudflared\` container."
+            echo ""
+            echo "A backup of the previous \`.env\` was left at \`/opt/snipeit/.env.bak.*\` on the VM."
+            echo ""
+            echo "Next: check the Tunnel shows a healthy connector in the Zero Trust dashboard, then re-run whichever of deploy-azure-vm.yml / sync-secrets-vm.yml originally failed."
+          } >> "$GITHUB_STEP_SUMMARY"

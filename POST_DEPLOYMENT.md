@@ -64,16 +64,21 @@ AWS SES's SMTP endpoint, etc. — there's no vendor-specific SDK involved.
    the provider will let you send as — most providers reject a `From:`
    that doesn't match a domain/sender you've verified with them).
 
-2. Add these GitHub secrets, scoped to the environment you're configuring:
+2. Add these GitHub Secrets and this one Variable, scoped to the
+   environment you're configuring (Settings → Secrets and variables →
+   Actions — Secrets and Variables are two separate tabs):
 
    | Secret | Value |
    |---|---|
-   | `NOTIFICATIONS_ENABLED` | `true` |
    | `SMTP_HOST` | e.g. `smtp.sendgrid.net` |
    | `SMTP_USERNAME` | Your provider's SMTP username |
    | `SMTP_PASSWORD` | Your provider's SMTP password/API key |
    | `SMTP_FROM_EMAIL` | The verified "From" address |
    | `ADMIN_NOTIFICATION_EMAILS` | *(optional)* comma-separated extra recipients for extension-request alerts, on top of Admins/Managers/the Super Admin, who already get those automatically |
+
+   | Variable (not Secret) | Value |
+   |---|---|
+   | `NOTIFICATIONS_ENABLED` | `true` |
 
    (Port/transport default to `587`/STARTTLS, but are configurable — if
    your provider requires implicit SSL on `465` instead, set the
@@ -172,15 +177,20 @@ actually fits a normal use case here:
    in — no sharing step needed, since uploads happen as yourself. Grab its
    ID from the folder's URL: `https://drive.google.com/drive/folders/<THIS_PART>`.
 
-3. Add these GitHub secrets, scoped to the environment you're configuring:
+3. Add these GitHub Secrets and this one Variable, scoped to the
+   environment you're configuring (Settings → Secrets and variables →
+   Actions — Secrets and Variables are two separate tabs):
 
    | Secret | Value |
    |---|---|
-   | `GDRIVE_BACKUP_ENABLED` | `true` |
-   | `GDRIVE_OAUTH_CLIENT_ID` | Printed by the script in step 1 |
-   | `GDRIVE_OAUTH_CLIENT_SECRET` | Printed by the script in step 1 |
-   | `GDRIVE_OAUTH_REFRESH_TOKEN` | Printed by the script in step 1 |
-   | `GDRIVE_FOLDER_ID` | The folder ID from step 2 |
+   | `BACKUP_GDRIVE_OAUTH_CLIENT_ID` | Printed by the script in step 1 |
+   | `BACKUP_GDRIVE_OAUTH_CLIENT_SECRET` | Printed by the script in step 1 |
+   | `BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN` | Printed by the script in step 1 |
+   | `BACKUP_GDRIVE_FOLDER_ID` | The folder ID from step 2 |
+
+   | Variable (not Secret) | Value |
+   |---|---|
+   | `BACKUP_GDRIVE_ENABLED` | `true` |
 
 4. Re-run `infra-deploy.yml` for that environment.
 

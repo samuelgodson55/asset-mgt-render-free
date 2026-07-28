@@ -3015,7 +3015,8 @@ is also invoked as a reusable `workflow_call` by every deploy workflow
 below; coverage isn't 100% of the app yet, see [Suggested Future
 Features](#suggested-future-features) for what's still missing),
 [`deploy-azure-staging.yml`](.github/workflows/deploy-azure-staging.yml)
-(push-to-deploy on `develop`),
+(manual `workflow_dispatch` only — no push trigger, so a push to `develop`
+never auto-deploys),
 [`release.yml`](.github/workflows/release.yml) (triggered by pushing a
 `git tag v1.x.x` — builds and pushes both images tagged with that VERSION,
 not just a commit SHA, opens a pull request against `main` with a new
@@ -3038,9 +3039,10 @@ equivalent of `infra-deploy.yml` above),
 [`deploy-azure-vm.yml`](.github/workflows/deploy-azure-vm.yml) (build both
 images → Trivy scan → SSH over the Cloudflare Tunnel → sync
 `docker-compose.vm.yml`/`Caddyfile` → `docker compose up -d` → migrate →
-smoke test — same `git tag v1.x.x`-triggers-production shape as
-`release.yml`/`deploy-azure-production.yml` above, just without a
-Container Apps control plane in the middle), and
+smoke test — same `git tag v1.x.x`-triggers-production, everything-else-
+is-manual-`workflow_dispatch` shape as `release.yml`/
+`deploy-azure-production.yml` above, just without a Container Apps
+control plane in the middle), and
 [`sync-secrets-vm.yml`](.github/workflows/sync-secrets-vm.yml) (pushes
 updated `.env` values out to the running VM without a full redeploy). The
 two paths are independent — use one, the other, or both side by side —
@@ -3067,10 +3069,11 @@ All of these already follow the same rule, which is what makes any of this genui
 The full walkthrough — one-time setup, what each workflow does stage by
 stage, rollback, scaling, monitoring, and cost — lives in
 [`DEPLOYMENT.md`](DEPLOYMENT.md)'s **Azure Container Apps Production
-Deployment** section rather than being duplicated here. Short version: push
-to `develop` and staging updates itself; push a `git tag v1.x.x` off `main`
-and production updates itself (merging to `main` alone no longer deploys
-anything); nothing manual after the one-time setup.
+Deployment** section rather than being duplicated here. Short version:
+deploys are manually triggered (`workflow_dispatch` from the Actions tab)
+for staging, and a pushed `git tag v1.x.x` off `main` still automatically
+ships production (merging to `main` alone, without a tag, never deploys
+anything); nothing manual beyond that after the one-time setup.
 
 ### Azure VM
 

@@ -1,34 +1,25 @@
 # .github/workflows/deploy-azure-staging.yml
 # -----------------------------------------------------------------------------
-# Mirrors deploy-azure-production.yml but triggers on `develop` and targets
-# the staging resource group/environment. Same cost-optimized shape (3
-# Container Apps: frontend/backend/redis, two Docker Hub images, plus a
-# standalone Azure Database for PostgreSQL Flexible Server) -- see
-# infra/main.bicep's top-of-file comment. Staging's `backend` AND `frontend`
-# are both provisioned with min replicas 0 (see infra-deploy.yml) -- pure
+# Mirrors deploy-azure-production.yml and targets the staging resource
+# group/environment. Same cost-optimized shape (3 Container Apps:
+# frontend/backend/redis, two Docker Hub images, plus a standalone Azure
+# Database for PostgreSQL Flexible Server) -- see infra/main.bicep's
+# top-of-file comment. Staging's `backend` AND `frontend` are both
+# provisioned with min replicas 0 (see infra-deploy.yml) -- pure
 # scale-to-zero, a cold start on the first request after idle, effectively
 # free compute the rest of the time.
-# -----------------------------------------------------------------------------
-name: Deploy to Azure (Staging)
-
-# WHY workflow_dispatch EXISTS: a plain `push` to `develop` always runs the
-# full pipeline -- ci -> build-push -> migrate -> deploy -- even when the
-# only thing that changed was one of these workflow YAML files themselves
-# (e.g. testing a fix to the "Roll out new revisions" job below). That
-# means every iteration on the deploy logic pays for a full backend+frontend
-# CI run, two fresh Docker builds/pushes, and an `alembic upgrade head` that
-# hasn't actually changed, just to re-exercise a few `az` commands.
 #
-# workflow_dispatch with `image_tag` set lets you redeploy an image that's
-# ALREADY on Docker Hub from a prior successful `build-push` (copy the SHA
-# from that run, or use `latest`), skipping `ci` and `build-push` entirely.
-# `skip_migrate: true` additionally skips `migrate`, for when you know the
-# schema hasn't changed since that image was built. Leave `image_tag` blank
-# (or just push to `develop` normally) to get the original full-pipeline
-# behavior -- nothing changes for a normal push.
+# MANUAL DEPLOYS ONLY: this workflow has no `push` trigger -- pushing to
+# `develop` runs ci.yml (the fast lint/test/build gate) and nothing else.
+# Deploying to staging is a deliberate, separate action: open this workflow
+# in the Actions tab and "Run workflow". Leave `image_tag` blank to build
+# fresh from whichever branch you run it against (the normal case); set
+# `image_tag` to redeploy an image that's ALREADY on Docker Hub from a
+# prior successful `build-push` (copy the SHA from that run, or use
+# `latest`), which skips `ci` and `build-push` entirely. `skip_migrate:
+# true` additionally skips `migrate`, for when you know the schema hasn't
+# changed since that image was built.
 on:
-  push:
-    branches: [develop]
   workflow_dispatch:
     inputs:
       image_tag:
@@ -51,18 +42,32 @@ permissions:
 
 env:
   RESOURCE_GROUP: ${{ secrets.STAGING_RESOURCE_GROUP }}
-  # Falls back to github.sha whenever image_tag isn't supplied -- a normal
-  # push, or a workflow_dispatch run with image_tag left blank.
+  # Falls back to github.sha whenever image_tag isn't supplied -- i.e. a
+  # workflow_dispatch run with image_tag left blank, building fresh from
+  # whichever branch/ref the run was triggered against.
   IMAGE_TAG: ${{ inputs.image_tag || github.sha }}
   BACKEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend-staging
   FRONTEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-frontend-staging
-  # true only for a workflow_dispatch run that supplied an existing tag --
-  # every job below that builds/tests fresh code checks this.
-  REUSE_EXISTING_IMAGE: ${{ github.event_name == 'workflow_dispatch' && inputs.image_tag != '' }}
+  # true only when this run supplied an existing tag to redeploy -- every
+  # job below that builds/tests fresh code checks this.
+  REUSE_EXISTING_IMAGE: ${{ inputs.image_tag != '' }}
+  # BUILD_ENV is the frontend/Dockerfile ARG that controls whether the
+  # built frontend/ JS is left untouched (local), minified only (development),
+  # or minified AND obfuscated (production) -- see frontend/Dockerfile's own
+  # comment and build-frontend/build.js's module docstring. This pipeline
+  # never previously passed --build-arg BUILD_ENV=... at all (see the
+  # "Build + push frontend image" step below), which silently left the
+  # frontend/Dockerfile's own `ARG BUILD_ENV=development` default in
+  # effect -- harmless for staging specifically (development IS the right
+  # profile here), but it meant there was no actual pipeline-level control
+  # of this value, just a Dockerfile default nothing overrode. Staging
+  # builds "development" -- minified, not obfuscated -- matching
+  # ci.yml's own "staging profile" frontend image verification build.
+  BUILD_ENV: development
 
 jobs:
   ci:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.image_tag == '' }}
+    if: ${{ inputs.image_tag == '' }}
     uses: ./.github/workflows/ci.yml
 
   build-push:
@@ -72,7 +77,7 @@ jobs:
     # otherwise skip this job too by GitHub's default needs-propagation --
     # explicitly allow through both a real ci success AND ci being skipped
     # for the same reason this job itself should be skipped.
-    if: ${{ always() && (needs.ci.result == 'success' || needs.ci.result == 'skipped') && (github.event_name != 'workflow_dispatch' || inputs.image_tag == '') }}
+    if: ${{ always() && (needs.ci.result == 'success' || needs.ci.result == 'skipped') && inputs.image_tag == '' }}
     runs-on: ubuntu-latest
     strategy:
       # See release.yml's matching comment: fail-fast defaults to true,
@@ -103,7 +108,12 @@ jobs:
 
       - name: Build + push ${{ matrix.service }} image
         run: |
+          BUILD_ARGS=()
+          if [ "${{ matrix.service }}" = "frontend" ]; then
+            BUILD_ARGS+=(--build-arg "BUILD_ENV=$BUILD_ENV")
+          fi
           docker build -f ${{ matrix.dockerfile }} \
+                       "${BUILD_ARGS[@]}" \
                        -t ${{ steps.img.outputs.name }}:$IMAGE_TAG \
                        -t ${{ steps.img.outputs.name }}:latest \
                        ${{ matrix.context }}
@@ -126,7 +136,7 @@ jobs:
     # success-or-skipped is needed here. Additionally skipped when
     # `skip_migrate: true` was passed to a workflow_dispatch run reusing an
     # existing image_tag.
-    if: ${{ always() && (needs.build-push.result == 'success' || needs.build-push.result == 'skipped') && !(github.event_name == 'workflow_dispatch' && inputs.skip_migrate) }}
+    if: ${{ always() && (needs.build-push.result == 'success' || needs.build-push.result == 'skipped') && !inputs.skip_migrate }}
     runs-on: ubuntu-latest
     # AZURE_CLIENT_ID/AZURE_TENANT_ID/AZURE_SUBSCRIPTION_ID are configured
     # as per-environment secrets (see DEPLOYMENT.md step 5's table --

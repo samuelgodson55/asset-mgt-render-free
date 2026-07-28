@@ -13,6 +13,13 @@
 # update`, since there's no Container Apps control plane on this path --
 # just a VM.
 #
+# TRIGGERS: only two. (1) `git tag vX.Y.Z && git push origin vX.Y.Z` --
+# always deploys `prod`, this is the one automatic path left. (2) manual
+# `workflow_dispatch` from the Actions tab -- covers everything else,
+# including deploying `vm-staging`, or redeploying `prod` outside of a
+# tagged release. A plain push to `main`/`develop` no longer triggers any
+# deploy on its own; it only runs ci.yml.
+#
 # Required repo/environment secrets (see DEPLOYMENT_VM.md step 5-9 and
 # its "Set up Cloudflare Tunnel" section for how each one is produced):
 #   DOCKERHUB_USERNAME, DOCKERHUB_TOKEN  - already used by deploy-azure-*.yml
@@ -40,15 +47,18 @@
 name: Deploy to Azure VM
 
 on:
+  # NO `branches: [main]` here anymore -- a plain push to `main` no longer
+  # auto-deploys anything on this path. Pushing `git tag vX.Y.Z && git push
+  # origin vX.Y.Z` is still THE way to cut a real, named, rollback-able
+  # release on this path -- see DEPLOYMENT_VM.md's "Tagging & Versioning"
+  # section. Mirrors release.yml's `on.push.tags` trigger for the Container
+  # Apps path, kept independent/self-contained here rather than calling
+  # into that workflow, since the two deploy targets can be used
+  # separately or together without depending on each other. Everything
+  # else (a normal push to `main`/`develop`/any branch, or deploying to
+  # `vm-staging`) goes through `workflow_dispatch` below instead.
   push:
-    branches: [main]
-    tags: ['v*.*.*'] # pushing `git tag vX.Y.Z && git push origin vX.Y.Z` is
-    # THE way to cut a real, named, rollback-able release on this path --
-    # see DEPLOYMENT_VM.md's "Tagging & Versioning" section. Mirrors
-    # release.yml's `on.push.tags` trigger for the Container Apps path,
-    # kept independent/self-contained here rather than calling into that
-    # workflow, since the two deploy targets can be used separately or
-    # together without depending on each other.
+    tags: ['v*.*.*']
   workflow_dispatch:
     inputs:
       environment:
@@ -87,6 +97,17 @@ env:
   # trustworthy for "is this a stable named release or a dev build".
   IMAGE_TAG: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) && github.ref_name || (inputs.image_tag || github.sha) }}
   VERSION: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) && github.ref_name || (inputs.image_tag != '' && inputs.image_tag || 'unversioned') }}
+  # BUILD_ENV is the frontend/Dockerfile ARG controlling minification-only
+  # ("development") vs minification+obfuscation ("production") -- see
+  # release.yml's matching BUILD_ENV comment for the full story, including
+  # the bug this fixes (this build step never used to pass BUILD_ENV at
+  # all, so it silently always built frontend/Dockerfile's own
+  # `development` default, even for a real `prod` VM deploy). Recomputes
+  # the same prod-vs-vm-staging condition ENVIRONMENT (above) uses --
+  # workflow-level `env:` entries can't reliably reference each other via
+  # the `env` context, so this mirrors IMAGE_TAG/VERSION's own pattern of
+  # recomputing the full expression rather than chaining off ENVIRONMENT.
+  BUILD_ENV: ${{ ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) && 'prod' || (inputs.environment || 'prod')) == 'prod' && 'production' || 'development' }}
   BACKEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend${{ (inputs.environment || 'prod') == 'vm-staging' && '-staging' || '' }}
   FRONTEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-frontend${{ (inputs.environment || 'prod') == 'vm-staging' && '-staging' || '' }}
   REUSE_EXISTING_IMAGE: ${{ github.event_name == 'workflow_dispatch' && inputs.image_tag != '' }}
@@ -137,7 +158,12 @@ jobs:
         # the SHA are already the same value -- harmless duplicate push
         # in that case), and `latest`.
         run: |
+          BUILD_ARGS=()
+          if [ "${{ matrix.service }}" = "frontend" ]; then
+            BUILD_ARGS+=(--build-arg "BUILD_ENV=$BUILD_ENV")
+          fi
           docker build -f ${{ matrix.dockerfile }} \
+                       "${BUILD_ARGS[@]}" \
                        --label org.opencontainers.image.version="$VERSION" \
                        --label org.opencontainers.image.revision="${{ github.sha }}" \
                        --label org.opencontainers.image.created="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -235,6 +261,24 @@ jobs:
             ProxyCommand cloudflared access ssh --hostname %h --service-token-id $CF_ACCESS_CLIENT_ID --service-token-secret $CF_ACCESS_CLIENT_SECRET
           SSHCONFIG
           chmod 600 ~/.ssh/config
+
+      - name: Self-heal /opt/snipeit ownership before syncing
+        # Cheap, idempotent guard against the root-ownership drift we hit
+        # live: any manual root-shell edit under /opt/snipeit (e.g.
+        # patching a file directly on the VM instead of through a
+        # workflow) leaves some subset of it root-owned, which then makes
+        # THIS scp -- writing as $VM_SSH_USER -- fail with a silent
+        # Permission denied on whatever it touches. Running this
+        # unconditionally, every deploy, means that drift can never
+        # again block a sync no matter how it got introduced -- on a
+        # normal deploy where nothing drifted, it just re-chowns files
+        # that are already correctly owned, which is a no-op.
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_SSH_USER: ${{ secrets.VM_SSH_USER }}
+        run: |
+          ssh -i ~/.ssh/deploy_key "$VM_SSH_USER@$VM_HOST" \
+            "sudo chown -R $VM_SSH_USER:$VM_SSH_USER /opt/snipeit"
 
       - name: Sync docker-compose.vm.yml + Caddyfile to the VM
         env:

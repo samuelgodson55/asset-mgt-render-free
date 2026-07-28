@@ -418,7 +418,7 @@ tagged **Variable** or left as a (default) **Secret**; add it under the
 matching section, both live on the same Environment page, just click
 **Add secret** or **Add variable** as appropriate. A **Variable** isn't
 sensitive (it's plain text, visible to anyone with repo read access) —
-that's exactly why non-secret settings like `VM_SIZE`/`LOCATION` below
+that's exactly why non-secret settings like `VM_SIZE`/`AZURE_LOCATION` below
 use it instead of a secret.
 
 Add these to each Environment (Secrets unless marked **Variable**):
@@ -451,7 +451,7 @@ Add these to each Environment (Secrets unless marked **Variable**):
 | `DOCKERHUB_TOKEN` | A Docker Hub [Personal Access Token](https://app.docker.com/settings/personal-access-tokens) (not your password) | both workflows |
 | `CUSTOM_DOMAIN` (**Variable**, not secret) | REQUIRED — a hostname in the `CLOUDFLARE_ZONE_ID` zone, e.g. `assets.example.com` | `infra-deploy-vm.yml` |
 | `VM_SIZE` (**Variable**, not secret) | Optional — overrides `variables.tf`'s `Standard_B2s` default. E.g. `Standard_D2s_v3` if `Standard_B2s` isn't available in your region (see Troubleshooting) | `infra-deploy-vm.yml` |
-| `LOCATION` (**Variable**, not secret) | Optional — overrides `variables.tf`'s `eastus` default region. E.g. `southafricanorth` for South Africa North (region *names* like "South Africa North" shown in the Portal map to lowercase, no-space *slugs* like this for `az`/Terraform — `az account list-locations -o table` shows every region's slug) | `infra-deploy-vm.yml` |
+| `AZURE_LOCATION` (**Variable**, not secret) | Optional — overrides `variables.tf`'s `eastus` default region. E.g. `southafricanorth` for South Africa North (region *names* like "South Africa North" shown in the Portal map to lowercase, no-space *slugs* like this for `az`/Terraform — `az account list-locations -o table` shows every region's slug). Named to match the Container Apps path's own `AZURE_LOCATION` Variable (see `DEPLOYMENT.md`) -- one name, one meaning, on both deploy paths. | `infra-deploy-vm.yml` |
 | `VM_HOST` | Filled in AFTER step 8 (see step 9) — this is the VM's **Cloudflare Tunnel SSH hostname** (`ssh-<label>.<CLOUDFLARE_ZONE_NAME>`, e.g. `ssh-assets.example.com` for `CUSTOM_DOMAIN=assets.example.com`; `ssh.<CLOUDFLARE_ZONE_NAME>` if `CUSTOM_DOMAIN` is the zone apex), not its public IP; nothing listens on port 22 at the public IP by default | `deploy-azure-vm.yml`, `sync-secrets-vm.yml` |
 
 Optional (leave unset if you don't use them yet):
@@ -613,8 +613,10 @@ Terraform to create a brand new token and rewire GitHub to match:
 ## 10. Deploy the application (`deploy-azure-vm.yml`)
 
 In GitHub: **Actions → Deploy to Azure VM → Run workflow**, `environment:
-prod`, leave `image_tag` blank (build fresh). Or just `git push` to `main`
-— the workflow also triggers on that automatically.
+prod`, leave `image_tag` blank (build fresh). A plain `git push` to `main`
+no longer triggers this automatically — only a `git tag vX.Y.Z && git push
+origin vX.Y.Z` does (see "Tagging & Versioning" below); everything else
+goes through the manual `workflow_dispatch` run described here.
 
 This runs: `ci.yml` (full test suite) → build + push both images to Docker
 Hub → SSH in, sync `docker-compose.vm.yml`/`Caddyfile`, update `IMAGE_TAG`
@@ -694,8 +696,8 @@ that isn't safely reversible, see below), `MINOR` for new features,
 workflow — see the caveat below) is the running human-readable history of
 what changed in each one.
 
-A plain `git push` to `main` (no tag) or a `workflow_dispatch` run without
-`image_tag` still deploys fine — it's just recorded as `VERSION=unversioned`
+A manual `workflow_dispatch` run without `image_tag` still deploys fine —
+it's just recorded as `VERSION=unversioned`
 rather than a named release (real SHA-tagged image, fully functional, just
 not something `git tag`/Docker Hub/`CHANGELOG.md` will ever show you as a
 release you can refer back to by name). Good for iterating on `vm-staging`;
@@ -1290,7 +1292,7 @@ be globally unique across all of Azure. Change `app_base_name` slightly
 `SkuNotAvailableForLocation`** — Azure has no current capacity for that
 VM size in that region; this is regional capacity, not anything wrong
 with the config, and it shifts over time (a size unavailable today may
-free up later). Set the `VM_SIZE` and/or `LOCATION` repo/environment
+free up later). Set the `VM_SIZE` and/or `AZURE_LOCATION` repo/environment
 Variables (step 6) to something else — e.g. `Standard_B2ms`, or a nearby
 region — and re-apply. `az vm list-skus --location <region> --size
 Standard_B --output table` shows what's actually available/restricted
@@ -1315,7 +1317,7 @@ own error message names the exact resource address (e.g.
 terraform import cloudflare_record.app <zone_id>/<dns_record_id>
 ```
 
-**I need to change `LOCATION`/region after already applying, and Azure
+**I need to change `AZURE_LOCATION`/region after already applying, and Azure
 won't let me move an existing resource group in place** — resist the
 urge to wipe or reset the whole state file to force this through. State
 is **one shared file covering every provider in this config** — Azure
@@ -1416,10 +1418,21 @@ early. Options, in order of likelihood:
    since there's no live connection to route through at all. Fix it by
    re-running `sync-secrets-vm.yml` to push the current token -- **but
    note that workflow also connects over this same Tunnel, so it can't
-   help while the Tunnel itself is down.** With the Tunnel down, do it
-   by hand instead, over the Azure Serial Console (VM → Support +
-   troubleshooting → Serial console -- no network path, so it works
-   regardless of Tunnel state):
+   help while the Tunnel itself is down.**
+
+   With the Tunnel down, run **`repair-tunnel-token-vm.yml`** instead
+   (`workflow_dispatch`, pick the same `environment`) -- it reads the
+   current live token straight out of Terraform state and pushes it via
+   `az vm run-command invoke`, which goes over Azure's own VM Agent
+   control-plane channel rather than SSH/the Tunnel, so it works
+   regardless of Tunnel state without you touching the VM by hand at
+   all. It restarts just the `cloudflared` container once the token's
+   written.
+
+   No CI access, or want to see exactly what it's doing / do it
+   yourself? Same repair, by hand, over the Azure Serial Console (VM →
+   Support + troubleshooting → Serial console -- no network path, so it
+   also works regardless of Tunnel state):
    ```bash
    # 1. On your machine, in infra-vm/, get the current live token:
    terraform output -raw cloudflare_tunnel_token
@@ -1427,8 +1440,9 @@ early. Options, in order of likelihood:
    sudo nano /opt/snipeit/.env   # update the CLOUDFLARE_TUNNEL_TOKEN= line
    cd /opt/snipeit && docker compose -f docker-compose.vm.yml up -d cloudflared
    ```
-   Confirm the fix in the dashboard -- `Status` should flip to `Active`
-   with one connector listed -- before retrying any CI deploy.
+   Either way, confirm the fix in the dashboard -- `Status` should flip
+   to `Active` with one connector listed -- before retrying any CI
+   deploy.
 2. Outbound internet from the VM is somehow blocked — `cloudflared` needs
    to reach Cloudflare's edge; this project's NSG never restricts
    outbound traffic, so this would point at something unusual in your

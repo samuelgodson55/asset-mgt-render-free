@@ -439,13 +439,14 @@ as in a single-instance deployment.
 
 ## Azure Container Apps Production Deployment (Cost-Optimized)
 
-This is the **primary production target**: Azure Container Apps (ACA), fully
-automated end to end, and deliberately built to be the **cheapest realistic
-way to run this app on Azure** while keeping full functionality, real
-autoscaling, and a fast, zero-downtime deploy pipeline. Push to `develop`
-and Staging updates itself. Production works differently: **a pushed
-`git tag v1.x.x` is what triggers a production release** — merging to
-`main` alone does *not* deploy anything by itself anymore (see
+This is the **primary production target**: Azure Container Apps (ACA), with
+a fast, zero-downtime deploy pipeline built to be the **cheapest realistic
+way to run this app on Azure** while keeping full functionality and real
+autoscaling. All deployments are manually triggered from the Actions tab
+(`workflow_dispatch`) — a plain push to `develop` or `main` never deploys
+anything by itself, it only runs `ci.yml`'s fast lint/test/build gate.
+**A pushed `git tag v1.x.x` is the one exception**: it still automatically
+triggers a production release (see
 [Versioning & Cutting a Release](#versioning--cutting-a-release) below for
 the full walkthrough). Nothing manual after the one-time setup below either
 way. The pipeline lives in `.github/workflows/` (`ci.yml`, `infra-deploy.yml`,
@@ -620,7 +621,7 @@ not you ever push an image).
    restricted for your subscription, try `centralus` next — there's no way
    to know in advance which region a given subscription is cleared for, so
    this is trial and error. Whatever you pick, use the same region for both
-   commands above and for the `AZURE_LOCATION` secret in step 5, and keep
+   commands above and for the `AZURE_LOCATION` Variable in step 5, and keep
    `POSTGRES_SKU_NAME` on a `Standard_B*` (Burstable) tier — Burstable has
    the widest regional availability of the three Flexible Server tiers.)
 
@@ -636,7 +637,6 @@ not you ever push an image).
    | Secret | Scope | Notes |
    |---|---|---|
    | `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` | per-environment | From the App Registration in step 4 |
-   | `AZURE_LOCATION` | repo | e.g. `eastus2` — see the note on region restrictions in step 3 above; `centralus` is the fallback if `eastus2` is also restricted on your subscription |
    | `STAGING_RESOURCE_GROUP` / `PROD_RESOURCE_GROUP` | repo | The two resource group names from step 3 |
    | `DOCKERHUB_USERNAME` | repo | From step 1 |
    | `DOCKERHUB_TOKEN` | repo | From step 1 |
@@ -644,20 +644,28 @@ not you ever push an image).
    | `REDIS_PASSWORD` | per-environment | `openssl rand -hex 16` is fine here — no complexity rule, this isn't Flexible Server. Different per environment. |
    | `JWT_SECRET_KEY` | per-environment | Generate with `openssl rand -hex 32` |
    | `ROOT_ADMIN_BOOTSTRAP_PASSWORD` | per-environment | Optional — the root admin's initial password. Leave unset to have `0002_bootstrap_root_admin.py` generate a random one and print it once instead (see README's "Viewing the one-time-generated root admin password"). Note: the root admin's username/display name (`SUPER_ADMIN_USERNAME`/`SUPER_ADMIN_NAME`) aren't wired as GitHub secrets at all here — `infra/main.bicep` hardcodes them to `superadmin`/`Super Admin`; edit the bicep file directly if you want different values. |
-   | `CUSTOM_DOMAIN` | per-environment | Optional — leave unset to use the generated `*.azurecontainerapps.io` FQDN |
-   | `NOTIFICATIONS_ENABLED` | per-environment | Optional, string `"true"`/`"false"` — master switch for all outbound email. Leave unset (defaults to off) until the four `SMTP_*` secrets below are set. See [POST_DEPLOYMENT.md](POST_DEPLOYMENT.md) for the full walkthrough. |
-   | `SMTP_HOST` / `SMTP_USERNAME` / `SMTP_PASSWORD` / `SMTP_FROM_EMAIL` | per-environment | Optional — required together if `NOTIFICATIONS_ENABLED=true`. Any RFC 5321 SMTP server works (your own Postfix, SendGrid, Mailgun, AWS SES's SMTP endpoint, ...) — no vendor-specific SDK. See [POST_DEPLOYMENT.md](POST_DEPLOYMENT.md). |
+   | `SMTP_HOST` / `SMTP_USERNAME` / `SMTP_PASSWORD` / `SMTP_FROM_EMAIL` | per-environment | Optional — required together if `NOTIFICATIONS_ENABLED=true` (see the Variables list below). Any RFC 5321 SMTP server works (your own Postfix, SendGrid, Mailgun, AWS SES's SMTP endpoint, ...) — no vendor-specific SDK. See [POST_DEPLOYMENT.md](POST_DEPLOYMENT.md). |
    | `ADMIN_NOTIFICATION_EMAILS` | per-environment | Optional — comma-separated extra recipients for extension-request alerts, on top of Admins/Managers/the Super Admin, who are covered automatically. |
-   | `GDRIVE_BACKUP_ENABLED` | per-environment | Optional, string `"true"`/`"false"` — leave unset (defaults to off, local-disk-only backups) until the four `GDRIVE_*` secrets below are set. See [POST_DEPLOYMENT.md](POST_DEPLOYMENT.md). |
-   | `GDRIVE_OAUTH_CLIENT_ID` / `GDRIVE_OAUTH_CLIENT_SECRET` / `GDRIVE_OAUTH_REFRESH_TOKEN` | per-environment | Optional — required together if `GDRIVE_BACKUP_ENABLED=true`. Produced by running `backend/scripts/gdrive_oauth_setup.py` **once, on your own machine, not in CI** — see [POST_DEPLOYMENT.md](POST_DEPLOYMENT.md). |
-   | `GDRIVE_FOLDER_ID` | per-environment | Optional — the destination Drive folder's ID (from its URL), required alongside the three secrets above. |
+   | `BACKUP_GDRIVE_OAUTH_CLIENT_ID` / `BACKUP_GDRIVE_OAUTH_CLIENT_SECRET` / `BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN` | per-environment | Optional — required together if `BACKUP_GDRIVE_ENABLED=true` (see the Variables list below). Produced by running `backend/scripts/gdrive_oauth_setup.py` **once, on your own machine, not in CI** — see [POST_DEPLOYMENT.md](POST_DEPLOYMENT.md). |
+   | `BACKUP_GDRIVE_FOLDER_ID` | per-environment | Optional — the destination Drive folder's ID (from its URL), required alongside the three secrets above. |
    | `ALERT_EMAIL_ADDRESS` | per-environment | Optional — leave unset to skip creating any alerting resources (no cost, no action group). Set it to wire up the three Azure Monitor scheduled query alerts (backend error-rate spike, `/readyz` failing, daily backup missing) from `infra/main.bicep` to that address — see [SRE_STRATEGY.md](SRE_STRATEGY.md) section 2. **Leave this unset on a brand-new environment's first-ever `infra-deploy.yml` run.** The three alert rules query the `ContainerAppConsoleLogs_CL` table, which Azure only creates once a log line has actually been ingested — on a fresh Log Analytics workspace it doesn't exist yet, and the deployment fails with `Failed to resolve table or column expression named 'ContainerAppConsoleLogs_CL'` if you try to create the rules first. Deploy once with this unset, let `backend`/`frontend` run for a few minutes (or serve one request), then set this secret and re-run `infra-deploy.yml` for the same environment to add the alert rules on top of the already-running infra. |
 
-   Optionally, also set two repo-level **Variables** (Settings → Secrets
-   and variables → Actions → **Variables** tab, not Secrets — these aren't
-   sensitive) to size the Flexible Server: `POSTGRES_SKU_NAME` (default
-   `Standard_B1ms` if unset) and `POSTGRES_STORAGE_GB` (default `32` if
-   unset). Most deployments never need to touch these.
+   Also set these repo/environment-level **Variables** (Settings → Secrets
+   and variables → Actions → **Variables** tab, not Secrets — none of
+   these are sensitive; these are also the exact same names/values
+   `infra-deploy-vm.yml`/`sync-secrets-vm.yml` use on the VM deploy path,
+   so one value means the same thing on both paths):
+
+   | Variable | Scope | Notes |
+   |---|---|---|
+   | `AZURE_LOCATION` | repo | e.g. `eastus2` — see the note on region restrictions in step 3 above; `centralus` is the fallback if `eastus2` is also restricted on your subscription. Falls back to `eastus2` if unset. |
+   | `CUSTOM_DOMAIN` | per-environment | Optional — leave unset to use the generated `*.azurecontainerapps.io` FQDN |
+   | `NOTIFICATIONS_ENABLED` | per-environment | Optional, string `"true"`/`"false"` — master switch for all outbound email. Leave unset (defaults to off) until the four `SMTP_*` secrets above are set. See [POST_DEPLOYMENT.md](POST_DEPLOYMENT.md) for the full walkthrough. |
+   | `BACKUP_GDRIVE_ENABLED` | per-environment | Optional, string `"true"`/`"false"` — leave unset (defaults to off, local-disk-only backups) until the four `BACKUP_GDRIVE_*` secrets above are set. See [POST_DEPLOYMENT.md](POST_DEPLOYMENT.md). |
+   | `POSTGRES_SKU_NAME` | repo | Optional — sizes the Flexible Server. Default `Standard_B1ms` if unset. |
+   | `POSTGRES_STORAGE_GB` | repo | Optional — sizes the Flexible Server. Default `32` if unset. |
+
+   Most deployments never need to touch `POSTGRES_SKU_NAME`/`POSTGRES_STORAGE_GB`.
 
 6. **Run `infra-deploy.yml` manually once per environment** (Actions tab →
    "Deploy Azure Infrastructure" → Run workflow → choose `staging`, then run
@@ -688,8 +696,9 @@ not you ever push an image).
    commit) one bullet per feature/fix instead of one bullet per intermediate
    commit inside the branch.
 
-9. **Push to `develop`** for Staging, or **push a `git tag v1.x.x`** off
-   `main` for Production — either builds real images, pushes them to Docker
+9. **Manually run `deploy-azure-staging.yml`** (Actions tab → "Run
+   workflow") for Staging, or **push a `git tag v1.x.x`** off `main` for
+   Production — either builds real images, pushes them to Docker
    Hub, runs migrations, and rolls them out (`deploy-azure-staging.yml` for
    the former; `release.yml` → `deploy-azure-production.yml` for the
    latter — see [Versioning & Cutting a Release](#versioning--cutting-a-release)
@@ -830,11 +839,12 @@ cost-optimized design (one combined container instead of separate
 `db` → `postgresServer` migration steps above first, then run
 `infra-deploy.yml` against the new `infra/main.bicep` (it will remove the
 old `app` Container App and create `backend`/`frontend` in its place), then
-push to `main`/`develop` to populate both new apps' images.
+manually run `deploy-azure-staging.yml`/`deploy-azure-production.yml` to
+populate both new apps' images.
 
 ### The pipeline, branch by branch
 
-- **`develop` push → Staging** (`deploy-azure-staging.yml`): build BOTH
+- **Manual `deploy-azure-staging.yml` run → Staging**: build BOTH
   images (`backend`, `frontend`) in parallel → push each to its own Docker
   Hub repo, tagged with the commit SHA → Trivy scan (report-only, doesn't
   block) → run `migrate` job against the new `backend` image → roll out

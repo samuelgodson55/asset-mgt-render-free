@@ -106,7 +106,12 @@ jobs:
       # (e.g. Standard_B2ms -- see DEPLOYMENT_VM.md's Cost section) or a
       # nearby region is the actual fix.
       TF_VAR_vm_size: ${{ vars.VM_SIZE || 'Standard_B2s' }}
-      TF_VAR_location: ${{ vars.LOCATION || 'eastus' }}
+      # AZURE_LOCATION -- named to match infra-deploy.yml's (Container Apps
+      # path) Variable of the same name/purpose, rather than the previous
+      # bare "LOCATION" here, so one Variable name means "which Azure
+      # region" on both deploy paths instead of two different names for the
+      # same thing.
+      TF_VAR_location: ${{ vars.AZURE_LOCATION || 'eastus' }}
       TF_VAR_ssh_public_key: ${{ secrets.VM_SSH_PUBLIC_KEY }}
       # OPTIONAL break-glass only -- leave this secret unset entirely for
       # the normal case (no inbound port 22 on the NSG at all, reached

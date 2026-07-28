@@ -61,9 +61,16 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Ensure resource group exists
+        # AZURE_LOCATION is a repo-level Variable, not a Secret -- an Azure
+        # region slug (e.g. "eastus2") isn't sensitive. See this repo's
+        # Secrets vs Variables convention: infra-deploy-vm.yml's equivalent
+        # (TF_VAR_location) reads the exact same AZURE_LOCATION Variable, so
+        # both deploy paths share one name and one classification for "what
+        # Azure region" instead of drifting (this used to be a repo Secret
+        # here, named differently from the VM path's Variable).
         run: |
           az group show --name "$RESOURCE_GROUP" 2>/dev/null || \
-          az group create --name "$RESOURCE_GROUP" --location "${{ secrets.AZURE_LOCATION }}"
+          az group create --name "$RESOURCE_GROUP" --location "${{ vars.AZURE_LOCATION || 'eastus2' }}"
 
       
       # main.bicep's alerting section (action group + 3 scheduled query
@@ -130,23 +137,43 @@ jobs:
       # Unset variables fall back to bicep's own defaults (Standard_B1ms /
       # 32 GiB) via the `|| default` bash pattern below -- this step is safe
       # to run even if you never set either variable.
-      # SMTP (email notifications) and Google Drive (backup upload) are
-      # BOTH optional -- every secret referenced below resolves to an
-      # empty string / 'false' if you never set it in
-      # Settings -> Secrets and variables -> Actions -> Secrets, which
-      # keeps main.bicep's defaults (notifications off, gdrive off) exactly
-      # as before these lines existed. Set them once you're ready:
-      #   - SMTP_HOST / SMTP_USERNAME / SMTP_PASSWORD / SMTP_FROM_EMAIL,
-      #     then NOTIFICATIONS_ENABLED=true. ADMIN_NOTIFICATION_EMAILS is
-      #     optional on top (comma-separated).
-      #   - GDRIVE_OAUTH_CLIENT_ID / GDRIVE_OAUTH_CLIENT_SECRET /
-      #     GDRIVE_OAUTH_REFRESH_TOKEN (from backend/scripts/
+      # SMTP (email notifications) and Google Drive (backup upload) now
+      # follow the SAME Secrets-vs-Variables split, and the SAME names,
+      # that sync-secrets-vm.yml/infra-deploy-vm.yml already use on the VM
+      # path and that backend/config.py's BACKUP_GDRIVE_*/
+      # NOTIFICATIONS_ENABLED env vars use (see .env.example):
+      #   - SMTP_HOST / SMTP_USERNAME / SMTP_PASSWORD / SMTP_FROM_EMAIL /
+      #     ADMIN_NOTIFICATION_EMAILS and the three BACKUP_GDRIVE_OAUTH_*
+      #     values stay real GitHub Secrets (unchanged).
+      #   - The on/off switches -- NOTIFICATIONS_ENABLED and
+      #     BACKUP_GDRIVE_ENABLED -- are config, not credentials, so they're
+      #     GitHub Variables, same as ENABLE_API_DOCS/SITE_NAME/etc. below.
+      #     BACKUP_GDRIVE_FOLDER_ID (a Drive folder ID, not a credential)
+      #     stays a Secret only because sync-secrets-vm.yml already treats
+      #     it as one -- kept that way here too so the same name means the
+      #     same classification on both deploy paths.
+      #   This used to put NOTIFICATIONS_ENABLED AND the whole GDRIVE_*
+      #   group in Secrets under different names entirely (GDRIVE_BACKUP_ENABLED,
+      #   GDRIVE_OAUTH_CLIENT_ID, GDRIVE_FOLDER_ID, ...) than both the VM
+      #   path and the app's own .env.example -- renamed/reclassified here
+      #   so one name means one thing everywhere in this repo.
+      # Every value below still resolves to an empty string / 'false' if
+      # you never set it, keeping main.bicep's defaults (notifications off,
+      # gdrive off) exactly as before these lines existed. Set them once
+      # you're ready:
+      #   - SMTP_HOST / SMTP_USERNAME / SMTP_PASSWORD / SMTP_FROM_EMAIL
+      #     (Secrets), then NOTIFICATIONS_ENABLED=true (Variable).
+      #     ADMIN_NOTIFICATION_EMAILS is optional on top (comma-separated,
+      #     Secret).
+      #   - BACKUP_GDRIVE_OAUTH_CLIENT_ID / BACKUP_GDRIVE_OAUTH_CLIENT_SECRET /
+      #     BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN (Secrets, from backend/scripts/
       #     gdrive_oauth_setup.py -- run that ONCE on your own machine, not
-      #     in CI) and GDRIVE_FOLDER_ID, then GDRIVE_BACKUP_ENABLED=true.
-      # `secrets.X == 'true'` (not a plain boolean secret) because GitHub
-      # Actions secrets are always strings -- this is the standard pattern
-      # for turning an unset/empty secret into bicep's `false` default
-      # without a separate Variables-tab entry.
+      #     in CI) and BACKUP_GDRIVE_FOLDER_ID (Secret), then
+      #     BACKUP_GDRIVE_ENABLED=true (Variable).
+      # `vars.X == 'true'` / `secrets.X == 'true'` (not a plain boolean)
+      # because GitHub Actions Variables and Secrets are always strings --
+      # the standard pattern for turning an unset/empty value into bicep's
+      # `false` default without needing a separate entry just for that.
       # ENABLE_API_DOCS / SITE_NAME / rate-limit / lockout / super-admin
       # identity / SMTP port+transport / notification intervals / display
       # timezone / currency / catalog visibility / backup schedule are all
@@ -189,19 +216,19 @@ jobs:
               redisPassword="${{ secrets.REDIS_PASSWORD }}" \
               jwtSecretKey="${{ secrets.JWT_SECRET_KEY }}" \
               rootAdminBootstrapPassword="${{ secrets.ROOT_ADMIN_BOOTSTRAP_PASSWORD }}" \
-              customDomain="${{ secrets.CUSTOM_DOMAIN }}" \
+              customDomain="${{ vars.CUSTOM_DOMAIN }}" \
               alertEmailAddress="${{ secrets.ALERT_EMAIL_ADDRESS }}" \
-              notificationsEnabled=${{ secrets.NOTIFICATIONS_ENABLED == 'true' }} \
+              notificationsEnabled=${{ vars.NOTIFICATIONS_ENABLED == 'true' }} \
               smtpHost="${{ secrets.SMTP_HOST }}" \
               smtpUsername="${{ secrets.SMTP_USERNAME }}" \
               smtpPassword="${{ secrets.SMTP_PASSWORD }}" \
               smtpFromEmail="${{ secrets.SMTP_FROM_EMAIL }}" \
               adminNotificationEmails="${{ secrets.ADMIN_NOTIFICATION_EMAILS }}" \
-              gdriveBackupEnabled=${{ secrets.GDRIVE_BACKUP_ENABLED == 'true' }} \
-              gdriveOauthClientId="${{ secrets.GDRIVE_OAUTH_CLIENT_ID }}" \
-              gdriveOauthClientSecret="${{ secrets.GDRIVE_OAUTH_CLIENT_SECRET }}" \
-              gdriveOauthRefreshToken="${{ secrets.GDRIVE_OAUTH_REFRESH_TOKEN }}" \
-              gdriveFolderId="${{ secrets.GDRIVE_FOLDER_ID }}" \
+              gdriveBackupEnabled=${{ vars.BACKUP_GDRIVE_ENABLED == 'true' }} \
+              gdriveOauthClientId="${{ secrets.BACKUP_GDRIVE_OAUTH_CLIENT_ID }}" \
+              gdriveOauthClientSecret="${{ secrets.BACKUP_GDRIVE_OAUTH_CLIENT_SECRET }}" \
+              gdriveOauthRefreshToken="${{ secrets.BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN }}" \
+              gdriveFolderId="${{ secrets.BACKUP_GDRIVE_FOLDER_ID }}" \
               enableApiDocs=${{ vars.ENABLE_API_DOCS == 'true' }} \
               siteName="${{ vars.SITE_NAME || 'Snipe-IT Lite' }}" \
               logLevel="${{ vars.LOG_LEVEL || 'INFO' }}" \

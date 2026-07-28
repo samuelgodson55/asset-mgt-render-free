@@ -65,6 +65,24 @@ jobs:
       VERSION: ${{ github.ref_name }} # e.g. v1.4.2
       BACKEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend
       FRONTEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-frontend
+      # BUILD_ENV is the frontend/Dockerfile ARG that decides how far the
+      # frontend/ JS gets transformed -- "production" is the only mode that
+      # also obfuscates (javascript-obfuscator), on top of the
+      # minification "development" already does. See frontend/Dockerfile's
+      # own comment and build-frontend/build.js's module docstring for the
+      # full local/development/production breakdown.
+      #
+      # BUG FIX: the "Build + push frontend image" step below never used
+      # to pass --build-arg BUILD_ENV=... at all -- every real production
+      # release built off this workflow was therefore silently getting
+      # frontend/Dockerfile's own `ARG BUILD_ENV=development` DEFAULT
+      # instead, meaning production images were shipped minified but
+      # NEVER actually obfuscated, with nothing in this pipeline making
+      # that visible. Setting it explicitly here (and passing it through
+      # in the build step) is what actually makes "production" mean
+      # production for the one deploy path -- `git tag vX.Y.Z` -- that's
+      # supposed to guarantee it.
+      BUILD_ENV: production
     strategy:
       # fail-fast defaults to true, which meant a Trivy failure on ONE
       # matrix leg (e.g. frontend) would immediately CANCEL the other leg
@@ -103,7 +121,12 @@ jobs:
       # (convenience for anyone pulling without pinning a version).
       - name: Build + push ${{ matrix.service }} image
         run: |
+          BUILD_ARGS=()
+          if [ "${{ matrix.service }}" = "frontend" ]; then
+            BUILD_ARGS+=(--build-arg "BUILD_ENV=$BUILD_ENV")
+          fi
           docker build -f ${{ matrix.dockerfile }} \
+                       "${BUILD_ARGS[@]}" \
                        -t ${{ steps.img.outputs.name }}:$VERSION \
                        -t ${{ steps.img.outputs.name }}:${{ github.sha }} \
                        -t ${{ steps.img.outputs.name }}:latest \
