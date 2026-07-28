@@ -1,258 +1,43 @@
 // =============================================================================
 // infra/main.bicep
 // -----------------------------------------------------------------------------
-// COST-OPTIMIZED Azure Container Apps deployment for Snipe-IT Lite --
-// THREE Container Apps: `frontend`, `backend`, `redis`, all inside ONE
-// Container Apps Managed Environment (see "SINGLE MANAGED ENVIRONMENT" below
-// for why this file uses one, not three), PLUS a managed Azure Database for
-// PostgreSQL Flexible Server (`postgresServer` below) -- NOT a fourth
-// Container App. See "WHY POSTGRES IS A MANAGED SERVICE, NOT A CONTAINER
-// APP" immediately below for why that one piece can't be a Container App at
-// all, regardless of budget.
+// Cost-optimized Azure Container Apps deployment for Snipe-IT Lite.
 //
-// WHY POSTGRES IS A MANAGED SERVICE, NOT A CONTAINER APP
-// ---------------------------------------------------------------------------
-// An earlier version of this file ran Postgres as a fourth Container App
-// (`db`, official postgres:16-alpine image) on a persistent Azure Files
-// share, the same pattern still used below for `redis` and for
-// `backend`'s `backup-data`/`export-data` volumes. That is NOT a sizing
-// problem you can fix with a bigger container -- it fails at container
-// *start*, before Postgres ever gets to serve a single query:
+// PROVISIONS
+//   - Log Analytics workspace (Container Apps logs)
+//   - Storage Account + 2 Azure Files shares (backup_data, export_data)
+//   - VNet (1 delegated subnet + NSG) + 1 Container Apps Environment (Consumption plan)
+//   - Azure Database for PostgreSQL Flexible Server (`postgresServer`) -- a
+//     managed service, not a Container App, because Azure Files (the volume
+//     type Container Apps uses for persistent storage) doesn't support the
+//     POSIX permissions Postgres's `initdb` requires on its data directory.
+//     Smallest Burstable SKU by default (see `postgresSkuName`).
+//   - 3 Container Apps, all in ONE environment (multiple environments hit a
+//     per-subscription quota on Free Trial/starter subscriptions):
+//       `redis`    -- redis:7-alpine, internal-only, 1 replica, no persistence
+//       `backend`  -- FastAPI + embedded Celery worker/beat, internal-only,
+//                     scales 0-N
+//       `frontend` -- static frontend + reverse proxy to `backend`, the ONLY
+//                     public-facing app, scales 0-N independently of `backend`
+//   - 1 Container Apps Job: `migrate` (runs `alembic upgrade head`, triggered
+//     by CI/CD before each backend rollout)
 //
-//   F chmod: /var/lib/postgresql/data/pgdata: Operation not permitted
-//   F initdb: error: could not change permissions of directory
-//     "/var/lib/postgresql/data/pgdata": Operation not permitted
+// No Azure Container Registry (images pulled from Docker Hub -- a free
+// account includes one private repo, so keep at least one of
+// backend/frontend public unless you're on a paid plan), no Key Vault (plain
+// Container Apps secrets), no managed identity, no Application Insights by
+// default (opt in via `otelAzureMonitorEnabled` for OpenTelemetry tracing --
+// see README.md's "Distributed Tracing" section).
 //
-// Azure Files (an SMB/NFS share) does not implement real POSIX ownership
-// and permission bits the way a local/managed block-storage disk does --
-// `chmod`/`chown` on a mounted Azure Files share are either silently
-// ignored or rejected, depending on protocol and mount options. Postgres's
-// own `initdb` unconditionally `chmod 700`s its data directory as a
-// hard-coded safety check (refuses to run as an unprivileged process
-// otherwise) -- there is no Postgres config flag, entrypoint env var, or
-// Container Apps CPU/memory setting that makes that call succeed against
-// Azure Files. This is a documented, permanent incompatibility between
-// Azure Files and any database engine that needs POSIX file permissions on
-// its data directory (Postgres, MySQL, etc.) -- not something this app was
-// doing wrong. Every Container Apps persistent-volume option
-// (`AzureFile`, and the newer `NfsAzureFile`) is backed by Azure Files
-// under the hood, so there is no volume type inside Container Apps that
-// fixes this -- the storage layer itself is the blocker, not the
-// container.
+// Network isolation is at the application layer, not the network layer:
+// `redis`/`backend` set `ingress.external: false` (no public FQDN, only
+// `frontend` gets one) and `postgresServer` gates access via its own
+// firewall rules. All apps in the environment share one subnet, so there's
+// no per-app network segmentation -- acceptable for most early-stage
+// deployments; request an Azure quota increase and split environments
+// yourself if you need it.
 //
-// `redis` and `backend`'s `backup-data`/`export-data` volumes don't hit
-// this: Redis's own data files don't need `chmod`-on-boot the way
-// `initdb` does (and this app already runs `redis` with `--appendonly no`,
-// no persistence at all), and `backend`'s own files are written by the app
-// itself post-boot, not by a startup routine that hard-fails on a
-// permission-bit mismatch. Postgres is the one piece of this stack Azure
-// Files structurally cannot host.
-//
-// The fix: Azure Database for PostgreSQL Flexible Server
-// (`postgresServer` below) -- Postgres running on Microsoft-managed,
-// Postgres-aware storage (not Azure Files), so `initdb`'s `chmod` succeeds
-// the normal way. This also removes an entire category of self-inflicted
-// ops work this file used to take on for a single-instance, single-writer
-// database it was never actually a good idea to hand-roll: patching minor
-// versions, taking your own backups as the *only* backup story (this
-// app's own `pg_dump`-based backups, still available via
-// `ENABLE_AUTO_BACKUP`, are now a *convenience* layer on top of the
-// managed service's own automated backups/point-in-time-restore, not the
-// only line of defense), and reasoning about `chmod`/ownership edge cases
-// on a shared filesystem a database was never designed to run on. The
-// added cost is small (smallest Burstable SKU, see the `postgresSkuName`
-// parameter below) and, unlike the old `db` Container App, buys you
-// automated backups with point-in-time restore, engine patching, and a
-// supported upgrade path -- for a stateful single-writer database, that
-// trade is worth taking even in a cost-optimized design. See
-// DEPLOYMENT.md's Cost section for the updated numbers.
-//
-// This is the split-services evolution of an earlier, even leaner version of
-// this file that ran ONE combined `app` container (backend + frontend +
-// embedded Celery worker/beat, via Dockerfile.render -- the same image used
-// for the Render free-tier deploy) alongside `db`/`redis`. That version is
-// still the cheapest possible shape and is a perfectly reasonable choice --
-// see git history / DEPLOYMENT.md for the reasoning -- but it couples
-// frontend and backend to the SAME scaling unit: a burst of pure
-// asset-browsing traffic scales up backend replicas (and their embedded
-// Celery workers) even if no API calls are actually happening, and vice
-// versa. This version decouples them.
-//
-// WHY `redis` IS STILL A CONTAINER APP, NOT JUST `frontend`/`backend`
-// ---------------------------------------------------------------------------
-// `backend` runs with RUN_EMBEDDED_WORKER=true (same as before) and now
-// genuinely autoscales 0-N on its own, independent of `frontend`. Once
-// `backend` can run more than one replica, Redis stops being optional:
-//   - it's the Celery broker every replica's embedded worker shares (one
-//     task queue, not N independent ones)
-//   - it backs the cross-replica login rate limiter (see this doc's
-//     "Load Balancing & Scaling For Peak Use" section above)
-//   - it backs the scheduled-backup leader lock (so N replicas don't all
-//     run pg_dump at 3am simultaneously)
-// Cutting Redis would mean pinning `backend` to exactly 1 replica forever
-// (no real autoscaling) or silently breaking all three of the above the
-// first time it scales past 1. Unlike Postgres (see above), Redis here
-// runs with `--appendonly no` -- no on-disk persistence at all, so it
-// never touches Azure Files and never hits the `chmod`/`initdb` problem --
-// keeping it as a small Container App (not a managed Azure Cache instance)
-// is a safe, cheap trade (0.25 vCPU/0.5 GiB, same acceptable "resets on
-// restart" trade as before).
-//
-// WHY `frontend` IS ITS OWN CONTAINER APP, NOT FOLDED INTO `backend`
-// ---------------------------------------------------------------------------
-// `frontend/js/api.js` hardcodes API_URL = '/api' as a RELATIVE path and
-// every request sends credentials:'include' (cookie auth) -- both only work
-// same-origin. Rather than rewrite that (and every cookie-auth code path)
-// to support a cross-origin split, `frontend` reuses frontend/Dockerfile
-// UNMODIFIED -- the exact same image that already does this for local
-// Docker Compose: it serves the static build itself AND reverse-proxies
-// /api/* to `backend` over the Container Apps environment's internal DNS
-// (nginx/default.conf.template's BACKEND_HOST/BACKEND_PORT env vars, no
-// hardcoded platform assumptions, resolver IP auto-detected at boot -- see
-// nginx/docker-entrypoint.d/15-detect-resolver-ip.sh). Zero frontend code
-// changes; the browser still only ever talks to ONE origin (`frontend`'s),
-// exactly like before. `backend` becomes internal-only ingress now -- only
-// `frontend` and `migrate` ever reach it, a small security improvement over
-// the previous combined `app`, which was directly internet-facing.
-//
-// COST IMPACT OF THE SPLIT (vs. the single-`app` version)
-// ---------------------------------------------------------------------------
-// Roughly a wash, sometimes a net win: `frontend` adds one small
-// scale-to-zero container, but `frontend` and `backend` now each scale to
-// their OWN actual load instead of both being sized for whichever is
-// busier. See DEPLOYMENT.md's Cost section for the full breakdown table.
-//
-// SINGLE MANAGED ENVIRONMENT (was: three, one per trust tier)
-// ---------------------------------------------------------------------------
-// This file previously gave `frontend`, `backend`, and `db`/`redis` each
-// their OWN Container Apps Managed Environment (own delegated subnet, own
-// NSG) purely for network segmentation -- see the git history for that
-// version's "SECURITY FIX" comment. In practice that hit a hard wall:
-// `Microsoft.App/managedEnvironments` is capped by a per-subscription
-// quota, and on Free Trial/starter subscriptions that cap is exactly 1 --
-// and it's GLOBAL across every region, not per-region: the 2nd environment
-// fails with `MaxNumberOfRegionalEnvironmentsInSubExceeded` if you land in
-// a region that already has one, and the 3rd still fails with
-// `MaxNumberOfGlobalEnvironmentsInSubExceeded` even in a brand-new region,
-// because the limit counts environments subscription-wide. Switching
-// regions cannot work around this. Three environments is a deploy-time
-// failure on those subscriptions, not just a theoretical concern -- this
-// is the fix for exactly that failure.
-//
-// Consolidated back to ONE environment (`env` below), one subnet, one NSG.
-// `frontend`, `backend`, `redis`, and the `migrate` Job all share it (Postgres
-// is a separate managed service outside this environment entirely -- see
-// "WHY POSTGRES IS A MANAGED SERVICE" above -- so it isn't part of this
-// quota/subnet discussion at all). The trade-off: an NSG applies at the
-// SUBNET boundary, and every app inside one Container Apps Environment
-// shares that environment's one subnet -- Azure does not let you attach
-// per-app network rules within an environment (see
-// https://learn.microsoft.com/azure/container-apps/firewall-integration),
-// so the lateral-movement protection a three-subnet design would buy (a
-// compromised `frontend` literally cannot resolve/reach `redis` on the
-// wire, regardless of application logic) isn't present here. What's still
-// in place, unchanged, at the APPLICATION layer:
-//   - `redis`/`backend` both still set `ingress.external: false` -- neither
-//     ever gets a public FQDN, only `frontend` does. `postgresServer`
-//     likewise has no Container Apps ingress at all (it isn't a Container
-//     App); its own firewall rules gate who can reach it -- see that
-//     resource's comment.
-//   - `backend`'s API still only trusts requests proxied through
-//     `frontend` in practice (same-origin cookie auth, see the comment
-//     above), and `redis`/`postgresServer` still require their own
-//     passwords.
-// What's gone is defense-in-depth against a compromised container
-// port-scanning `redis` directly -- if that risk matters more to you than
-// the quota/cost trade, either request an environment-quota increase from
-// Azure support and restore the three-environment version from git
-// history, or self-host a reverse proxy/service mesh inside this one
-// environment instead. For most early-stage deployments, the small
-// standing risk is an acceptable trade for "the deploy actually succeeds."
-//
-// WHAT'S UNCHANGED FROM THE COMBINED-`app` VERSION (see that version's
-// original comment, preserved in git history, for the full reasoning)
-// ---------------------------------------------------------------------------
-//   - No Azure Container Registry -- images pulled from Docker Hub (now
-//     TWO images: <dockerHubUsername>/snipeit-lite-backend and
-//     .../snipeit-lite-frontend; a Docker Hub free account only includes
-//     ONE private repo, so if you want both private you'll need a paid
-//     Docker Hub plan or to keep one of the two public -- default is BOTH
-//     public, zero registry cost/credentials either way)
-//   - No Key Vault -- plain Container Apps secrets
-//   - No managed identity, no Application Insights BY DEFAULT -- Application
-//     Insights is now available as an opt-in (see `otelAzureMonitorEnabled`
-//     param) for OpenTelemetry distributed tracing; see "WHAT WAS REMOVED...
-//     AND WHY IT'S SAFE HERE" below for why turning it on no longer
-//     conflicts with this file's cost-optimized design
-//   - `redis` unchanged: official Docker Hub image, internal-only, pinned
-//     to exactly 1 replica, no persistent volume
-// =============================================================================
-// This replaces an earlier version of this file that ran Postgres as a
-// fourth Container App (`db`) on a persistent Azure Files share -- which
-// does not work, full stop, regardless of CPU/memory sizing (see "WHY
-// POSTGRES IS A MANAGED SERVICE" above). It also replaces the version
-// before THAT, which used Azure Database for PostgreSQL Flexible Server +
-// Azure Cache for Redis + Azure Container Registry + Key Vault + a
-// User-Assigned Managed Identity + Application Insights + 4 Container Apps
-// (backend/worker/beat/frontend) -- a solid *scaling* story, but several of
-// those managed extras (Azure Cache, ACR Basic, Key Vault) have their own
-// fixed monthly floor and never scale to zero regardless of traffic. This
-// version keeps Flexible Server (the one piece that has no working
-// Container-Apps-only substitute) and drops the rest of that list in favor
-// of Container Apps' own free/scale-to-zero equivalents.
-//
-// WHAT THIS PROVISIONS
-// ---------------------------------------------------------------------------
-//   - Log Analytics workspace                    (Container Apps console/system logs)
-//   - Storage Account + 2 Azure Files shares      (backup_data, export_data --
-//                                                   billed by GB actually used, not provisioned)
-//   - VNet (1 delegated subnet + NSG)              (see SINGLE MANAGED ENVIRONMENT comment above; no fixed floor)
-//   - 1 Container Apps Environment                 (Consumption plan, shared by every app below -- no fixed floor; see SINGLE MANAGED ENVIRONMENT comment above for why this is 1, not 3)
-//   - 1 Azure Database for PostgreSQL Flexible Server (`postgresServer`) -- smallest Burstable
-//                                                   SKU by default (see `postgresSkuName`), NOT inside
-//                                                   the Container Apps environment -- its own managed
-//                                                   resource, own storage, own automated backups
-//   - 3 Container Apps:
-//       `redis`    -- redis:7-alpine, official Docker Hub image, internal-only, 1 replica always
-//       `backend`  -- FastAPI + embedded Celery worker/beat (backend/Dockerfile),
-//                     internal-only ingress, scales 0-N on its own
-//       `frontend` -- static frontend + reverse proxy to `backend` (frontend/Dockerfile,
-//                     UNMODIFIED from local Docker Compose), the ONLY public-facing app,
-//                     scales 0-N independent of `backend`
-//   - 1 Container Apps Job: `migrate`             (runs `alembic upgrade head` against `backend`'s image, only when triggered)
-//
-// WHAT WAS REMOVED FROM THE ORIGINAL MANAGED-SERVICES DESIGN, AND WHY IT'S
-// SAFE HERE
-// ---------------------------------------------------------------------------
-//   - Azure Cache for Redis -> `redis` container app, no persistent volume.
-//     Still just the Celery broker/result backend + rate-limiter/lock store
-//     (see this file's top comment) -- losing state on a restart is an
-//     acceptable trade for the cost savings, and (unlike Postgres) Redis
-//     here never touches Azure Files in the first place.
-//   - Azure Container Registry -> Docker Hub (two images now: backend and
-//     frontend -- see top comment on the free-plan private-repo limit).
-//   - Key Vault -> plain Container Apps secrets.
-//   - User-assigned managed identity -> removed (nothing left to authenticate
-//     once ACR and Key Vault are both gone, assuming public Docker Hub repos).
-//   - Application Insights -> removed by default (its own ingestion cost on
-//     top of Log Analytics) -- now available as an OPT-IN via
-//     `otelAzureMonitorEnabled` (default false, so nothing changes unless
-//     you ask for it) for OpenTelemetry distributed tracing
-//     (backend/telemetry.py). Workspace-based on the SAME `logAnalytics`
-//     below rather than a second standalone resource, so turning it on
-//     adds usage-based cost only (Application Insights' first 5GB/month is
-//     free per billing account -- see that param's own @description and
-//     README.md's "Distributed Tracing" section), not a second fixed
-//     floor.
-//   Postgres itself was NOT removed/downgraded -- see "WHY POSTGRES IS A
-//   MANAGED SERVICE" at the top of this file for why that one piece stays
-//   a managed service even in an otherwise cost-optimized design.
-//
-// REALISTIC MONTHLY COST -- see DEPLOYMENT.md's Cost section for the full
-// breakdown table. The Flexible Server is the one component here that
-// can't scale to zero and has a real fixed floor (smallest Burstable SKU,
-// ~US$12-15/mo before storage); everything else keeps the prior design's
-// scale-to-zero/Consumption-plan cost profile.
+// See DEPLOYMENT.md's Cost section for the full monthly cost breakdown.
 //
 // USAGE
 // ---------------------------------------------------------------------------
@@ -266,26 +51,19 @@
 //                  redisPassword=$(openssl rand -hex 16) \
 //                  jwtSecretKey=$(openssl rand -hex 32) \
 //                  rootAdminBootstrapPassword=$(openssl rand -base64 24)
-//                  # ^ postgresPassword MUST satisfy Azure Database for
-//                  # PostgreSQL Flexible Server's password complexity rule
-//                  # (8-128 chars, at least 3 of: uppercase, lowercase,
-//                  # digit, symbol) -- `openssl rand -base64 24` reliably
-//                  # produces all four; `openssl rand -hex ...` (all this
-//                  # file used pre-managed-Postgres) does NOT, since hex
-//                  # output is only digits + a-f. rootAdminBootstrapPassword
-//                  # is optional -- omit (or leave "") to let the migrate
-//                  # Job generate one instead and print it to stderr once
+//                  # postgresPassword MUST satisfy Flexible Server's password
+//                  # complexity rule (8-128 chars, at least 3 of: uppercase,
+//                  # lowercase, digit, symbol) -- use base64, not hex, since
+//                  # hex output is only digits + a-f.
+//                  # rootAdminBootstrapPassword is optional -- omit to let
+//                  # the migrate Job generate one and print it to stderr once
 //                  # (see DEPLOYMENT.md's Monitoring section for how to read
-//                  # that back out of Log Analytics if you go that route).
-//                  # Passing it explicitly here, as above, means you already
-//                  # have it in your own shell instead. Either way it's a
-//                  # no-op on every deploy after the first -- the migrate
-//                  # Job only ever bootstraps the root admin row once.
+//                  # it back out of Log Analytics).
 //
 // Re-run the same command any time to update the environment idempotently --
-// this file does NOT set `backend`/`frontend`/`migrate`'s image tags on
-// every run (that's the CI/CD pipeline's job via `az containerapp update
-// --image`), so deploying new code never requires a full infra re-deploy.
+// this file does NOT set `backend`/`frontend`/`migrate`'s image tags on every
+// run (that's the CI/CD pipeline's job via `az containerapp update --image`),
+// so deploying new code never requires a full infra re-deploy.
 // =============================================================================
 
 @description('Short environment name: "prod" or "staging". Prefixes every resource name.')
@@ -397,13 +175,8 @@ param enableApiDocs bool = false
 @description('Email address to page on the three Azure Monitor scheduled query alerts below (backend error-rate spike, /readyz failing, daily backup missing) -- see SRE_STRATEGY.md section 2. Leave empty (the default) to skip creating the action group/alert rules entirely -- no alerting, no extra cost, same as before this parameter existed. IMPORTANT ordering requirement: leave this EMPTY on the very first deploy of a brand-new environment. The three alert rules below query the `ContainerAppConsoleLogs_CL` table, which Azure only materializes the first time a log line actually lands in it -- on a fresh Log Analytics workspace that table does not exist yet, and Microsoft.Insights/scheduledQueryRules validates its KQL against the workspace schema at deploy time, so creating the rules before any logs have been ingested fails deployment with "Failed to resolve table or column expression named \'ContainerAppConsoleLogs_CL\'". Deploy once with this empty, let `backend`/`frontend` serve at least one request (or just sit running for a few minutes) so the table gets created, confirm it under the Log Analytics workspace\'s Logs > Tables blade, THEN set this and re-run infra-deploy.yml for the same environment to add the alert rules on top of the already-running infra.')
 param alertEmailAddress string = ''
 
-// -----------------------------------------------------------------------------
-// Previously hardcoded literals in `sharedEnv` below -- promoted to params so
-// infra-deploy.yml can set them per-environment from GitHub Variables, without
-// editing this file. All non-sensitive (no passwords/tokens among them), so
-// they're read as `vars.X` in infra-deploy.yml, the same pattern already used
-// for postgresSkuName/postgresStorageGb above -- not `secrets.X`.
-// -----------------------------------------------------------------------------
+// Non-sensitive config below is read as `vars.X` (not `secrets.X`) in
+// infra-deploy.yml, same pattern as postgresSkuName/postgresStorageGb above.
 
 @description('Brand name shown in the navbar/login header, browser tab title (GET /config/public), and the Quotation/Checkout Receipt PDF letterhead. Matches .env.example\'s SITE_NAME.')
 param siteName string = 'Snipe-IT Lite'
@@ -494,15 +267,8 @@ var usePrivateDockerHubRepo = !empty(dockerHubUsername)
 var backendImage = '${dockerHubBackendImage}:${initialImageTag}'
 var frontendImage = '${dockerHubFrontendImage}:${initialImageTag}'
 
-// ---------------------------------------------------------------------------
-// Monitoring -- one Log Analytics workspace for every container app's
-// console/system logs. Application Insights is OPT-IN (see
-// `otelAzureMonitorEnabled` param above) rather than always-on -- see that
-// param's own @description for the reasoning this file's original
-// "No Application Insights" design (see top-of-file comment) no longer
-// fully applies now that distributed tracing (backend/telemetry.py) is a
-// real Operations & Observability requirement, not a hypothetical.
-// ---------------------------------------------------------------------------
+// One Log Analytics workspace for every container app's console/system
+// logs. Application Insights is opt-in (see `otelAzureMonitorEnabled` above).
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
   name: '${namePrefix}-logs'
   location: location
@@ -512,15 +278,8 @@ resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
   }
 }
 
-// Workspace-based (points WorkspaceResourceId at `logAnalytics` above,
-// rather than the older "classic" standalone mode) -- this is what lets
-// Application Insights ride on that SAME Log Analytics workspace's
-// pay-for-what-you-ingest billing instead of provisioning a second
-// separate resource with its own cost floor. Only deployed at all when
-// `otelAzureMonitorEnabled` is true; leave that at its default `false` and
-// this section creates nothing and costs nothing, same as before it
-// existed (identical opt-in pattern to `alertingEnabled`/
-// `alertActionGroup` immediately below).
+// Rides the same `logAnalytics` workspace's billing rather than a second
+// standalone resource. Only deployed when `otelAzureMonitorEnabled` is true.
 resource appInsights 'Microsoft.Insights/components@2020-02-02' = if (otelAzureMonitorEnabled) {
   name: '${namePrefix}-insights'
   location: location
@@ -529,44 +288,23 @@ resource appInsights 'Microsoft.Insights/components@2020-02-02' = if (otelAzureM
     Application_Type: 'web'
     WorkspaceResourceId: logAnalytics.id
     IngestionMode: 'LogAnalytics'
-    // This app's `backend` (a FastAPI/Celery service, not a browser page)
-    // never loads Application Insights' JS snippet -- nothing here would
-    // ever use it regardless of this setting, but disabling it explicitly
-    // avoids Azure defaulting a public-web-facing setting on for a
-    // service that has no public web frontend of its own (`frontend` is
-    // the public-facing app, and it isn't the one instrumented with
-    // OpenTelemetry -- see backend/telemetry.py's module docstring).
+    // backend is an API service, not a browser page, so it never loads the
+    // JS snippet -- disabled explicitly rather than left at Azure's default.
     DisableIpMasking: false
   }
 }
 
-// ---------------------------------------------------------------------------
-// Alerting -- closes the gap SRE_STRATEGY.md section 2 originally flagged:
-// `logAnalytics` above collects console logs, but nothing was watching them
-// and paging anyone. These three Azure Monitor scheduled query alerts are
-// the exact three failure modes that document calls out, as code instead of
-// portal clicks. Billed per-rule (cents/month), no Application Insights
-// required -- consistent with this file's cost-optimized design elsewhere.
+// Three Azure Monitor scheduled query alerts (backend error-rate spike,
+// /readyz failing, daily backup missing -- see SRE_STRATEGY.md section 2).
+// Billed per-rule (cents/month), no Application Insights required. Entirely
+// opt-in: only deploys if `alertEmailAddress` is set.
 //
-// Entirely OPT-IN: every resource below only deploys if `alertEmailAddress`
-// is set (see that param's description). Leave it empty and this section
-// costs nothing and creates nothing, same as before it existed.
-//
-// ORDERING REQUIREMENT -- read before setting ALERT_EMAIL_ADDRESS on a new
-// environment: alertBackendErrorRate/alertReadyzFailing/alertBackupMissing
-// below all query `ContainerAppConsoleLogs_CL`, a table Azure only creates
-// once the FIRST log line is actually ingested into it. On a brand-new
-// `logAnalytics` workspace that table doesn't exist yet, and
-// scheduledQueryRules validates its KQL against the live workspace schema
-// at deploy time -- so deploying these three rules before `backend`/
-// `frontend` have produced any console output fails with "Failed to
-// resolve table or column expression named 'ContainerAppConsoleLogs_CL'".
-// Leave `alertEmailAddress` empty on an environment's first-ever deploy,
-// let the apps run for a few minutes (or serve one request) so the table
-// materializes, then set it and re-run this workflow to layer the alert
-// rules on top of the already-running infra. See `alertEmailAddress`'s
-// @description above for the same note.
-// ---------------------------------------------------------------------------
+// ORDERING: leave `alertEmailAddress` empty on a brand-new environment's
+// first deploy. These rules query `ContainerAppConsoleLogs_CL`, which Azure
+// only creates once a log line has actually been ingested -- deploying them
+// against an empty workspace fails with "Failed to resolve table or column
+// expression named 'ContainerAppConsoleLogs_CL'". Let the apps run for a few
+// minutes first, then set the email and re-run to add alerting on top.
 var alertingEnabled = !empty(alertEmailAddress)
 
 resource alertActionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = if (alertingEnabled) {
@@ -751,25 +489,14 @@ resource exportShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023
   properties: { shareQuota: 10 }
 }
 
-// ---------------------------------------------------------------------------
-// SINGLE SUBNET, SINGLE NSG (was: three subnets/NSGs, one per trust tier)
-// ---------------------------------------------------------------------------
-// See the "SINGLE MANAGED ENVIRONMENT" comment at the top of this file for
-// the full story: three Managed Environments blew through this
-// subscription's per-region environment quota
-// (`MaxNumberOfRegionalEnvironmentsInSubExceeded`), so `frontend`/`backend`/
-// `redis` + the `migrate` Job now share ONE environment, and therefore one
-// delegated subnet (`postgresServer` isn't part of this at all -- it's a
-// standalone managed resource outside `env`, see its own comment). An NSG
-// can only filter traffic AT a subnet boundary, so with everything on one
-// subnet there is no NSG rule that can allow `frontend -> backend:8000`
-// while denying `frontend -> redis:6379` -- that distinction no longer
-// exists at the network layer. This one NSG instead covers what's still
-// true regardless of subnet layout: only the public internet -> `frontend`
-// path needs to be open at all, everything else (`redis`/`backend`'s own
-// `ingress.external: false`) already never gets a public IP, so it's
-// unreachable from outside the VNet no matter what this NSG says.
-// ---------------------------------------------------------------------------
+// Single subnet, single NSG: `frontend`/`backend`/`redis`/`migrate` share
+// one Container Apps Environment (`postgresServer` is a standalone managed
+// resource outside it). An NSG only filters at the subnet boundary, so it
+// can't distinguish `frontend -> backend` from `frontend -> redis` traffic
+// on a shared subnet. What it does cover: only the public internet ->
+// `frontend` path needs to be open -- `redis`/`backend` already have
+// `ingress.external: false` and are unreachable from outside the VNet
+// regardless of this NSG.
 
 var subnetPrefix = '10.0.0.0/23'
 
@@ -1186,25 +913,11 @@ resource backendApp 'Microsoft.App/containerApps@2024-03-01' = {
         external: false
         targetPort: 8000
         transport: 'auto'
-        // BUG FIX -- root cause of "Roll out new revisions" smoke-test
-        // failures ("backend could not be resolved (3: Host not found)"
-        // in nginx's error log, HTTP 502 on /api/*): this was previously
-        // left unset, which defaults to `false`. With `allowInsecure:
-        // false`, Container Apps' shared Envoy proxy layer answers plain
-        // HTTP requests to `backend`'s internal FQDN/app-name with a
-        // redirect to HTTPS instead of actually proxying them -- but that
-        // was never even the request that failed, because nginx couldn't
-        // resolve the hostname AT ALL before getting that far (see
-        // `frontendApp` below for the actual DNS half of this bug and why
-        // both halves have to be fixed together). Once DNS resolution is
-        // fixed there, nginx's `proxy_pass http://$backend_upstream...`
-        // (see nginx/default.conf.template) still speaks plain HTTP, not
-        // HTTPS -- so `backend` also needs to accept plain HTTP through
-        // the proxy for that connection to actually succeed end-to-end.
-        // This only affects traffic between apps INSIDE the environment
-        // (`backend` still has `external: false`, so it's never reachable
-        // from the public internet either way) -- true e2e TLS between
-        // `frontend` and `backend` isn't in scope for this fix.
+        // Required: nginx's `proxy_pass http://$backend_upstream...` (see
+        // nginx/default.conf.template) speaks plain HTTP, and Container
+        // Apps' Envoy proxy redirects plain HTTP to HTTPS unless this is
+        // set. Only affects traffic inside the environment -- `backend`
+        // still has `external: false`, so it's never internet-reachable.
         allowInsecure: true
       }
     }
@@ -1215,18 +928,12 @@ resource backendApp 'Microsoft.App/containerApps@2024-03-01' = {
           image: backendImage
           resources: { cpu: json('0.5'), memory: '1Gi' }
           env: concat(sharedEnv, sharedSecretEnvRefs, [
-            // BUG FIX: this was previously a no-op -- backend/start.sh
-            // didn't read RUN_EMBEDDED_WORKER at all, so audit exports
-            // queued into Redis with nothing consuming them and the
-            // notification digest never fired. start.sh now actually
-            // launches the embedded worker (see its own comments and
-            // celery_app.py's RedBeat config, which is what makes this
-            // safe even as `backend` scales to more than one replica).
+            // Launches the embedded Celery worker/beat (see start.sh and
+            // celery_app.py's RedBeat config, which keeps this safe even
+            // as `backend` scales to more than one replica).
             { name: 'RUN_EMBEDDED_WORKER', value: 'true' }
-            // No SERVE_FRONTEND here -- `frontend` serves the static build
-            // now, `backend` is API-only. CORS_ORIGINS still set (defense
-            // in depth / anything that ever calls `backend` directly), even
-            // though normal browser traffic never leaves `frontend`'s origin.
+            // No SERVE_FRONTEND -- `frontend` serves the static build,
+            // `backend` is API-only. CORS_ORIGINS kept as defense in depth.
             { name: 'CORS_ORIGINS', value: publicOrigin }
           ])
           volumeMounts: [
@@ -1325,51 +1032,17 @@ resource frontendApp 'Microsoft.App/containerApps@2024-03-01' = {
           resources: { cpu: json('0.25'), memory: '0.5Gi' }
           env: [
             { name: 'PORT', value: '80' }
-            // BUG FIX -- root cause of "Roll out new revisions" smoke-test
-            // failures: nginx logged "backend could not be resolved (3:
-            // Host not found)" and every /api/* request 502'd, even
-            // though `frontend` and `backend` share one environment and
-            // Azure's own docs say the bare app name (`http://backend`)
-            // "just resolves". It does -- for plain OS-level DNS clients
-            // (curl, this app's own smoke test, Python's requests, etc.),
-            // which all consult /etc/resolv.conf's `search` domain list
-            // and silently qualify an unqualified single-label name like
-            // "backend" before querying (see resolv.conf(5), "ndots"/
-            // domain search path). nginx's `resolver` directive
-            // (nginx/default.conf.template -- needed here so a stale IP
-            // from a `backend` redeploy doesn't get cached forever, see
-            // that file's own comment) does its OWN raw DNS queries and
-            // deliberately bypasses glibc entirely, so it NEVER reads or
-            // applies that search-domain list -- it queries exactly the
-            // literal string it's given, "backend", which doesn't exist
-            // as its own top-level DNS record and so comes back NXDOMAIN.
-            // This is a known, documented nginx-specific gotcha on every
-            // platform that relies on search-domain expansion for
-            // short-name service discovery (Kubernetes, DigitalOcean App
-            // Platform, and Azure Container Apps alike) -- the fix
-            // everywhere is the same: hand nginx the FULLY QUALIFIED name
-            // instead, which needs no search-list expansion at all.
-            // `backendApp.properties.configuration.ingress.fqdn` is
-            // exactly that -- `backend.internal.<env-id>.<region>.
-            // azurecontainerapps.io` -- so this also creates an explicit
-            // Bicep dependency on `backendApp` (on top of the `dependsOn`
-            // it already has for other reasons), guaranteeing `backend`'s
-            // ingress FQDN is known before `frontend` deploys.
+            // The fully-qualified FQDN, not the bare app name -- nginx's
+            // `resolver` directive does its own raw DNS queries and bypasses
+            // glibc's search-domain expansion, so a bare "backend" comes
+            // back NXDOMAIN even though curl/Python resolve it fine. Also
+            // creates an explicit Bicep dependency on `backendApp`.
             { name: 'BACKEND_HOST', value: backendApp.properties.configuration.ingress.fqdn }
-            // Calls between container apps in the same environment --
-            // whether by bare app name or by FQDN -- go through the
-            // environment's shared Envoy proxy on the STANDARD web port,
-            // not the backend container's own `targetPort: 8000` (that
-            // port is an implementation detail Envoy forwards to
-            // internally; it's never exposed as a literal port number to
-            // other apps calling in). Port 8000 here was doubly wrong:
-            // even once DNS resolution above is fixed, connecting to
-            // "<backend FQDN>:8000" would still fail (nothing listens on
-            // 8000 at that address) or connect to the wrong thing.
-            // Plain port 80 (not 443) because nginx's proxy_pass speaks
-            // plain HTTP -- see `backendApp`'s `allowInsecure: true` above,
-            // which is what makes plain HTTP on this port actually work
-            // instead of getting redirected to HTTPS.
+            // Calls between apps in the same environment go through the
+            // environment's shared Envoy proxy on the standard web port, not
+            // the container's own `targetPort: 8000`. Plain port 80 (not
+            // 443) because nginx's proxy_pass speaks plain HTTP -- see
+            // `backendApp`'s `allowInsecure: true` above.
             { name: 'BACKEND_PORT', value: '80' }
             { name: 'ENABLE_API_DOCS', value: string(enableApiDocs) } // must match backend's own value -- see nginx/default.conf.template's /docs passthrough gating
             // RESOLVER_IP deliberately NOT set -- nginx/docker-entrypoint.d/15-detect-resolver-ip.sh

@@ -54,15 +54,9 @@ env:
   # BUILD_ENV is the frontend/Dockerfile ARG that controls whether the
   # built frontend/ JS is left untouched (local), minified only (development),
   # or minified AND obfuscated (production) -- see frontend/Dockerfile's own
-  # comment and build-frontend/build.js's module docstring. This pipeline
-  # never previously passed --build-arg BUILD_ENV=... at all (see the
-  # "Build + push frontend image" step below), which silently left the
-  # frontend/Dockerfile's own `ARG BUILD_ENV=development` default in
-  # effect -- harmless for staging specifically (development IS the right
-  # profile here), but it meant there was no actual pipeline-level control
-  # of this value, just a Dockerfile default nothing overrode. Staging
-  # builds "development" -- minified, not obfuscated -- matching
-  # ci.yml's own "staging profile" frontend image verification build.
+  # comment and build-frontend/build.js's module docstring. Staging builds
+  # "development" -- minified, not obfuscated -- matching ci.yml's own
+  # "staging profile" frontend image verification build.
   BUILD_ENV: development
 
 jobs:

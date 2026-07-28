@@ -3,13 +3,10 @@
 # Spins up the whole Snipe-IT Lite stack with one command:
 #     docker compose up --build
 #
-# SECRETS (requirement #1): every value that used to be hardcoded here
-# (POSTGRES_PASSWORD, JWT_SECRET_KEY, etc.) is now read from a git-ignored
-# ".env" file in this same folder via the ${VARIABLE_NAME} syntax. Docker
-# Compose automatically loads ".env" with NO extra configuration needed --
-# it just has to sit next to this file. See .env.example for the template
-# and copy it to ".env" before running `docker compose up` for the first
-# time:
+# SECRETS: every sensitive value (POSTGRES_PASSWORD, JWT_SECRET_KEY, etc.)
+# is read from a git-ignored ".env" file in this same folder via the
+# ${VARIABLE_NAME} syntax. Docker Compose loads ".env" automatically as long
+# as it sits next to this file. Copy the template before first run:
 #     cp .env.example .env
 #
 # Six services:
@@ -110,26 +107,10 @@ services:
 
   backend:
     build: ./backend
-    # BUG FIX -- worker container logging "ModuleNotFoundError: No module
-    # named 'telemetry'" (or any other import that exists in backend/ but
-    # not in the worker's running container) after a rebuild that only
-    # touched `backend`. Root cause: `backend`, `worker`, and `beat` all
-    # build from the exact same Dockerfile/context (`build: ./backend`),
-    # but WITHOUT an explicit `image:` name, Compose tags each service's
-    # build output separately (e.g. `<project>-backend`, `<project>-
-    # worker`, `<project>-beat`) -- three independently cached images
-    # that happen to start out identical, but have no way to stay that
-    # way. Running `docker compose build backend` (or `up --build
-    # backend`) alone -- a completely reasonable thing to do when only
-    # iterating on API code -- rebuilds ONLY that one tag; `worker`/`beat`
-    # keep running whatever they were last built from, however stale,
-    # and silently miss anything added to backend/ since (a new module
-    # like telemetry.py, a new dependency in requirements.txt, ...).
-    #
-    # Fix: give all three the SAME explicit `image:` tag below. Compose
-    # then builds it once and every service that references this tag
-    # runs that identical, freshly-built image -- there is no longer a
-    # separate `worker`/`beat` image that CAN go stale on its own.
+    # `backend`, `worker`, and `beat` all build from the same Dockerfile
+    # (`build: ./backend`) but need the SAME explicit `image:` tag -- without
+    # it, Compose tags each service's build output separately, and
+    # rebuilding just `backend` leaves `worker`/`beat` running a stale image.
     image: snipeit-lite-backend:local
     # NOTE: no `container_name` here (unlike the single-instance `db` and
     # `redis` services above) -- a fixed container name can only ever be
@@ -311,12 +292,10 @@ services:
     # meaningful: Compose won't consider this container healthy -- and
     # therefore won't start `frontend` -- until GET /healthz is actually
     # answering 200, not merely until the process has started.
-    # NOTE: no host `ports:` mapping here anymore -- see nginx reverse-proxy
-    # comment block below for why. The backend is still fully reachable by
-    # the frontend container over Compose's internal network at
-    # "backend:8000"; it's just no longer directly exposed to the host/
-    # public internet. If you need to hit it directly for debugging (e.g.
-    # curling it, or Postman), temporarily add back:
+    # No host `ports:` mapping -- see nginx reverse-proxy comment block
+    # below for why. `backend` is still reachable from `frontend` over
+    # Compose's internal network at "backend:8000", just not from the host.
+    # To hit it directly for debugging (curl, Postman), temporarily add:
     #     ports:
     #       - "8000:8000"
 
@@ -356,15 +335,10 @@ services:
     # `docker compose up --scale worker=3` during peak load (see
     # DEPLOYMENT.md) to process more CSV/PDF export jobs in parallel.
     restart: unless-stopped
-    # LOAD BALANCING FIX: this used to run `celery ... worker -B`, embedding
-    # Celery BEAT (the periodic-task scheduler) directly inside the worker
-    # process. celery_app.py's beat_schedule comment already flagged this
-    # as NOT safe to scale past one replica: every replica would run its
-    # own Beat and fire the overdue/due-soon notification digests once per
-    # replica, sending duplicate emails. The `-B` flag is gone from this
-    # command -- Beat now runs in its own single-replica `beat` service
-    # below, so `worker` itself can be freely scaled to handle more
-    # concurrent export jobs during peak use without that risk.
+    # No `-B` flag -- Beat (the periodic-task scheduler) runs in its own
+    # single-replica `beat` service below, not embedded here. That's what
+    # lets `worker` scale to multiple replicas without firing duplicate
+    # overdue/due-soon notification digests once per replica.
     command: ["celery", "-A", "celery_app", "worker", "--loglevel=info", "--concurrency=2"]
     volumes:
       # Shares the SAME volume as the `backend` service's own mount of
@@ -402,16 +376,11 @@ services:
       OTEL_TRACES_SAMPLE_RATIO: ${OTEL_TRACES_SAMPLE_RATIO:-1.0}
       OTEL_CONSOLE_EXPORTER: ${OTEL_CONSOLE_EXPORTER:-false}
       APPLICATIONINSIGHTS_CONNECTION_STRING: ${APPLICATIONINSIGHTS_CONNECTION_STRING:-}
-      # The worker never logs anyone in with the Super Admin/root account,
-      # and unlike before, config.py's Settings() no longer has a startup
-      # validator that requires a password value here at all -- the root
-      # admin's password lives only in the database now (see
-      # backend/security.py's module docstring). SUPER_ADMIN_USERNAME/NAME
-      # are harmless non-secret defaults baked into Settings() itself, so
-      # this service doesn't need to pass any of the three through anymore.
-      # The worker never runs its own DB migrations/seeding -- `backend`
-      # already owns that on its startup hook -- so these stay disabled
-      # here regardless of the .env values used for `backend`.
+      # The worker never logs anyone in as the root admin -- that password
+      # lives only in the database (see backend/security.py) -- so no
+      # SUPER_ADMIN_* values need to be passed here.
+      # `backend` owns DB migrations/seeding on its own startup hook, so
+      # these stay disabled here regardless of `backend`'s .env values.
       AUTO_INIT_DB: "false"
       AUTO_SEED_DEMO_DATA: "false"
       # Same notification settings as `backend` above -- the overdue-digest
@@ -437,20 +406,11 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    # ZERO-DOWNTIME / BUG FIX: this service shares backend/Dockerfile's
-    # image with `backend` above (`build: ./backend`, no separate
-    # Dockerfile) -- which means it also inherits that image's baked-in
-    # HEALTHCHECK instruction (GET /healthz over HTTP) UNLESS overridden
-    # here. This container runs `celery ... worker`, not uvicorn -- there
-    # is no HTTP server listening on port 8000 in this process at all, so
-    # the inherited check would connection-refuse every single time and
-    # Compose would report this container permanently "unhealthy" despite
-    # it working perfectly correctly. Override with the standard Celery
-    # liveness check instead: `celery inspect ping` round-trips a real
-    # message through the SAME broker this worker actually consumes from
-    # (settings.REDIS_URL), so it only reports healthy if the worker
-    # process is both alive AND actually able to receive/answer control
-    # commands -- not just "the process didn't exit".
+    # This service shares `backend`'s image, which includes an inherited
+    # HEALTHCHECK for `GET /healthz` over HTTP -- but this container runs
+    # `celery worker`, not uvicorn, so nothing listens on port 8000.
+    # Override with a real Celery liveness check: `celery inspect ping`
+    # round-trips through the same broker this worker consumes from.
     healthcheck:
       test: ["CMD-SHELL", "celery -A celery_app inspect ping --destination celery@$$HOSTNAME --timeout 10 | grep -q OK"]
       interval: 30s
@@ -520,29 +480,12 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    # BUG FIX: same image-sharing issue as `worker` above (see that
-    # service's own `healthcheck:` comment for the full "why this needs
-    # overriding at all" explanation) -- this container also inherits
-    # backend/Dockerfile's HTTP-based HEALTHCHECK otherwise, and `celery
-    # ... beat` serves no HTTP endpoint to satisfy it either.
-    #
-    # Unlike `worker`, there's no equivalent "round-trip a real command
-    # through the broker" check available here: `celery inspect ping`
-    # only targets WORKER processes (the ones consuming task queues) --
-    # Beat doesn't run that consumer loop, so it never answers control
-    # commands at all, healthy or not. And because this app's Beat
-    # scheduler is RedBeat (celery_app.py's `beat_scheduler=
-    # "redbeat.RedBeatScheduler"`), the schedule itself lives in Redis,
-    # not in a local `celerybeat-schedule` file on disk whose mtime a
-    # healthcheck could otherwise watch for "is it still ticking".
-    # Rather than ship a low-signal check that just re-confirms the
-    # process hasn't exited (which `restart: unless-stopped` above
-    # already handles for a genuine crash -- see celery_app.py's
-    # `redbeat_lock_timeout`/`beat_max_loop_interval` comments for the
-    # one known crash-and-clean-restart case, which is a correctly
-    # handled scenario, not a gap), explicitly disable the inherited
-    # check rather than have Compose falsely report this container
-    # unhealthy forever.
+    # This container inherits `backend`'s HTTP-based HEALTHCHECK, but
+    # `celery beat` serves no HTTP endpoint and (unlike `worker`) has no
+    # "inspect ping" equivalent -- Beat doesn't consume tasks, so it never
+    # answers control commands. RedBeat's schedule lives in Redis, not a
+    # local file, so there's nothing to check locally either. Disable the
+    # inherited check rather than have Compose falsely report it unhealthy.
     healthcheck:
       disable: true
 
@@ -565,36 +508,18 @@ services:
   # other thing needed to see traces locally is OTEL_ENABLED=true in your
   # .env (see .env.example) -- no Jaeger-specific config on your end.
   #
-  # BUG FIX (image tag): this used to pin "jaegertracing/all-in-one:1.62"
-  # -- that tag does not exist on Docker Hub (Jaeger has never published
-  # a bare "1.62" tag, only fully-qualified three-part tags like
-  # "1.62.0"), so `docker compose --profile tracing up` failed outright
-  # at the image-pull step with a "manifest not found" error. Even fixed
-  # to "1.62.0" though, Jaeger v1 reached end-of-life on 2025-12-31 and
-  # no longer receives updates -- so this now runs the CURRENT stable
-  # release line instead: Jaeger v2 (a from-scratch rewrite built on the
-  # OpenTelemetry Collector). Pinned to a specific version (never
-  # "latest") so a `docker compose pull` months from now can't silently
-  # hand you a different, untested release.
+  # Runs Jaeger v2 (a from-scratch rewrite on the OpenTelemetry Collector --
+  # Jaeger v1 reached end-of-life 2025-12-31). Pinned to a specific version
+  # (never "latest") so `docker compose pull` can't silently swap releases.
+  # v2's all-in-one image has OTLP enabled on 4317 (gRPC) and 4318 (HTTP) by
+  # default -- matches OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318 above,
+  # so backend/telemetry.py needs no Jaeger-specific config.
   #
-  # WHY v2 "JUST WORKS" HERE WITH NO OTHER CHANGES: v1's all-in-one image
-  # needed `COLLECTOR_OTLP_ENABLED=true` (removed below -- v2 doesn't
-  # read Jaeger-specific environment variables like this at all; see
-  # v2's "Configuration" docs) to turn on its OTLP receiver. v2's
-  # all-in-one role has OTLP enabled on 4317 (gRPC) and 4318 (HTTP) BY
-  # DEFAULT, no flag needed -- exactly the endpoint
-  # OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318 above already points
-  # at, so backend/telemetry.py needed zero changes to work against it.
-  #
-  # Still one self-contained image bundling the collector, in-memory
-  # storage, and query UI -- the right choice for "one developer, one
-  # laptop, traces don't need to outlive `docker compose down`"
-  # (restarting this container discards whatever traces it was holding,
-  # same trade-off this file already makes for `redis`'s queued jobs). It
-  # is deliberately NOT what infra/main.bicep provisions for production
-  # Azure use -- see that file's `otelAzureMonitorEnabled` param and
-  # README.md's "Distributed Tracing" section for the Application
-  # Insights path instead, which actually persists traces.
+  # One self-contained image bundling the collector, in-memory storage, and
+  # query UI -- right for local dev where traces don't need to outlive
+  # `docker compose down`. Not what infra/main.bicep uses in production --
+  # see that file's `otelAzureMonitorEnabled` param for the Application
+  # Insights path, which persists traces.
   jaeger:
     image: jaegertracing/jaeger:2.19.0
     container_name: snipeit_lite_jaeger
@@ -624,21 +549,15 @@ services:
   # ---------------------------------------------------------------------
   # frontend / nginx reverse proxy (requirement: multi-tier deployment)
   # ---------------------------------------------------------------------
-  # This is no longer a bare `nginx:alpine` + bind-mounted static files --
-  # it's now built from frontend/Dockerfile, which produces ONE
-  # self-contained image bundling both the static site AND an
-  # environment-templated nginx config (see nginx/default.conf.template).
-  # That image is what gets deployed unmodified to Render and your cloud
-  # environment too; only the environment variables below change between
-  # tiers. (backend/ owns backend/Dockerfile the same way -- each service
-  # has its own Dockerfile.)
+  # Built from frontend/Dockerfile: one self-contained image bundling the
+  # static site AND an environment-templated nginx config (see
+  # nginx/default.conf.template). Deployed unmodified to Render and your
+  # cloud environment too -- only the environment variables below change.
   #
-  # SECURITY: this is now the ONLY container with a host-published port.
-  # The browser talks exclusively to nginx; nginx is the sole thing that
-  # forwards /api/* requests on to the backend over the private Compose
-  # network (see BACKEND_HOST/BACKEND_PORT below). The backend is no longer
-  # reachable directly from outside Docker at all -- shrinking the app's
-  # public attack surface to one hardened, well-understood entry point.
+  # SECURITY: this is the only container with a host-published port. The
+  # browser talks exclusively to nginx, which forwards /api/* to `backend`
+  # over the private Compose network (see BACKEND_HOST/BACKEND_PORT below).
+  # `backend` itself is not reachable from outside Docker.
   frontend:
     build:
       context: .

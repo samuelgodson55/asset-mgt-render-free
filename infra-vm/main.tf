@@ -111,18 +111,12 @@ resource "azurerm_network_security_group" "this" {
     }
   }
 
-  # -------------------------------------------------------------------
-  # Deliberately NO rules for 80/443/443-udp here. Every previous version
-  # of this file opened those to the whole internet for Caddy + Let's
-  # Encrypt's HTTP-01 challenge -- the Cloudflare Tunnel replaces that
-  # entirely: `cloudflared` (see docker-compose.vm.yml) makes the only
-  # connection in or out, purely OUTBOUND to Cloudflare's edge, and
-  # Cloudflare proxies both the app and SSH over that one connection.
-  # Real visitors and Let's Encrypt alike never touch this VM's public IP
-  # directly anymore -- there is, on purpose, no longer a public IP-based
-  # path in at all. See Caddyfile's top comment and DEPLOYMENT_VM.md's
-  # "Set up Cloudflare Tunnel" section.
-  # -------------------------------------------------------------------
+  # Deliberately no rules for 80/443/443-udp here. `cloudflared` (see
+  # docker-compose.vm.yml) makes the only connection, purely outbound to
+  # Cloudflare's edge, which proxies both the app and SSH over that one
+  # connection -- there is no public IP-based path in at all. See
+  # Caddyfile's top comment and DEPLOYMENT_VM.md's "Set up Cloudflare
+  # Tunnel" section.
 
   security_rule {
     name                       = "DenyAllOtherInbound"
@@ -189,20 +183,12 @@ locals {
   # to cloudflare_zone_name) needs the record name "@" instead.
   effective_dns_record_name = local.effective_domain == var.cloudflare_zone_name ? "@" : trimsuffix(local.effective_domain, ".${var.cloudflare_zone_name}")
 
-  # BUG FIX: this used to be "ssh.${local.effective_dns_record_name}" /
-  # "ssh.${var.custom_domain}", which puts the SSH hostname TWO DNS labels
-  # deep from the zone apex whenever custom_domain is itself a subdomain
-  # (e.g. custom_domain "assets.example.com" -> "ssh.assets.example.com").
-  # Cloudflare's default Universal SSL certificate is a single-level
-  # wildcard ("*.example.com") and does NOT cover a second label, so the
-  # edge had no cert to present for that SNI and failed the TLS handshake
-  # before cloudflared/Access/the Tunnel were ever reached (confirmed via
-  # `openssl s_client -connect ssh.assets.example.com:443 -servername
-  # ssh.assets.example.com` -> handshake failure, while the same command
-  # against assets.example.com itself succeeds). Using a HYPHEN instead of
-  # a DOT keeps the SSH hostname to a single label under the zone apex
-  # ("ssh-assets.example.com"), which the default wildcard does cover, so
-  # no dashboard-only "Total TLS" dependency is needed. Apex custom_domain
+  # Uses a hyphen, not a dot ("ssh-assets.example.com", not
+  # "ssh.assets.example.com") to keep the SSH hostname to a single DNS
+  # label under the zone apex. Cloudflare's default Universal SSL
+  # certificate is a single-level wildcard ("*.example.com") and doesn't
+  # cover a second label, so a dot-separated hostname fails the TLS
+  # handshake before the Tunnel is ever reached. Apex custom_domain
   # (record name "@") still gets the simple "ssh" record name.
   effective_ssh_dns_record_name = local.effective_dns_record_name == "@" ? "ssh" : "ssh-${local.effective_dns_record_name}"
   effective_ssh_domain          = "${local.effective_ssh_dns_record_name}.${var.cloudflare_zone_name}"
@@ -238,22 +224,11 @@ resource "cloudflare_zero_trust_tunnel_cloudflared" "this" {
 # `cloudflared tunnel run` in docker-compose.vm.yml actually authenticates
 # with.
 #
-# BUG FIX: this used to be read from a separate
-# `data "cloudflare_zero_trust_tunnel_cloudflared_token"` block. That data
-# source is a v5-only addition -- it does not exist anywhere in the v4.x
-# provider line (confirmed against the v4.52.8 source directly: no
-# data_source_tunnel_token.go exists, and the
-# cloudflare_zero_trust_tunnel_cloudflared data source's schema has no
-# token attribute at all), which is what `terraform validate`/`plan`'s
-# "Invalid data source ... does not support data source" error was
-# actually reporting -- widening the version constraint earlier fixed the
-# *previous* validate error but couldn't fix this one, since no v4.x
-# release has it to widen into. In v4, the token is instead a computed,
-# sensitive attribute directly on the resource itself (see
-# tunnel_token in schema_cloudflare_tunnel.go / docs/resources/
-# zero_trust_tunnel_cloudflared.md), so it's read straight off
-# cloudflare_zero_trust_tunnel_cloudflared.this below with no separate
-# data source needed.
+# Read directly off cloudflare_zero_trust_tunnel_cloudflared.this below,
+# not a separate data source -- on the v4.x provider line this repo pins,
+# the token is a computed, sensitive attribute on the resource itself
+# (tunnel_token in schema_cloudflare_tunnel.go), not a standalone data
+# source (that's a v5-only addition).
 
 resource "cloudflare_zero_trust_tunnel_cloudflared_config" "this" {
   account_id = var.cloudflare_account_id

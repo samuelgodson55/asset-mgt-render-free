@@ -8,26 +8,18 @@
 #
 # WHY THIS LOOKS DIFFERENT FROM A "TYPICAL" MULTI-SERVICE DEPLOYMENT
 # -----------------------------------------------------------------------------
-# An earlier version of this file provisioned FIVE resources: a Postgres
-# database, a Redis instance, a PRIVATE backend service, a PRIVATE Celery
-# worker, and a PUBLIC nginx frontend. That shape doesn't fit Render's Free
-# plan, for two separate reasons (see https://render.com/docs/free):
-#
-#   1. Free instances only exist for THREE service types: Web Services,
-#      Render Postgres, and Render Key Value (Redis). Private Services and
-#      Background Workers -- what the old backend and worker services
-#      were -- don't support the Free instance type AT ALL, at any plan.
-#   2. Even ignoring (1), a Free web service can SEND private-network
-#      traffic to datastores, but can NOT RECEIVE it -- so a private
-#      backend behind a public nginx frontend (two web-shaped services
-#      talking to each other over Render's private network) isn't
-#      reachable on Free instances either.
+# Render's Free plan only supports THREE service types: Web Services, Render
+# Postgres, and Render Key Value (Redis) -- Private Services and Background
+# Workers aren't available on Free at any plan, and a Free web service can
+# send private-network traffic to datastores but can't receive it, so a
+# private backend behind a public frontend (two web-shaped services talking
+# to each other) isn't reachable either.
 #
 # THE FIX: one combined image (see Dockerfile.render + render-start.sh) that
 # runs the FastAPI backend, the static frontend, AND (embedded, via
 # RUN_EMBEDDED_WORKER) the Celery worker/beat process all in a SINGLE
-# container -- so the whole app fits on the one service type that Free
-# instances actually support. That leaves exactly three resources below,
+# container -- so the whole app fits on the one service type Free instances
+# actually support. That leaves exactly three resources below,
 # ALL eligible for a Free instance type:
 #   - snipeit-lite-db     (Postgres,   plan: free)
 #   - snipeit-lite-redis  (Key Value,  plan: free)

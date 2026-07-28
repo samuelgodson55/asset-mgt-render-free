@@ -147,29 +147,11 @@ services:
     environment:
       ENVIRONMENT: production
       UVICORN_WORKERS: ${UVICORN_WORKERS:-2}
-      # BUG FIX -- "Backup failed: Port could not be cast to integer value
-      # as '<fragment>'" (System Backups panel, VM deployments only).
-      # This used to be rebuilt here as
-      # postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
-      # -- fine for POSTGRES_USER/POSTGRES_PASSWORD values with no URL-
-      # reserved characters, but DEPLOYMENT_VM.md step 4 tells you to
-      # generate POSTGRES_PASSWORD with `openssl rand -base64 24`, whose
-      # output routinely contains `+`/`/`/`=`. Substituted in raw, a `:`
-      # or `@` (or the `/`/`+` around it) lands wherever docker-compose's
-      # env substitution happens to put it, and urlparse()/psycopg then
-      # misread part of the password as the port -- hence "Port could not
-      # be cast to integer value as '<password fragment>'" from
-      # backend/services/backup_service.py's _db_connection_kwargs()
-      # (SQLAlchemy, used for every other query, tolerates this better
-      # but is relying on the same broken input). infra/main.bicep's
-      # Container Apps path never had this bug -- its databaseUrl already
-      # percent-encodes the password via uriComponent(postgresPassword).
-      # This VM path's equivalent fix is infra-vm/main.tf's
-      # postgres_password_urlencoded (Terraform's urlencode()), written
-      # into .env as a single ready-to-use DATABASE_URL by
-      # infra-vm/cloud-init.yaml and .github/workflows/sync-secrets-vm.yml's
-      # "Render new .env" step -- consumed verbatim here instead of being
-      # rebuilt from the raw, unescaped POSTGRES_USER/POSTGRES_PASSWORD.
+      # Pre-encoded, ready-to-use DATABASE_URL from .env -- written by
+      # infra-vm/cloud-init.yaml / sync-secrets-vm.yml using Terraform's
+      # urlencode() on POSTGRES_USER/POSTGRES_PASSWORD, so special
+      # characters from `openssl rand -base64 24` (`+`/`/`/`=`) don't
+      # corrupt postgresql:// URL parsing. Consumed verbatim, not rebuilt.
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
       REDIS_URL: redis://redis:6379/0
       EXPORT_RESULT_DIR: /app/export_results
@@ -468,25 +450,12 @@ services:
     restart: unless-stopped
     mem_limit: ${CLOUDFLARED_MEM_LIMIT:-128m}
     mem_reservation: ${CLOUDFLARED_MEM_RESERVATION:-32m}
-    # BUG FIX (ENTRYPOINT/CMD stacking + no shell in image): the image
-    # bakes in ENTRYPOINT ["cloudflared", "--no-autoupdate"]. Compose's
-    # `command:` only ever replaces CMD, never ENTRYPOINT, so a shell
-    # script here doesn't run standalone -- it gets appended as literal
-    # arguments to that entrypoint (`cloudflared --no-autoupdate sh -c
-    # '...'`), which cloudflared doesn't understand as a subcommand and
-    # exits after printing its Quick Tunnel help. `docker inspect` also
-    # confirms this image ships with no /bin/sh at all, so no
-    # `entrypoint: ["/bin/sh", "-c"]` override could ever have worked
-    # either. Fix: use the plain `tunnel run` subcommand as `command:` --
-    # it stacks cleanly onto the baked-in entrypoint
-    # (`cloudflared --no-autoupdate tunnel run`) and `cloudflared` reads
-    # TUNNEL_TOKEN from `environment:` below natively, so no shell/
-    # conditional is needed for the normal/production path.
+    # The image bakes in ENTRYPOINT ["cloudflared", "--no-autoupdate"], and
+    # ships no shell -- `tunnel run` is the plain subcommand that stacks
+    # cleanly onto it. `cloudflared` reads TUNNEL_TOKEN from `environment:`
+    # below natively, no shell/conditional needed.
     #
-    # NOTE: this removes the old shell-based fallback to an
-    # account-less Quick Tunnel when CLOUDFLARE_TUNNEL_TOKEN is unset
-    # (there is no shell available to run that conditional in). For
-    # local testing without a domain/token yet, run a Quick Tunnel from
+    # For local testing without a domain/token yet, run a Quick Tunnel from
     # outside this compose file instead, e.g.:
     #   docker run --rm cloudflare/cloudflared:2025.6.1 tunnel --no-autoupdate --url http://localhost:8080
     command: ["tunnel", "run"]
@@ -529,18 +498,8 @@ services:
   # beat above already reach the OTLP receiver over the internal
   # "jaeger:4318" service name and need no port publish at all.
   #
-  # BUG FIX (image tag): this used to pin "jaegertracing/all-in-one:1.62"
-  # -- that tag was never published to Docker Hub (only fully-qualified
-  # three-part tags like "1.62.0" exist), so starting this profile failed
-  # outright with a "manifest not found" error. Even fixed to "1.62.0"
-  # though, Jaeger v1 reached end-of-life on 2025-12-31 -- so this now runs
-  # Jaeger v2 instead (a from-scratch rewrite on the OpenTelemetry
-  # Collector), pinned to a specific version rather than "latest". v2's
-  # all-in-one role has OTLP enabled on 4317 (gRPC) and 4318 (HTTP) by
-  # default -- no `COLLECTOR_OTLP_ENABLED` env var needed (v1 required it,
-  # v2 doesn't read that variable at all) -- so backend/telemetry.py needed
-  # zero changes to work against it. See docker-compose.yml's identical
-  # service for the full writeup.
+  # Jaeger v2 (OTLP enabled on 4317/4318 by default) -- see
+  # docker-compose.yml's `jaeger` service for the full writeup.
   jaeger:
     image: jaegertracing/jaeger:2.19.0
     container_name: snipeit_lite_jaeger
