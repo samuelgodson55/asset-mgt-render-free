@@ -12,6 +12,7 @@ crash.*.log
 terraform.tfvars
 *.auto.tfvars
 *.auto.tfvars.json
+tfplan
 
 # SSH keys, if generated inside this directory
 *_deploy_key
