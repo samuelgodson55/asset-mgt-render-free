@@ -475,6 +475,27 @@ service the same way it covers local Docker Compose):
 provisioned some other way — this VM path doesn't provision one itself,
 unlike the Container Apps path's `infra/main.bicep`).
 
+> **Not yet exposed as GitHub Variables on this VM path** (unlike
+> `DEPLOYMENT.md`'s Container Apps path, which wires all of these
+> through `infra/main.bicep`): `LOG_LEVEL`, `LOGIN_RATE_LIMIT_MAX`,
+> `LOGIN_RATE_LIMIT_WINDOW_SECONDS`, `ACCOUNT_LOCKOUT_MAX_ATTEMPTS`,
+> `ACCOUNT_LOCKOUT_DURATION_MINUTES`, `OVERDUE_NOTIFICATION_INTERVAL_HOURS`,
+> `DUE_SOON_REMINDER_DAYS`, `DUE_SOON_NOTIFICATION_INTERVAL_HOURS`,
+> `SEND_INDIVIDUAL_HOLDER_REMINDERS`, `CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER`,
+> `BACKUP_HOURS_UTC`, `BACKUP_RETENTION_COUNT`,
+> `OTEL_AZURE_MONITOR_ENABLED`. `backend/config.py` reads all of these as
+> plain environment variables with sensible defaults (e.g.
+> `LOGIN_RATE_LIMIT_MAX=5`) regardless of deployment target, so the app
+> works correctly without them — but on this VM path they can currently
+> only be changed by hand-adding the line to both `/opt/snipeit/.env`
+> *and* the relevant service(s)' `environment:` block in
+> `/opt/snipeit/docker-compose.vm.yml` (`sync-secrets-vm.yml` won't
+> preserve either edit across its next run, since it rewrites `.env`
+> from GitHub Environment secrets/variables only). Wiring these through
+> as first-class VM GitHub Variables, the same way the Container Apps
+> path already does, is a reasonable follow-up if you need to tune them
+> regularly.
+
 ---
 
 ## 7. Review the Terraform plan locally (optional but recommended first time)
@@ -1384,6 +1405,20 @@ rule not applied — check `main.tf`'s `AllowHTTP` rule specifically uses
 `db` probably isn't healthy yet. Check: `docker compose -f
 docker-compose.vm.yml ps` — `db` should show `(healthy)`. If not,
 `docker compose logs db`.
+
+**System Backups panel shows "Backup failed: Port could not be cast to
+integer value as '\<random-looking fragment\>'"** — fixed (see
+`docker-compose.vm.yml`'s `DATABASE_URL` comment on the `backend` service
+for the full root-cause writeup); a pre-fix VM still needs the corrected
+`DATABASE_URL` pushed to it once: re-run **Actions → Sync secrets to
+Azure VM** (`sync-secrets-vm.yml`) — no secret values actually need to
+change, this workflow always recomputes `DATABASE_URL` from the current
+`POSTGRES_USER`/`POSTGRES_PASSWORD` on every run — then confirm
+`docker compose -f /opt/snipeit/docker-compose.vm.yml exec backend env |
+grep ^DATABASE_URL=` on the VM shows a `%`-encoded password (e.g. `%2B`
+for a literal `+`) rather than a raw one. The Container Apps path
+(`DEPLOYMENT.md`) was never affected — `infra/main.bicep` already
+percent-encodes the password with `uriComponent()`.
 
 **Out of memory / a container keeps restarting** — check which one:
 `docker compose -f docker-compose.vm.yml ps` (a repeatedly restarting

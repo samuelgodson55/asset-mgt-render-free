@@ -1,0 +1,415 @@
+#cloud-config
+# =============================================================================
+# infra-vm/cloud-init.yaml
+# -----------------------------------------------------------------------------
+# Runs exactly ONCE, the very first time the VM boots (Azure feeds this to
+# the VM as custom_data -- see main.tf's azurerm_linux_virtual_machine
+# resource). Rendered through Terraform's templatefile() first, so every
+# $${...} below is substituted with a real value BEFORE the VM ever sees
+# this file -- nothing here is a live Terraform reference at runtime.
+#
+# What it does, in order:
+#   1. Installs Docker Engine + the Compose plugin
+#   2. Formats and mounts the separate data disk at /mnt/docker-data,
+#      points Docker's data-root there instead of the OS disk
+#   3. Hardens the VM: UFW firewall mirroring the NSG, fail2ban for SSH,
+#      unattended-upgrades for OS packages Azure's own patching doesn't
+#      already cover
+#   4. Writes /opt/snipeit/{.env, docker-compose.vm.yml, Caddyfile}
+#   5. Logs into Docker Hub (only if a private registry was configured)
+#      and brings the whole stack up
+#
+# Every deploy AFTER this first boot is handled by
+# .github/workflows/deploy-azure-vm.yml SSHing in directly and re-running
+# `docker compose up -d` with a new IMAGE_TAG -- this file is NOT re-run on
+# redeploys, reboots, or `terraform apply` (see main.tf's `lifecycle.
+# ignore_changes = [custom_data]`).
+# =============================================================================
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - ca-certificates
+  - curl
+  - gnupg
+  - ufw
+  - fail2ban
+  - unattended-upgrades
+  - jq
+
+write_files:
+  # ---------------------------------------------------------------------
+  # Cloudflare Origin CA certificate + key -- Caddy's TLS cert now that
+  # nothing but the Cloudflare Tunnel ever reaches it (see Caddyfile and
+  # main.tf's "Cloudflare Tunnel" section). 0600 because the key is as
+  # sensitive as any other secret in /opt/snipeit/.env below.
+  # ---------------------------------------------------------------------
+  - path: /opt/snipeit/certs/cloudflare-origin.pem
+    permissions: "0644"
+    content: |
+      ${indent(6, cloudflare_origin_cert)}
+  - path: /opt/snipeit/certs/cloudflare-origin-key.pem
+    permissions: "0600"
+    content: |
+      ${indent(6, cloudflare_origin_cert_key)}
+
+  # ---------------------------------------------------------------------
+  # /opt/snipeit/.env -- every value docker-compose.vm.yml's $${...}
+  # substitutions read. Written with 0600 perms (below, in `runcmd`)
+  # since it holds real secrets (DB password, JWT signing key, etc).
+  # ---------------------------------------------------------------------
+  - path: /opt/snipeit/.env
+    permissions: "0600"
+    content: |
+      # Generated once by Terraform on first VM boot. Safe to hand-edit
+      # after that -- deploy-azure-vm.yml only ever touches the
+      # IMAGE_TAG line on redeploys, everything else is left as you set
+      # it here. Re-running `terraform apply` later will NOT overwrite
+      # this file (cloud-init only runs on first boot -- see this
+      # file's top comment).
+      DOMAIN=${domain}
+      CLOUDFLARE_TUNNEL_TOKEN=${cloudflare_tunnel_token}
+      IMAGE_TAG=${initial_image_tag}
+      DOCKERHUB_BACKEND_IMAGE=${dockerhub_backend_image}
+      DOCKERHUB_FRONTEND_IMAGE=${dockerhub_frontend_image}
+
+      POSTGRES_USER=${postgres_user}
+      POSTGRES_PASSWORD=${postgres_password}
+      POSTGRES_DB=${postgres_db}
+
+      # Pre-encoded so docker-compose.vm.yml can use it verbatim instead of
+      # rebuilding a postgresql:// URL from the raw POSTGRES_USER/
+      # POSTGRES_PASSWORD above -- a raw base64 password (DEPLOYMENT_VM.md
+      # step 4's `openssl rand -base64 24`) routinely contains `+`/`/`/`=`,
+      # any of which corrupts URL parsing (e.g. a `:` or `@` landing where
+      # host/port is expected) if substituted in unescaped. See
+      # docker-compose.vm.yml's DATABASE_URL comment for the full story.
+      DATABASE_URL=postgresql://${postgres_user_urlencoded}:${postgres_password_urlencoded}@db:5432/${postgres_db}
+
+      JWT_SECRET_KEY=${jwt_secret_key}
+      JWT_ALGORITHM=HS256
+      JWT_EXPIRY_HOURS=12
+
+      CORS_ORIGINS=https://${domain}
+      SITE_NAME=${site_name}
+      ENABLE_API_DOCS=${enable_api_docs}
+
+      SUPER_ADMIN_USERNAME=superadmin
+      SUPER_ADMIN_NAME=Super Admin
+      ROOT_ADMIN_BOOTSTRAP_PASSWORD=${root_admin_bootstrap_password}
+
+      NOTIFICATIONS_ENABLED=${notifications_enabled}
+      SMTP_HOST=${smtp_host}
+      SMTP_PORT=${smtp_port}
+      SMTP_USERNAME=${smtp_username}
+      SMTP_PASSWORD=${smtp_password}
+      SMTP_USE_TLS=true
+      SMTP_USE_SSL=false
+      SMTP_FROM_EMAIL=${smtp_from_email}
+      ADMIN_NOTIFICATION_EMAILS=${admin_notification_emails}
+
+      DISPLAY_TIMEZONE=${display_timezone}
+      CURRENCY_CODE=${currency_code}
+
+      ENABLE_AUTO_BACKUP=${enable_auto_backup}
+      BACKUP_GDRIVE_ENABLED=${backup_gdrive_enabled}
+      BACKUP_GDRIVE_OAUTH_CLIENT_ID=${backup_gdrive_oauth_client_id}
+      BACKUP_GDRIVE_OAUTH_CLIENT_SECRET=${backup_gdrive_oauth_client_secret}
+      BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN=${backup_gdrive_oauth_refresh_token}
+      BACKUP_GDRIVE_FOLDER_ID=${backup_gdrive_folder_id}
+
+      # Distributed tracing (OpenTelemetry -- Operations & Observability
+      # requirement #4; see backend/telemetry.py's module docstring and
+      # docker-compose.vm.yml's `jaeger` service comment). Off by
+      # default. Flip OTEL_ENABLED=true and run `docker compose -f
+      # docker-compose.vm.yml --profile tracing up -d` to try it locally
+      # on this VM -- see README.md's "Distributed Tracing" section.
+      OTEL_ENABLED=${otel_enabled}
+      OTEL_SERVICE_NAME=${otel_service_name}
+      OTEL_EXPORTER_OTLP_ENDPOINT=${otel_exporter_otlp_endpoint}
+      OTEL_EXPORTER_OTLP_HEADERS=${otel_exporter_otlp_headers}
+      OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+      OTEL_TRACES_SAMPLE_RATIO=${otel_traces_sample_ratio}
+      OTEL_CONSOLE_EXPORTER=${otel_console_exporter}
+      APPLICATIONINSIGHTS_CONNECTION_STRING=${applicationinsights_connection_string}
+
+      # ---- Per-service memory ceilings -- see docker-compose.vm.yml's
+      # top comment for the full sizing table and how to double these if
+      # you resize the VM up to Standard_B2ms (8 GiB). ----
+      DB_MEM_LIMIT=768m
+      DB_MEM_RESERVATION=256m
+      REDIS_MEM_LIMIT=256m
+      REDIS_MEM_RESERVATION=128m
+      BACKEND_MEM_LIMIT=768m
+      BACKEND_MEM_RESERVATION=256m
+      WORKER_MEM_LIMIT=640m
+      WORKER_MEM_RESERVATION=256m
+      BEAT_MEM_LIMIT=128m
+      BEAT_MEM_RESERVATION=64m
+      FRONTEND_MEM_LIMIT=128m
+      FRONTEND_MEM_RESERVATION=64m
+      CADDY_MEM_LIMIT=160m
+      CADDY_MEM_RESERVATION=64m
+
+  # ---------------------------------------------------------------------
+  # Docker daemon config -- moves Docker's data-root to the mounted data
+  # disk (set up in `runcmd` below, BEFORE Docker is installed) and caps
+  # container log growth at the daemon level as a second safety net on
+  # top of each service's own `logging:` block in docker-compose.vm.yml.
+  # ---------------------------------------------------------------------
+  - path: /etc/docker/daemon.json
+    permissions: "0644"
+    content: |
+      {
+        "data-root": "/mnt/docker-data/docker",
+        "log-driver": "json-file",
+        "log-opts": {
+          "max-size": "10m",
+          "max-file": "3"
+        }
+      }
+
+  # ---------------------------------------------------------------------
+  # fail2ban -- ban an IP after repeated failed SSH attempts. A second
+  # layer under the NSG's ssh_allowed_source_ips restriction (main.tf),
+  # useful if that variable is ever left wide open during initial setup.
+  # ---------------------------------------------------------------------
+  - path: /etc/fail2ban/jail.local
+    permissions: "0644"
+    content: |
+      [sshd]
+      enabled = true
+      port = 22
+      maxretry = 5
+      findtime = 600
+      bantime = 3600
+
+  # ---------------------------------------------------------------------
+  # docker-compose.vm.yml + Caddyfile -- embedded here via Terraform's
+  # file() (see main.tf's templatefile() call) so the VM already has a
+  # working stack the moment `terraform apply` finishes, instead of
+  # sitting empty until the first GitHub Actions deploy. Every deploy
+  # AFTER this first boot overwrites both files again from the repo (see
+  # deploy-azure-vm.yml) -- they're tracked in git, never hand-edited on
+  # the VM, so this initial copy and every later one are always identical
+  # given the same commit.
+  # ---------------------------------------------------------------------
+  - path: /opt/snipeit/docker-compose.vm.yml
+    permissions: "0644"
+    content: |
+      ${indent(6, docker_compose_vm_yml)}
+
+  - path: /opt/snipeit/Caddyfile
+    permissions: "0644"
+    content: |
+      ${indent(6, caddyfile)}
+
+  # ---------------------------------------------------------------------
+  # Swap file -- Standard_B2s's 4 GiB RAM is fully allocated by the
+  # per-service mem_limits in docker-compose.vm.yml (~2.9 GiB) plus the
+  # OS/Docker daemon itself; a small swap file is cheap insurance against
+  # an OOM-killed container during a brief spike (e.g. several large PDF
+  # exports queued at once) instead of that container being killed
+  # outright.
+  # ---------------------------------------------------------------------
+  - path: /etc/systemd/system/create-swap.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Create 2G swapfile on data disk
+      DefaultDependencies=no
+      Before=swap.target
+      RequiresMountsFor=/mnt/docker-data
+
+      [Service]
+      Type=oneshot
+      ExecStart=/opt/snipeit/scripts/create-swap.sh
+      RemainAfterExit=true
+
+      [Install]
+      WantedBy=swap.target
+
+  - path: /opt/snipeit/scripts/create-swap.sh
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      SWAPFILE=/mnt/docker-data/swapfile
+      if [ ! -f "$SWAPFILE" ]; then
+        fallocate -l 2G "$SWAPFILE"
+        chmod 600 "$SWAPFILE"
+        mkswap "$SWAPFILE"
+      fi
+      if ! swapon --show | grep -q "$SWAPFILE"; then
+        swapon "$SWAPFILE"
+      fi
+      grep -q "$SWAPFILE" /etc/fstab || echo "$SWAPFILE none swap sw 0 0" >> /etc/fstab
+      sysctl -w vm.swappiness=10
+
+  # ---------------------------------------------------------------------
+  # First-boot scripts, run from `runcmd` below by PATH rather than as
+  # inline `- |` blocks. Cloud-init concatenates every inline runcmd
+  # block into ONE script and executes it with `#!/bin/sh` (dash on
+  # Ubuntu) -- which does NOT support `set -o pipefail`, so any inline
+  # block using it would abort the *entire* runcmd script at that line,
+  # silently skipping everything after it. Giving each script its own
+  # `#!/usr/bin/env bash` shebang and invoking it by path (same pattern
+  # already used for create-swap.sh above) guarantees it runs under bash
+  # regardless of what shell cloud-init's own wrapper script uses.
+  # ---------------------------------------------------------------------
+  - path: /opt/snipeit/scripts/setup-disk.sh
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      DISK=/dev/disk/azure/scsi1/lun0
+      for i in $(seq 1 30); do [ -e "$DISK" ] && break; sleep 2; done
+      if ! blkid "$DISK" >/dev/null 2>&1; then
+        mkfs.ext4 -F "$DISK"
+      fi
+      mkdir -p /mnt/docker-data
+      UUID=$(blkid -s UUID -o value "$DISK")
+      grep -q "$UUID" /etc/fstab || echo "UUID=$UUID /mnt/docker-data ext4 defaults,nofail 0 2" >> /etc/fstab
+      mount -a
+      mkdir -p /mnt/docker-data/docker \
+               /mnt/docker-data/volumes/pgdata \
+               /mnt/docker-data/volumes/redisdata \
+               /mnt/docker-data/volumes/backup_data \
+               /mnt/docker-data/volumes/export_data \
+               /mnt/docker-data/volumes/caddy_data \
+               /mnt/docker-data/volumes/caddy_config
+
+  - path: /opt/snipeit/scripts/install-docker.sh
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      install -m 0755 -d /etc/apt/keyrings
+      curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+      chmod a+r /etc/apt/keyrings/docker.asc
+      echo \
+        "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+        $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+      apt-get update -y
+      apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+      systemctl enable --now docker
+      usermod -aG docker ${admin_username}
+
+  # ---------------------------------------------------------------------
+  # systemd unit so the stack comes back up automatically after a VM
+  # reboot (Azure host maintenance, `AutomaticByPlatform` patch reboot,
+  # or you manually rebooting for any reason) -- `docker compose up -d`
+  # is idempotent and safe to run against an already-running stack too,
+  # which is exactly what deploy-azure-vm.yml itself does on every
+  # deploy.
+  # ---------------------------------------------------------------------
+  - path: /etc/systemd/system/snipeit.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=snipeit-lite docker compose stack
+      Requires=docker.service
+      After=docker.service network-online.target mnt-docker\x2ddata.mount
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=true
+      WorkingDirectory=/opt/snipeit
+      ExecStart=/usr/bin/docker compose -f docker-compose.vm.yml up -d
+      ExecStop=/usr/bin/docker compose -f docker-compose.vm.yml down
+      TimeoutStartSec=300
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  # -----------------------------------------------------------------------
+  # 1. Format + mount the data disk at /mnt/docker-data. It's attached to
+  #    the VM by main.tf's azurerm_virtual_machine_data_disk_attachment
+  #    at LUN 0, which Azure always exposes as /dev/disk/azure/scsi1/lun0
+  #    regardless of however /dev/sdX happens to enumerate on this
+  #    particular boot -- using the /dev/sdX name directly here would be
+  #    fragile across VM resizes/reboots.
+  # -----------------------------------------------------------------------
+  - /opt/snipeit/scripts/setup-disk.sh
+
+  - systemctl daemon-reload
+  - systemctl enable --now create-swap.service
+
+  # -----------------------------------------------------------------------
+  # 2. Install Docker Engine + Compose plugin from Docker's own apt repo
+  #    (Ubuntu's default repo ships an older, sometimes-stale version).
+  #    daemon.json (written above) is already in place BEFORE this starts
+  #    Docker for the first time, so it comes up already pointed at the
+  #    data disk -- no separate "stop docker, move data, restart" dance.
+  # -----------------------------------------------------------------------
+  - /opt/snipeit/scripts/install-docker.sh
+
+  # -----------------------------------------------------------------------
+  # 3. Firewall -- UFW mirrors the NSG (main.tf) at the OS level, a second
+  #    layer in case the NSG is ever loosened by mistake. Enabled LAST
+  #    (after the SSH rule is added) so an active session is never cut.
+  # -----------------------------------------------------------------------
+  - ufw allow 22/tcp
+  - ufw --force enable
+  - systemctl enable --now fail2ban
+  # `ufw allow 22/tcp` above is host-level defense-in-depth only -- the
+  # ACTUAL internet-facing gate is the NSG (main.tf), which has NO
+  # inbound rule for port 22, 80, or 443 by default (empty
+  # ssh_allowed_source_ips, and the Cloudflare Tunnel replaces the old
+  # 80/443 rules entirely -- see main.tf's NSG comment). The `cloudflared`
+  # container (docker-compose.vm.yml) reaches both Caddy and this VM's
+  # sshd purely over the internal Docker network / host-gateway, having
+  # itself made only an OUTBOUND connection to Cloudflare's edge -- so
+  # this UFW rule is only ever reachable via that path or the documented
+  # break-glass NSG rule, never directly from the public internet.
+  #
+  # No separate Tailscale (or any other) agent install step here anymore
+  # -- `cloudflared` runs entirely as a Docker container (see
+  # docker-compose.vm.yml), started along with the rest of the stack in
+  # step 5 below, nothing extra to install on the host itself.
+
+  # -----------------------------------------------------------------------
+  # 4. App directory + first deploy. deploy-azure-vm.yml overwrites
+  #    docker-compose.vm.yml and Caddyfile on every future deploy (they're
+  #    tracked in the repo, not hand-maintained on the VM) -- this first
+  #    write just gets something running immediately after `terraform
+  #    apply` finishes, without waiting for the first CI run.
+  # -----------------------------------------------------------------------
+  - mkdir -p /opt/snipeit
+  - chown -R ${admin_username}:${admin_username} /opt/snipeit
+%{ if dockerhub_username != "" }
+  - |
+    echo "${dockerhub_token}" | docker login -u "${dockerhub_username}" --password-stdin
+%{ endif }
+
+  # -----------------------------------------------------------------------
+  # 5. Bring the stack up for the first time via the systemd unit (written
+  #    above) rather than a bare `docker compose up -d` here -- this way
+  #    the exact same command systemd will use on every future reboot is
+  #    what actually starts it now, so first boot isn't a special case
+  #    that behaves differently from every boot after it.
+  # -----------------------------------------------------------------------
+  - systemctl daemon-reload
+  - systemctl enable snipeit.service
+  - systemctl start snipeit.service
+
+  # -----------------------------------------------------------------------
+  # 6. Run the initial DB schema migration + seed the root admin account.
+  #    Retries for a couple of minutes since `backend`'s image itself may
+  #    still be finishing its very first pull from Docker Hub when this
+  #    line runs. Safe to re-run any time (Alembic migrations are
+  #    idempotent) -- deploy-azure-vm.yml runs this exact same command
+  #    again after every future deploy too.
+  # -----------------------------------------------------------------------
+  - |
+    cd /opt/snipeit
+    for i in $(seq 1 20); do
+      docker compose -f docker-compose.vm.yml run --rm backend alembic upgrade head && break
+      echo "Migration attempt $i failed, retrying in 10s..."
+      sleep 10
+    done
+
+final_message: "snipeit-lite VM provisioning complete after $UPTIME seconds. Docker data-root: /mnt/docker-data/docker. App should now be reachable -- see the app_url Terraform output (allow a minute for the `cloudflared` container to establish the Tunnel and for Cloudflare's DNS to propagate). SSH access: this VM has NO open inbound SSH port on its NSG by default -- reach it via the Cloudflare Tunnel instead (see the ssh_hostname/ssh_command Terraform outputs, and DEPLOYMENT_VM.md's 'Set up Cloudflare Tunnel' section for the one-time ~/.ssh/config entry). Root admin credentials: see ROOT_ADMIN_BOOTSTRAP_PASSWORD in /opt/snipeit/.env, or check `docker compose -f /opt/snipeit/docker-compose.vm.yml logs backend` for the auto-generated one if that was left blank. Future deploys go through .github/workflows/deploy-azure-vm.yml -- see DEPLOYMENT_VM.md step 9."

@@ -643,18 +643,21 @@ not you ever push an image).
    | `POSTGRES_PASSWORD` | per-environment | Generate with `openssl rand -base64 24`, **not** `openssl rand -hex ...` — Azure Database for PostgreSQL Flexible Server requires 8-128 characters with at least 3 of {uppercase, lowercase, digit, symbol}; hex output is only digits + a-f (2 categories) and will be rejected. Different value per environment. |
    | `REDIS_PASSWORD` | per-environment | `openssl rand -hex 16` is fine here — no complexity rule, this isn't Flexible Server. Different per environment. |
    | `JWT_SECRET_KEY` | per-environment | Generate with `openssl rand -hex 32` |
-   | `ROOT_ADMIN_BOOTSTRAP_PASSWORD` | per-environment | Optional — the root admin's initial password. Leave unset to have `0002_bootstrap_root_admin.py` generate a random one and print it once instead (see README's "Viewing the one-time-generated root admin password"). Note: the root admin's username/display name (`SUPER_ADMIN_USERNAME`/`SUPER_ADMIN_NAME`) aren't wired as GitHub secrets at all here — `infra/main.bicep` hardcodes them to `superadmin`/`Super Admin`; edit the bicep file directly if you want different values. |
+   | `ROOT_ADMIN_BOOTSTRAP_PASSWORD` | per-environment | Optional — the root admin's initial password. Leave unset to have `0002_bootstrap_root_admin.py` generate a random one and print it once instead (see README's "Viewing the one-time-generated root admin password"). The root admin's username/display name (`SUPER_ADMIN_USERNAME`/`SUPER_ADMIN_NAME`) are set separately — see the Variables table below, not here. |
    | `SMTP_HOST` / `SMTP_USERNAME` / `SMTP_PASSWORD` / `SMTP_FROM_EMAIL` | per-environment | Optional — required together if `NOTIFICATIONS_ENABLED=true` (see the Variables list below). Any RFC 5321 SMTP server works (your own Postfix, SendGrid, Mailgun, AWS SES's SMTP endpoint, ...) — no vendor-specific SDK. See [POST_DEPLOYMENT.md](POST_DEPLOYMENT.md). |
    | `ADMIN_NOTIFICATION_EMAILS` | per-environment | Optional — comma-separated extra recipients for extension-request alerts, on top of Admins/Managers/the Super Admin, who are covered automatically. |
    | `BACKUP_GDRIVE_OAUTH_CLIENT_ID` / `BACKUP_GDRIVE_OAUTH_CLIENT_SECRET` / `BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN` | per-environment | Optional — required together if `BACKUP_GDRIVE_ENABLED=true` (see the Variables list below). Produced by running `backend/scripts/gdrive_oauth_setup.py` **once, on your own machine, not in CI** — see [POST_DEPLOYMENT.md](POST_DEPLOYMENT.md). |
    | `BACKUP_GDRIVE_FOLDER_ID` | per-environment | Optional — the destination Drive folder's ID (from its URL), required alongside the three secrets above. |
    | `ALERT_EMAIL_ADDRESS` | per-environment | Optional — leave unset to skip creating any alerting resources (no cost, no action group). Set it to wire up the three Azure Monitor scheduled query alerts (backend error-rate spike, `/readyz` failing, daily backup missing) from `infra/main.bicep` to that address — see [SRE_STRATEGY.md](SRE_STRATEGY.md) section 2. **Leave this unset on a brand-new environment's first-ever `infra-deploy.yml` run.** The three alert rules query the `ContainerAppConsoleLogs_CL` table, which Azure only creates once a log line has actually been ingested — on a fresh Log Analytics workspace it doesn't exist yet, and the deployment fails with `Failed to resolve table or column expression named 'ContainerAppConsoleLogs_CL'` if you try to create the rules first. Deploy once with this unset, let `backend`/`frontend` run for a few minutes (or serve one request), then set this secret and re-run `infra-deploy.yml` for the same environment to add the alert rules on top of the already-running infra. |
+   | `OTEL_EXPORTER_OTLP_HEADERS` | per-environment | Optional — only used if `OTEL_ENABLED=true` (see the Variables table below). The one OTel setting kept as a Secret rather than a Variable, since it commonly carries a collector API key (`Authorization=Bearer <token>`-style header). See README.md's "Distributed Tracing" section. |
 
    Also set these repo/environment-level **Variables** (Settings → Secrets
    and variables → Actions → **Variables** tab, not Secrets — none of
-   these are sensitive; these are also the exact same names/values
-   `infra-deploy-vm.yml`/`sync-secrets-vm.yml` use on the VM deploy path,
-   so one value means the same thing on both paths):
+   these are sensitive). Most of these share the same name/meaning with
+   `infra-deploy-vm.yml`/`sync-secrets-vm.yml` on the VM deploy path — see
+   `DEPLOYMENT_VM.md` step 6 for that path's own table, and its callout
+   just below that table for the handful (mostly rate-limiting/lockout
+   and notification-timing knobs) not yet wired as VM Variables:
 
    | Variable | Scope | Notes |
    |---|---|---|
@@ -664,8 +667,38 @@ not you ever push an image).
    | `BACKUP_GDRIVE_ENABLED` | per-environment | Optional, string `"true"`/`"false"` — leave unset (defaults to off, local-disk-only backups) until the four `BACKUP_GDRIVE_*` secrets above are set. See [POST_DEPLOYMENT.md](POST_DEPLOYMENT.md). |
    | `POSTGRES_SKU_NAME` | repo | Optional — sizes the Flexible Server. Default `Standard_B1ms` if unset. |
    | `POSTGRES_STORAGE_GB` | repo | Optional — sizes the Flexible Server. Default `32` if unset. |
+   | `ENABLE_API_DOCS` | per-environment | Optional, string `"true"`/`"false"` — exposes `/docs`/`/redoc` (Swagger/ReDoc). Default `false` if unset. |
+   | `SITE_NAME` | per-environment | Optional — display name shown in the UI/emails. Default `Snipe-IT Lite` if unset. |
+   | `LOG_LEVEL` | per-environment | Optional — `backend`'s structured JSON log level (`DEBUG`/`INFO`/`WARNING`/`ERROR`). Default `INFO` if unset. |
+   | `LOGIN_RATE_LIMIT_MAX` | per-environment | Optional — failed-login attempts allowed per window before rate-limiting kicks in. Default `5` if unset. |
+   | `LOGIN_RATE_LIMIT_WINDOW_SECONDS` | per-environment | Optional — the window `LOGIN_RATE_LIMIT_MAX` is measured over, in seconds. Default `60` if unset. |
+   | `ACCOUNT_LOCKOUT_MAX_ATTEMPTS` | per-environment | Optional — failed logins before an account is locked out entirely (separate from, and on top of, the rate limit above). Default `5` if unset. |
+   | `ACCOUNT_LOCKOUT_DURATION_MINUTES` | per-environment | Optional — how long a lockout from the setting above lasts. Default `15` if unset. |
+   | `SUPER_ADMIN_USERNAME` | per-environment | Optional — the root admin's login username. Default `superadmin` if unset. |
+   | `SUPER_ADMIN_NAME` | per-environment | Optional — the root admin's display name. Default `Super Admin` if unset. |
+   | `SMTP_PORT` | per-environment | Optional — only relevant once `NOTIFICATIONS_ENABLED=true`. Default `587` if unset. |
+   | `SMTP_USE_TLS` | per-environment | Optional, string `"true"`/`"false"` — STARTTLS. Default `true` unless explicitly set to `"false"`. |
+   | `SMTP_USE_SSL` | per-environment | Optional, string `"true"`/`"false"` — implicit TLS (e.g. port 465). Default `false` unless explicitly set to `"true"`. Mutually exclusive with `SMTP_USE_TLS` in practice — set at most one. |
+   | `OVERDUE_NOTIFICATION_INTERVAL_HOURS` | per-environment | Optional — how often the overdue-assets digest re-fires. Default `24` if unset. |
+   | `DUE_SOON_REMINDER_DAYS` | per-environment | Optional — how many days before an asset's return date the "due soon" reminder starts. Default `2` if unset. |
+   | `DUE_SOON_NOTIFICATION_INTERVAL_HOURS` | per-environment | Optional — how often the due-soon digest re-fires. Default `24` if unset. |
+   | `SEND_INDIVIDUAL_HOLDER_REMINDERS` | per-environment | Optional, string `"true"`/`"false"` — also emails the individual asset holder, not just Admins/Managers. Default `true` unless explicitly set to `"false"`. |
+   | `DISPLAY_TIMEZONE` | per-environment | Optional — IANA zone (e.g. `America/New_York`) used to render timestamps in the UI, filenames, and emails. Default `Africa/Lagos` if unset. |
+   | `CURRENCY_CODE` | per-environment | Optional — ISO 4217 code (e.g. `USD`) shown next to asset costs. Default `NGN` if unset. |
+   | `CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER` | per-environment | Optional, string `"true"`/`"false"` — whether Staff/Customer roles see remaining stock counts in the catalog. Default `false` if unset. |
+   | `BACKUP_HOURS_UTC` | per-environment | Optional — UTC hour(s) the daily `pg_dump` backup job runs, e.g. `3`. Default `3` if unset. |
+   | `BACKUP_RETENTION_COUNT` | per-environment | Optional — how many local backups to keep before pruning the oldest. Default `7` if unset. |
+   | `OTEL_ENABLED` | per-environment | Optional, string `"true"`/`"false"` — master switch for OpenTelemetry distributed tracing. Off by default. See README.md's "Distributed Tracing" section. |
+   | `OTEL_SERVICE_NAME` | per-environment | Optional — only relevant once `OTEL_ENABLED=true`. Default `snipeit-lite-backend` if unset. |
+   | `OTEL_EXPORTER_OTLP_ENDPOINT` | per-environment | Required once `OTEL_ENABLED=true` — your OTLP collector's endpoint (e.g. an Application Insights- or Jaeger-compatible one). No default; leave unset while tracing is off. |
+   | `OTEL_TRACES_SAMPLE_RATIO` | per-environment | Optional — fraction of requests traced, `0.0`–`1.0`. Default `1.0` if unset. |
+   | `OTEL_AZURE_MONITOR_ENABLED` | per-environment | Optional, string `"true"`/`"false"` — additionally exports traces to Azure Monitor/Application Insights alongside the plain OTLP endpoint above. Default `false` if unset. |
 
-   Most deployments never need to touch `POSTGRES_SKU_NAME`/`POSTGRES_STORAGE_GB`.
+   Most deployments only ever need to touch a handful of these —
+   `POSTGRES_SKU_NAME`/`POSTGRES_STORAGE_GB`, the notification-timing
+   ones, and `DISPLAY_TIMEZONE`/`CURRENCY_CODE`, are the ones most
+   commonly customized; everything else is safe to leave unset and take
+   the default shown.
 
 6. **Run `infra-deploy.yml` manually once per environment** (Actions tab →
    "Deploy Azure Infrastructure" → Run workflow → choose `staging`, then run

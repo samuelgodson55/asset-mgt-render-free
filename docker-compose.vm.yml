@@ -147,7 +147,30 @@ services:
     environment:
       ENVIRONMENT: production
       UVICORN_WORKERS: ${UVICORN_WORKERS:-2}
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      # BUG FIX -- "Backup failed: Port could not be cast to integer value
+      # as '<fragment>'" (System Backups panel, VM deployments only).
+      # This used to be rebuilt here as
+      # postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      # -- fine for POSTGRES_USER/POSTGRES_PASSWORD values with no URL-
+      # reserved characters, but DEPLOYMENT_VM.md step 4 tells you to
+      # generate POSTGRES_PASSWORD with `openssl rand -base64 24`, whose
+      # output routinely contains `+`/`/`/`=`. Substituted in raw, a `:`
+      # or `@` (or the `/`/`+` around it) lands wherever docker-compose's
+      # env substitution happens to put it, and urlparse()/psycopg then
+      # misread part of the password as the port -- hence "Port could not
+      # be cast to integer value as '<password fragment>'" from
+      # backend/services/backup_service.py's _db_connection_kwargs()
+      # (SQLAlchemy, used for every other query, tolerates this better
+      # but is relying on the same broken input). infra/main.bicep's
+      # Container Apps path never had this bug -- its databaseUrl already
+      # percent-encodes the password via uriComponent(postgresPassword).
+      # This VM path's equivalent fix is infra-vm/main.tf's
+      # postgres_password_urlencoded (Terraform's urlencode()), written
+      # into .env as a single ready-to-use DATABASE_URL by
+      # infra-vm/cloud-init.yaml and .github/workflows/sync-secrets-vm.yml's
+      # "Render new .env" step -- consumed verbatim here instead of being
+      # rebuilt from the raw, unescaped POSTGRES_USER/POSTGRES_PASSWORD.
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
       REDIS_URL: redis://redis:6379/0
       EXPORT_RESULT_DIR: /app/export_results
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env}
@@ -237,7 +260,10 @@ services:
       - /mnt/docker-data/volumes/export_data:/app/export_results
     environment:
       ENVIRONMENT: production
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      # Pre-encoded DATABASE_URL from .env -- see the backend service's
+      # DATABASE_URL comment above for why this is no longer rebuilt from
+      # raw POSTGRES_USER/POSTGRES_PASSWORD here.
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
       REDIS_URL: redis://redis:6379/0
       EXPORT_RESULT_DIR: /app/export_results
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env}
@@ -303,7 +329,10 @@ services:
     command: ["celery", "-A", "celery_app", "beat", "--loglevel=info"]
     environment:
       ENVIRONMENT: production
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      # Pre-encoded DATABASE_URL from .env -- see the backend service's
+      # DATABASE_URL comment above for why this is no longer rebuilt from
+      # raw POSTGRES_USER/POSTGRES_PASSWORD here.
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
       REDIS_URL: redis://redis:6379/0
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
