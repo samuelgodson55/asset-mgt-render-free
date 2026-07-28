@@ -41,3 +41,6 @@ npm-debug.log*
 *.sql
 *.dump
 snipeit_vm_deploy_key*
+
+**/tfplan
+**/*.tfplan
