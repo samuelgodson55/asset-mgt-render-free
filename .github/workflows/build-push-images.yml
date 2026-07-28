@@ -1,0 +1,150 @@
+# .github/workflows/build-push-images.yml
+# -----------------------------------------------------------------------------
+# Reusable `workflow_call` workflow: the ONE place that knows how to build,
+# tag, push, and Trivy-scan the backend + frontend images. Every pipeline
+# that ships a real, deployable image -- release.yml (git-tag production
+# releases), deploy-azure-vm.yml (VM path, both vm-staging and prod),
+# deploy-azure-staging.yml (Container Apps staging), and
+# deploy-azure-production.yml (Container Apps production, including a fresh
+# build with no git tag -- see that workflow's `build-push` job) -- calls
+# THIS workflow instead of running its own copy-pasted `docker build`
+# matrix.
+#
+# WHY THIS EXISTS: before this file, the exact same "docker build -f
+# <dockerfile> --build-arg BUILD_ENV=... -t <name>:<tag> ..." logic was
+# copy-pasted across four separate workflow files. That's precisely how the
+# BUILD_ENV bug happened (see release.yml's BUILD_ENV comment, and
+# deploy-azure-vm.yml's matching one): a fix landed in one copy and not the
+# others, so "the same" backend/frontend image silently differed depending
+# on which pipeline happened to build it. Docker Hub only ever sees ONE
+# backend image name (per environment: -staging or not) and ONE frontend
+# image name -- if the thing that builds it differs by which workflow
+# triggered the build, the image behind that name isn't actually a single
+# consistent artifact irrespective of environment, it's N slightly-different
+# artifacts that happen to share a name. Consolidating the build step here
+# is what makes "the shared image" a true invariant instead of a convention
+# four different files have to independently remember to honor.
+#
+# Every image gets OCI labels now (version/revision/created/source) --
+# previously only deploy-azure-vm.yml's build step set these; now every
+# caller gets them for free, for the same "don't let the copies drift"
+# reason.
+# -----------------------------------------------------------------------------
+name: Build + push images (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      backend_image_name:
+        description: 'Docker Hub repo name for backend, WITHOUT the username -- e.g. "snipeit-lite-backend" or "snipeit-lite-backend-staging". The full ref is built inside this workflow as "<DOCKERHUB_USERNAME secret>/<this>", since a workflow_call caller''s `with:` block cannot itself reference the secrets context.'
+        required: true
+        type: string
+      frontend_image_name:
+        description: 'Docker Hub repo name for frontend, WITHOUT the username -- same convention as backend_image_name.'
+        required: true
+        type: string
+      image_tags:
+        description: 'Space-separated list of tags to build once and push under -- e.g. "v1.4.2 abc1234 latest". The FIRST tag in the list is what gets Trivy-scanned (all tags point at the exact same image, so scanning one scans all of them).'
+        required: true
+        type: string
+      build_env:
+        description: 'frontend/Dockerfile''s BUILD_ENV build-arg: "production" (minified + obfuscated) or "development" (minified only) -- see that Dockerfile''s own comment.'
+        required: true
+        type: string
+      version_label:
+        description: 'Value for the org.opencontainers.image.version label -- typically the human-facing release/version string (falls back to the first image_tags entry if left blank).'
+        required: false
+        type: string
+        default: ''
+      trivy_blocking:
+        description: 'If true, a CRITICAL finding (ignoring CVEs with no fix yet) fails this workflow. If false, CRITICAL findings are still scanned and printed, just non-blocking -- matches staging''s "report, don''t block" posture.'
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      DOCKERHUB_USERNAME:
+        required: true
+      DOCKERHUB_TOKEN:
+        required: true
+
+jobs:
+  build-push:
+    name: Build + push both images
+    runs-on: ubuntu-latest
+    strategy:
+      # fail-fast defaults to true, which would let one image's failure
+      # cancel the other mid-build/push even though backend and frontend are
+      # entirely independent artifacts -- one failing tells you nothing
+      # about the other. See release.yml's original matching comment (this
+      # is where that reasoning now lives).
+      fail-fast: false
+      matrix:
+        include:
+          - service: backend
+            dockerfile: backend/Dockerfile
+            context: backend
+          - service: frontend
+            dockerfile: frontend/Dockerfile
+            context: .
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Docker Hub login
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Resolve image name + primary tag
+        id: img
+        run: |
+          if [ "${{ matrix.service }}" = "backend" ]; then
+            echo "name=${{ secrets.DOCKERHUB_USERNAME }}/${{ inputs.backend_image_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${{ secrets.DOCKERHUB_USERNAME }}/${{ inputs.frontend_image_name }}" >> "$GITHUB_OUTPUT"
+          fi
+          PRIMARY_TAG=$(echo "${{ inputs.image_tags }}" | awk '{print $1}')
+          echo "primary_tag=$PRIMARY_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Build + push ${{ matrix.service }} image
+        run: |
+          set -euo pipefail
+          BUILD_ARGS=()
+          if [ "${{ matrix.service }}" = "frontend" ]; then
+            BUILD_ARGS+=(--build-arg "BUILD_ENV=${{ inputs.build_env }}")
+          fi
+
+          TAG_ARGS=()
+          for TAG in ${{ inputs.image_tags }}; do
+            TAG_ARGS+=(-t "${{ steps.img.outputs.name }}:$TAG")
+          done
+
+          docker build -f ${{ matrix.dockerfile }} \
+                       "${BUILD_ARGS[@]}" \
+                       --label org.opencontainers.image.version="${{ inputs.version_label != '' && inputs.version_label || steps.img.outputs.primary_tag }}" \
+                       --label org.opencontainers.image.revision="${{ github.sha }}" \
+                       --label org.opencontainers.image.created="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                       --label org.opencontainers.image.source="${{ github.server_url }}/${{ github.repository }}" \
+                       "${TAG_ARGS[@]}" \
+                       ${{ matrix.context }}
+
+          for TAG in ${{ inputs.image_tags }}; do
+            docker push "${{ steps.img.outputs.name }}:$TAG"
+          done
+
+      - name: Trivy scan (CRITICAL, ignoring CVEs with no fix yet)
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          image-ref: ${{ steps.img.outputs.name }}:${{ steps.img.outputs.primary_tag }}
+          severity: 'CRITICAL'
+          exit-code: ${{ inputs.trivy_blocking && '1' || '0' }}
+          ignore-unfixed: true
+          format: 'table'
+
+      - name: Trivy scan (HIGH, report-only)
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          image-ref: ${{ steps.img.outputs.name }}:${{ steps.img.outputs.primary_tag }}
+          severity: 'HIGH'
+          exit-code: '0'
+          format: 'table'

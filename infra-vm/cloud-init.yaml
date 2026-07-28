@@ -117,6 +117,12 @@ write_files:
       BACKUP_GDRIVE_OAUTH_CLIENT_ID=${backup_gdrive_oauth_client_id}
       BACKUP_GDRIVE_OAUTH_CLIENT_SECRET=${backup_gdrive_oauth_client_secret}
       BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN=${backup_gdrive_oauth_refresh_token}
+      # Mode 2 -- Google Workspace service account + Shared Drive. Paste the
+      # entire JSON key file contents as one line (see README.md's Backups
+      # section) -- BUG FIX: this was missing here even though Mode 1 above
+      # was already fully wired, so Mode 2 silently never worked on the VM
+      # path. See docker-compose.vm.yml's matching env var comment.
+      BACKUP_GDRIVE_CREDENTIALS_JSON=${backup_gdrive_credentials_json}
       BACKUP_GDRIVE_FOLDER_ID=${backup_gdrive_folder_id}
 
       # Distributed tracing (OpenTelemetry -- Operations & Observability

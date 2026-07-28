@@ -259,6 +259,18 @@ variable "backup_gdrive_oauth_refresh_token" {
   sensitive = true
   default   = ""
 }
+# Mode 2 -- Google Workspace service account + Shared Drive (the raw JSON
+# key contents, one line). BUG FIX: this was never added here even though
+# backend/config.py, backend/services/backup_service.py, docker-compose.yml,
+# and render.yaml all already support it -- meaning the VM path could only
+# ever use Mode 1 (personal OAuth) backups, silently, with no error, even if
+# you set this expecting Mode 2 to work. See docker-compose.vm.yml's matching
+# comment on this same variable's env var.
+variable "backup_gdrive_credentials_json" {
+  type      = string
+  sensitive = true
+  default   = ""
+}
 variable "backup_gdrive_folder_id" {
   type    = string
   default = ""

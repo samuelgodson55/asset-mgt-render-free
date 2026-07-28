@@ -140,6 +140,43 @@ resource "azurerm_subnet_network_security_group_association" "this" {
   network_security_group_id = azurerm_network_security_group.this.id
 }
 
+# -----------------------------------------------------------------------------
+# BUG FIX: on a fresh (or freshly recreated) apply, azurerm_network_interface
+# .this below used to fail intermittently with:
+#   Error: creating Network Interface ... InvalidResourceReference: Resource
+#   .../subnets/snet-app referenced by resource .../networkInterfaces/nic-...
+#   was not found.
+# and azurerm_network_security_group.this itself would sometimes fail the
+# SAME apply with:
+#   Error: Provider produced inconsistent result after apply ... Root object
+#   was present, but now absent.
+# Both are the same underlying cause, not two separate bugs: Azure Resource
+# Manager's control plane can return HTTP 201/200 for a create/update (vnet,
+# subnet, NSG) before that object has actually finished replicating to every
+# ARM shard that a DEPENDENT resource's own create call gets validated
+# against -- so a NIC created moments later, referencing a subnet ID that
+# genuinely does exist, can still get "not found" back, and a near-
+# simultaneous read of the NSG can briefly see a null/absent object. This is
+# a well-documented class of ARM eventual-consistency race (not something
+# retrying `terraform plan` fixes on its own, and not something a `depends_on`
+# alone fixes either, since the implicit dependency via subnet_id already
+# forces correct ORDERING -- the problem is ARM's own propagation lag after
+# that order is already respected). A short, one-time pause after the
+# subnet/NSG/association are created -- before anything that references them
+# -- gives ARM's replication time to catch up. See
+# infra-deploy-vm.yml's terraform-apply retry loop for the second half of
+# this fix (a transient failure here should never require a human to notice
+# and manually re-run the workflow).
+# -----------------------------------------------------------------------------
+resource "time_sleep" "network_propagation" {
+  depends_on = [
+    azurerm_subnet.this,
+    azurerm_network_security_group.this,
+    azurerm_subnet_network_security_group_association.this,
+  ]
+  create_duration = "30s"
+}
+
 resource "azurerm_public_ip" "this" {
   name                = "pip-${local.name_prefix}"
   resource_group_name = azurerm_resource_group.this.name
@@ -155,6 +192,12 @@ resource "azurerm_network_interface" "this" {
   resource_group_name = azurerm_resource_group.this.name
   location            = azurerm_resource_group.this.location
   tags                = local.common_tags
+
+  # Explicit, on top of the implicit dependency subnet_id already creates --
+  # see time_sleep.network_propagation's comment above for why ordering
+  # alone (which the implicit dependency already guaranteed) wasn't
+  # sufficient by itself.
+  depends_on = [time_sleep.network_propagation]
 
   ip_configuration {
     name                          = "internal"
@@ -442,6 +485,7 @@ resource "azurerm_linux_virtual_machine" "this" {
     backup_gdrive_oauth_client_id     = var.backup_gdrive_oauth_client_id
     backup_gdrive_oauth_client_secret = var.backup_gdrive_oauth_client_secret
     backup_gdrive_oauth_refresh_token = var.backup_gdrive_oauth_refresh_token
+    backup_gdrive_credentials_json    = var.backup_gdrive_credentials_json
     backup_gdrive_folder_id           = var.backup_gdrive_folder_id
     otel_enabled                      = var.otel_enabled
     otel_service_name                 = var.otel_service_name

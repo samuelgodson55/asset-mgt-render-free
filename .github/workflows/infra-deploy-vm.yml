@@ -142,6 +142,11 @@ jobs:
       TF_VAR_backup_gdrive_oauth_client_id: ${{ secrets.BACKUP_GDRIVE_OAUTH_CLIENT_ID }}
       TF_VAR_backup_gdrive_oauth_client_secret: ${{ secrets.BACKUP_GDRIVE_OAUTH_CLIENT_SECRET }}
       TF_VAR_backup_gdrive_oauth_refresh_token: ${{ secrets.BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN }}
+      # Mode 2 -- Google Workspace service account + Shared Drive. BUG FIX:
+      # this was missing here even though Mode 1 (the four vars above) was
+      # already wired end-to-end -- see infra-vm/variables.tf's matching
+      # variable and docker-compose.vm.yml's matching env var comment.
+      TF_VAR_backup_gdrive_credentials_json: ${{ secrets.BACKUP_GDRIVE_CREDENTIALS_JSON }}
       TF_VAR_backup_gdrive_folder_id: ${{ secrets.BACKUP_GDRIVE_FOLDER_ID }}
       TF_VAR_otel_enabled: ${{ vars.OTEL_ENABLED || 'false' }}
       TF_VAR_otel_service_name: ${{ vars.OTEL_SERVICE_NAME }}
@@ -208,7 +213,48 @@ jobs:
 
       - name: terraform apply
         if: inputs.action == 'apply'
-        run: terraform apply -input=false -auto-approve tfplan
+        # Retries on the transient Azure Resource Manager eventual-
+        # consistency races described in main.tf's time_sleep.
+        # network_propagation comment -- e.g. "Provider produced
+        # inconsistent result after apply ... Root object was present, but
+        # now absent" on the NSG, or "InvalidResourceReference ... was not
+        # found" on the NIC. That resource already gives ARM a head start
+        # once per apply; this loop is the backstop for the rarer case
+        # where 30s wasn't quite enough, or a similar race hits a different
+        # resource entirely. A plain `terraform apply` of an already-
+        # existing tfplan is safe to simply re-run as-is on failure --
+        # Terraform re-reads current state/plan validity on each attempt,
+        # and every resource in this stack is idempotent create-or-update,
+        # so a partially-applied plan from attempt 1 just picks up where it
+        # left off on attempt 2 rather than double-creating anything.
+        run: |
+          set -uo pipefail
+          MAX_ATTEMPTS=3
+          for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
+            echo "::group::terraform apply (attempt $attempt/$MAX_ATTEMPTS)"
+            if terraform apply -input=false -auto-approve tfplan; then
+              echo "::endgroup::"
+              exit 0
+            fi
+            echo "::endgroup::"
+            if [ "$attempt" -lt "$MAX_ATTEMPTS" ]; then
+              SLEEP=$((attempt * 30))
+              echo "::warning::terraform apply failed on attempt $attempt/$MAX_ATTEMPTS -- if this was one of the known transient Azure eventual-consistency races (NSG 'Provider produced inconsistent result', NIC 'InvalidResourceReference ... was not found'), retrying often succeeds once ARM catches up. Re-planning + retrying in ${SLEEP}s."
+              sleep "$SLEEP"
+              # Re-plan rather than blindly reusing the stale tfplan file --
+              # Terraform refuses to apply a plan if state moved under it
+              # (e.g. attempt 1 partially applied before failing), and a
+              # fresh plan against current state is what correctly picks up
+              # from wherever attempt 1 actually left off.
+              if [ -n "${{ inputs.replace_target }}" ]; then
+                terraform plan -input=false -replace="${{ inputs.replace_target }}" -out=tfplan
+              else
+                terraform plan -input=false -out=tfplan
+              fi
+            fi
+          done
+          echo "::error::terraform apply failed after $MAX_ATTEMPTS attempts -- this no longer looks like a transient Azure propagation race. Check the log above for the real error."
+          exit 1
 
       - name: terraform destroy
         if: inputs.action == 'destroy'

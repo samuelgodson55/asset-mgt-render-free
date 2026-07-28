@@ -214,6 +214,12 @@ services:
       BACKUP_GDRIVE_OAUTH_CLIENT_ID: ${BACKUP_GDRIVE_OAUTH_CLIENT_ID:-}
       BACKUP_GDRIVE_OAUTH_CLIENT_SECRET: ${BACKUP_GDRIVE_OAUTH_CLIENT_SECRET:-}
       BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN: ${BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN:-}
+      # Mode 2 -- Google Workspace service account + Shared Drive. BUG FIX:
+      # this line was missing entirely on the VM path (present in
+      # docker-compose.yml/render.yaml/backend/config.py the whole time) --
+      # see backend/services/backup_service.py's BACKUP_GDRIVE_CREDENTIALS_JSON
+      # branch and infra-vm/variables.tf's matching variable.
+      BACKUP_GDRIVE_CREDENTIALS_JSON: ${BACKUP_GDRIVE_CREDENTIALS_JSON:-}
       BACKUP_GDRIVE_FOLDER_ID: ${BACKUP_GDRIVE_FOLDER_ID:-}
     depends_on:
       db:

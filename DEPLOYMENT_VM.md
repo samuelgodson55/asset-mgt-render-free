@@ -1030,6 +1030,15 @@ ID from the folder's URL: `https://drive.google.com/drive/folders/<THIS_PART>`.
 | `BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN` | printed by the script above | Secret |
 | `BACKUP_GDRIVE_FOLDER_ID` | folder ID from step 2 | Secret |
 
+> **Mode 2 (Google Workspace service account + Shared Drive) instead of Mode
+> 1 above?** Set `BACKUP_GDRIVE_CREDENTIALS_JSON` (the service account's JSON
+> key, pasted as one line) as a Secret on the `prod`/`vm-staging` GitHub
+> Environment instead of the three OAuth secrets above — see README.md's
+> [Backups](README.md#backups) section for how to create that service
+> account. `infra-deploy-vm.yml` reads it into
+> `TF_VAR_backup_gdrive_credentials_json` the same way it reads every other
+> `TF_VAR_*` here.
+
 **Step 4 — apply it.** This differs depending on where you are:
 
 - **VM not provisioned yet** — just run `infra-deploy-vm.yml` (`action:

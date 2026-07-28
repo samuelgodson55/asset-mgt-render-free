@@ -1,21 +1,31 @@
 # .github/workflows/deploy-azure-production.yml
 # -----------------------------------------------------------------------------
-# THE production rollout pipeline -- migrate, then roll out both already-built
-# images, then smoke test, with automatic rollback on failure.
+# THE production rollout pipeline -- migrate, then roll out both images,
+# then smoke test, with automatic rollback on failure. Two ways in:
 #
-# TRIGGER CHANGE: this workflow is NO LONGER triggered by `push: branches:
-# [main]`. Production releases are now cut by pushing a `git tag v1.x.x`
-# (see release.yml), which builds + Trivy-scans + pushes both images tagged
-# with that VERSION (not just a commit SHA), updates CHANGELOG.md, cuts a
-# GitHub Release, and only then calls this workflow (`uses:
-# ./.github/workflows/deploy-azure-production.yml`) to actually deploy the
-# already-pushed `image_tag` to Azure. That's why this file only declares
-# `workflow_call` / `workflow_dispatch` triggers below -- it doesn't build or
-# push anything itself anymore, it just migrates + deploys whatever version
-# tag it's told to (see DEPLOYMENT.md's "Rollback" section for how
-# `workflow_dispatch` + an older `image_tag` doubles as the recommended
-# rollback path, reusing this same migrate -> deploy -> smoke-test ->
-# auto-rollback machinery instead of raw `az containerapp update` commands).
+#   A. TAG RELEASE (unchanged): `git tag v1.x.x && git push origin v1.x.x`
+#      runs release.yml, which builds + Trivy-scans + pushes both images
+#      tagged with that VERSION, updates CHANGELOG.md, cuts a GitHub
+#      Release, and calls this workflow (`uses:
+#      ./.github/workflows/deploy-azure-production.yml`, i.e. workflow_call)
+#      with that already-built `image_tag`. This file does NOT build
+#      anything on this path -- `ci` and `build-push` below both `if:`
+#      themselves out for workflow_call, exactly as before.
+#
+#   B. FRESH BUILD, NO GIT TAG (new): run this workflow directly
+#      (workflow_dispatch) against any branch/ref, leaving `image_tag`
+#      BLANK. The new `ci` + `build-push` jobs below then run first --
+#      `ci` re-runs the full lint/test/scan gate, `build-push` builds a
+#      brand-new backend+frontend image from that ref (via
+#      build-push-images.yml, tagged with the commit SHA + `latest`) and
+#      pushes it -- and only then does migrate -> deploy -> smoke-test as
+#      usual. This is how you ship a change to production (including one
+#      that isn't ready to be a numbered release yet, e.g. the kind of
+#      quick infra/config fix that prompted this comment) without cutting a
+#      version tag. Supplying a non-blank `image_tag` on workflow_dispatch
+#      instead skips straight to migrate -- that's the existing
+#      redeploy/rollback path, unchanged; see DEPLOYMENT.md's "Rollback"
+#      section.
 #
 # COST-OPTIMIZED SHAPE: `frontend`, `backend`, `redis` (Container Apps) +
 # Azure Database for PostgreSQL Flexible Server (`postgresServer`, a managed
@@ -26,7 +36,8 @@
 # rebuilt here; Postgres has no image to rebuild at all -- it's a PaaS
 # resource, patched by Azure itself.
 #
-# Stages (given an `image_tag` that release.yml has already built & pushed):
+# Stages (given an `image_tag` that's either already built, or that
+# build-push just built fresh -- see A/B above):
 #   1. Run `alembic upgrade head` as a Container Apps Job, using the NEW
 #      backend image -- BEFORE either new image rolls out, against the OLD
 #      still-live `backend`/`frontend`
@@ -54,8 +65,8 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: 'Docker image tag to deploy, e.g. v1.4.2 (must already exist on Docker Hub) -- use this for a manual redeploy or a rollback to an older version; see DEPLOYMENT.md "Rollback"'
-        required: true
+        description: 'Existing tag on Docker Hub to redeploy/roll back to, e.g. "v1.4.2" or a commit SHA from a prior successful build (skips `ci` + `build-push` entirely, same as deploy-azure-staging.yml). Leave BLANK to build FRESH from whichever branch/ref you run this workflow against and deploy that straight to production -- this is the "deploy production without a git tag" path; see DEPLOYMENT.md "Rollback" for the redeploy/rollback use of a non-blank value instead.'
+        required: false
         type: string
       skip_migrate:
         description: 'Skip the migrate job (only safe if you are certain no migration has changed since image_tag was built -- e.g. re-running just the deploy/rollout logic after a workflow-file-only fix)'
@@ -73,20 +84,77 @@ permissions:
 
 env:
   RESOURCE_GROUP: ${{ secrets.PROD_RESOURCE_GROUP }}
-  IMAGE_TAG: ${{ inputs.image_tag }}
+  # workflow_call (release.yml) always supplies a real image_tag. On
+  # workflow_dispatch, a blank image_tag means "build fresh" -- fall back to
+  # the commit SHA of whatever ref this run was dispatched against, exactly
+  # like deploy-azure-staging.yml already does, so build-push below and the
+  # rest of this pipeline always have a concrete tag to work with even
+  # though the human left the input blank.
+  IMAGE_TAG: ${{ inputs.image_tag != '' && inputs.image_tag || github.sha }}
+  FRESH_BUILD: ${{ github.event_name == 'workflow_dispatch' && inputs.image_tag == '' }}
   BACKEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend
   FRONTEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-frontend
 
 jobs:
+  ci:
+    name: CI gate (fresh-build path only)
+    # Only runs when deploying production WITHOUT a git tag (workflow_dispatch,
+    # image_tag left blank) -- release.yml's workflow_call path already ran
+    # this exact gate itself (see release.yml's own `ci` job) before ever
+    # calling this workflow, so running it again here would be redundant on
+    # that path. Reused via `uses:`, not copy-pasted -- see ci.yml.
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.image_tag == '' }}
+    uses: ./.github/workflows/ci.yml
+
+  build-push:
+    name: Build + push both images (fresh-build path only)
+    needs: [ci]
+    if: ${{ always() && (needs.ci.result == 'success' || needs.ci.result == 'skipped') && github.event_name == 'workflow_dispatch' && inputs.image_tag == '' }}
+    permissions:
+      contents: read
+    # Delegates to build-push-images.yml -- the single source of truth for
+    # how the backend/frontend images actually get built, shared with
+    # release.yml, deploy-azure-vm.yml, and deploy-azure-staging.yml. See
+    # that file's own top-of-file comment for the full "why". This is what
+    # makes "deploy production without a git tag push" a real capability
+    # instead of just a redeploy-an-old-tag capability: production gets a
+    # BRAND NEW image, built from whatever ref this run targets, tagged with
+    # the commit SHA (IMAGE_TAG above) and `latest`, THEN deployed --
+    # not merely re-pointed at something release.yml built earlier.
+    #
+    # build_env: production, same as release.yml -- a fresh build going
+    # straight to production should get the exact same obfuscated frontend
+    # build a tagged release would, never the "development" mode staging
+    # uses. trivy_blocking: true for the same reason -- this is production,
+    # full stop, regardless of which path got it there.
+    uses: ./.github/workflows/build-push-images.yml
+    with:
+      backend_image_name: snipeit-lite-backend
+      frontend_image_name: snipeit-lite-frontend
+      image_tags: ${{ github.sha }} latest
+      build_env: production
+      trivy_blocking: true
+    secrets: inherit
+
   migrate:
     name: Run database migrations
     runs-on: ubuntu-latest
-    # Skippable only via workflow_dispatch's skip_migrate input (not
-    # available on the workflow_call path release.yml uses, so a real
-    # release always runs its migration -- this is strictly a manual
-    # workflow_dispatch escape hatch for re-testing the deploy/rollout
-    # logic below without re-running an unchanged migration each time).
-    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.skip_migrate) }}
+    needs: [build-push]
+    # Two independent gates ANDed together:
+    #   - skip_migrate: the existing manual escape hatch, workflow_dispatch
+    #     only (see comment below)
+    #   - build-push: must have actually succeeded if it ran at all (fresh-
+    #     build path) -- `always()` + explicit result check because a
+    #     needs: job that gets `if:`-skipped (the normal case on the
+    #     workflow_call/existing-tag paths) would otherwise skip this job
+    #     too via GitHub's default needs-propagation, blocking every
+    #     release.yml-triggered production deploy.
+    # Skippable via workflow_dispatch's skip_migrate input (not available on
+    # the workflow_call path release.yml uses, so a real release always runs
+    # its migration -- this is strictly a manual workflow_dispatch escape
+    # hatch for re-testing the deploy/rollout logic below without re-running
+    # an unchanged migration each time).
+    if: ${{ always() && (needs.build-push.result == 'success' || needs.build-push.result == 'skipped') && !(github.event_name == 'workflow_dispatch' && inputs.skip_migrate) }}
     # AZURE_CLIENT_ID/AZURE_TENANT_ID/AZURE_SUBSCRIPTION_ID are configured
     # as per-environment secrets (see DEPLOYMENT.md step 5's table --
     # deliberately per-environment since staging and production use

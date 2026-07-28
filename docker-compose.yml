@@ -188,6 +188,13 @@ services:
       LEAN_MODE: ${LEAN_MODE:-}
       # Operations & Observability requirement #2: structured logging.
       LOG_FORMAT: ${LOG_FORMAT:-json}
+      # BUG FIX: this was present on `worker`/`beat` below and on every
+      # service in docker-compose.vm.yml, but missing here -- backend fell
+      # back to config.py's own LOG_LEVEL default (INFO, or WARNING under
+      # LEAN_MODE) instead of actually honoring a LOG_LEVEL set in your
+      # .env, unlike every other service. Caught by
+      # scripts/check-compose-drift.py.
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # Operations & Observability requirement #4: distributed tracing
       # (OpenTelemetry) -- see backend/telemetry.py's module docstring for
       # what this instruments and why. Off by default, matching every

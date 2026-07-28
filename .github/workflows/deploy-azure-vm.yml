@@ -121,82 +121,28 @@ jobs:
     name: Build + push both images
     needs: [ci]
     if: ${{ always() && (needs.ci.result == 'success' || needs.ci.result == 'skipped') && (github.event_name != 'workflow_dispatch' || inputs.image_tag == '') }}
-    runs-on: ubuntu-latest
-    strategy:
-      # See release.yml's matching comment: fail-fast defaults to true,
-      # which would let one image's failure cancel the other mid-build/push.
-      fail-fast: false
-      matrix:
-        include:
-          - service: backend
-            dockerfile: backend/Dockerfile
-            context: backend
-            image_env: BACKEND_IMAGE
-          - service: frontend
-            dockerfile: frontend/Dockerfile
-            context: .
-            image_env: FRONTEND_IMAGE
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Docker Hub login
-        uses: docker/login-action@v4
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Resolve image name
-        id: img
-        run: echo "name=${{ matrix.image_env == 'BACKEND_IMAGE' && env.BACKEND_IMAGE || env.FRONTEND_IMAGE }}" >> "$GITHUB_OUTPUT"
-
-      - name: Build + push ${{ matrix.service }} image
-        # Three tags on the same build, same convention release.yml uses
-        # for the Container Apps path: the human-facing tag ($IMAGE_TAG --
-        # a real vX.Y.Z for a version-tag push, else a SHA), the raw
-        # commit SHA (always present, so a build is traceable back to
-        # exact source even for a plain branch push where $IMAGE_TAG and
-        # the SHA are already the same value -- harmless duplicate push
-        # in that case), and `latest`.
-        run: |
-          BUILD_ARGS=()
-          if [ "${{ matrix.service }}" = "frontend" ]; then
-            BUILD_ARGS+=(--build-arg "BUILD_ENV=$BUILD_ENV")
-          fi
-          docker build -f ${{ matrix.dockerfile }} \
-                       "${BUILD_ARGS[@]}" \
-                       --label org.opencontainers.image.version="$VERSION" \
-                       --label org.opencontainers.image.revision="${{ github.sha }}" \
-                       --label org.opencontainers.image.created="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-                       --label org.opencontainers.image.source="${{ github.server_url }}/${{ github.repository }}" \
-                       -t ${{ steps.img.outputs.name }}:$IMAGE_TAG \
-                       -t ${{ steps.img.outputs.name }}:${{ github.sha }} \
-                       -t ${{ steps.img.outputs.name }}:latest \
-                       ${{ matrix.context }}
-          docker push ${{ steps.img.outputs.name }}:$IMAGE_TAG
-          docker push ${{ steps.img.outputs.name }}:${{ github.sha }}
-          docker push ${{ steps.img.outputs.name }}:latest
-
-      - name: Trivy scan (blocking on CRITICAL -- see ci.yml's backend Trivy step)
-        # ignore-unfixed skips CVEs with no available patch yet -- those
-        # can't be resolved by bumping anything, so failing on them would
-        # just block deploys indefinitely with no actionable fix.
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
-        with:
-          image-ref: ${{ steps.img.outputs.name }}:${{ env.IMAGE_TAG }}
-          severity: 'CRITICAL'
-          exit-code: '1'
-          ignore-unfixed: true
-          format: 'table'
-
-      - name: Trivy scan (HIGH, report-only)
-        # Separate non-blocking step so HIGH findings still show up in logs
-        # without failing the deploy -- there's a real backlog to triage
-        # before blocking on it, same as ci.yml.
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
-        with:
-          image-ref: ${{ steps.img.outputs.name }}:${{ env.IMAGE_TAG }}
-          severity: 'HIGH'
-          exit-code: '0'
+    permissions:
+      contents: read
+    # Delegates to build-push-images.yml -- the single source of truth for
+    # how the backend/frontend images actually get built, shared with
+    # release.yml, deploy-azure-staging.yml, and
+    # deploy-azure-production.yml's fresh-build path. See that file's own
+    # top-of-file comment for the full "why".
+    #
+    # image_tags: the human-facing tag ($IMAGE_TAG -- a real vX.Y.Z for a
+    # version-tag push, else a SHA), the raw commit SHA again (always
+    # present, so a build is traceable back to exact source even for a plain
+    # branch push where $IMAGE_TAG and the SHA are already the same value --
+    # a harmless duplicate tag/push in that case), and `latest`.
+    uses: ./.github/workflows/build-push-images.yml
+    with:
+      backend_image_name: snipeit-lite-backend${{ (inputs.environment || 'prod') == 'vm-staging' && '-staging' || '' }}
+      frontend_image_name: snipeit-lite-frontend${{ (inputs.environment || 'prod') == 'vm-staging' && '-staging' || '' }}
+      image_tags: ${{ env.IMAGE_TAG }} ${{ github.sha }} latest
+      version_label: ${{ env.VERSION }}
+      build_env: ${{ env.BUILD_ENV }}
+      trivy_blocking: true
+    secrets: inherit
 
   deploy:
     name: Deploy over SSH + migrate

@@ -269,6 +269,25 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  compose-drift-check:
+    name: docker-compose.yml / docker-compose.vm.yml drift check
+    runs-on: ubuntu-latest
+    # No `needs:`/path filter -- this only reads two YAML files with the
+    # stdlib, takes well under a second, and both files can be edited
+    # independently of anything `changes` tracks, so there's no meaningful
+    # cost to just always running it.
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check for backend/worker/beat/frontend env var drift
+        # See scripts/check-compose-drift.py's own module docstring for the
+        # full story -- this is the guard against exactly the bug class
+        # this repo shipped once already (BACKUP_GDRIVE_CREDENTIALS_JSON
+        # present in docker-compose.yml, silently missing from
+        # docker-compose.vm.yml, so Mode 2 backups only ever worked in
+        # local dev).
+        run: python3 scripts/check-compose-drift.py
+
   nginx-config:
     name: nginx config validation (clean URLs)
     needs: [changes]
