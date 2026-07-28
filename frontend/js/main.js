@@ -201,6 +201,63 @@ function continuePastRecoveryCodes() {
   redirectByUserRole(role);
 }
 
+// Which kind of code #mfa-verify-code currently expects -- 'totp' (default,
+// the 6-digit authenticator app code) or 'recovery' (one of the one-time
+// XXXXX-XXXXX backup codes from enrollment/regeneration, for when someone
+// is locked out of their authenticator app entirely). Both are submitted
+// through the exact same field/form/verifyMfa() call -- see auth_service.py's
+// mfa_verify(), which tells the two apart itself via
+// security.py's is_recovery_code_format() -- this only changes what the
+// input *looks like it wants* so recovery codes aren't silently rejected
+// by a 6-digit-only pattern/maxlength before they ever reach the backend.
+let mfaVerifyMode = 'totp';
+
+// Swaps the #mfa-verify-code input (plus its label/description/toggle-button
+// text) between TOTP and recovery-code mode. `focusInput` is false when
+// called from cancelMfaFlow() below, since focusing a field on a screen
+// that's about to be hidden would just steal focus from the login form.
+function setMfaVerifyMode(mode, focusInput = true) {
+  mfaVerifyMode = mode;
+  const input = document.getElementById('mfa-verify-code');
+  const label = document.getElementById('mfa-verify-label');
+  const description = document.getElementById('mfa-verify-description');
+  const toggle = document.getElementById('mfa-recovery-toggle');
+  if (!input) return;
+  input.value = '';
+  if (mode === 'recovery') {
+    input.removeAttribute('pattern');
+    input.setAttribute('inputmode', 'text');
+    input.setAttribute('autocomplete', 'off');
+    input.setAttribute('maxlength', '11'); // "XXXXX-XXXXX"
+    input.setAttribute('placeholder', 'XXXXX-XXXXX');
+    input.classList.remove('tracking-[0.4em]');
+    input.classList.add('tracking-[0.15em]', 'uppercase');
+    if (label) label.textContent = 'Recovery code';
+    if (description) {
+      description.textContent = 'Lost access to your authenticator app? Enter one of the unused recovery codes you saved when you set up 2FA.';
+    }
+    if (toggle) toggle.textContent = 'Use my authenticator app instead';
+  } else {
+    input.setAttribute('pattern', '[0-9]*');
+    input.setAttribute('inputmode', 'numeric');
+    input.setAttribute('autocomplete', 'one-time-code');
+    input.setAttribute('maxlength', '6');
+    input.setAttribute('placeholder', '123456');
+    input.classList.remove('tracking-[0.15em]', 'uppercase');
+    input.classList.add('tracking-[0.4em]');
+    if (label) label.textContent = 'Authentication code';
+    if (description) {
+      description.textContent = 'Enter the 6-digit code from your authenticator app to finish signing in.';
+    }
+    if (toggle) toggle.textContent = 'Use a recovery code instead';
+  }
+  if (focusInput) input.focus();
+}
+
+function toggleMfaVerifyMode() {
+  setMfaVerifyMode(mfaVerifyMode === 'totp' ? 'recovery' : 'totp');
+}
+
 function cancelMfaFlow() {
   pendingMfaToken = null;
   const verifyCode = document.getElementById('mfa-verify-code');
@@ -209,6 +266,10 @@ function cancelMfaFlow() {
   if (verifyCode) verifyCode.value = '';
   if (setupCode) setupCode.value = '';
   if (qrContainer) qrContainer.innerHTML = '';
+  // Reset back to the default TOTP look so the next login attempt (this
+  // account or another one) always starts from a known state instead of
+  // possibly reopening mid-way through a previous recovery-code attempt.
+  setMfaVerifyMode('totp', false);
   showAuthScreen('auth-screen');
 }
 
@@ -222,6 +283,10 @@ const CLICK_ACTIONS = {
   // mfa_setup_token / mfa_pending_token (see the login-form handler
   // below) since neither is good for anything once abandoned.
   'cancel-mfa': () => cancelMfaFlow(),
+  // Login page 2FA screen only -- flips #mfa-verify-code between expecting
+  // a 6-digit authenticator code and an XXXXX-XXXXX recovery code. See
+  // setMfaVerifyMode() above.
+  'toggle-mfa-recovery-mode': () => toggleMfaVerifyMode(),
   'download-recovery-codes': () => downloadRecoveryCodes(),
   'continue-past-recovery-codes': () => continuePastRecoveryCodes(),
   // "My Profile" -> Two-Factor Authentication (super_admin only -- see
@@ -604,6 +669,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const data = await login(identifier, password);
         if (data.mfa_required) {
           pendingMfaToken = data.mfa_pending_token;
+          setMfaVerifyMode('totp', false);
           showAuthScreen('mfa-verify-screen');
           document.getElementById('mfa-verify-code')?.focus();
           return;

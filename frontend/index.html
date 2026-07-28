@@ -129,11 +129,11 @@
   <div id="mfa-verify-screen" class="hidden w-full max-w-md rounded-xl border border-border bg-card p-5 shadow-2xl space-y-5 sm:p-6 sm:space-y-6">
     <div>
       <h2 class="text-[15px] font-semibold text-slate-100">Two-factor authentication</h2>
-      <p class="text-[12px] text-slate-500 mt-0.5">Enter the 6-digit code from your authenticator app to finish signing in.</p>
+      <p id="mfa-verify-description" class="text-[12px] text-slate-500 mt-0.5">Enter the 6-digit code from your authenticator app to finish signing in.</p>
     </div>
     <form id="mfa-verify-form" class="space-y-4">
       <div>
-        <label for="mfa-verify-code" class="mb-1.5 block text-[12px] font-medium text-slate-400">Authentication code</label>
+        <label id="mfa-verify-label" for="mfa-verify-code" class="mb-1.5 block text-[12px] font-medium text-slate-400">Authentication code</label>
         <input
           type="text"
           id="mfa-verify-code"
@@ -151,6 +151,22 @@
         class="mt-2 w-full rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500 active:bg-blue-700 shadow-lg shadow-blue-600/10"
       >
         Verify &amp; Sign In
+      </button>
+      <!-- Lets someone locked out of their authenticator app (phone lost/
+           reset, app uninstalled, etc.) sign in with one of the one-time
+           recovery codes they saved at enrollment instead -- toggles the
+           input above between "6-digit TOTP code" and "XXXXX-XXXXX
+           recovery code" modes via main.js's setMfaVerifyMode(). The same
+           #mfa-verify-code field/form is reused either way since
+           auth_service.py's mfa_verify() already accepts both formats
+           interchangeably (see security.py's is_recovery_code_format()). -->
+      <button
+        type="button"
+        id="mfa-recovery-toggle"
+        data-action="toggle-mfa-recovery-mode"
+        class="w-full text-center text-[12px] font-medium text-blue-400 transition hover:text-blue-300"
+      >
+        Use a recovery code instead
       </button>
       <button
         type="button"
