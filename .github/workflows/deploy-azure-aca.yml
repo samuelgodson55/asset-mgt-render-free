@@ -140,11 +140,22 @@ jobs:
     # comment for the full "why".
     uses: ./.github/workflows/build-push-images.yml
     with:
-      backend_image_name: snipeit-lite-backend${{ env.ENVIRONMENT == 'staging' && '-staging' || '' }}
-      frontend_image_name: snipeit-lite-frontend${{ env.ENVIRONMENT == 'staging' && '-staging' || '' }}
-      image_tags: ${{ env.IMAGE_TAG }} latest
-      build_env: ${{ env.BUILD_ENV }}
-      trivy_blocking: ${{ env.ENVIRONMENT == 'production' }}
+      # NOTE: these inline the full $ENVIRONMENT/$IMAGE_TAG/$BUILD_ENV
+      # ternaries rather than referencing env.ENVIRONMENT/env.IMAGE_TAG/
+      # env.BUILD_ENV -- the `with:` block of a job that calls a reusable
+      # workflow (`uses:`) can only reference the github/needs/inputs/vars/
+      # strategy/matrix contexts, NOT `env`. Referencing `env.*` here
+      # parses but is invalid at trigger time: GitHub rejects the entire
+      # workflow file with "Unrecognized named-value: 'env'" and every run
+      # shows a bare "Startup failure" with no job graph, before anything
+      # runs -- this bit both this file and deploy-azure-vm.yml's own
+      # `build-push` job the same way. See build-push-images.yml's own
+      # inputs for what each of these feeds.
+      backend_image_name: snipeit-lite-backend${{ (((github.event_name == 'workflow_call') && 'production' || (inputs.environment || 'production')) == 'staging') && '-staging' || '' }}
+      frontend_image_name: snipeit-lite-frontend${{ (((github.event_name == 'workflow_call') && 'production' || (inputs.environment || 'production')) == 'staging') && '-staging' || '' }}
+      image_tags: ${{ inputs.image_tag != '' && inputs.image_tag || github.sha }} latest
+      build_env: ${{ (((github.event_name == 'workflow_call') && 'production' || (inputs.environment || 'production')) == 'production') && 'production' || 'development' }}
+      trivy_blocking: ${{ ((github.event_name == 'workflow_call') && 'production' || (inputs.environment || 'production')) == 'production' }}
     secrets: inherit
 
   migrate:
@@ -170,7 +181,16 @@ jobs:
     # an error at parse time), and azure/login@v3 fails at runtime with
     # "Not all values are present. Ensure 'client-id' and 'tenant-id' are
     # supplied" even though the secrets exist and are correctly named.
-    environment: ${{ env.ENVIRONMENT }}
+    #
+    # NOTE: this has to recompute the full ternary rather than reference
+    # `env.ENVIRONMENT` -- the job-level `environment:` key only supports
+    # the github/needs/inputs/vars/strategy/matrix contexts, NOT `env`.
+    # Referencing `env.ENVIRONMENT` here parses, but is invalid at trigger
+    # time -- GitHub reports it as a bare "Startup failure" with no job
+    # graph at all, since the whole workflow file fails validation before
+    # any job runs. See deploy-azure-vm.yml's `environment:` line for the
+    # same pattern (it uses `inputs.environment`, never `env.*`).
+    environment: ${{ (github.event_name == 'workflow_call') && 'production' || (inputs.environment || 'production') }}
     steps:
       - name: Validate image_tag looks like a version tag (production only)
         if: ${{ env.ENVIRONMENT == 'production' }}
@@ -261,7 +281,9 @@ jobs:
     # default, a skipped dependency skips everything downstream of it too).
     if: ${{ always() && (needs.migrate.result == 'success' || needs.migrate.result == 'skipped') }}
     runs-on: ubuntu-latest
-    environment: ${{ env.ENVIRONMENT }}
+    # See `migrate`'s `environment:` line above for why this recomputes the
+    # full ternary instead of referencing `env.ENVIRONMENT`.
+    environment: ${{ (github.event_name == 'workflow_call') && 'production' || (inputs.environment || 'production') }}
     steps:
       - uses: azure/login@v3
         with:
