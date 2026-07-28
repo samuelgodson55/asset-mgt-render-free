@@ -27,7 +27,7 @@
 # re-applying infra changes never rolls a running environment back to a
 # placeholder image.
 # -----------------------------------------------------------------------------
-name: Deploy Azure Infrastructure
+name: Deploy ACA Infrastructure
 
 on:
   workflow_dispatch:
