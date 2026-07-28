@@ -2,16 +2,16 @@
 # -----------------------------------------------------------------------------
 # Runs on every push and PR, to every branch -- the fast, no-deploy gate that
 # has to pass before anything is even eligible for the Azure deploy workflows
-# (deploy-azure-staging.yml on `develop`, release.yml on `git tag v*.*.*`).
-# Nothing here talks to Azure or requires any Azure secrets.
+# (deploy-azure-aca.yml's/deploy-azure-vm.yml's fresh-build paths,
+# release.yml on `git tag v*.*.*`). Nothing here talks to Azure or requires
+# any Azure secrets.
 #
-# `workflow_call` is what makes this reusable: deploy-azure-staging.yml and
-# release.yml both invoke it with `uses: ./.github/workflows/ci.yml` as their
-# own `ci` job, rather than copy-pasting these steps. Without `workflow_call`
-# declared here, every one of those `uses:` references fails at trigger time
-# ("workflow was not reusable, as it is missing a `workflow_call` trigger") --
-# that was a pre-existing bug in this file that would have silently broken
-# every deploy the first time either caller workflow actually ran.
+# `workflow_call` is what makes this reusable: deploy-azure-aca.yml,
+# deploy-azure-vm.yml, and release.yml all invoke it with
+# `uses: ./.github/workflows/ci.yml` as their own `ci` job, rather than
+# copy-pasting these steps. Without `workflow_call` declared here, every one
+# of those `uses:` references fails at trigger time ("workflow was not
+# reusable, as it is missing a `workflow_call` trigger").
 # -----------------------------------------------------------------------------
 name: CI
 

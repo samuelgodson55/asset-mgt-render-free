@@ -7,7 +7,7 @@
 # "Cloudflare Tunnel" section and docker-compose.vm.yml's `cloudflared`
 # service) -> sync docker-compose.vm.yml/Caddyfile -> `docker compose up -d`
 # with the new tag -> run migrations -> smoke test.
-# Mirrors deploy-azure-staging.yml's shape (same reusable ci.yml call,
+# Mirrors deploy-azure-aca.yml's shape (same reusable ci.yml call,
 # same workflow_dispatch image_tag/skip_migrate escape hatch) but the
 # "deploy" step is SSH + docker compose instead of `az containerapp
 # update`, since there's no Container Apps control plane on this path --
@@ -44,7 +44,7 @@
 #                                           whose public half was passed as
 #                                           ssh_public_key to Terraform
 # -----------------------------------------------------------------------------
-name: Deploy to Azure VM
+name: Deploy to VM
 
 on:
   # NO `branches: [main]` here anymore -- a plain push to `main` no longer
@@ -62,7 +62,7 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        description: 'Target environment. "vm-staging", not "staging" -- kept deliberately distinct from the Container Apps path''s "staging" GitHub Environment (deploy-azure-staging.yml/infra-deploy.yml) so the two paths never share AZURE_CLIENT_ID or other environment-scoped secrets. See DEPLOYMENT_VM.md''s "Using both deployment targets" section.'
+        description: 'Target environment. "vm-staging", not "staging" -- kept deliberately distinct from the Container Apps path''s "staging" GitHub Environment (deploy-azure-aca.yml/infra-deploy.yml) so the two paths never share AZURE_CLIENT_ID or other environment-scoped secrets. See DEPLOYMENT_VM.md''s "Using both deployment targets" section.'
         required: true
         type: choice
         options: [vm-staging, prod]
@@ -125,8 +125,8 @@ jobs:
       contents: read
     # Delegates to build-push-images.yml -- the single source of truth for
     # how the backend/frontend images actually get built, shared with
-    # release.yml, deploy-azure-staging.yml, and
-    # deploy-azure-production.yml's fresh-build path. See that file's own
+    # release.yml and
+    # deploy-azure-aca.yml's fresh-build path. See that file's own
     # top-of-file comment for the full "why".
     #
     # image_tags: the human-facing tag ($IMAGE_TAG -- a real vX.Y.Z for a

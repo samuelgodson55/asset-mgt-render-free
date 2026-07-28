@@ -3,12 +3,11 @@
 # Reusable `workflow_call` workflow: the ONE place that knows how to build,
 # tag, push, and Trivy-scan the backend + frontend images. Every pipeline
 # that ships a real, deployable image -- release.yml (git-tag production
-# releases), deploy-azure-vm.yml (VM path, both vm-staging and prod),
-# deploy-azure-staging.yml (Container Apps staging), and
-# deploy-azure-production.yml (Container Apps production, including a fresh
-# build with no git tag -- see that workflow's `build-push` job) -- calls
-# THIS workflow instead of running its own copy-pasted `docker build`
-# matrix.
+# releases), deploy-azure-vm.yml ("Deploy to VM": VM path, both vm-staging
+# and prod), and deploy-azure-aca.yml ("Deploy to ACA": Container Apps path,
+# both staging and production, including a fresh build with no git tag --
+# see that workflow's `build-push` job) -- calls THIS workflow instead of
+# running its own copy-pasted `docker build` matrix.
 #
 # WHY THIS EXISTS: before this file, the exact same "docker build -f
 # <dockerfile> --build-arg BUILD_ENV=... -t <name>:<tag> ..." logic was
@@ -23,7 +22,7 @@
 # consistent artifact irrespective of environment, it's N slightly-different
 # artifacts that happen to share a name. Consolidating the build step here
 # is what makes "the shared image" a true invariant instead of a convention
-# four different files have to independently remember to honor.
+# multiple files have to independently remember to honor.
 #
 # Every image gets OCI labels now (version/revision/created/source) --
 # previously only deploy-azure-vm.yml's build step set these; now every

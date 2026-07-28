@@ -10,7 +10,7 @@
 # on Azure Files). No ACR, no Key Vault, no managed identity, no Application
 # Insights -- see infra/main.bicep's top-of-file comment.
 #
-# This is DELIBERATELY separate from deploy-azure-production.yml /
+# This is DELIBERATELY separate from deploy-azure-aca.yml /
 # -staging.yml, which only ever push new `backend`/`frontend` images --
 # infra changes (a new env var, a Postgres storage size bump, ...) are
 # infrequent and reviewed, not something you want re-running on every
@@ -86,7 +86,7 @@ jobs:
       
       # First deploy ever: this `az containerapp show` call fails (backend
       # doesn't exist yet) -- fall back to "latest", which is fine, since
-      # deploy-azure-production.yml/-staging.yml will push a real image
+      # deploy-azure-aca.yml will push a real image
       # immediately after this workflow finishes anyway.
       - name: Resolve currently-deployed image tag (so infra updates don't clobber it)
         id: current

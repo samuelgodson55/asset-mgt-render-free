@@ -25,13 +25,14 @@
 #                       (never pushes to `main` directly -- see that job's
 #                       comments), and cuts a GitHub Release with the same
 #                       notes.
-#   4. `deploy`      -- calls deploy-azure-production.yml with
-#                       `image_tag: vX.Y.Z` to actually roll the already-built
-#                       images out to Azure (migrate -> deploy -> smoke test
-#                       -> auto-rollback). Runs in parallel with `changelog`,
-#                       not after it -- a docs PR waiting on human review
-#                       shouldn't hold up shipping an already-built, already
-#                       Trivy-scanned release.
+#   4. `deploy`      -- calls deploy-azure-aca.yml (workflow_call entry point,
+#                       always production) with `image_tag: vX.Y.Z` to
+#                       actually roll the already-built images out to Azure
+#                       (migrate -> deploy -> smoke test -> auto-rollback).
+#                       Runs in parallel with `changelog`, not after it -- a
+#                       docs PR waiting on human review shouldn't hold up
+#                       shipping an already-built, already Trivy-scanned
+#                       release.
 #
 # `changelog` opens a PR rather than committing straight to `main` because
 # this repo's `main` only ever changes via reviewed pull request (feature
@@ -62,10 +63,10 @@ jobs:
       contents: read
     # Delegates to build-push-images.yml -- the single source of truth for
     # how the backend/frontend images actually get built, shared with
-    # deploy-azure-vm.yml, deploy-azure-staging.yml, and
-    # deploy-azure-production.yml's fresh-build path, so "the shared image"
-    # is genuinely the same artifact no matter which of those four pipelines
-    # built it. See that file's own top-of-file comment for the full "why".
+    # deploy-azure-vm.yml and deploy-azure-aca.yml's fresh-build path, so
+    # "the shared image" is genuinely the same artifact no matter which of
+    # those pipelines built it. See that file's own top-of-file comment for
+    # the full "why".
     #
     # image_tags: three tags on the same build -- VERSION (the real release
     # artifact, e.g. v1.4.2 -- what deploy-azure-production.yml pulls), the
@@ -181,12 +182,15 @@ jobs:
             --notes "${{ steps.notes.outputs.notes }}"
 
   deploy:
-    name: Deploy this version to Azure (Production)
+    name: Deploy this version to ACA (Production)
     needs: [build-push] # not `changelog` -- a changelog PR awaiting review shouldn't hold up shipping an already-built, already-scanned release
     permissions:
       id-token: write
       contents: read
-    uses: ./.github/workflows/deploy-azure-production.yml
+    # deploy-azure-aca.yml's workflow_call entry point always targets
+    # production -- there's no `environment` input on this path (that
+    # choice only exists on its workflow_dispatch entry point).
+    uses: ./.github/workflows/deploy-azure-aca.yml
     with:
       image_tag: ${{ github.ref_name }}
     secrets: inherit

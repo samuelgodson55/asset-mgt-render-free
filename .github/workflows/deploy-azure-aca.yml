@@ -1,0 +1,463 @@
+# .github/workflows/deploy-azure-aca.yml
+# -----------------------------------------------------------------------------
+# ONE workflow for the Azure Container Apps target -- pick `staging` or
+# `production` from the Actions tab, same shape as deploy-azure-vm.yml's
+# `vm-staging`/`prod` choice on the VM target. This replaces what used to be
+# two separate files (`deploy-azure-staging.yml` and
+# `deploy-azure-production.yml`) that copy-pasted almost the entire
+# ci -> build-push -> migrate -> deploy pipeline between them, differing only
+# in which resource group / image names / GitHub Environment / safety
+# posture applied. That copy-paste is exactly how staging and production
+# drifted apart in ways that had nothing to do with an intentional
+# environment difference (see the "Wait for backend/frontend readiness" and
+# log-dump BUG FIX comments below -- both were fixed once, in one file, and
+# silently absent from the other for a while). One file, parameterized by
+# `$ENVIRONMENT`, makes that class of drift structurally impossible.
+#
+# TWO WAYS IN:
+#   A. MANUAL (workflow_dispatch): open this workflow in the Actions tab,
+#      choose `staging` or `production`, and "Run workflow". Leave
+#      `image_tag` BLANK to build fresh from whichever branch/ref you run it
+#      against (the normal case) -- `ci` + `build-push` run first. Supply an
+#      EXISTING Docker Hub tag (a commit SHA from a prior successful
+#      "Build + push both images" run, a version like `v1.4.2`, or `latest`)
+#      to skip straight to `migrate` -> `deploy` with that already-built
+#      image instead -- this is also the rollback/redeploy path. `skip_migrate:
+#      true` additionally skips `migrate`, for when you know the schema
+#      hasn't changed since that image was built.
+#   B. TAG RELEASE (workflow_call, production only): `git tag vX.Y.Z && git
+#      push origin vX.Y.Z` runs release.yml, which builds + Trivy-scans +
+#      pushes both images tagged with that VERSION and then calls THIS
+#      workflow (`uses: ./.github/workflows/deploy-azure-aca.yml`) with that
+#      already-built `image_tag`. There is no `environment` input on this
+#      path -- a git-tag release always means production; see
+#      `$ENVIRONMENT` below. `ci`/`build-push` both skip themselves out here
+#      exactly as before, since release.yml already ran an equivalent gate.
+#
+# WHAT DIFFERS BETWEEN staging AND production (everything else is identical,
+# driven off the same `$ENVIRONMENT`/`$RESOURCE_GROUP`/`$BACKEND_IMAGE`/
+# `$FRONTEND_IMAGE`/`$BUILD_ENV` variables):
+#   - Resource group + image names: `-staging` suffix vs. none.
+#   - GitHub Environment used for OIDC secrets: `staging` vs. `production`
+#     (separate Azure AD App Registrations/federated credentials -- see the
+#     `migrate`/`deploy` jobs' own comments).
+#   - `BUILD_ENV`: `development` (minified only) vs. `production` (minified
+#     + obfuscated) -- see frontend/Dockerfile's own comment.
+#   - Trivy blocking: staging reports CRITICAL findings but doesn't fail the
+#     build on them; production does.
+#   - Readiness gate + automatic rollback: production's `backend`/`frontend`
+#     run with real minimum replicas, so `deploy` waits for each to report
+#     Healthy before moving on, and rolls both back to what was live before
+#     this run if the smoke test then fails. Staging's `backend` AND
+#     `frontend` both run with min replicas 0 (scale-to-zero -- effectively
+#     free compute the rest of the time), so there's no "wait for healthy"
+#     moment to gate on -- and no traffic was live to roll back TO -- the
+#     smoke test itself (long, cold-start-tolerant retry budget) is the
+#     only check.
+# -----------------------------------------------------------------------------
+name: Deploy to ACA
+
+on:
+  workflow_call:
+    inputs:
+      image_tag:
+        description: 'Docker image tag to deploy, e.g. v1.4.2 (must already exist on Docker Hub -- see release.yml). This entry point always targets production.'
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target Azure Container Apps environment.'
+        required: true
+        type: choice
+        options: [staging, production]
+        default: production
+      image_tag:
+        description: 'Existing tag on Docker Hub to redeploy/roll back to, e.g. "v1.4.2" or a commit SHA from a prior successful build (skips `ci` + `build-push` entirely). Leave BLANK to build FRESH from whichever branch/ref you run this workflow against.'
+        required: false
+        type: string
+      skip_migrate:
+        description: 'Skip the migrate job (only safe if you are certain no migration has changed since image_tag was built -- e.g. re-running just the deploy/rollout logic after a workflow-file-only fix)'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  # workflow_call (release.yml) has no `inputs.environment` of its own --
+  # always production, same fallback used throughout this file.
+  group: deploy-aca-${{ (github.event_name == 'workflow_call') && 'production' || (inputs.environment || 'production') }}
+  cancel-in-progress: false # never cancel a deploy mid-flight -- let it finish or fail cleanly
+
+permissions:
+  id-token: write # OIDC federated Azure login -- no client secret stored in GitHub
+  contents: read
+
+env:
+  # Every other env var below recomputes this same ternary rather than
+  # chaining off $ENVIRONMENT -- workflow-level `env:` entries can't
+  # reliably reference each other via the `env` context (see
+  # deploy-azure-vm.yml's matching comment, where this pattern started).
+  # $ENVIRONMENT itself is still defined, purely for jobs/steps to read
+  # (that direction -- job/step reading workflow-level env -- works fine).
+  ENVIRONMENT: ${{ (github.event_name == 'workflow_call') && 'production' || (inputs.environment || 'production') }}
+  RESOURCE_GROUP: ${{ ((github.event_name == 'workflow_call') && 'production' || (inputs.environment || 'production')) == 'production' && secrets.PROD_RESOURCE_GROUP || secrets.STAGING_RESOURCE_GROUP }}
+  # workflow_call (release.yml) always supplies a real image_tag. On
+  # workflow_dispatch, a blank image_tag means "build fresh" -- fall back to
+  # the commit SHA of whatever ref this run was dispatched against, so
+  # build-push below and the rest of this pipeline always have a concrete
+  # tag to work with even though the human left the input blank.
+  IMAGE_TAG: ${{ inputs.image_tag != '' && inputs.image_tag || github.sha }}
+  BACKEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend${{ (((github.event_name == 'workflow_call') && 'production' || (inputs.environment || 'production')) == 'staging') && '-staging' || '' }}
+  FRONTEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-frontend${{ (((github.event_name == 'workflow_call') && 'production' || (inputs.environment || 'production')) == 'staging') && '-staging' || '' }}
+  # BUILD_ENV is the frontend/Dockerfile ARG that controls whether the built
+  # frontend/ JS is minified only (development, staging) or minified AND
+  # obfuscated (production) -- see frontend/Dockerfile's own comment.
+  BUILD_ENV: ${{ (((github.event_name == 'workflow_call') && 'production' || (inputs.environment || 'production')) == 'production') && 'production' || 'development' }}
+
+jobs:
+  ci:
+    name: CI gate (fresh-build path only)
+    # Only runs on a workflow_dispatch run building fresh (image_tag left
+    # blank) -- release.yml's workflow_call path already ran this exact gate
+    # itself before ever calling this workflow. Reused via `uses:`, not
+    # copy-pasted -- see ci.yml.
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.image_tag == '' }}
+    uses: ./.github/workflows/ci.yml
+
+  build-push:
+    name: Build + push both images (fresh-build path only)
+    needs: [ci]
+    # `always()` because a skipped `ci` (see its own `if:` above) would
+    # otherwise skip this job too by GitHub's default needs-propagation --
+    # explicitly allow through both a real ci success AND ci being skipped
+    # for the same reason this job itself should be skipped.
+    if: ${{ always() && (needs.ci.result == 'success' || needs.ci.result == 'skipped') && github.event_name == 'workflow_dispatch' && inputs.image_tag == '' }}
+    permissions:
+      contents: read
+    # Delegates to build-push-images.yml -- the single source of truth for
+    # how the backend/frontend images actually get built, shared with
+    # release.yml and deploy-azure-vm.yml. See that file's own top-of-file
+    # comment for the full "why".
+    uses: ./.github/workflows/build-push-images.yml
+    with:
+      backend_image_name: snipeit-lite-backend${{ env.ENVIRONMENT == 'staging' && '-staging' || '' }}
+      frontend_image_name: snipeit-lite-frontend${{ env.ENVIRONMENT == 'staging' && '-staging' || '' }}
+      image_tags: ${{ env.IMAGE_TAG }} latest
+      build_env: ${{ env.BUILD_ENV }}
+      trivy_blocking: ${{ env.ENVIRONMENT == 'production' }}
+    secrets: inherit
+
+  migrate:
+    name: Run database migrations
+    needs: [build-push]
+    # Two independent gates ANDed together:
+    #   - skip_migrate: the manual escape hatch, workflow_dispatch only
+    #   - build-push: must have actually succeeded if it ran at all (fresh-
+    #     build path) -- `always()` + explicit result check because a
+    #     needs: job that gets `if:`-skipped (the normal case on the
+    #     workflow_call/existing-tag paths) would otherwise skip this job
+    #     too via GitHub's default needs-propagation, blocking every
+    #     release.yml-triggered production deploy.
+    if: ${{ always() && (needs.build-push.result == 'success' || needs.build-push.result == 'skipped') && !(github.event_name == 'workflow_dispatch' && inputs.skip_migrate) }}
+    runs-on: ubuntu-latest
+    # AZURE_CLIENT_ID/AZURE_TENANT_ID/AZURE_SUBSCRIPTION_ID are configured
+    # as per-environment secrets (see DEPLOYMENT.md step 5's table --
+    # deliberately per-environment since staging and production use
+    # separate Azure AD App Registrations/federated credentials, never the
+    # same one). GitHub only injects an Environment's secrets into a job
+    # that actually declares `environment:` -- without this, those three
+    # `secrets.AZURE_*` references silently resolve to empty strings (not
+    # an error at parse time), and azure/login@v3 fails at runtime with
+    # "Not all values are present. Ensure 'client-id' and 'tenant-id' are
+    # supplied" even though the secrets exist and are correctly named.
+    environment: ${{ env.ENVIRONMENT }}
+    steps:
+      - name: Validate image_tag looks like a version tag (production only)
+        if: ${{ env.ENVIRONMENT == 'production' }}
+        run: |
+          if [[ ! "$IMAGE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "::warning::image_tag '$IMAGE_TAG' doesn't look like a v*.*.* version tag -- continuing anyway (useful for hotfix/manual tags), but double check this is intentional."
+          fi
+
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Point the migrate job at the new backend image
+        run: |
+          az containerapp job update \
+            --name migrate --resource-group "$RESOURCE_GROUP" \
+            --image "$BACKEND_IMAGE:$IMAGE_TAG"
+
+      - name: Run alembic upgrade head (against the OLD, still-live `backend`)
+        run: |
+          az containerapp job start --name migrate --resource-group "$RESOURCE_GROUP" --output json > job-run.json
+          EXECUTION_NAME=$(jq -r '.name' job-run.json)
+          echo "Started migration execution: $EXECUTION_NAME"
+
+      # infra/main.bicep's `migrateJob` is configured with `replicaTimeout:
+      # 600` (10 minutes) -- Azure itself won't kill a healthy execution
+      # before that. Polling window here is 45 x 15s = 675s, a bit past
+      # that 600s replicaTimeout so Azure's own timeout is always what
+      # actually fires first, plus headroom for the job to be scheduled/
+      # start pulling its image before its first status even shows up here.
+      - name: Wait for migration to complete
+        run: |
+          for i in $(seq 1 45); do
+            STATUS=$(az containerapp job execution list \
+              --name migrate --resource-group "$RESOURCE_GROUP" \
+              --query "[0].properties.status" -o tsv)
+            echo "Migration status: $STATUS"
+            if [ "$STATUS" = "Succeeded" ]; then exit 0; fi
+            if [ "$STATUS" = "Failed" ]; then echo "::error::Migration failed"; exit 1; fi
+            sleep 15
+          done
+          echo "::error::Migration did not reach Succeeded/Failed within 675s (job's own replicaTimeout is 600s, so this means Azure itself hasn't resolved it yet -- check the job's execution logs, it may still be genuinely stuck)"
+          exit 1
+
+      # azure/login@v3 at the top of this job exchanges a GitHub Actions
+      # OIDC token for an Azure AD access token via a client assertion
+      # that's only valid for a few minutes (observed: ~5 minutes) from
+      # when it was minted -- NOT for the lifetime of the job. "Wait for
+      # migration to complete" above can poll for up to 675s (11m15s), so
+      # by the time a failure reaches this step the original assertion has
+      # commonly already expired, and every `az` call below would fail with
+      # "AADSTS700024: Client assertion is not within its valid time
+      # range". Re-authenticating here mints a fresh token right before
+      # it's actually used.
+      - name: Re-authenticate (previous login may have expired during the wait above)
+        if: failure()
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Dump migration job logs (on failure)
+        if: failure()
+        run: |
+          EXECUTION_NAME=$(az containerapp job execution list \
+            --name migrate --resource-group "$RESOURCE_GROUP" \
+            --query "[0].name" -o tsv)
+          echo "::group::migrate job execution: $EXECUTION_NAME"
+          az containerapp job execution show \
+            --name migrate --resource-group "$RESOURCE_GROUP" \
+            --job-execution-name "$EXECUTION_NAME" -o json || true
+          echo "::endgroup::"
+          echo "::group::migrate container logs"
+          az containerapp job logs show \
+            --name migrate --resource-group "$RESOURCE_GROUP" \
+            --container migrate --tail 200 || \
+            echo "Could not fetch logs via 'az containerapp job logs show' -- check Log Analytics (workspace: \${namePrefix}-logs) or the Azure Portal's 'migrate' Container Apps Job > Execution history directly."
+          echo "::endgroup::"
+
+  deploy:
+    name: Roll out new revisions
+    needs: [migrate]
+    # `always()` + explicit success-or-skipped so this still runs when
+    # `migrate` was deliberately skipped via skip_migrate above (by
+    # default, a skipped dependency skips everything downstream of it too).
+    if: ${{ always() && (needs.migrate.result == 'success' || needs.migrate.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    environment: ${{ env.ENVIRONMENT }}
+    steps:
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Snapshot currently-live images (for production rollback)
+        id: previous
+        if: ${{ env.ENVIRONMENT == 'production' }}
+        run: |
+          PREV_BACKEND=$(az containerapp show --name backend --resource-group "$RESOURCE_GROUP" \
+                   --query "properties.template.containers[0].image" -o tsv)
+          PREV_FRONTEND=$(az containerapp show --name frontend --resource-group "$RESOURCE_GROUP" \
+                   --query "properties.template.containers[0].image" -o tsv)
+          echo "backend_image=$PREV_BACKEND" >> "$GITHUB_OUTPUT"
+          echo "frontend_image=$PREV_FRONTEND" >> "$GITHUB_OUTPUT"
+          echo "Currently-live before this deploy: backend=$PREV_BACKEND frontend=$PREV_FRONTEND"
+
+      # Container Apps' Single revision mode replaces replicas gradually and
+      # only routes traffic to new replicas once their readiness probe
+      # passes (see infra/main.bicep's `probes` blocks) -- this IS the
+      # rolling update for each app; no extra orchestration needed. `backend`
+      # is updated first so `frontend`'s proxy target is already correct by
+      # the time `frontend` itself rolls out.
+      - name: Update backend
+        run: |
+          az containerapp update --name backend --resource-group "$RESOURCE_GROUP" \
+            --image "$BACKEND_IMAGE:$IMAGE_TAG"
+
+      # Only meaningful on production, which runs real minimum replicas.
+      # Staging's `backend`/`frontend` both run min replicas 0 (scale-to-
+      # zero) -- there's no "becomes Healthy" moment to wait for here; the
+      # smoke test below (long, cold-start-tolerant retry budget) is what
+      # actually proves the new revision works.
+      - name: Wait for backend readiness (production only)
+        if: ${{ env.ENVIRONMENT == 'production' }}
+        run: |
+          for i in $(seq 1 30); do
+            READY=$(az containerapp revision list --name backend --resource-group "$RESOURCE_GROUP" \
+                      --query "[?properties.active].properties.healthState | [0]" -o tsv)
+            echo "backend health state: $READY"
+            [ "$READY" = "Healthy" ] && exit 0
+            sleep 10
+          done
+          echo "::error::backend did not become healthy in time"
+          exit 1
+
+      - name: Update frontend
+        run: |
+          az containerapp update --name frontend --resource-group "$RESOURCE_GROUP" \
+            --image "$FRONTEND_IMAGE:$IMAGE_TAG"
+
+      - name: Wait for frontend readiness (production only)
+        if: ${{ env.ENVIRONMENT == 'production' }}
+        run: |
+          for i in $(seq 1 30); do
+            READY=$(az containerapp revision list --name frontend --resource-group "$RESOURCE_GROUP" \
+                      --query "[?properties.active].properties.healthState | [0]" -o tsv)
+            echo "frontend health state: $READY"
+            [ "$READY" = "Healthy" ] && exit 0
+            sleep 10
+          done
+          echo "::error::frontend did not become healthy in time"
+          exit 1
+
+      - name: Smoke test
+        id: smoke
+        run: |
+          FQDN=$(az containerapp show --name frontend --resource-group "$RESOURCE_GROUP" \
+                   --query "properties.configuration.ingress.fqdn" -o tsv)
+          echo "Testing https://$FQDN ($ENVIRONMENT -- cold start possible if this app can scale from zero)"
+          # `curl` has no timeout by default, so a request that connects but
+          # then just never gets a response (as opposed to an outright
+          # connection failure) hangs indefinitely instead of failing.
+          # `--connect-timeout 30`: generous for establishing the TCP/TLS
+          # connection to Container Apps ingress itself (this part is never
+          # slow, even on a cold start -- ingress always answers, only the
+          # app behind it might not be up yet).
+          # `--max-time 90` + `--retry 5 --retry-delay 5`: bounds the ENTIRE
+          # request (connect + wait for first byte + transfer), covering a
+          # scale-from-zero cold start on staging, with up to 6 bounded
+          # attempts -- worst case here is ~6 * (90 + 5) = 570s (~9.5 min)
+          # instead of unbounded. Just as safe, if unnecessarily generous,
+          # on production, which already waited for Healthy above.
+          curl -f -s -S --connect-timeout 30 --max-time 90 \
+               --retry 5 --retry-delay 5 --retry-connrefused --retry-max-time 570 \
+               -o /dev/null -w "HTTP %{http_code} in %{time_total}s\n" \
+               "https://$FQDN/"
+
+          # Hits backend THROUGH frontend's reverse proxy -- proves nginx's
+          # /api/ location block is actually reaching `backend` internally,
+          # not just that frontend serves static files. Expects 200 (a
+          # stale valid session cookie) or 401 (the normal "not logged in"
+          # response, and specifically NOT an HTML error page) -- either
+          # proves the request actually reached FastAPI and got a real JSON
+          # response.
+          curl -f -s -S --connect-timeout 30 --max-time 60 \
+               "https://$FQDN/api/auth/me" -o /dev/null -w "HTTP %{http_code} in %{time_total}s\n" \
+               | grep -qE "200|401" || {
+                 echo "::error::GET /api/auth/me did not return 200 or 401 -- backend is unreachable through frontend's /api/ proxy. Falling through to the log-dump step below."
+                 exit 1
+               }
+
+      # azure/login@v3 at the top of this job exchanges a GitHub Actions
+      # OIDC token for an Azure AD access token via a client assertion
+      # that's only valid for a few minutes from when it was minted -- NOT
+      # for the lifetime of the job. The readiness waits + smoke test above
+      # can together run for several minutes, so by the time a smoke-test
+      # failure reaches this step the original assertion is commonly
+      # already expired. Re-authenticating here mints a fresh token right
+      # before it's used by this step and (on production) the rollback
+      # step that follows it.
+      - name: Re-authenticate (previous login may have expired during the steps above)
+        if: failure() && steps.smoke.outcome == 'failure'
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Dump backend/frontend logs (on smoke test failure)
+        if: failure() && steps.smoke.outcome == 'failure'
+        run: |
+          # Tries a live tail first (useful when a replica came up but is
+          # degraded), then ALWAYS follows up with a real Log Analytics KQL
+          # query for the last 15 minutes of console output from both apps
+          # -- the same query a human would have to run by hand otherwise.
+          # The live tail alone isn't enough on staging: both `backend` and
+          # `frontend` run min replicas 0, so the most common failure this
+          # step exists to diagnose -- a new revision that never passes its
+          # readiness probe and gets scaled back to 0 -- is exactly the
+          # case where there's no live replica for `logs show` to tail.
+          ENV_NAME=$(az containerapp env list --resource-group "$RESOURCE_GROUP" \
+                       --query "[0].name" -o tsv)
+          WORKSPACE_ID=$(az containerapp env show --name "$ENV_NAME" --resource-group "$RESOURCE_GROUP" \
+                            --query "properties.appLogsConfiguration.logAnalyticsConfiguration.customerId" -o tsv)
+
+          for APP in backend frontend; do
+            echo "::group::$APP container logs (live tail, last 200 lines)"
+            az containerapp logs show --name "$APP" --resource-group "$RESOURCE_GROUP" --tail 200 || \
+              echo "Could not fetch logs via 'az containerapp logs show' -- no live replica (expected if the revision never passed its readiness probe). Falling through to the Log Analytics query below."
+            echo "::endgroup::"
+          done
+
+          if [ -n "$WORKSPACE_ID" ]; then
+            for APP in backend frontend; do
+              echo "::group::$APP console logs from Log Analytics (last 15 minutes)"
+              az monitor log-analytics query --workspace "$WORKSPACE_ID" \
+                --analytics-query "ContainerAppConsoleLogs_CL | where ContainerAppName_s == '$APP' | where TimeGenerated > ago(15m) | project TimeGenerated, Log_s | order by TimeGenerated desc | take 100" \
+                --output table || echo "Log Analytics query failed for $APP -- check the '$ENV_NAME' Container Apps Environment's Log Analytics workspace directly in the Azure Portal."
+              echo "::endgroup::"
+            done
+          else
+            echo "::warning::Could not resolve the Log Analytics workspace customerId for environment '$ENV_NAME' -- check the Azure Portal's Container Apps Environment > Log stream directly."
+          fi
+
+          echo "::group::backend revision status"
+          az containerapp revision list --name backend --resource-group "$RESOURCE_GROUP" \
+            --query "[].{name:name, active:properties.active, healthState:properties.healthState, runningState:properties.runningState, replicas:properties.replicas}" \
+            -o table || true
+          echo "::endgroup::"
+          echo "::group::frontend revision status"
+          az containerapp revision list --name frontend --resource-group "$RESOURCE_GROUP" \
+            --query "[].{name:name, active:properties.active, healthState:properties.healthState, runningState:properties.runningState, replicas:properties.replicas}" \
+            -o table || true
+          echo "::endgroup::"
+
+      # Production only -- staging has no prior "currently live" traffic to
+      # roll back to on a fresh scale-from-zero deploy (see the Snapshot
+      # step's own `if:` above), and staging's whole point is a cheap place
+      # to find this exact kind of failure before it ever reaches prod.
+      - name: Roll back on smoke test failure (production only)
+        if: ${{ failure() && steps.smoke.outcome == 'failure' && env.ENVIRONMENT == 'production' }}
+        run: |
+          echo "::warning::Smoke test failed -- rolling back both apps to what was live before this run ($IMAGE_TAG)"
+          az containerapp update --name backend --resource-group "$RESOURCE_GROUP" \
+            --image "${{ steps.previous.outputs.backend_image }}"
+          az containerapp update --name frontend --resource-group "$RESOURCE_GROUP" \
+            --image "${{ steps.previous.outputs.frontend_image }}"
+          exit 1
+
+      - name: Summarize this deploy
+        if: success()
+        run: |
+          {
+            echo "## Deployed to ACA ($ENVIRONMENT) :rocket:"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| **Environment** | \`$ENVIRONMENT\` |"
+            echo "| **Image tag** | \`$IMAGE_TAG\` |"
+            echo "| **Backend image** | \`$BACKEND_IMAGE:$IMAGE_TAG\` |"
+            echo "| **Frontend image** | \`$FRONTEND_IMAGE:$IMAGE_TAG\` |"
+            echo "| **Deployed by** | @${{ github.actor }} |"
+            if [ "$ENVIRONMENT" = "production" ]; then
+              echo "| **Previously live** | \`${{ steps.previous.outputs.backend_image }}\` / \`${{ steps.previous.outputs.frontend_image }}\` |"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

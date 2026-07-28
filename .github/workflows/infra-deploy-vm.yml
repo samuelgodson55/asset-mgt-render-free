@@ -64,7 +64,7 @@ jobs:
     # from the Container Apps path's own "staging", precisely so the two
     # paths never fight over the same secret values; see this workflow's
     # `environment` input description above) -- see
-    # deploy-azure-staging.yml's `migrate`/`deploy` jobs for why declaring
+    # deploy-azure-aca.yml's `migrate`/`deploy` jobs for why declaring
     # `environment:` here is what actually makes GitHub inject that
     # Environment's secrets into this job at all.
     environment: ${{ inputs.environment }}
