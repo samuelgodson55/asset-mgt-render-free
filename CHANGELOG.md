@@ -15,6 +15,23 @@ above the marker are yours to keep.
 
 <!-- release-notes-insertion-point -->
 
+## [v1.0.1] - 2026-07-28
+- infra fix (a927219)
+- VM not provisioned well fix (2660753)
+- fix inactive cloudflare tunnel (e0c12a2)
+- fix handshake error in deployment (28a7aef)
+- troubleshooting documentation (642d505)
+- further bug corrections (a0099ad)
+- resolving compounding errors (7e39848)
+- terraform oidc (08c0c59)
+- terraform state and zero trust (3a9e626)
+- terraform structure (31cca1b)
+- environment & secrets (ec52742)
+- Documentation (b650bc6)
+- Debugging salient bugs using Terraform Plan (b498d59)
+- VM Infra Setup (d2d18d4)
+- docs(changelog): v1.0.0 (08361b0)
+
 ## [v1.0.0] - 2026-07-26
 - infra (54be95b)
 - Develop (#79) (6eb7be2)
