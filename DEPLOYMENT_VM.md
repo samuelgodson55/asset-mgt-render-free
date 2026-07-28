@@ -1339,12 +1339,34 @@ Once the remote backend (this doc's step 1) is correctly configured,
 new failures stop causing this — but any resource created *before* it
 was working still needs one-time manual cleanup: either delete the
 specific leftover resource in the Portal/Cloudflare dashboard and let
-Terraform recreate it fresh on the next apply, or `terraform import` it
-into state instead if you'd rather keep the existing one. Terraform's
-own error message names the exact resource address (e.g.
-`cloudflare_record.app`) to import, if you go that route:
+Terraform recreate it fresh on the next apply, or import it into state
+instead if you'd rather keep the existing one.
+
+The easiest way to import: run this workflow again with **action: import**
+and **import_resources** set to one `address=azure_resource_id` line per
+resource named in the error — copy both straight out of the error message
+itself (the address is the `resource "..." "..."` line right below "with",
+the ID is the quoted string in the `Error:` line). For example, given:
+```
+Error: A resource with the ID ".../resourceGroups/rg-.../providers/Microsoft.Network/networkSecurityGroups/nsg-..." already exists
+  with azurerm_network_security_group.this,
+```
+set `import_resources` to:
+```
+azurerm_network_security_group.this=/subscriptions/.../resourceGroups/rg-.../providers/Microsoft.Network/networkSecurityGroups/nsg-...
+```
+One line per conflicting resource (the error may list more than one in a
+single failed apply — include all of them in the same import run). No
+`create`, no `delete`, no risk to an existing data disk or database this
+way — it just tells Terraform's state "this address IS that ID, go read its
+current real config." Follow up with **action: plan** to confirm the diff
+is now clean (or only shows the change you actually intended) before
+switching back to **action: apply**.
+
+If you'd rather do it from a local machine with Terraform + Azure CLI
+already set up instead, the equivalent is:
 ```bash
-terraform import cloudflare_record.app <zone_id>/<dns_record_id>
+terraform import azurerm_network_security_group.this <resource_id>
 ```
 
 **I need to change `AZURE_LOCATION`/region after already applying, and Azure

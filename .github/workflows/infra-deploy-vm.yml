@@ -24,13 +24,18 @@ on:
         type: choice
         options: [vm-staging, prod]
       action:
-        description: 'Terraform action to run.'
+        description: 'Terraform action to run. "import" reconciles a resource that already exists in Azure but is missing from state -- see import_resources below and DEPLOYMENT_VM.md''s "Already exists" troubleshooting section.'
         required: true
         type: choice
-        options: [plan, apply, destroy]
+        options: [plan, apply, destroy, import]
         default: plan
       replace_target:
         description: 'Optional: force-replace ONE resource instead of a normal plan/apply -- e.g. azurerm_linux_virtual_machine.this to rebuild just the VM (data disk, NIC, public IP, and all Cloudflare resources are untouched). Leave blank for a normal run. See DEPLOYMENT_VM.md''s "Rebuilding just the VM" section.'
+        required: false
+        type: string
+        default: ''
+      import_resources:
+        description: 'Only used when action=import. One "terraform_address=azure_resource_id" pair per line, e.g.: azurerm_network_security_group.this=/subscriptions/xxx/resourceGroups/rg-snipeit-lite-prod-vm/providers/Microsoft.Network/networkSecurityGroups/nsg-snipeit-lite-prod (copy the address + ID straight out of the "Error: A resource with the ID ... already exists" message -- the address is the `resource "..." "..."` line right below "with", the ID is the quoted string in the Error line itself).'
         required: false
         type: string
         default: ''
@@ -200,6 +205,43 @@ jobs:
 
       - name: terraform validate
         run: terraform validate
+
+      - name: terraform import
+        if: inputs.action == 'import'
+        # WHY THIS EXISTS: "Error: A resource with the ID ... already exists
+        # -- to be managed via Terraform this resource needs to be imported
+        # into the State" means Azure has this resource but Terraform's
+        # state doesn't -- almost always because an earlier apply was
+        # interrupted (a cancelled workflow run, a runner that got killed
+        # mid-apply, or a run from before this state's remote backend was
+        # fully wired up) after Azure finished creating something but
+        # before/without that create landing in state. Re-running plan/apply
+        # as-is just repeats the same "already exists" error forever --
+        # Terraform refuses to overwrite a resource it doesn't believe it
+        # owns, on purpose, since blindly "creating" over something real
+        # risks destroying/replacing live data (see the managed_disk.data
+        # case in particular -- that's the persistent data disk).
+        # `terraform import` instead just tells state "this address IS that
+        # ID, go read its current real config" -- no create, no delete, no
+        # data risk. After an import run succeeds, switch back to
+        # action=plan to confirm the plan is now clean (ideally an empty
+        # diff, or only the diff you actually intended) before apply-ing.
+        run: |
+          set -euo pipefail
+          if [ -z "${{ inputs.import_resources }}" ]; then
+            echo "::error::action=import requires at least one line in import_resources (address=azure_resource_id). See this input's description for the exact format, copied straight out of the 'already exists' error message."
+            exit 1
+          fi
+          echo "${{ inputs.import_resources }}" | while IFS='=' read -r ADDRESS ID; do
+            ADDRESS=$(echo "$ADDRESS" | xargs)
+            ID=$(echo "$ID" | xargs)
+            if [ -z "$ADDRESS" ] || [ -z "$ID" ]; then
+              continue
+            fi
+            echo "::group::terraform import $ADDRESS"
+            terraform import -input=false "$ADDRESS" "$ID"
+            echo "::endgroup::"
+          done
 
       - name: terraform plan
         if: inputs.action == 'plan' || inputs.action == 'apply'
