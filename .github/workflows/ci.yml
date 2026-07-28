@@ -426,7 +426,7 @@ jobs:
         # skips CVEs with no available patch yet -- those can't be
         # resolved by bumping anything, so failing on them would just
         # block releases indefinitely with no actionable fix.
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: snipeit-backend:ci
           severity: 'CRITICAL'
@@ -437,7 +437,7 @@ jobs:
       - name: Trivy scan -- backend (HIGH, report-only)
         # Separate non-blocking step so HIGH findings still show up in
         # logs without failing CI -- see the comment above.
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: snipeit-backend:ci
           severity: 'HIGH'
@@ -447,7 +447,7 @@ jobs:
       - name: Trivy scan -- frontend
         # See the backend Trivy step above for why this is pinned to a SHA,
         # and why CRITICAL now blocks here instead of only at release time.
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: snipeit-frontend:ci
           severity: 'CRITICAL'
@@ -456,7 +456,7 @@ jobs:
           format: 'table'
 
       - name: Trivy scan -- frontend (HIGH, report-only)
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: snipeit-frontend:ci
           severity: 'HIGH'
