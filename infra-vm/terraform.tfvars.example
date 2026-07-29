@@ -36,14 +36,10 @@ cloudflare_zone_id         = "CHANGE-ME" # Dashboard -> assets.example.com's ove
 cloudflare_zone_name       = "example.com"
 ssh_access_allowed_emails  = ["you@example.com"]
 cloudflare_origin_cert     = <<-EOT
-  -----BEGIN CERTIFICATE-----
   CHANGE-ME (Dashboard -> SSL/TLS -> Origin Server -> Create Certificate)
-  -----END CERTIFICATE-----
 EOT
 cloudflare_origin_cert_key = <<-EOT
-  -----BEGIN PRIVATE KEY-----
   CHANGE-ME (from the same "Create Certificate" step, shown once)
-  -----END PRIVATE KEY-----
 EOT
 
 # ---- Domain ---------------------------------------------------------------
