@@ -44,6 +44,9 @@ export async function openProfileModal() {
   setProfileFormMessage('', false);
   const form = document.getElementById('changePasswordForm');
   if (form) form.reset();
+  setIdentityFormMessage('', false);
+  const identityForm = document.getElementById('updateIdentityForm');
+  if (identityForm) identityForm.reset();
 
   openModal('profileModal');
 
@@ -88,6 +91,22 @@ export async function openProfileModal() {
     // handle, only "regenerate my recovery codes".
     const mfaSection = document.getElementById('profileMfaSection');
     if (mfaSection) mfaSection.classList.toggle('hidden', profile.role !== 'super_admin');
+
+    // Account Details (name/username/email self-service rotation) --
+    // same role gate as the MFA section just above, and for the same
+    // underlying reason: SUPER_ADMIN_ROLE is the one account nobody else
+    // can edit these fields for (see admin.html's profileIdentitySection
+    // comment for the full rationale). Pre-fill from the same fresh
+    // GET /auth/me response the read-only summary above just used.
+    const identitySection = document.getElementById('profileIdentitySection');
+    if (identitySection) {
+      identitySection.classList.toggle('hidden', profile.role !== 'super_admin');
+      if (profile.role === 'super_admin') {
+        document.getElementById('identityNameInput').value = profile.name || '';
+        document.getElementById('identityEmailInput').value = profile.email || '';
+        document.getElementById('identityUsernameInput').value = profile.username || '';
+      }
+    }
   } catch (err) {
     setProfileFormMessage(`Could not load profile: ${err.message}`, true);
   }
@@ -130,6 +149,60 @@ export async function submitChangePasswordForm(event) {
     document.getElementById('changePasswordForm').reset();
   } catch (err) {
     setProfileFormMessage(err.message, true);
+  }
+}
+
+// -----------------------------------------------------------------------------
+// ACCOUNT DETAILS (name / username / email self-service rotation)
+// -----------------------------------------------------------------------------
+// Powers #updateIdentityForm in admin.html's profileIdentitySection --
+// super_admin only (see that section's comment / openProfileModal() above
+// for why). Calls PATCH /auth/me (backend/api/auth_api.py ->
+// services/auth_service.py's update_identity()), the same self-service,
+// current-password-re-confirming shape submitChangePasswordForm() above
+// already uses for the password itself.
+function setIdentityFormMessage(text, isError) {
+  const msgEl = document.getElementById('identityFormMessage');
+  if (!msgEl) return;
+  msgEl.textContent = text || '';
+  msgEl.classList.toggle('hidden', !text);
+  msgEl.classList.toggle('text-rose-400', !!isError);
+  msgEl.classList.toggle('text-emerald-400', !isError);
+}
+
+export async function submitUpdateIdentityForm(event) {
+  event.preventDefault();
+  setIdentityFormMessage('', false);
+
+  const name = document.getElementById('identityNameInput').value.trim();
+  const email = document.getElementById('identityEmailInput').value.trim();
+  const username = document.getElementById('identityUsernameInput').value.trim();
+  const currentPassword = document.getElementById('identityCurrentPasswordInput').value;
+
+  try {
+    const result = await apiRequest('/auth/me', {
+      method: 'PATCH',
+      body: JSON.stringify({
+        name, email, username,
+        current_password: currentPassword,
+      }),
+    });
+    setIdentityFormMessage(result.message || 'Profile updated successfully.', false);
+    document.getElementById('identityCurrentPasswordInput').value = '';
+    // Reflect the (possibly changed) values in the read-only summary
+    // above without needing to close/reopen the modal or re-fetch.
+    document.getElementById('profileName').textContent = result.name;
+    document.getElementById('profileEmail').textContent = result.email;
+    document.getElementById('profileUsername').textContent = result.username || '—';
+    // NOTE: the current session's JWT (see auth.js's getSession()) still
+    // carries whatever name/username was true AT LOGIN time -- it isn't
+    // re-issued by this call. That's a cosmetic-only staleness (e.g. the
+    // navbar name) that clears itself the next time this account logs in
+    // again; it doesn't affect what this session is allowed to do, since
+    // permission checks key off `role`/`sub`, neither of which this form
+    // can change.
+  } catch (err) {
+    setIdentityFormMessage(err.message, true);
   }
 }
 

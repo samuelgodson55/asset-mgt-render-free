@@ -295,6 +295,14 @@ app.add_middleware(
         # account -- worth the same outer IP throttle in case a session
         # cookie were ever compromised without the password itself.
         "/api/auth/mfa/recovery-codes/regenerate",
+        # Pre-login, unauthenticated, and email-sending -- exactly the
+        # same brute-force/spam surface as /auth/login itself:
+        # forgot-password could otherwise be hammered to flood an
+        # arbitrary inbox with reset emails, and reset-password's token
+        # guess is worth throttling the same way a password guess is (see
+        # services/auth_service.py's request_password_reset()/
+        # confirm_password_reset()).
+        "/api/auth/forgot-password", "/api/auth/reset-password",
     },
     max_requests=settings.LOGIN_RATE_LIMIT_MAX,
     window_seconds=settings.LOGIN_RATE_LIMIT_WINDOW_SECONDS,

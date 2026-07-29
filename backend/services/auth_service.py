@@ -22,8 +22,13 @@ from security import (
     totp_provisioning_uri, verify_totp_code, create_mfa_token, decode_mfa_token,
     MFA_SETUP_TOKEN_PURPOSE, MFA_PENDING_TOKEN_PURPOSE,
     generate_recovery_codes, is_recovery_code_format, normalize_recovery_code,
+    generate_password_reset_token,
 )
-from schemas.auth_schema import LoginRequest, PasswordUpdateRequest
+from schemas.auth_schema import (
+    LoginRequest, PasswordUpdateRequest, ForgotPasswordRequest, ResetPasswordRequest,
+    IdentityUpdateRequest,
+)
+import services.notification_service as notification_service
 
 logger = logging.getLogger(__name__)
 
@@ -505,3 +510,217 @@ def update_password(db: Session, req: PasswordUpdateRequest, current_user: dict)
     db.commit()
     logger.info("Password updated", extra={"target_user_id": target.id, "changed_by": current_user["email"]})
     return {"message": "Password updated successfully."}
+
+
+# ---------------------------------------------------------------------------
+# "FORGOT PASSWORD?" SELF-RECOVERY (email-based, no session required)
+# ---------------------------------------------------------------------------
+# Fills the one gap update_password() above can't: it requires either the
+# CURRENT password (self-service) or a Super Admin/Admin acting on someone
+# ELSE's account (services/user_service.py -> reset_user_password()) --
+# neither works when SUPER_ADMIN_ROLE itself forgets its password, since
+# there's no admin "above" it and it obviously doesn't have its own current
+# password anymore. See models.PasswordResetToken's docstring for the
+# storage rationale; not restricted to that role specifically -- any
+# account can use this, same self-service reasoning as update_password().
+
+# Generic response for POST /auth/forgot-password, returned identically
+# whether or not `identifier` matched a real account -- SECURITY: the
+# alternative ("no account with that email/username") would let anyone
+# enumerate which emails/usernames exist in the system just by trying
+# them here, the exact same anti-enumeration reasoning login() already
+# documents for "Invalid email/username or password.".
+_FORGOT_PASSWORD_GENERIC_MESSAGE = (
+    "If an account matches that email or username, a password reset link has been sent to its registered email address."
+)
+
+
+def request_password_reset(db: Session, req: ForgotPasswordRequest) -> dict:
+    """
+    POST /auth/forgot-password. Looks `req.identifier` up the exact same
+    case-insensitive, email-OR-username way login() does, and -- ONLY if a
+    match is found -- issues a fresh, single-use reset token and emails it
+    to that account's REGISTERED email address (never anywhere the caller
+    typed, which matters here specifically: an attacker who knows a valid
+    username but not its email can't redirect the link anywhere they
+    control).
+
+    Always returns the same generic message either way (see
+    _FORGOT_PASSWORD_GENERIC_MESSAGE above) -- callers must never be able
+    to distinguish "sent" from "no such account" from the response alone.
+    """
+    identifier = req.identifier.strip().lower()
+    user = db.query(models.User).filter(
+        or_(func.lower(models.User.email) == identifier, func.lower(models.User.username) == identifier),
+        models.User.is_active,
+        ~models.User.is_deleted,
+    ).first()
+
+    if not user:
+        logger.info("Password reset requested for unknown identifier", extra={"identifier": req.identifier.strip()})
+        return {"message": _FORGOT_PASSWORD_GENERIC_MESSAGE}
+
+    # A fresh request supersedes any still-pending one -- same "hard
+    # reset, never a mix of old-batch/new-batch validity" reasoning as
+    # _issue_recovery_codes() above. Also means at most one row per user
+    # ever needs checking when a reset link is later redeemed.
+    db.query(models.PasswordResetToken).filter(models.PasswordResetToken.user_id == user.id).delete()
+
+    plaintext_token = generate_password_reset_token()
+    expires_at = utc_now() + datetime.timedelta(minutes=settings.PASSWORD_RESET_TOKEN_EXPIRY_MINUTES)
+    db.add(models.PasswordResetToken(
+        user_id=user.id, token_hash=hash_password(plaintext_token), expires_at=expires_at,
+    ))
+    db.commit()
+
+    reset_link = f"{settings.FRONTEND_BASE_URL.rstrip('/')}/?reset_token={plaintext_token}"
+    sent = notification_service.send_email(
+        to=user.email,
+        subject="Reset your Snipe-IT Lite password",
+        body=(
+            f"Hi {user.name},\n\n"
+            "A password reset was requested for your account. If this was you, "
+            f"click the link below within {settings.PASSWORD_RESET_TOKEN_EXPIRY_MINUTES} minutes to choose a new password:\n\n"
+            f"{reset_link}\n\n"
+            "If you didn't request this, you can safely ignore this email -- your password will not be changed.\n"
+        ),
+    )
+    # send_email() is fail-soft by design (see notification_service.py's
+    # module docstring) -- a misconfigured/unreachable SMTP server here
+    # must not turn into a 500, and must not reveal anything different to
+    # the caller than the "no such account" path above either. The token
+    # row above still exists and is still redeemable if delivery genuinely
+    # failed but the operator later fixes SMTP and resends manually via
+    # the logged plaintext (DEBUG level only, see send_email()) in a local
+    # dev environment with NOTIFICATIONS_ENABLED=false.
+    logger.info("Password reset requested", extra={"user_id": user.id, "email_sent": sent})
+    return {"message": _FORGOT_PASSWORD_GENERIC_MESSAGE}
+
+
+def confirm_password_reset(db: Session, req: ResetPasswordRequest) -> dict:
+    """
+    POST /auth/reset-password. Unlike update_password(), there's no
+    logged-in session and no known user_id up front -- only the plaintext
+    `req.token` from the emailed link. Since PasswordResetToken.token_hash
+    is a one-way Argon2id hash (same as a password -- never reversible),
+    the matching row can't be looked up by an indexed equality query; it's
+    found the same way a password itself is checked, by verifying the
+    candidate against each still-live hash. This table only ever holds
+    one row per user with a pending request (see request_password_reset()
+    above, which clears out any previous one first), so in practice this
+    is checking at most a small handful of rows system-wide at any moment.
+    """
+    now = utc_now()
+    candidates = db.query(models.PasswordResetToken).filter(
+        models.PasswordResetToken.used_at.is_(None),
+        models.PasswordResetToken.expires_at > now,
+    ).all()
+
+    matched = next((row for row in candidates if verify_password(req.token, row.token_hash)), None)
+    if not matched:
+        logger.warning("Password reset failed: invalid or expired token")
+        raise HTTPException(status_code=400, detail="This password reset link is invalid or has expired. Request a new one.")
+
+    user = db.query(models.User).filter(models.User.id == matched.user_id, ~models.User.is_deleted).first()
+    if not user:
+        raise HTTPException(status_code=400, detail="This password reset link is invalid or has expired. Request a new one.")
+
+    # Password complexity/length is already enforced up front by
+    # schemas.auth.ResetPasswordRequest's field_validator.
+    user.password_hash = hash_password(req.new_password)
+    user.is_verified = True
+    # SECURITY: a successful reset is a legitimate way to recover a
+    # locked-out account -- same reasoning as update_password() above.
+    user.failed_login_attempts = 0
+    user.locked_until = None
+    matched.used_at = now
+    db.commit()
+    logger.info("Password reset completed", extra={"user_id": user.id})
+    return {"message": "Password updated successfully. You can now sign in with your new password."}
+
+
+# ---------------------------------------------------------------------------
+# SELF-SERVICE IDENTITY ROTATION (name / username / email)
+# ---------------------------------------------------------------------------
+def update_identity(db: Session, req: IdentityUpdateRequest, current_user: dict) -> dict:
+    """
+    PATCH /auth/me. Lets the CURRENTLY LOGGED-IN account rotate its own
+    name/username/email -- the same self-service shape update_password()
+    already established for the password itself (SUPER_ADMIN_ROLE's
+    username/name/email were, until now, the one part of this identity
+    with genuinely no way to ever change -- see security.py's module
+    docstring). Deliberately SELF-ONLY: this never accepts a target
+    user_id and always acts on `current_user`'s own row, so it can't be
+    used as a side-door around services/user_service.py's
+    is_hidden_root_admin() guard to edit anyone ELSE's account.
+
+    Every present field requires `req.current_password` to have already
+    been re-verified below FIRST -- same reasoning as update_password()'s
+    self-service branch: a leaked/still-valid session cookie alone must
+    never be enough to quietly change what a person logs in as.
+    """
+    target = db.query(models.User).filter(models.User.id == int(current_user["sub"]), ~models.User.is_deleted).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Account not found.")
+
+    if not verify_password(req.current_password, target.password_hash):
+        logger.warning("Identity update rejected: current password mismatch", extra={"user_id": target.id})
+        raise HTTPException(status_code=400, detail="Current password is incorrect.")
+
+    updates = req.model_dump(exclude_unset=True, exclude={"current_password"})
+
+    if "email" in updates and updates["email"].strip().lower() != target.email.strip().lower():
+        # Case-insensitive clash check -- same rationale as
+        # user_service.py's create_user()/update_user(): login matches
+        # email/username case-insensitively, so two accounts differing
+        # only by case must never both exist.
+        clash = db.query(models.User).filter(
+            func.lower(models.User.email) == updates["email"].strip().lower(), models.User.id != target.id,
+        ).first()
+        if clash:
+            raise HTTPException(status_code=400, detail="A user with this email already exists.")
+        target.email = updates["email"].strip()
+
+    if "username" in updates and updates["username"] != target.username:
+        candidate = updates["username"].strip().lower()
+        # Same reserved-username guard user_service.py's
+        # _derive_username()/update_user() apply -- keeps the
+        # CONFIGURED default (settings.SUPER_ADMIN_USERNAME) permanently
+        # blocked as a matter of policy (nobody should be able to register
+        # the well-known default root login name to impersonate it), fully
+        # independent of whatever this account's username is rotated to.
+        # The plain uniqueness check just below is what protects THIS
+        # account's actual current/new username from being claimed by
+        # anyone else -- a real `users` row with a unique constraint on
+        # `username`, exactly like every other account.
+        reserved = settings.SUPER_ADMIN_USERNAME.strip().lower()
+        if candidate == reserved and target.role != SUPER_ADMIN_ROLE:
+            raise HTTPException(status_code=400, detail="That username is reserved.")
+        clash = db.query(models.User).filter(models.User.username == candidate, models.User.id != target.id).first()
+        if clash:
+            raise HTTPException(status_code=400, detail="That username is already taken.")
+        target.username = candidate
+
+    if "name" in updates:
+        target.name = updates["name"].strip()
+
+    # NOTE: `operator` uses `target.email` (the row's own, just-committed
+    # value) rather than `current_user["email"]` (the JWT's snapshot at
+    # login time) -- this action is always self-service (target IS the
+    # caller), and if email was one of the fields just rotated, the JWT's
+    # snapshot is already stale by definition. Using the fresh value keeps
+    # audit_service.py's live super-admin-email lookup matching this row
+    # immediately, instead of it briefly (and only for this one row)
+    # appearing to belong to a different operator than the account
+    # actually is right now.
+    db.add(models.AuditLog(
+        operator=target.email, action="IDENTITY_UPDATED", target_type="User", target_id=target.id,
+        details="Updated own account name/username/email.",
+    ))
+    db.commit()
+    db.refresh(target)
+    logger.info("Identity updated", extra={"user_id": target.id})
+    return {
+        "message": "Profile updated successfully.",
+        "name": target.name, "username": target.username, "email": target.email,
+    }

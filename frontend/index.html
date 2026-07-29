@@ -88,6 +88,19 @@
       >
         Sign In
       </button>
+
+      <!-- Opens #forgot-password-screen (see js/main.js's showAuthScreen()
+           calls) -- POST /auth/forgot-password (backend/api/auth_api.py)
+           always responds with the same generic message whether or not
+           the identifier matched a real account, so this link is exactly
+           as safe to show unconditionally as the login form itself. -->
+      <button
+        type="button"
+        data-action="show-forgot-password"
+        class="mt-1 w-full text-center text-[12px] font-medium text-blue-400 transition hover:text-blue-300"
+      >
+        Forgot password?
+      </button>
     </form>
 
     <!-- Demo credentials helper (safe to delete once you provision your own users).
@@ -118,6 +131,103 @@
       </p>
     </div>
 
+  </div>
+
+  <!-- ================= FORGOT PASSWORD: REQUEST A RESET LINK =================
+       Shown instead of #auth-screen via the "Forgot password?" link above.
+       POST /auth/forgot-password (backend/services/auth_service.py's
+       request_password_reset()) always returns the same generic message
+       regardless of whether `identifier` matched a real account -- see
+       js/main.js's forgot-password form handler, which just displays
+       whatever message comes back rather than branching on success/failure. -->
+  <div id="forgot-password-screen" class="hidden w-full max-w-md rounded-xl border border-border bg-card p-5 shadow-2xl space-y-5 sm:p-6 sm:space-y-6">
+    <div>
+      <h2 class="text-[15px] font-semibold text-slate-100">Reset your password</h2>
+      <p class="text-[12px] text-slate-500 mt-0.5">Enter your email or username and we'll send a password reset link to your registered email address.</p>
+    </div>
+    <form id="forgot-password-form" class="space-y-4">
+      <div>
+        <label for="forgot-password-identifier" class="mb-1.5 block text-[12px] font-medium text-slate-400">Email or Username</label>
+        <input
+          type="text"
+          id="forgot-password-identifier"
+          required
+          placeholder="e.g. employee@corp.io or t.okafor"
+          autocomplete="username"
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none transition focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40"
+        />
+      </div>
+      <!-- Set to POST /auth/forgot-password's message either way (found
+           or not) -- always emerald/neutral, never rose, since this
+           screen must never reveal whether the identifier matched a real
+           account. See js/main.js's forgot-password form handler. -->
+      <p id="forgot-password-message" class="hidden text-[12px] font-medium text-emerald-400"></p>
+      <button
+        type="submit"
+        class="mt-2 w-full rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500 active:bg-blue-700 shadow-lg shadow-blue-600/10"
+      >
+        Send Reset Link
+      </button>
+      <button
+        type="button"
+        data-action="cancel-forgot-password"
+        class="w-full rounded-lg border border-border py-2 text-[12px] font-medium text-slate-400 transition hover:bg-card2"
+      >
+        Back to sign in
+      </button>
+    </form>
+  </div>
+
+  <!-- ================= FORGOT PASSWORD: CHOOSE A NEW PASSWORD =================
+       Shown automatically on page load when the URL carries a
+       ?reset_token=... query parameter -- i.e. the person just clicked
+       the link from their email (see js/main.js's DOMContentLoaded
+       handler, which checks for this before anything else renders).
+       POST /auth/reset-password (backend/services/auth_service.py's
+       confirm_password_reset()) does the actual verification/update. -->
+  <div id="reset-password-screen" class="hidden w-full max-w-md rounded-xl border border-border bg-card p-5 shadow-2xl space-y-5 sm:p-6 sm:space-y-6">
+    <div>
+      <h2 class="text-[15px] font-semibold text-slate-100">Choose a new password</h2>
+      <p class="text-[12px] text-slate-500 mt-0.5">Enter a new password for your account.</p>
+    </div>
+    <form id="reset-password-form" class="space-y-4">
+      <div>
+        <label for="reset-password-new" class="mb-1.5 block text-[12px] font-medium text-slate-400">New Password</label>
+        <input
+          type="password"
+          id="reset-password-new"
+          required
+          autocomplete="new-password"
+          placeholder="••••••••"
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none transition focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40"
+        />
+      </div>
+      <div>
+        <label for="reset-password-confirm" class="mb-1.5 block text-[12px] font-medium text-slate-400">Confirm New Password</label>
+        <input
+          type="password"
+          id="reset-password-confirm"
+          required
+          autocomplete="new-password"
+          placeholder="••••••••"
+          class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 placeholder-slate-500 outline-none transition focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40"
+        />
+      </div>
+      <p id="reset-password-message" class="hidden text-[12px] font-medium"></p>
+      <button
+        type="submit"
+        class="mt-2 w-full rounded-lg bg-blue-600 py-2.5 text-[13px] font-semibold text-white transition hover:bg-blue-500 active:bg-blue-700 shadow-lg shadow-blue-600/10"
+      >
+        Update Password
+      </button>
+      <button
+        type="button"
+        data-action="cancel-forgot-password"
+        class="w-full rounded-lg border border-border py-2 text-[12px] font-medium text-slate-400 transition hover:bg-card2"
+      >
+        Back to sign in
+      </button>
+    </form>
   </div>
 
   <!-- ================= 2FA: ALREADY-ENROLLED ACCOUNT (verify code) =================

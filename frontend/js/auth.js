@@ -130,6 +130,38 @@ export async function login(identifier, password) {
   return data;
 }
 
+// POST /auth/forgot-password -- see backend/services/auth_service.py's
+// request_password_reset(). Deliberately never throws on "no such
+// account" -- the backend always responds 200 with the same generic
+// message either way (see that function's docstring), so there's nothing
+// for a caller here to branch on beyond a genuine network/server error.
+export async function requestPasswordReset(identifier) {
+  const response = await fetch(`${API_URL}/auth/forgot-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ identifier }),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(buildErrorMessage(response, data, 'Something went wrong. Please try again.'));
+  return data;
+}
+
+// POST /auth/reset-password -- completes a "forgot password?" recovery
+// using the plaintext token from the emailed link (see
+// backend/services/auth_service.py's confirm_password_reset()). No
+// session/cookie involved -- this doesn't log the person in, it only
+// updates their password; they still sign in normally afterward.
+export async function confirmPasswordReset(token, newPassword) {
+  const response = await fetch(`${API_URL}/auth/reset-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token, new_password: newPassword }),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(buildErrorMessage(response, data, 'This password reset link is invalid or has expired.'));
+  return data;
+}
+
 // Completes FIRST-time 2FA enrollment: `mfaSetupToken`/`code` come from the
 // mfa_setup_required response above and the code the person typed in after
 // scanning/typing the secret into their authenticator app. On success this

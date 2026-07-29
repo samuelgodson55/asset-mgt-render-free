@@ -1683,6 +1683,53 @@
         </button>
       </div>
 
+      <!-- Account Details (name/username/email rotation) -- shown only
+           for role === 'super_admin' by profile.js's openProfileModal().
+           This exists because SUPER_ADMIN_ROLE is the one account with no
+           admin "above" it who could otherwise fix these values for it
+           (see backend/services/user_service.py's is_hidden_root_admin()
+           guard, which blocks PATCH /users/{id} from ever reaching this
+           row) -- and specifically so its bootstrap-assigned
+           "{username}@local" placeholder email (see
+           backend/alembic/versions/0002_bootstrap_root_admin.py) can be
+           replaced with a real, reachable mailbox, which
+           POST /auth/forgot-password (js/main.js's "Forgot password?"
+           link on the login page) needs somewhere valid to send to.
+           Every other role's name/username/email is instead edited by an
+           Admin/Super Admin via the User Directory's Edit action -- see
+           services/user_service.py's update_user() -- so this section
+           doesn't need to appear for them. -->
+      <div id="profileIdentitySection" class="hidden border-t border-border pt-4">
+        <h4 class="mb-1 text-[13px] font-semibold text-slate-100">Account Details</h4>
+        <p class="mb-3 text-[12px] text-slate-500">Requires your current password -- for security reasons. Only change what needs updating; leave the rest as-is.</p>
+        <form id="updateIdentityForm" class="space-y-3">
+          <div>
+            <label class="mb-1 block text-[12px] font-medium text-slate-400">Name</label>
+            <input type="text" id="identityNameInput" autocomplete="name"
+              class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
+          </div>
+          <div>
+            <label class="mb-1 block text-[12px] font-medium text-slate-400">Email</label>
+            <input type="text" id="identityEmailInput" autocomplete="email"
+              class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
+          </div>
+          <div>
+            <label class="mb-1 block text-[12px] font-medium text-slate-400">Username</label>
+            <input type="text" id="identityUsernameInput" autocomplete="username"
+              class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
+          </div>
+          <div>
+            <label class="mb-1 block text-[12px] font-medium text-slate-400">Current Password</label>
+            <input type="password" id="identityCurrentPasswordInput" required autocomplete="current-password"
+              class="w-full rounded-lg border border-border bg-card2 px-3 py-2 text-[13px] text-slate-200 outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/40" />
+          </div>
+          <p id="identityFormMessage" class="hidden text-[12px] font-medium"></p>
+          <button type="submit" class="mt-1 w-full rounded-lg bg-blue-600 py-2 text-[13px] font-semibold text-white transition hover:bg-blue-500 active:bg-blue-700">
+            Save Account Details
+          </button>
+        </form>
+      </div>
+
       <div class="border-t border-border pt-4">
         <h4 class="mb-1 text-[13px] font-semibold text-slate-100">Change Password</h4>
         <p class="mb-3 text-[12px] text-slate-500">Requires your current password -- for security reasons</p>

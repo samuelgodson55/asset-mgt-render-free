@@ -275,25 +275,67 @@ class Settings(BaseSettings):
     # "super_admin" IS a real row in the `users` table now -- exactly one,
     # bootstrapped by `alembic/versions/0002_bootstrap_root_admin.py` the
     # first time `alembic upgrade head` runs against a production database
-    # (see that file's module docstring for the full rationale). Only the
-    # IDENTITY (username/display name) is hardcoded/configured here; the
-    # PASSWORD is never read from an environment variable at runtime --
-    # it's a normal Argon2id hash in `password_hash`, just like every other
-    # account, so it can be rotated (self-service change-password, or an
-    # Admin-issued reset) and every login/rotation goes through the exact
-    # same audited code path (services/auth_service.py -> login()/
-    # update_password(), services/user_service.py -> reset_user_password())
-    # as any other user. There is deliberately no SUPER_ADMIN_PASSWORD
-    # setting anymore -- see security.py's module docstring for what
-    # replaced it.
+    # (see that file's module docstring for the full rationale). Neither
+    # value below is hardcoded/frozen identity anymore -- both are just the
+    # INITIAL seed used the one time the bootstrap migration inserts the
+    # row. The PASSWORD is never read from an environment variable at
+    # runtime -- it's a normal Argon2id hash in `password_hash`, just like
+    # every other account, so it can be rotated (self-service
+    # change-password, or an Admin-issued reset) and every login/rotation
+    # goes through the exact same audited code path
+    # (services/auth_service.py -> login()/update_password(),
+    # services/user_service.py -> reset_user_password()) as any other
+    # user. There is deliberately no SUPER_ADMIN_PASSWORD setting anymore
+    # -- see security.py's module docstring for what replaced it.
+    #
+    # SECURITY CHANGE: username/name/email used to be the one part of this
+    # identity that truly never changed after bootstrap -- there was no
+    # code path that could touch them. They're now rotatable too, the same
+    # self-service way the password already was, via
+    # PATCH /auth/me (services/auth_service.py -> update_identity()) --
+    # re-confirming the CURRENT password, same as update_password(). This
+    # is what finally makes the bootstrap-assigned "{username}@local"
+    # placeholder email (see 0002_bootstrap_root_admin.py) replaceable
+    # with a real, reachable mailbox -- which POST /auth/forgot-password
+    # actually needs somewhere valid to send to.
     #
     # These two values are read directly by the bootstrap migration too
     # (via `os.environ`, NOT by importing this settings object -- see that
     # migration file's comment for why), so set them identically in your
     # `.env` if you want the migration and the running app to agree on the
-    # root account's username/display name.
+    # root account's INITIAL username/display name -- whatever the account
+    # is later rotated to in the database always wins over these at
+    # runtime, exactly like the password already does.
     SUPER_ADMIN_USERNAME: str = "superadmin"
     SUPER_ADMIN_NAME: str = "Super Admin"
+
+    # --- "Forgot password?" self-recovery -----------------------------------
+    # Powers POST /auth/forgot-password / POST /auth/reset-password (see
+    # services/auth_service.py's request_password_reset()/
+    # confirm_password_reset() and models.py's PasswordResetToken). Exists
+    # mainly so SUPER_ADMIN_ROLE -- the one account with no admin "above"
+    # it to reset a forgotten password for it -- has a real self-recovery
+    # path, but works for any account.
+    #
+    # How long a mailed reset link stays redeemable before it's treated as
+    # expired, same "deliberately short-lived" reasoning as
+    # security.py's _MFA_TOKEN_EXPIRY_MINUTES -- long enough for someone to
+    # receive and click an email, short enough that a link sitting
+    # unread/forwarded/leaked in an inbox doesn't stay a standing way into
+    # the account indefinitely.
+    PASSWORD_RESET_TOKEN_EXPIRY_MINUTES: int = 30
+
+    # The base URL request_password_reset() builds the mailed reset link
+    # from (e.g. "https://assets.corp.io" -> ".../reset-password?token=...").
+    # Deliberately its own setting rather than reusing CORS_ORIGINS' first
+    # entry -- CORS_ORIGINS is a list of origins the BACKEND trusts to call
+    # it, which isn't necessarily the one canonical address a person should
+    # click through to from their inbox (a deployment may trust several
+    # origins, e.g. a staging one, without wanting reset emails to ever
+    # point at it). No made-up production default, same reasoning as
+    # SMTP_FROM_EMAIL just below -- set this explicitly once a real
+    # public-facing URL exists.
+    FRONTEND_BASE_URL: str = "http://localhost:8080"
 
     # --- Email notifications (extension requests + overdue + due-soon) ----
     # This app sends exactly three kinds of email:

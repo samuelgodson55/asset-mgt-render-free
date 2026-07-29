@@ -479,6 +479,7 @@ class User(Base):
     checkouts = relationship("AssetCheckout", back_populates="user")
     converted_to_outsider = relationship("Outsider", foreign_keys=[converted_to_outsider_id])
     recovery_codes = relationship("RecoveryCode", back_populates="user", cascade="all, delete-orphan")
+    password_reset_tokens = relationship("PasswordResetToken", back_populates="user", cascade="all, delete-orphan")
 
 
 class Outsider(Base):
@@ -973,3 +974,49 @@ class RecoveryCode(Base):
     used_at = Column(DateTime(timezone=True), nullable=True)
 
     user = relationship("User", back_populates="recovery_codes")
+
+
+class PasswordResetToken(Base):
+    """
+    "Forgot password?" tokens -- see services/auth_service.py's
+    request_password_reset()/confirm_password_reset() for the full flow.
+
+    Exists specifically so the SUPER_ADMIN_ROLE account (the one identity
+    in the system with no admin "above" it who could otherwise reset a
+    locked-out password for it -- see services/user_service.py ->
+    reset_user_password()'s is_hidden_root_admin() guard) has a real
+    self-recovery path. Not restricted to that role at the model/service
+    layer, though -- any account can request one, same self-service
+    reasoning as update_password()/update_identity().
+
+    Same hashed, single-use, DB-backed shape as RecoveryCode above (see
+    that model's docstring) rather than a stateless JWT: a mailed link
+    needs to be explicitly revocable (a second request must invalidate an
+    earlier still-unused one) and needs a real "already used" record, and
+    a bare JWT can do neither of those without extra bookkeeping of its
+    own -- so this reuses the same hash_password()/verify_password() +
+    `used_at` timestamp pattern already established here instead of
+    inventing a second, JWT-based mechanism for the same kind of problem.
+
+      - `token_hash`  -- Argon2id hash of the plaintext token emailed to
+                         the account's registered address. The plaintext
+                         is never stored -- only ever available once, at
+                         the moment request_password_reset() generates it
+                         (see that function).
+      - `expires_at`  -- short-lived on purpose (see config.py's
+                         PASSWORD_RESET_TOKEN_EXPIRY_MINUTES) -- a mailed
+                         link sitting in an inbox indefinitely would
+                         otherwise stay a standing way into the account.
+      - `used_at`     -- NULL until consumed; stamped (not deleted) on
+                         use, same audit-trail reasoning as
+                         RecoveryCode.used_at.
+    """
+    __tablename__ = "password_reset_tokens"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    token_hash = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    used_at = Column(DateTime(timezone=True), nullable=True)
+
+    user = relationship("User", back_populates="password_reset_tokens")

@@ -22,7 +22,7 @@
 // string, and add `'my-thing': (el) => ...` to the relevant registry.
 // =============================================================================
 
-import { checkAccess, startIdleWatchdog, login, confirmMfaSetup, verifyMfa, redirectByUserRole, logout, getSession } from './auth.js';
+import { checkAccess, startIdleWatchdog, login, confirmMfaSetup, verifyMfa, redirectByUserRole, logout, getSession, requestPasswordReset, confirmPasswordReset } from './auth.js';
 import { qrcode } from './vendor/qrcode.js';
 import { closeModal, switchTab, toggleRoute, toggleAdhocExisting, toggleCapacityEdit, toggleNameEdit, toggleCategoryEdit, togglePriceEdit, changePage, setSearch, setPerPage, openRowDetailsFromElement, initSwipeNav, initModalBackdropDismiss, switchDashboardTab, initDashSwipeNav, initSearchClearButtons, downloadTextFile } from './ui.js';
 import { toggleTheme, initThemeToggle } from './theme.js';
@@ -54,7 +54,7 @@ import {
   openCustodyModal, processReturn, updateCustodySelection, toggleSelectAllCustody,
   processAllReturns, bulkProcessReturns, openBulkExtendModal, submitBulkExtendForm,
 } from './components/custody.js';
-import { openProfileModal, submitChangePasswordForm, ROLE_LABELS, openRegenerateRecoveryCodesModal, submitRegenerateRecoveryCodesForm, downloadRegeneratedRecoveryCodes, closeRecoveryCodesResultModal } from './components/profile.js';
+import { openProfileModal, submitChangePasswordForm, ROLE_LABELS, openRegenerateRecoveryCodesModal, submitRegenerateRecoveryCodesForm, downloadRegeneratedRecoveryCodes, closeRecoveryCodesResultModal, submitUpdateIdentityForm } from './components/profile.js';
 import { exportMyItems, exportCustodyItems, exportAllUsers, exportAllOutsiders, exportAssetsInventory, exportQuotation, exportQuoteDetail, exportMyQuoteDetail } from './components/exports.js';
 import {
   initQuotationPage, addAssetToOrder, updateOrderItemQuantity, removeOrderItem,
@@ -122,6 +122,13 @@ const SERVER_PAGE_CHANGERS = {
 // CLICK_ACTIONS' 'cancel-mfa' entry needs to reach cancelMfaFlow() too.
 let pendingMfaToken = null;
 
+// Holds the plaintext token read off the URL's ?reset_token=... query
+// param (see the DOMContentLoaded handler below) for the lifetime of this
+// page load only -- same "never anywhere more persistent than this tab,
+// right now" reasoning as pendingMfaToken above. Consumed by
+// reset-password-form's submit handler via confirmPasswordReset().
+let pendingResetToken = null;
+
 // Set the moment enrollment (or a later regeneration -- see profile.js)
 // hands back a fresh recovery-code batch; read by the two click actions
 // below and cleared the moment the person moves on.
@@ -129,7 +136,10 @@ let pendingRecoveryCodes = null;
 let pendingRedirectRole = null;
 
 function showAuthScreen(screenId) {
-  ['auth-screen', 'mfa-verify-screen', 'mfa-setup-screen', 'mfa-recovery-codes-screen'].forEach((id) => {
+  [
+    'auth-screen', 'mfa-verify-screen', 'mfa-setup-screen', 'mfa-recovery-codes-screen',
+    'forgot-password-screen', 'reset-password-screen',
+  ].forEach((id) => {
     const el = document.getElementById(id);
     if (el) el.classList.toggle('hidden', id !== screenId);
   });
@@ -283,6 +293,16 @@ const CLICK_ACTIONS = {
   // mfa_setup_token / mfa_pending_token (see the login-form handler
   // below) since neither is good for anything once abandoned.
   'cancel-mfa': () => cancelMfaFlow(),
+  // Login page only -- "Forgot password?" link swaps to the
+  // request-a-reset-link screen; its own "Back to sign in" button (and
+  // reset-password-screen's) both route back through the same handler.
+  'show-forgot-password': () => {
+    document.getElementById('forgot-password-message')?.classList.add('hidden');
+    document.getElementById('forgot-password-form')?.reset();
+    showAuthScreen('forgot-password-screen');
+    document.getElementById('forgot-password-identifier')?.focus();
+  },
+  'cancel-forgot-password': () => showAuthScreen('auth-screen'),
   // Login page 2FA screen only -- flips #mfa-verify-code between expecting
   // a 6-digit authenticator code and an XXXXX-XXXXX recovery code. See
   // setMfaVerifyMode() above.
@@ -629,7 +649,31 @@ function wireCsvDragAndDrop(fileInput, form) {
 // -----------------------------------------------------------------------------
 // PAGE BOOTSTRAP
 // -----------------------------------------------------------------------------
+// Runs once, before anything else -- if the URL carries ?reset_token=...
+// (the person just clicked the link from their "forgot password?" email),
+// jump straight to the reset-password screen instead of the normal login
+// form/checkAccess() flow. The token is immediately stripped from the
+// visible URL via history.replaceState() so it doesn't linger in the
+// address bar, browser history, or get re-sent if the tab is reloaded/
+// bookmarked -- same "sensitive, single-use, not meant to persist"
+// reasoning as pendingResetToken itself.
+function checkForPasswordResetLink() {
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get('reset_token');
+  if (!token) return false;
+  pendingResetToken = token;
+  params.delete('reset_token');
+  const cleanedSearch = params.toString();
+  const cleanedUrl = window.location.pathname + (cleanedSearch ? `?${cleanedSearch}` : '') + window.location.hash;
+  window.history.replaceState({}, document.title, cleanedUrl);
+  return true;
+}
+
 document.addEventListener('DOMContentLoaded', () => {
+  if (checkForPasswordResetLink()) {
+    showAuthScreen('reset-password-screen');
+    document.getElementById('reset-password-new')?.focus();
+  }
   checkAccess();
   startIdleWatchdog();
   wireDelegatedEvents();
@@ -731,6 +775,85 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  // --- Forgot password (index.html only) ---
+  // See auth.js's requestPasswordReset() -- always shows the SAME generic
+  // message back, whether or not the identifier matched a real account
+  // (backend/services/auth_service.py's request_password_reset() never
+  // reveals which). Never treat this as an error state either way -- it
+  // always succeeds from the caller's point of view.
+  const forgotPasswordForm = document.getElementById('forgot-password-form');
+  if (forgotPasswordForm) {
+    forgotPasswordForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const identifier = document.getElementById('forgot-password-identifier').value;
+      const msgEl = document.getElementById('forgot-password-message');
+      try {
+        const data = await requestPasswordReset(identifier);
+        if (msgEl) {
+          msgEl.textContent = data.message;
+          msgEl.classList.remove('hidden');
+        }
+        forgotPasswordForm.reset();
+      } catch (error) {
+        // A genuine network/server error -- NOT "no such account", which
+        // never reaches this branch (see requestPasswordReset()'s
+        // docstring). Safe to surface as-is.
+        if (msgEl) {
+          msgEl.textContent = error.message;
+          msgEl.classList.remove('hidden');
+        }
+      }
+    });
+  }
+
+  // --- Reset password (index.html only, reached via emailed link) ---
+  // `pendingResetToken` is read off the URL's ?reset_token= query param
+  // once, below (right after this form-wiring block) -- see auth.js's
+  // confirmPasswordReset() for how it's actually redeemed.
+  //
+  // NOTE: named forgotPasswordResetForm (not resetPasswordForm) even
+  // though its own element id IS "reset-password-form" -- there's already
+  // an UNRELATED `resetPasswordForm` further down in this same
+  // DOMContentLoaded scope, bound to the ADMIN "reset a user's password"
+  // modal (`#resetPasswordForm`, backend's UserPasswordResetRequest
+  // flow). Two `const`s with the same name in the same scope is a syntax
+  // error terser (the frontend build's minifier) rejects outright at
+  // build time -- see build-frontend/build.js -- so these two,
+  // similarly-named-but-unrelated forms need visibly different variable
+  // names here even though their DOM ids don't collide.
+  const forgotPasswordResetForm = document.getElementById('reset-password-form');
+  if (forgotPasswordResetForm) {
+    forgotPasswordResetForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const newPassword = document.getElementById('reset-password-new').value;
+      const confirmPassword = document.getElementById('reset-password-confirm').value;
+      const msgEl = document.getElementById('reset-password-message');
+      const setMsg = (text, isError) => {
+        if (!msgEl) return;
+        msgEl.textContent = text;
+        msgEl.classList.remove('hidden');
+        msgEl.classList.toggle('text-rose-400', isError);
+        msgEl.classList.toggle('text-emerald-400', !isError);
+      };
+      if (newPassword !== confirmPassword) {
+        setMsg('New password and confirmation do not match.', true);
+        return;
+      }
+      if (!pendingResetToken) {
+        setMsg('This password reset link is invalid or has expired. Request a new one.', true);
+        return;
+      }
+      try {
+        const data = await confirmPasswordReset(pendingResetToken, newPassword);
+        setMsg(data.message, false);
+        pendingResetToken = null;
+        forgotPasswordResetForm.reset();
+      } catch (error) {
+        setMsg(error.message, true);
+      }
+    });
+  }
+
   // --- Logout button (dashboards) ---
   const logoutBtn = document.getElementById('logout-btn');
   if (logoutBtn) {
@@ -757,6 +880,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const changePasswordForm = document.getElementById('changePasswordForm');
   if (changePasswordForm) changePasswordForm.addEventListener('submit', submitChangePasswordForm);
+  const updateIdentityForm = document.getElementById('updateIdentityForm');
+  if (updateIdentityForm) updateIdentityForm.addEventListener('submit', submitUpdateIdentityForm);
 
   const regenerateRecoveryCodesForm = document.getElementById('regenerateRecoveryCodesForm');
   if (regenerateRecoveryCodesForm) regenerateRecoveryCodesForm.addEventListener('submit', submitRegenerateRecoveryCodesForm);

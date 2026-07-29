@@ -1,7 +1,9 @@
 """
 schemas/auth.py
 ----------------
-Request bodies for POST /auth/login and POST /auth/update-password.
+Request bodies for POST /auth/login, POST /auth/update-password,
+POST /auth/forgot-password, POST /auth/reset-password, and
+PATCH /auth/me (identity rotation).
 """
 
 from typing import Optional
@@ -66,3 +68,73 @@ class PasswordUpdateRequest(BaseModel):
     @classmethod
     def _check_password_strength(cls, value: str) -> str:
         return validate_password_strength(value)
+
+
+class ForgotPasswordRequest(BaseModel):
+    """
+    POST /auth/forgot-password -- `identifier` accepts EITHER an email
+    address or a username, same flexible field as LoginRequest above (the
+    frontend's single "forgot password" box doesn't ask which kind of
+    value they're typing either). See
+    services/auth_service.py -> request_password_reset() for the actual
+    lookup/email-sending logic -- notably, this always returns the same
+    generic response whether or not a matching account exists, so this
+    schema intentionally carries no way to distinguish "found" from "not
+    found" for a caller probing for valid accounts.
+    """
+    identifier: str
+
+
+class ResetPasswordRequest(BaseModel):
+    """
+    POST /auth/reset-password -- completes a "forgot password?" recovery.
+    `token` is the plaintext value from the emailed reset link (see
+    services/auth_service.py -> confirm_password_reset(), which hashes it
+    and matches against models.PasswordResetToken.token_hash).
+    """
+    token: str
+    new_password: str
+
+    # Same policy as PasswordUpdateRequest.new_password above -- a
+    # recovery-issued password must meet the exact same complexity/length
+    # rules as any other newly-set password.
+    @field_validator("new_password")
+    @classmethod
+    def _check_password_strength(cls, value: str) -> str:
+        return validate_password_strength(value)
+
+
+class IdentityUpdateRequest(BaseModel):
+    """
+    Body for PATCH /auth/me -- lets the CURRENTLY LOGGED-IN account rotate
+    its own name/username/email, the same self-service shape
+    update_password() already established for the password itself. See
+    services/auth_service.py -> update_identity() for the full flow.
+
+    Distinct from schemas.users_schema.UserUpdateRequest (which an
+    Admin/Super Admin uses to edit a DIFFERENT account, and which
+    explicitly cannot reach the hidden root admin row -- see
+    services/user_service.py's is_hidden_root_admin() guard): this is the
+    self-only counterpart that row still needs, since nothing else can
+    ever touch it.
+
+    Every field is optional so a caller only sends the ones that actually
+    changed (same `exclude_unset` handling as UserUpdateRequest).
+    `current_password` is always required, regardless of which fields are
+    present -- re-confirming it before ANY identity change is what stops a
+    leaked/still-valid session cookie alone from being enough to quietly
+    take over an account's login details.
+    """
+    name: Optional[str] = None
+    username: Optional[str] = None
+    email: Optional[str] = None
+    current_password: str
+
+    # Same "a present-but-blank value would silently blank the field out"
+    # guard as UserUpdateRequest's identical validator.
+    @field_validator("name", "username", "email")
+    @classmethod
+    def _reject_blank(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and not value.strip():
+            raise ValueError("This field cannot be blank.")
+        return value.strip() if value is not None else value

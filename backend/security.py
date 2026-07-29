@@ -72,9 +72,13 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 #     services/user_service.py blocks `create_user()` from ever minting a
 #     second one; the bootstrap migration itself checks for an existing
 #     row before inserting).
-#   - Its username/name come from config.py's SUPER_ADMIN_USERNAME/
-#     SUPER_ADMIN_NAME (or the bootstrap migration's equivalent
-#     environment variables), not from anything a caller can choose.
+#   - Its username/name/email START from config.py's
+#     SUPER_ADMIN_USERNAME/SUPER_ADMIN_NAME (or the bootstrap migration's
+#     equivalent environment variables) the one time the row is
+#     bootstrapped -- but, like the password, are no longer permanently
+#     fixed after that: see services/auth_service.py's update_identity()
+#     (PATCH /auth/me), the same self-service, current-password-
+#     re-confirming rotation path the password already uses.
 #   - It can never be deleted, or edited via PATCH /users/{id} (see
 #     services/user_service.py's delete_user()/update_user() guards), and
 #     it's filtered out of the User Directory and Audit Trail everywhere
@@ -99,11 +103,17 @@ SUPER_ADMIN_ROLE = "super_admin"
 # without either one depending on the other.
 AUTH_EPOCH_SETTING_KEY = "auth_invalid_before"
 
-# The root row's `email` column, same synthetic-mailbox convention the old
-# super_admin_principal() used ("no real mailbox, just something readable
-# for audit-log operator= fields"). Used by services/audit_service.py to
-# recognize (and hide) this account's own audit-ledger entries in the UI.
-SUPER_ADMIN_EMAIL = f"{settings.SUPER_ADMIN_USERNAME}@local"
+# NOTE: there used to be a SUPER_ADMIN_EMAIL constant here, computed once
+# at import time as f"{settings.SUPER_ADMIN_USERNAME}@local" -- the
+# bootstrap migration's placeholder address (see
+# 0002_bootstrap_root_admin.py) -- and used by services/audit_service.py
+# to recognize (and hide) this account's own audit-ledger entries. Now
+# that email is a real, rotatable column (see update_identity() above),
+# a constant frozen at process-start would silently go stale the moment
+# the root account's email is ever changed -- newly-logged actions would
+# stop matching it and start leaking into the Audit Trail. audit_service.py
+# now looks the CURRENT email up live (a one-row query keyed on
+# role == SUPER_ADMIN_ROLE) instead of importing a fixed string from here.
 
 
 # ---------------------------------------------------------------------------
@@ -336,3 +346,27 @@ def normalize_recovery_code(code: str) -> str:
     """Recovery codes are generated uppercase; normalize input the same
     way before hashing/verifying so a lowercase paste still matches."""
     return (code or "").strip().upper()
+
+
+# ---------------------------------------------------------------------------
+# PASSWORD RESET ("forgot password?") TOKENS
+# ---------------------------------------------------------------------------
+# See models.PasswordResetToken's docstring for the full storage/lifecycle
+# rationale. Just generation here -- hashing/verifying a generated token
+# reuses hash_password()/verify_password() from above, exactly like a
+# recovery code, since nothing ever needs it back in plaintext once it's
+# emailed, only needs to check a guess against it.
+PASSWORD_RESET_TOKEN_BYTES = 32
+
+
+def generate_password_reset_token() -> str:
+    """
+    A high-entropy, URL-safe, single-use plaintext token for the mailed
+    "forgot password?" link (32 random bytes -> 256 bits of entropy,
+    `secrets.token_urlsafe` -- the standard library's own recommendation
+    for exactly this kind of security-sensitive, unguessable token). Only
+    ever returned once, at the moment request_password_reset()
+    (services/auth_service.py) generates it -- the database only ever
+    stores its hash (see models.PasswordResetToken.token_hash).
+    """
+    return secrets.token_urlsafe(PASSWORD_RESET_TOKEN_BYTES)

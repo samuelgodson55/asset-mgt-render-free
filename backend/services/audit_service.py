@@ -13,7 +13,27 @@ from sqlalchemy import desc
 
 import models
 import services.export_service as export_service
-from security import SUPER_ADMIN_EMAIL
+from security import SUPER_ADMIN_ROLE
+
+
+def _current_super_admin_email(db: Session) -> Optional[str]:
+    """
+    SECURITY CHANGE: this used to be a module-level SUPER_ADMIN_EMAIL
+    constant in security.py, computed ONCE at process start from
+    f"{settings.SUPER_ADMIN_USERNAME}@local". Now that the root account's
+    email is a real, rotatable column (see auth_service.py's
+    update_identity()), a value frozen at import time would silently go
+    stale the moment it's ever changed -- newly-written AuditLog rows
+    would stop matching it and start leaking into the UI-facing listings
+    below. This looks the CURRENT value up live instead -- one cheap,
+    indexed row lookup per request, always correct regardless of how many
+    times the address has been rotated since the process started.
+
+    Returns None if the root row somehow doesn't exist yet (e.g. a
+    database that hasn't run 0002_bootstrap_root_admin.py) -- callers
+    treat that the same as "no email to exclude" rather than raising.
+    """
+    return db.query(models.User.email).filter(models.User.role == SUPER_ADMIN_ROLE).scalar()
 
 # The audit ledger is the one dataset in this app guaranteed to grow
 # forever (it's an append-only log -- nothing is ever deleted from it), so
@@ -53,8 +73,9 @@ def get_audit_logs(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offset: 
     here (they have small, sane defaults) and `total` tells the caller how
     many pages exist so it can render Prev/Next controls correctly.
 
-    HIDDEN ROOT ADMIN: entries whose `operator` is the hardcoded root
-    admin's own synthetic email (SUPER_ADMIN_EMAIL) are excluded from this
+    HIDDEN ROOT ADMIN: entries whose `operator` matches the root admin's
+    CURRENT email (looked up live -- see _current_super_admin_email()
+    above, since that address is now rotatable) are excluded from this
     UI-facing listing -- "it's a secure door for the developer" means its
     actions shouldn't show up here even though a Super Admin/Admin/Manager
     otherwise now sees the entire ledger. The row is still written to
@@ -66,7 +87,10 @@ def get_audit_logs(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offset: 
     limit = max(1, min(limit, MAX_LIMIT))
     offset = max(0, offset)
 
-    query = db.query(models.AuditLog).filter(models.AuditLog.operator != SUPER_ADMIN_EMAIL)
+    query = db.query(models.AuditLog)
+    super_admin_email = _current_super_admin_email(db)
+    if super_admin_email:
+        query = query.filter(models.AuditLog.operator != super_admin_email)
 
     total = query.count()
     logs = query.order_by(desc(models.AuditLog.timestamp)).offset(offset).limit(limit).all()
@@ -93,7 +117,10 @@ def _filtered_audit_logs_query(db: Session, user: dict, start_date: Optional[dat
     still-unexecuted query, ordered newest-first, so each caller decides for
     itself whether to stream it (CSV) or materialize it in one shot (PDF).
     """
-    query = db.query(models.AuditLog).filter(models.AuditLog.operator != SUPER_ADMIN_EMAIL)
+    query = db.query(models.AuditLog)
+    super_admin_email = _current_super_admin_email(db)
+    if super_admin_email:
+        query = query.filter(models.AuditLog.operator != super_admin_email)
     # `start_date`/`end_date` are plain calendar dates picked from a date
     # input -- a person choosing "2026-07-10" means "that day, in the time
     # I'm looking at" (i.e. DISPLAY_TIMEZONE), not "that day in UTC". Since
