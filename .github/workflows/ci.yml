@@ -268,6 +268,21 @@ jobs:
         uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # BUG FIX: gitleaks-action's own auto-detection looks for a file
+          # literally named `gitleaks.toml` (NO leading dot) at the repo
+          # root -- a different convention than the bare `gitleaks` CLI
+          # (which defaults to `.gitleaks.toml`, dot-prefixed, and is what
+          # every other gitleaks doc/example assumes). This repo's config
+          # lives at `.gitleaks.toml` (the dot-prefixed, CLI-standard name
+          # -- keeping it consistent with how `gitleaks` is invoked
+          # anywhere else, e.g. a local pre-commit hook or `gitleaks git .`
+          # run by hand), so auto-detection silently never found it and the
+          # "infra-vm/terraform.tfvars.example" placeholder-PEM false
+          # positive kept failing CI even after that config's allowlist was
+          # added. Setting GITLEAKS_CONFIG explicitly is the documented,
+          # deterministic way to point gitleaks-action at a config file
+          # regardless of what naming convention its auto-detection expects.
+          GITLEAKS_CONFIG: .gitleaks.toml
 
   compose-drift-check:
     name: docker-compose.yml / docker-compose.vm.yml drift check

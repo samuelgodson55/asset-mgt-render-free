@@ -260,6 +260,122 @@ def _get_user_by_email(engine, email):
     return dict(row) if row else None
 
 
+def _insert_outsider(engine, **overrides):
+    from sqlalchemy import text as sa_text
+    fields = {
+        "name": "Test Outsider", "email": f"outsider-{uuid.uuid4().hex[:8]}@example.com",
+        "phone_number": None, "company": None, "is_deleted": False, "deleted_at": None,
+        "converted_to_user_id": None,
+    }
+    fields.update(overrides)
+    with engine.begin() as conn:
+        row = conn.execute(
+            sa_text(
+                "INSERT INTO outsiders (name, email, phone_number, company, is_deleted, deleted_at, "
+                "converted_to_user_id) VALUES (:name, :email, :phone_number, :company, :is_deleted, "
+                ":deleted_at, :converted_to_user_id) RETURNING id"
+            ),
+            fields,
+        ).mappings().first()
+    return row["id"]
+
+
+def _get_outsider(engine, outsider_id):
+    from sqlalchemy import text as sa_text
+    with engine.connect() as conn:
+        row = conn.execute(
+            sa_text("SELECT * FROM outsiders WHERE id = :id"), {"id": outsider_id},
+        ).mappings().first()
+    return dict(row) if row else None
+
+
+def _insert_asset_type(engine, **overrides):
+    from sqlalchemy import text as sa_text
+    fields = {
+        "name": f"Test Asset {uuid.uuid4().hex[:8]}", "total_quantity": 10, "available_quantity": 10,
+    }
+    fields.update(overrides)
+    with engine.begin() as conn:
+        row = conn.execute(
+            sa_text(
+                "INSERT INTO asset_types (name, total_quantity, available_quantity) "
+                "VALUES (:name, :total_quantity, :available_quantity) RETURNING id"
+            ),
+            fields,
+        ).mappings().first()
+    return row["id"]
+
+
+def _get_asset_type(engine, asset_id):
+    from sqlalchemy import text as sa_text
+    with engine.connect() as conn:
+        row = conn.execute(
+            sa_text("SELECT * FROM asset_types WHERE id = :id"), {"id": asset_id},
+        ).mappings().first()
+    return dict(row) if row else None
+
+
+def _insert_checkout(engine, **overrides):
+    from sqlalchemy import text as sa_text
+    fields = {
+        "asset_id": None, "user_id": None, "outsider_id": None, "quotation_id": None,
+        "quantity": 1, "quantity_returned": 0, "checkout_date": None, "due_date": None,
+        "returned_at": None, "status": "active", "is_outsourced": False,
+        "outsourced_item_name": None, "outsourced_unit_price": None, "outsourced_source": None,
+    }
+    fields.update(overrides)
+    cols = list(fields.keys())
+    with engine.begin() as conn:
+        row = conn.execute(
+            sa_text(
+                f"INSERT INTO asset_checkouts ({', '.join(cols)}) "
+                f"VALUES ({', '.join(':' + c for c in cols)}) RETURNING id"
+            ),
+            fields,
+        ).mappings().first()
+    return row["id"]
+
+
+def _get_checkout(engine, checkout_id):
+    from sqlalchemy import text as sa_text
+    with engine.connect() as conn:
+        row = conn.execute(
+            sa_text("SELECT * FROM asset_checkouts WHERE id = :id"), {"id": checkout_id},
+        ).mappings().first()
+    return dict(row) if row else None
+
+
+def _insert_quotation(engine, **overrides):
+    from sqlalchemy import text as sa_text
+    fields = {
+        "user_id": None, "created_at": datetime.datetime(2026, 1, 1),
+        "updated_at": datetime.datetime(2026, 1, 1), "status": "draft",
+        "reference_number": None, "submitted_at": None,
+        "assigned_to_id": None, "assigned_outsider_id": None, "notes": None, "approved_at": None,
+        "approved_by_id": None, "fulfilled_at": None, "fulfilled_by_id": None, "discount_percent": 0,
+    }
+    fields.update(overrides)
+    cols = list(fields.keys())
+    with engine.begin() as conn:
+        row = conn.execute(
+            sa_text(
+                f"INSERT INTO quotations ({', '.join(cols)}) "
+                f"VALUES ({', '.join(':' + c for c in cols)}) RETURNING id"
+            ),
+            fields,
+        ).mappings().first()
+    return row["id"]
+
+
+def _get_quotation(engine, quotation_id):
+    from sqlalchemy import text as sa_text
+    with engine.connect() as conn:
+        row = conn.execute(
+            sa_text("SELECT * FROM quotations WHERE id = :id"), {"id": quotation_id},
+        ).mappings().first()
+    return dict(row) if row else None
+
+
 # ---------------------------------------------------------------------------
 # 1. Filename-collision avoidance
 # ---------------------------------------------------------------------------
@@ -677,7 +793,9 @@ def test_reconcile_leaves_restore_only_accounts_untouched(backup_env):
     )
 
     result = backup_service._reconcile_post_restore_credentials(engine, pre_restore_users=[])
-    assert result == {"users_reconciled": 0, "users_reinserted": 0, "super_admins_reset": 0}
+    assert result == {
+        "users_reconciled": 0, "users_reinserted": 0, "super_admins_reset": 0, "preserved_user_ids": [],
+    }
 
     row = _get_user_by_email(engine, "restore.only@example.com")
     assert row["id"] == restore_only_id
@@ -797,3 +915,301 @@ def test_reconcile_super_admin_reset_applies_to_both_duplicate_and_reinserted(ba
             sa_text("SELECT COUNT(*) FROM recovery_codes WHERE user_id = :uid"), {"uid": dup_id},
         ).scalar()
     assert remaining_codes == 0
+
+
+# ---------------------------------------------------------------------------
+# 6. Outsider reconciliation (duplicates / reinserted / restore-only)
+# ---------------------------------------------------------------------------
+
+
+def test_reconcile_outsiders_duplicate_uses_pre_restore_profile(backup_env):
+    """Case 1: an outsider present in both is matched by id (outsiders
+    have no unique email/phone -- see models.Outsider) and its entire
+    pre-restore (current) profile wins."""
+    import services.backup_service as backup_service
+
+    engine = backup_env["engine"]
+    outsider_id = _insert_outsider(engine, name="Old Name", company="Old Co")
+
+    pre_restore_outsiders = [{
+        "id": outsider_id, "name": "New Current Name", "email": "current@example.com",
+        "phone_number": "555-0199", "company": "New Co", "is_deleted": False,
+        "deleted_at": None, "converted_to_user_id": None,
+    }]
+
+    result = backup_service._reconcile_post_restore_outsiders(engine, pre_restore_outsiders)
+    assert result["outsiders_reconciled"] == 1
+    assert result["outsiders_reinserted"] == 0
+    assert result["preserved_outsider_ids"] == [outsider_id]
+
+    row = _get_outsider(engine, outsider_id)
+    assert row["name"] == "New Current Name"
+    assert row["company"] == "New Co"
+
+
+def test_reconcile_outsiders_reinserts_missing_outsider_preserving_id(backup_env):
+    """Case 2: an outsider added after the backup was taken (no row in
+    restored data) is re-inserted wholesale, id preserved when free."""
+    import services.backup_service as backup_service
+
+    engine = backup_env["engine"]
+    pre_restore_outsiders = [{
+        "id": 88888, "name": "Added After Backup", "email": "added.after@example.com",
+        "phone_number": None, "company": "Acme", "is_deleted": False,
+        "deleted_at": None, "converted_to_user_id": None,
+    }]
+
+    result = backup_service._reconcile_post_restore_outsiders(engine, pre_restore_outsiders)
+    assert result["outsiders_reinserted"] == 1
+    assert result["preserved_outsider_ids"] == [88888]
+
+    row = _get_outsider(engine, 88888)
+    assert row is not None
+    assert row["name"] == "Added After Backup"
+
+
+def test_reconcile_outsiders_leaves_restore_only_untouched(backup_env):
+    """Case 3: an outsider present only in the restored backup is left
+    completely as-is."""
+    import services.backup_service as backup_service
+
+    engine = backup_env["engine"]
+    restore_only_id = _insert_outsider(engine, name="Restore Only")
+
+    result = backup_service._reconcile_post_restore_outsiders(engine, pre_restore_outsiders=[])
+    assert result == {"outsiders_reconciled": 0, "outsiders_reinserted": 0, "preserved_outsider_ids": []}
+
+    row = _get_outsider(engine, restore_only_id)
+    assert row["name"] == "Restore Only"
+
+
+# ---------------------------------------------------------------------------
+# 7. Asset-activity reconciliation: checkouts and quotations
+# ---------------------------------------------------------------------------
+
+
+def test_reconcile_checkout_duplicate_uses_pre_restore_state_and_recalculates_stock(backup_env):
+    """Case 1: a checkout that exists both pre- and post-restore for a
+    PRESERVED user has its mutable fields (status/quantity_returned/
+    returned_at) updated to the pre-restore (current) value -- e.g. a
+    return the user already made must not un-happen -- and the asset's
+    cached available_quantity is recalculated afterward."""
+    import services.backup_service as backup_service
+
+    engine = backup_env["engine"]
+    user_id = _insert_user(engine, email="checkout.owner@example.com")
+    asset_id = _insert_asset_type(engine, total_quantity=5, available_quantity=3)
+    checkout_id = _insert_checkout(
+        engine, asset_id=asset_id, user_id=user_id, quantity=2, quantity_returned=0, status="active",
+    )
+
+    # Pre-restore (current) reality: the user already returned the item.
+    pre_restore_checkouts = [{
+        "id": checkout_id, "asset_id": asset_id, "user_id": user_id, "outsider_id": None,
+        "quotation_id": None, "quantity": 2, "quantity_returned": 2,
+        "checkout_date": None, "due_date": None, "returned_at": datetime.datetime(2026, 1, 10),
+        "status": "returned", "is_outsourced": False, "outsourced_item_name": None,
+        "outsourced_unit_price": None, "outsourced_source": None,
+    }]
+
+    result = backup_service._reconcile_post_restore_asset_activity(
+        engine, pre_restore_checkouts, [], [], [], [user_id], [],
+    )
+    assert result["checkouts_reconciled"] == 1
+    assert result["checkouts_reinserted"] == 0
+
+    row = _get_checkout(engine, checkout_id)
+    assert row["status"] == "returned"
+    assert row["quantity_returned"] == 2
+    assert row["asset_id"] == asset_id  # identity field untouched
+
+    # Nothing is active for this asset anymore -> available_quantity back
+    # up to total_quantity (recalculated, not left at the stale backup value).
+    asset_row = _get_asset_type(engine, asset_id)
+    assert asset_row["available_quantity"] == 5
+
+
+def test_reconcile_reinserts_missing_checkout_for_preserved_user(backup_env):
+    """Case 2: a checkout made by a preserved user AFTER the backup was
+    taken (no row in restored data at all) is re-inserted, and the
+    asset's stock is recalculated to reflect it."""
+    import services.backup_service as backup_service
+
+    engine = backup_env["engine"]
+    user_id = _insert_user(engine, email="new.checkout.owner@example.com")
+    asset_id = _insert_asset_type(engine, total_quantity=5, available_quantity=5)
+
+    pre_restore_checkouts = [{
+        "id": 12345, "asset_id": asset_id, "user_id": user_id, "outsider_id": None,
+        "quotation_id": None, "quantity": 2, "quantity_returned": 0,
+        "checkout_date": datetime.datetime(2026, 1, 15), "due_date": None, "returned_at": None,
+        "status": "active", "is_outsourced": False, "outsourced_item_name": None,
+        "outsourced_unit_price": None, "outsourced_source": None,
+    }]
+
+    result = backup_service._reconcile_post_restore_asset_activity(
+        engine, pre_restore_checkouts, [], [], [], [user_id], [],
+    )
+    assert result["checkouts_reinserted"] == 1
+
+    row = _get_checkout(engine, 12345)
+    assert row is not None
+    assert row["quantity"] == 2
+    assert row["status"] == "active"
+
+    asset_row = _get_asset_type(engine, asset_id)
+    assert asset_row["available_quantity"] == 3  # 5 - 2 outbound
+
+
+def test_reconcile_skips_checkout_whose_asset_no_longer_exists(backup_env):
+    """A missing-from-restore checkout referencing an asset that itself
+    doesn't exist post-restore must be skipped, never force-inserted
+    with a dangling FK."""
+    import services.backup_service as backup_service
+
+    engine = backup_env["engine"]
+    user_id = _insert_user(engine, email="orphan.checkout.owner@example.com")
+
+    pre_restore_checkouts = [{
+        "id": 54321, "asset_id": 999999, "user_id": user_id, "outsider_id": None,
+        "quotation_id": None, "quantity": 1, "quantity_returned": 0,
+        "checkout_date": None, "due_date": None, "returned_at": None,
+        "status": "active", "is_outsourced": False, "outsourced_item_name": None,
+        "outsourced_unit_price": None, "outsourced_source": None,
+    }]
+
+    result = backup_service._reconcile_post_restore_asset_activity(
+        engine, pre_restore_checkouts, [], [], [], [user_id], [],
+    )
+    assert result["checkouts_reinserted"] == 0
+    assert result["checkouts_skipped"] == 1
+    assert any("999999" in d for d in result["skipped_details"])
+    assert _get_checkout(engine, 54321) is None
+
+
+def test_reconcile_ignores_checkout_for_non_preserved_user(backup_env):
+    """A checkout whose owner is NOT in preserved_user_ids (e.g. a
+    backup-only account) is left exactly as the restored backup has it
+    -- not reconciled, not reinserted."""
+    import services.backup_service as backup_service
+
+    engine = backup_env["engine"]
+    backup_only_user_id = _insert_user(engine, email="backup.only@example.com")
+    asset_id = _insert_asset_type(engine)
+    checkout_id = _insert_checkout(engine, asset_id=asset_id, user_id=backup_only_user_id, status="active")
+
+    pre_restore_checkouts = [{
+        "id": checkout_id, "asset_id": asset_id, "user_id": backup_only_user_id, "outsider_id": None,
+        "quotation_id": None, "quantity": 1, "quantity_returned": 1,
+        "checkout_date": None, "due_date": None, "returned_at": None,
+        "status": "returned", "is_outsourced": False, "outsourced_item_name": None,
+        "outsourced_unit_price": None, "outsourced_source": None,
+    }]
+
+    # backup_only_user_id is deliberately NOT in preserved_user_ids.
+    result = backup_service._reconcile_post_restore_asset_activity(
+        engine, pre_restore_checkouts, [], [], [], [], [],
+    )
+    assert result["checkouts_reconciled"] == 0
+    assert result["checkouts_reinserted"] == 0
+
+    row = _get_checkout(engine, checkout_id)
+    assert row["status"] == "active"  # restored backup's own value, untouched
+
+
+def test_reconcile_quotation_duplicate_replaces_items_wholesale(backup_env):
+    """Case 1 for quotations: a preserved user's quote gets its mutable
+    fields (status/notes/discount) updated to the current value, and its
+    item list wholesale-replaced with the pre-restore (current) cart
+    contents."""
+    import services.backup_service as backup_service
+    from sqlalchemy import text as sa_text
+
+    engine = backup_env["engine"]
+    user_id = _insert_user(engine, email="quote.owner@example.com")
+    asset_id_1 = _insert_asset_type(engine)
+    asset_id_2 = _insert_asset_type(engine)
+    quotation_id = _insert_quotation(engine, user_id=user_id, status="draft", notes="old note")
+    with engine.begin() as conn:
+        conn.execute(
+            sa_text(
+                "INSERT INTO quotation_items (quotation_id, asset_id, quantity, start_date, due_date, added_at) "
+                "VALUES (:qid, :aid, 1, '2026-01-01', '2026-01-05', '2026-01-01')"
+            ),
+            {"qid": quotation_id, "aid": asset_id_1},
+        )
+
+    pre_restore_quotations = [{
+        "id": quotation_id, "user_id": user_id, "created_at": datetime.datetime(2026, 1, 1),
+        "updated_at": datetime.datetime(2026, 1, 20), "status": "submitted",
+        "reference_number": "QT-000001", "submitted_at": datetime.datetime(2026, 1, 20),
+        "assigned_to_id": None, "assigned_outsider_id": None, "notes": "current note",
+        "approved_at": None, "approved_by_id": None, "fulfilled_at": None, "fulfilled_by_id": None,
+        "discount_percent": 10,
+    }]
+    pre_restore_items = [{
+        "id": 1, "quotation_id": quotation_id, "asset_id": asset_id_2, "quantity": 3,
+        "start_date": datetime.date(2026, 1, 2), "due_date": datetime.date(2026, 1, 6),
+        "added_at": datetime.datetime(2026, 1, 2),
+    }]
+
+    result = backup_service._reconcile_post_restore_asset_activity(
+        engine, [], pre_restore_quotations, pre_restore_items, [], [user_id], [],
+    )
+    assert result["quotations_reconciled"] == 1
+
+    row = _get_quotation(engine, quotation_id)
+    assert row["status"] == "submitted"
+    assert row["notes"] == "current note"
+    assert float(row["discount_percent"]) == 10
+
+    with engine.connect() as conn:
+        items = conn.execute(
+            sa_text("SELECT asset_id, quantity FROM quotation_items WHERE quotation_id = :qid"),
+            {"qid": quotation_id},
+        ).mappings().all()
+    assert len(items) == 1
+    assert items[0]["asset_id"] == asset_id_2
+    assert items[0]["quantity"] == 3
+
+
+def test_reconcile_reinserts_missing_quotation_with_items(backup_env):
+    """Case 2 for quotations: a quote submitted by a preserved user after
+    the backup, absent from the restored data entirely, is re-inserted
+    with its line items."""
+    import services.backup_service as backup_service
+    from sqlalchemy import text as sa_text
+
+    engine = backup_env["engine"]
+    user_id = _insert_user(engine, email="new.quote.owner@example.com")
+    asset_id = _insert_asset_type(engine)
+
+    pre_restore_quotations = [{
+        "id": 77001, "user_id": user_id, "created_at": datetime.datetime(2026, 1, 25),
+        "updated_at": datetime.datetime(2026, 1, 25), "status": "draft",
+        "reference_number": None, "submitted_at": None, "assigned_to_id": None,
+        "assigned_outsider_id": None, "notes": None, "approved_at": None, "approved_by_id": None,
+        "fulfilled_at": None, "fulfilled_by_id": None, "discount_percent": 0,
+    }]
+    pre_restore_items = [{
+        "id": 501, "quotation_id": 77001, "asset_id": asset_id, "quantity": 4,
+        "start_date": datetime.date(2026, 1, 25), "due_date": datetime.date(2026, 1, 30),
+        "added_at": datetime.datetime(2026, 1, 25),
+    }]
+
+    result = backup_service._reconcile_post_restore_asset_activity(
+        engine, [], pre_restore_quotations, pre_restore_items, [], [user_id], [],
+    )
+    assert result["quotations_reinserted"] == 1
+
+    row = _get_quotation(engine, 77001)
+    assert row is not None
+    assert row["user_id"] == user_id
+
+    with engine.connect() as conn:
+        items = conn.execute(
+            sa_text("SELECT asset_id, quantity FROM quotation_items WHERE quotation_id = :qid"),
+            {"qid": 77001},
+        ).mappings().all()
+    assert len(items) == 1
+    assert items[0]["quantity"] == 4

@@ -321,17 +321,53 @@ export async function confirmRestore() {
     // see it happened, same as the existing MFA-reset note below.
     const reinsertedCount = restoreResult && restoreResult.credential_reconciliation
       ? (restoreResult.credential_reconciliation.users_reinserted || 0) : 0;
+    // Same continuity guarantee, extended to ad-hoc (no-login) profiles
+    // and to the actual checkouts/quotations those and real accounts
+    // own -- see backend/services/backup_service.py's
+    // _reconcile_post_restore_outsiders()/
+    // _reconcile_post_restore_asset_activity() for what "reconciled" vs
+    // "reinserted" vs "skipped" mean here.
+    const outsiderRecon = restoreResult && restoreResult.outsider_reconciliation;
+    const activityRecon = restoreResult && restoreResult.asset_activity_reconciliation;
+    const outsidersReinserted = outsiderRecon ? (outsiderRecon.outsiders_reinserted || 0) : 0;
+    const checkoutsPreserved = activityRecon
+      ? (activityRecon.checkouts_reconciled || 0) + (activityRecon.checkouts_reinserted || 0) : 0;
+    const quotationsPreserved = activityRecon
+      ? (activityRecon.quotations_reconciled || 0) + (activityRecon.quotations_reinserted || 0) : 0;
+    const skippedCount = activityRecon
+      ? (activityRecon.checkouts_skipped || 0) + (activityRecon.quotations_skipped || 0) : 0;
     const mfaNote = resetCount > 0
       ? ' Your password still works, but you\'ll need to set up two-factor authentication again after logging back in.'
       : '';
     const reinsertedNote = reinsertedCount > 0
       ? ` ${reinsertedCount} account(s) created since the backup was taken ${reinsertedCount === 1 ? 'was' : 'were'} restored along with their current password.`
       : '';
+    const outsidersNote = outsidersReinserted > 0
+      ? ` ${outsidersReinserted} ad-hoc profile(s) added since the backup was taken ${outsidersReinserted === 1 ? 'was' : 'were'} also restored.`
+      : '';
+    const activityNote = (checkoutsPreserved > 0 || quotationsPreserved > 0)
+      ? ` Current checkout/quotation activity for preserved accounts was kept up to date `
+        + `(${checkoutsPreserved} checkout(s), ${quotationsPreserved} quotation(s)).`
+      : '';
+    // Deliberately loud, not buried -- a skipped record means this
+    // restore could NOT safely carry something forward (e.g. an asset it
+    // referenced no longer exists post-restore) without risking a
+    // corrupted/dangling record, so it was left out rather than forced.
+    // See that audit-log entry (RESTORE_ASSET_ACTIVITY_RECONCILIATION)
+    // for exactly which record(s) and why.
+    const skippedNote = skippedCount > 0
+      ? ` NOTE: ${skippedCount} checkout/quotation record(s) could not be safely carried forward `
+        + `(a referenced asset or quote no longer exists post-restore) and were skipped -- see the `
+        + `Audit Trail for details.`
+      : '';
     alert(
       'Restore complete. The database has been replaced with the chosen backup (a safety backup of the prior '
       + 'state was taken automatically first). For security, everyone is being logged out now, including you.'
       + mfaNote
       + reinsertedNote
+      + outsidersNote
+      + activityNote
+      + skippedNote
     );
     pendingRestore = null;
     await logout();
