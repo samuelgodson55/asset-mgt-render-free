@@ -649,7 +649,17 @@ not you ever push an image).
    | `BACKUP_GDRIVE_OAUTH_CLIENT_ID` / `BACKUP_GDRIVE_OAUTH_CLIENT_SECRET` / `BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN` | per-environment | Optional — required together if `BACKUP_GDRIVE_ENABLED=true` (see the Variables list below). Produced by running `backend/scripts/gdrive_oauth_setup.py` **once, on your own machine, not in CI** — see [POST_DEPLOYMENT.md](POST_DEPLOYMENT.md). |
    | `BACKUP_GDRIVE_FOLDER_ID` | per-environment | Optional — the destination Drive folder's ID (from its URL), required alongside the three secrets above. |
    | `ALERT_EMAIL_ADDRESS` | per-environment | Optional — leave unset to skip creating any alerting resources (no cost, no action group). Set it to wire up the three Azure Monitor scheduled query alerts (backend error-rate spike, `/readyz` failing, daily backup missing) from `infra/main.bicep` to that address — see [SRE_STRATEGY.md](SRE_STRATEGY.md) section 2. **Leave this unset on a brand-new environment's first-ever `infra-deploy.yml` run.** The three alert rules query the `ContainerAppConsoleLogs_CL` table, which Azure only creates once a log line has actually been ingested — on a fresh Log Analytics workspace it doesn't exist yet, and the deployment fails with `Failed to resolve table or column expression named 'ContainerAppConsoleLogs_CL'` if you try to create the rules first. Deploy once with this unset, let `backend`/`frontend` run for a few minutes (or serve one request), then set this secret and re-run `infra-deploy.yml` for the same environment to add the alert rules on top of the already-running infra. |
-   | `OTEL_EXPORTER_OTLP_HEADERS` | per-environment | Optional — only used if `OTEL_ENABLED=true` (see the Variables table below). The one OTel setting kept as a Secret rather than a Variable, since it commonly carries a collector API key (`Authorization=Bearer <token>`-style header). See README.md's "Distributed Tracing" section. |
+   | `OTEL_EXPORTER_OTLP_HEADERS` | per-environment | Optional — only used if `OTEL_ENABLED=true` (see the Variables table below). The one OTel setting kept as a Secret rather than a Variable, since it commonly carries a collector API key (`Authorization=Bearer <token>`-style header). See README.md's "Distributed Tracing" section. | 
+   Where does otel_exporter_otlp_header come from?
+   
+   It depends entirely on which OTLP-compatible backend you're sending traces to — this only matters if you're using the generic OTLP route (self-hosted collector, Grafana Cloud, Honeycomb, etc.) rather than otelAzureMonitorEnabled. You get the actual key/value from that vendor's dashboard:
+   Honeycomb → x-honeycomb-team=<your API key> (from Honeycomb's Team Settings → API Keys)
+    Grafana Cloud OTLP → typically Authorization=Basic <base64(instanceID:apiToken)> (from your Grafana Cloud stack's "OTLP" connection page)
+    Self-hosted otel-collector → only needed if you've configured that collector to require an API key/bearer token itself — many self-hosted setups on a private network skip auth entirely, in which case leave this empty.
+    Any other OTLP SaaS vendor → check their docs for "OTLP HTTP headers" or "OTLP authentication."
+    If you don't have one of these
+
+Leave otelExporterOtlpHeaders (and otelExporterOtlpEndpoint) empty and use otelAzureMonitorEnabled=true instead — that path needs no external vendor, no manually-obtained credential, and Azure provisions the App Insights connection string for you automatically, as covered above.
 
    Also set these repo/environment-level **Variables** (Settings → Secrets
    and variables → Actions → **Variables** tab, not Secrets — none of
