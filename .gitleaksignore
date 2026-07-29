@@ -1,0 +1,22 @@
+# .gitleaksignore
+# -----------------------------------------------------------------------------
+# Baseline of known-safe findings, keyed by Gitleaks fingerprint
+# (commit:file:rule:line). Read automatically by gitleaks/gitleaks-action and
+# by the bare `gitleaks` CLI -- no extra flag needed.
+#
+# Why this file exists: `.gitleaks.toml`'s path-based allowlist covers
+# `infra-vm/terraform.tfvars.example` as it exists in the *current* tree, but
+# `fetch-depth: 0` in ci.yml makes Gitleaks walk the *entire* commit history
+# (see ci.yml's "Gitleaks secret scan" job). Commit d2d18d4 predates that
+# allowlist / the file's current name-or-shape, so the path regex doesn't
+# retroactively match it there, and the placeholder `cloudflare_origin_cert_key`
+# PEM block (never a real key -- see .gitleaks.toml's own header comment for
+# the full story) keeps tripping the generic "private-key" rule on every scan.
+# Ignoring the exact historical fingerprint below is the standard way to
+# permanently clear a confirmed-safe historical finding without rewriting
+# repo history (which would break every existing clone/fork).
+#
+# If Gitleaks ever reports a *different* fingerprint for this same file/line
+# (e.g. because the commit hash changes after a history rewrite), add the new
+# fingerprint here rather than editing the old line.
+d2d18d45633883499bb5c825e6b8766d1f6e528b:infra-vm/terraform.tfvars.example:private-key:44

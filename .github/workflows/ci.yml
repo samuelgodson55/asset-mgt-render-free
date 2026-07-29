@@ -261,9 +261,24 @@ jobs:
     name: Gitleaks secret scan
     runs-on: ubuntu-latest
     steps:
+      # SCOPE CHANGE: was `fetch-depth: 0` (full history, every commit ever
+      # pushed). gitleaks-action has no env var to pass gitleaks' own
+      # `--log-opts` (which is how you'd scope a *full* clone to a commit
+      # range) -- it just runs `gitleaks detect` against whatever commits
+      # actually exist in the local checkout. So the actual lever here is
+      # the checkout depth itself: a shallow clone means there IS no older
+      # history for Gitleaks to walk, full stop. 50 covers this repo's
+      # normal push/PR batch size with room to spare; bump it if a single
+      # push ever legitimately contains more than 50 commits.
+      #
+      # Trade-off: a genuinely leaked secret sitting in a commit older than
+      # the last 50 will no longer be caught by this job. That's the
+      # intentional point of "recent commits only" -- if you need full-repo
+      # coverage occasionally (e.g. before a fork/handoff), run
+      # `gitleaks git .` locally with a full clone instead.
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          fetch-depth: 50
       - name: Gitleaks
         uses: gitleaks/gitleaks-action@v3
         env:
