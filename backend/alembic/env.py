@@ -82,8 +82,39 @@ config.set_main_option("sqlalchemy.url", db_settings.DATABASE_URL.replace("%", "
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
+#
+# BUG FIX: `logging.config.fileConfig()` defaults to
+# `disable_existing_loggers=True`. That flag doesn't just configure the
+# loggers listed in alembic.ini's [loggers] section (root/sqlalchemy/
+# alembic) -- it walks every logger already registered in
+# `logging.Logger.manager.loggerDict` at the time this runs and sets
+# `.disabled = True` on every ONE OF THEM that isn't in that ini file.
+# `Logger.handle()` checks `self.disabled` before `callHandlers()`, so a
+# disabled logger drops every record before any handler (including
+# pytest's `caplog`) ever sees it, no matter what level the handler is
+# listening at.
+#
+# `restore_backup()` (services/backup_service.py) calls
+# `alembic.command.upgrade()`/`command.stamp()` *in-process* (not via a
+# subprocess) as part of post-restore schema reconciliation, which runs
+# this env.py -- and therefore this fileConfig() call -- inside the same
+# Python interpreter as the rest of the test suite. By the time that
+# happens, application modules like main.py and telemetry.py have
+# already done `logging.getLogger(__name__)` at import time, so this call
+# was silently disabling the "main" and "telemetry" loggers for the rest
+# of that pytest session. Any later test asserting against
+# `caplog.records` for those loggers (e.g.
+# test_error_handling.py::test_unhandled_exception_is_logged_with_traceback,
+# test_telemetry.py::test_setup_tracing_warns_with_no_exporter_configured)
+# would then see zero records and fail -- but only when it happened to
+# run in the same process *after* a test that exercises restore_backup(),
+# which is exactly the "passes alone, fails combined" symptom this fixed.
+#
+# Fix: `disable_existing_loggers=False` -- this file only needs to ADD/
+# configure the loggers alembic.ini defines; it has no business silencing
+# loggers that belong to the rest of the application.
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # Point Alembic at our actual models' metadata so `alembic revision
 # --autogenerate` can diff the live database against models.py and generate
