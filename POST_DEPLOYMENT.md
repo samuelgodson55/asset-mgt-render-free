@@ -251,7 +251,7 @@ keep declaring it — no repeated manual step.
    [whatsmydns.net](https://www.whatsmydns.net/)) confirms once it's live
    globally.
 
-3. **Bind the domain with a free managed certificate** (once records have
+3. **Register & Bind the domain with a free managed certificate** (once records have
    propagated):
 
    ```bash
@@ -262,6 +262,14 @@ keep declaring it — no repeated manual step.
      --environment <your Container Apps environment name> \
      --validation-method CNAME
    ```
+   To get your container apps environment name, run
+   az containerapp env list --resource-group rg-snipeit-lite-prod --output table
+
+   Register
+   az containerapp hostname add --name frontend --resource-group rg-snipeit-lite-prod --hostname stack.multione.online
+   
+   Bind
+   az containerapp hostname bind --name frontend --resource-group rg-snipeit-lite-prod --hostname stack.multione.online --environment snipeit-lite-prod-env --validation-method CNAME
 
    This validates the TXT/CNAME records, provisions a free managed TLS
    certificate for the domain, and binds it to `frontend` — takes a few

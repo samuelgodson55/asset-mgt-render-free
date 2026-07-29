@@ -20,7 +20,7 @@ os_disk_size_gb   = 30
 data_disk_size_gb = 32
 
 admin_username = "azureuser"
-ssh_public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... snipeit-lite-vm-deploy"
+ssh_public_key = "ssh-ed25519 XXXXXX... snipeit-lite-vm-deploy"
 # Leave this EMPTY (the default) -- no inbound port 22 on the NSG at all.
 # Reached instead via the Cloudflare Tunnel (below). Only set this to your
 # own IP as a temporary break-glass measure -- see DEPLOYMENT_VM.md's
