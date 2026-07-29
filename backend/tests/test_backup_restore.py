@@ -1,0 +1,799 @@
+"""
+tests/test_backup_restore.py
+------------------------------
+Real-service tests for services/backup_service.py -- the one module in
+this app that fundamentally can't be exercised against conftest.py's
+throwaway SQLite database (see test_migrations.py's own module docstring
+for why: Alembic's SQLite dialect can't do everything this app's
+migrations need), and that also needs a REAL Redis for its distributed
+backup/restore locks (conftest.py's REDIS_URL is deliberately
+unreachable -- see its own comment). So, same convention as
+test_migrations.py and test_redbeat_scheduling.py: talk to real
+PostgreSQL/Redis instances, and skip (not fail) if neither is reachable,
+since CI always has both (see .github/workflows/ci.yml's service
+containers) but a contributor running `pytest backend/tests` locally
+without them shouldn't see a hard failure for it.
+
+WHAT'S COVERED HERE
+--------------------
+1. Filename-collision avoidance (create_backup() picking a disambiguated
+   name instead of silently overwriting an existing file with the same
+   second-resolution timestamp).
+2. The backup-vs-restore mutual-exclusion lock (a backup can't start
+   while a restore holds the lock, and vice versa).
+3. The auth-epoch forced-logout mechanism (a restore bumps
+   AUTH_EPOCH_SETTING_KEY so every existing session is invalidated).
+4. Partial-schema detection (_detect_schema_revision()) against a real,
+   partially-migrated database, and end-to-end schema reconciliation as
+   part of a real restore.
+5. The credential-reconciliation bug fix
+   (_reconcile_post_restore_credentials()): duplicates get the full
+   pre-restore profile (not just the password), accounts missing from
+   the restored backup are re-inserted instead of silently dropped, and
+   restore-only accounts are left untouched.
+
+WHY A REAL `alembic upgrade head` TO BUILD EACH TEST'S SCHEMA
+------------------------------------------------------------------
+Building the schema via `models.Base.metadata.create_all()` (like
+conftest.py's SQLite fixture does) would skip 0010_partition_audit_logs.py
+turning `audit_logs` into an actual partitioned table -- something only
+real DDL (not SQLAlchemy's generic create_all) sets up, and something
+_detect_schema_revision() explicitly checks for. Running the real
+Alembic chain, exactly as test_migrations.py already does for its own
+purposes, is what makes a restored dump here behave exactly like a
+restored dump would in production, including seeding the one root
+super_admin row via 0002_bootstrap_root_admin.py.
+"""
+import datetime
+import os
+import subprocess
+import sys
+import uuid
+from pathlib import Path
+
+import pytest
+
+try:
+    import psycopg2
+    import psycopg2.extensions
+except ImportError:  # pragma: no cover - psycopg2-binary is in requirements.txt
+    psycopg2 = None
+
+try:
+    import redis as redis_lib
+except ImportError:  # pragma: no cover - redis is in requirements.txt
+    redis_lib = None
+
+BACKEND_DIR = str(Path(__file__).resolve().parent.parent)
+if BACKEND_DIR not in sys.path:
+    sys.path.insert(0, BACKEND_DIR)
+
+PG_HOST = os.environ.get("TEST_POSTGRES_HOST", "localhost")
+PG_PORT = os.environ.get("TEST_POSTGRES_PORT", "5432")
+PG_USER = os.environ.get("TEST_POSTGRES_USER", "postgres")
+PG_PASSWORD = os.environ.get("TEST_POSTGRES_PASSWORD", "postgres")
+
+# A real, local Redis (never the module-level unreachable one conftest.py
+# points DEFAULT REDIS_URL at for every other test file) -- dedicated DB
+# index so this file's SET/DEL lock traffic can never collide with
+# anything a developer's own Redis instance might already be using on
+# db 0. Flushed before/after every test (see redis_client fixture).
+TEST_REDIS_URL = os.environ.get("TEST_REDIS_URL", "redis://localhost:6379/15")
+
+pytestmark = pytest.mark.skipif(
+    psycopg2 is None or redis_lib is None,
+    reason="psycopg2 and redis must both be installed -- see requirements.txt",
+)
+
+
+def _admin_pg_connection():
+    """Connection to the `postgres` maintenance database, used only to
+    CREATE/DROP each test's own throwaway database -- see
+    test_migrations.py's identical helper for the full rationale."""
+    try:
+        conn = psycopg2.connect(
+            host=PG_HOST, port=PG_PORT, user=PG_USER, password=PG_PASSWORD, dbname="postgres",
+            connect_timeout=5,
+        )
+    except psycopg2.OperationalError as exc:
+        pytest.skip(
+            f"No Postgres server reachable at {PG_HOST}:{PG_PORT} ({exc}). "
+            "backup_service tests need a real Postgres instance (pg_dump/psql "
+            "can't run against SQLite) -- see this file's module docstring. "
+            "CI always has one available; start one locally to run this file."
+        )
+    conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
+    return conn
+
+
+def _check_redis_reachable():
+    try:
+        client = redis_lib.from_url(TEST_REDIS_URL, socket_connect_timeout=3)
+        client.ping()
+    except redis_lib.RedisError as exc:
+        pytest.skip(
+            f"No Redis server reachable at {TEST_REDIS_URL} ({exc}). backup_service's "
+            "backup/restore locks need a real Redis (conftest.py's default REDIS_URL is "
+            "deliberately unreachable, see its own comment) -- CI always has one; start "
+            "one locally to run this file."
+        )
+    return client
+
+
+@pytest.fixture()
+def database_url():
+    """A brand-new, uniquely-named Postgres database for this one test,
+    dropped afterward -- identical pattern to test_migrations.py's own
+    `database_url` fixture."""
+    db_name = f"backup_restore_test_{uuid.uuid4().hex[:12]}"
+    admin_conn = _admin_pg_connection()
+    try:
+        with admin_conn.cursor() as cur:
+            cur.execute(f'CREATE DATABASE "{db_name}"')
+        yield f"postgresql://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{db_name}"
+    finally:
+        with admin_conn.cursor() as cur:
+            cur.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                "WHERE datname = %s AND pid <> pg_backend_pid()",
+                (db_name,),
+            )
+            cur.execute(f'DROP DATABASE IF EXISTS "{db_name}"')
+        admin_conn.close()
+
+
+def _run_alembic(*args, database_url, bootstrap_password="TestBootstrap123!"):
+    env = {
+        **os.environ,
+        "ENVIRONMENT": "production",
+        "DATABASE_URL": database_url,
+        "SUPER_ADMIN_USERNAME": "test_root_admin",
+        "SUPER_ADMIN_NAME": "Test Root Admin",
+        "ROOT_ADMIN_BOOTSTRAP_PASSWORD": bootstrap_password,
+    }
+    result = subprocess.run(
+        [sys.executable, "-m", "alembic", *args],
+        cwd=BACKEND_DIR, env=env, capture_output=True, text=True, timeout=120,
+    )
+    assert result.returncode == 0, (
+        f"alembic {' '.join(args)} failed:\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+    )
+    return result
+
+
+@pytest.fixture()
+def redis_client():
+    """A real Redis client on a dedicated, flushed-before/after DB index
+    -- see TEST_REDIS_URL above."""
+    client = _check_redis_reachable()
+    client.flushdb()
+    yield client
+    client.flushdb()
+
+
+@pytest.fixture()
+def backup_env(tmp_path, monkeypatch, database_url, redis_client):
+    """
+    Wires up services/backup_service.py (and database.py, which several
+    of its functions import and call directly) to talk to THIS test's
+    real, freshly-migrated Postgres database and real, flushed Redis --
+    the real-service equivalent of conftest.py's `db_engine` fixture.
+
+    Builds the schema via a real `alembic upgrade head` (see module
+    docstring for why, not `Base.metadata.create_all()`), which also
+    seeds the one root super_admin row via 0002_bootstrap_root_admin.py
+    -- most tests below don't need it directly, but a couple do (the
+    Super-Admin-specific reconciliation behavior).
+    """
+    import config
+    import database as database_module
+    import services.backup_service as backup_service
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    _run_alembic("upgrade", "head", database_url=database_url)
+
+    monkeypatch.setattr(config.settings, "DATABASE_URL", database_url)
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    monkeypatch.setattr(config.settings, "BACKUP_DIR", str(tmp_path))
+    monkeypatch.setattr(config.settings, "REDIS_URL", TEST_REDIS_URL)
+    monkeypatch.setattr(config.settings, "BACKUP_GDRIVE_ENABLED", False)
+    # backup_service caches its Redis client as a module global (see
+    # _get_redis_client()) -- clear it so the next call rebuilds one
+    # against the just-patched REDIS_URL above instead of reusing
+    # whatever a previous test's client was pointed at.
+    monkeypatch.setattr(backup_service, "_redis_client", None)
+
+    test_engine = create_engine(database_url)
+    TestSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
+    monkeypatch.setattr(database_module, "engine", test_engine)
+    monkeypatch.setattr(database_module, "SessionLocal", TestSessionLocal)
+
+    yield {
+        "database_url": database_url,
+        "engine": test_engine,
+        "redis": redis_client,
+        "backup_dir": str(tmp_path),
+    }
+    test_engine.dispose()
+
+
+def _insert_user(engine, **overrides):
+    """Inserts a minimal, valid `users` row directly via SQL (bypassing
+    services/user_service.py entirely -- this file is testing
+    backup_service, not user creation), returning its id."""
+    from sqlalchemy import text as sa_text
+    from security import hash_password
+
+    fields = {
+        "name": "Test User",
+        "email": f"user-{uuid.uuid4().hex[:8]}@example.com",
+        "username": None,
+        "role": "staff",
+        "password_hash": hash_password("Whatever123!"),
+        "is_verified": True,
+        "is_active": True,
+        "totp_enabled": False,
+        "department": None,
+        "department_role": None,
+    }
+    fields.update(overrides)
+    with engine.begin() as conn:
+        row = conn.execute(
+            sa_text(
+                "INSERT INTO users (name, email, username, role, password_hash, is_verified, "
+                "is_active, totp_enabled, department, department_role) "
+                "VALUES (:name, :email, :username, :role, :password_hash, :is_verified, "
+                ":is_active, :totp_enabled, :department, :department_role) RETURNING id"
+            ),
+            fields,
+        ).mappings().first()
+    return row["id"]
+
+
+def _get_user_by_email(engine, email):
+    from sqlalchemy import text as sa_text
+    with engine.connect() as conn:
+        row = conn.execute(
+            sa_text("SELECT * FROM users WHERE lower(email) = lower(:email)"), {"email": email},
+        ).mappings().first()
+    return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# 1. Filename-collision avoidance
+# ---------------------------------------------------------------------------
+
+
+def test_create_backup_avoids_filename_collision(backup_env):
+    """Two backups whose computed filename would land on the exact same
+    second must not overwrite one another -- the second gets a `-2`
+    suffix instead (see create_backup()'s own "BUG FIX" comment).
+
+    Rather than trying to race two real create_backup() calls into the
+    exact same wall-clock second (flaky), pre-compute the filename
+    create_backup() is about to choose (same algorithm it uses
+    internally) and pre-create a dummy file at that exact path first --
+    deterministically forcing the collision create_backup() must detect
+    and disambiguate around.
+    """
+    import datetime as dt
+    import services.backup_service as backup_service
+    import services.export_service as export_service
+
+    backup_dir = backup_env["backup_dir"]
+
+    now = dt.datetime.now(dt.timezone.utc)
+    display_now = now.astimezone(export_service.DISPLAY_TZ)
+    tz_label = "".join(ch for ch in display_now.tzname() if ch.isalnum()) or "TZ"
+    expected_base_filename = f"snipeit_backup_{display_now.strftime('%Y%m%d_%H%M%S')}_{tz_label}.sql.gz"
+    collision_path = os.path.join(backup_dir, expected_base_filename)
+
+    sentinel_content = b"pre-existing file that must survive untouched"
+    with open(collision_path, "wb") as f:
+        f.write(sentinel_content)
+
+    entry = backup_service.create_backup(triggered_by="manual")
+
+    # create_backup() must have picked a DIFFERENT name than the one
+    # that already existed -- never silently overwriting it.
+    assert entry["filename"] != expected_base_filename
+    assert os.path.exists(collision_path)
+    with open(collision_path, "rb") as f:
+        assert f.read() == sentinel_content, "pre-existing file at the colliding name must be untouched"
+
+    new_path = os.path.join(backup_dir, entry["filename"])
+    assert os.path.exists(new_path)
+    assert os.path.getsize(new_path) > 0
+
+    entries = backup_service.list_backups()
+    assert entry["filename"] in {e["filename"] for e in entries}
+
+
+# ---------------------------------------------------------------------------
+# 2. Backup vs. restore mutual-exclusion lock
+# ---------------------------------------------------------------------------
+
+
+def test_backup_lock_blocks_restore_and_vice_versa(backup_env):
+    """_acquire_restore_lock() must refuse to start while a backup holds
+    BACKUP_LOCK_KEY, and a backup must refuse to start while a restore
+    holds BACKUP_LOCK_KEY too -- which _restore_backup_impl() takes out
+    for its own entire destructive window (see that function's own
+    "ENTERPRISE HARDENING" comment on WHY it reuses the same lock
+    restore's own RESTORE_LOCK_KEY doesn't cover on its own), the
+    cross-check described in both functions' own docstrings."""
+    import services.backup_service as backup_service
+
+    # Direction 1: a backup running (BACKUP_LOCK_KEY held) must block a
+    # new restore from starting at all.
+    backup_token = uuid.uuid4().hex
+    backup_service._acquire_backup_lock(backup_token)
+    try:
+        with pytest.raises(backup_service.RestoreInProgressError):
+            backup_service._acquire_restore_lock(uuid.uuid4().hex)
+    finally:
+        backup_service._release_backup_lock(backup_token)
+
+    # Direction 2: a restore running holds BOTH RESTORE_LOCK_KEY (via
+    # restore_backup()) AND BACKUP_LOCK_KEY (via _restore_backup_impl's
+    # own destructive-window lock, see its own comment on why it reuses
+    # create_backup()'s lock rather than taking out a separate one) --
+    # simulate that combined state and confirm a concurrent backup is
+    # rejected because of the BACKUP_LOCK_KEY half specifically.
+    restore_token = uuid.uuid4().hex
+    backup_service._acquire_restore_lock(restore_token)
+    backup_service._acquire_backup_lock(restore_token)
+    try:
+        with pytest.raises(backup_service.BackupInProgressError):
+            backup_service._acquire_backup_lock(uuid.uuid4().hex)
+    finally:
+        backup_service._release_backup_lock(restore_token)
+        backup_service._release_restore_lock(restore_token)
+
+
+def test_second_concurrent_backup_is_rejected(backup_env):
+    """A second create_backup() while one already holds the lock gets a
+    clean BackupInProgressError, not a corrupted/overwritten dump."""
+    import services.backup_service as backup_service
+
+    token = uuid.uuid4().hex
+    backup_service._acquire_backup_lock(token)
+    try:
+        with pytest.raises(backup_service.BackupInProgressError):
+            backup_service._acquire_backup_lock(uuid.uuid4().hex)
+    finally:
+        backup_service._release_backup_lock(token)
+
+
+def test_second_concurrent_restore_is_rejected(backup_env):
+    """A second restore_backup() while one already holds the restore lock
+    gets RestoreInProgressError instead of racing the first (see
+    _acquire_restore_lock's own docstring on why two concurrent restores
+    would corrupt the database)."""
+    import services.backup_service as backup_service
+
+    token = uuid.uuid4().hex
+    backup_service._acquire_restore_lock(token)
+    try:
+        with pytest.raises(backup_service.RestoreInProgressError):
+            backup_service._acquire_restore_lock(uuid.uuid4().hex)
+    finally:
+        backup_service._release_restore_lock(token)
+
+
+# ---------------------------------------------------------------------------
+# 3 & 4. Full round trip: auth-epoch forced logout + schema reconciliation
+# ---------------------------------------------------------------------------
+
+
+def test_restore_bumps_auth_epoch_and_reconciles_schema(backup_env):
+    """
+    End-to-end: create a real backup, then restore it, and confirm:
+      - AUTH_EPOCH_SETTING_KEY (app_settings) is written with a fresh
+        timestamp -- the mechanism deps.py's get_current_user() uses to
+        force every existing session to log back in (see
+        _restore_backup_impl's own "ENTERPRISE HARDENING" comment).
+      - the post-restore schema status is fully at head (the migration
+        chain built by `alembic upgrade head` in the backup_env fixture
+        survives a full DROP SCHEMA / psql reload / re-migrate cycle
+        intact).
+    """
+    import services.backup_service as backup_service
+    from security import AUTH_EPOCH_SETTING_KEY
+    from sqlalchemy import text as sa_text
+
+    engine = backup_env["engine"]
+
+    before_epoch = datetime.datetime.now(datetime.timezone.utc)
+
+    entry = backup_service.create_backup(triggered_by="manual")
+    filepath = os.path.join(backup_env["backup_dir"], entry["filename"])
+
+    result = backup_service.restore_backup(filepath, take_safety_backup=False)
+
+    assert result["schema_status"]["ready"] is True
+
+    with engine.connect() as conn:
+        row = conn.execute(
+            sa_text("SELECT value FROM app_settings WHERE key = :key"),
+            {"key": AUTH_EPOCH_SETTING_KEY},
+        ).mappings().first()
+    assert row is not None, "restore must set AUTH_EPOCH_SETTING_KEY so existing sessions are invalidated"
+    epoch_value = datetime.datetime.fromisoformat(row["value"])
+    assert epoch_value >= before_epoch, "auth epoch must be bumped to (at least) restore time, forcing re-login"
+
+    status = backup_service.get_restore_status()
+    assert status["status"] == "succeeded"
+
+
+def test_detect_schema_revision_against_partially_migrated_database(database_url, monkeypatch):
+    """
+    _detect_schema_revision() must correctly identify how far a
+    database's schema actually got by inspecting real columns/tables --
+    not just assume "no alembic_version row" means either "brand new" or
+    "fully current". Migrate only partway (up to 0007, deliberately
+    BEFORE 0008 adds users.totp_enabled/0009 adds recovery_codes/0010
+    partitions audit_logs) and confirm detection stops exactly there.
+    """
+    from sqlalchemy import create_engine
+    import services.backup_service as backup_service
+
+    _run_alembic("upgrade", "0007_split_contact_details", database_url=database_url)
+
+    test_engine = create_engine(database_url)
+    try:
+        with test_engine.connect() as conn:
+            detected = backup_service._detect_schema_revision(conn)
+        assert detected == "0007_split_contact_details"
+    finally:
+        test_engine.dispose()
+
+    # And a fully-migrated database should be detected as being at the
+    # real head marker (0010, the partitioned-audit_logs one).
+    _run_alembic("upgrade", "head", database_url=database_url)
+    test_engine = create_engine(database_url)
+    try:
+        with test_engine.connect() as conn:
+            detected_full = backup_service._detect_schema_revision(conn)
+        assert detected_full == "0010_partition_audit_logs"
+    finally:
+        test_engine.dispose()
+
+
+def test_restore_of_backup_from_older_schema_reconciles_up_to_head(backup_env, database_url):
+    """
+    Full "restore a genuinely old backup" scenario: take a backup from a
+    database intentionally stopped at 0007 (predating
+    users.totp_enabled/recovery_codes/partitioned audit_logs entirely),
+    then restore it into the (currently fully-migrated, via backup_env's
+    own fixture setup) target database. The restore must detect the
+    dump's real, older schema shape and run the missing migrations on
+    top of it, ending up fully at head -- not silently stamp it as
+    already current (see _detect_schema_revision's own module docstring
+    for the exact bug this guards against).
+    """
+    import services.backup_service as backup_service
+    from sqlalchemy import inspect as sa_inspect
+
+    # A second, throwaway database deliberately migrated only to 0007 --
+    # this is what an "old backup" actually looks like.
+    old_db_name = f"backup_restore_old_{uuid.uuid4().hex[:12]}"
+    admin_conn = _admin_pg_connection()
+    old_db_url = f"postgresql://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{old_db_name}"
+    try:
+        with admin_conn.cursor() as cur:
+            cur.execute(f'CREATE DATABASE "{old_db_name}"')
+        _run_alembic("upgrade", "0007_split_contact_details", database_url=old_db_url)
+
+        # pg_dump the OLD (0007-era) database directly -- bypassing
+        # create_backup() (which always dumps settings.DATABASE_URL, the
+        # target database) since we specifically need a dump of the
+        # *older* schema to restore.
+        old_backup_path = os.path.join(backup_env["backup_dir"], "old_schema_backup.sql.gz")
+        import gzip as gzip_module
+        dump_result = subprocess.run(
+            ["pg_dump", "--host", PG_HOST, "--port", PG_PORT, "--username", PG_USER,
+             "--dbname", old_db_name, "--no-owner", "--no-privileges", "--format", "plain"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env={**os.environ, "PGPASSWORD": PG_PASSWORD}, timeout=120,
+        )
+        assert dump_result.returncode == 0, dump_result.stderr
+        with gzip_module.open(old_backup_path, "wb") as gz_out:
+            gz_out.write(dump_result.stdout)
+    finally:
+        with admin_conn.cursor() as cur:
+            cur.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                "WHERE datname = %s AND pid <> pg_backend_pid()", (old_db_name,),
+            )
+            cur.execute(f'DROP DATABASE IF EXISTS "{old_db_name}"')
+        admin_conn.close()
+
+    # Now restore that OLD-schema dump into backup_env's own (fully
+    # migrated) target database.
+    result = backup_service.restore_backup(old_backup_path, take_safety_backup=False)
+    assert result["schema_status"]["ready"] is True
+
+    with backup_env["engine"].connect() as conn:
+        inspector = sa_inspect(conn)
+        assert "recovery_codes" in inspector.get_table_names()
+        assert "totp_enabled" in {c["name"] for c in inspector.get_columns("users")}
+
+
+# ---------------------------------------------------------------------------
+# 5. Credential-reconciliation bug fix: duplicates / reinserted / restore-only
+# ---------------------------------------------------------------------------
+
+
+def test_reconcile_duplicate_account_uses_full_pre_restore_profile(backup_env):
+    """
+    Case 1 (duplicates): an account present in both the pre-restore
+    snapshot and the restored data gets its ENTIRE profile overwritten
+    with the pre-restore (current) values -- not just password_hash, the
+    old bug's behavior. Its `id` must never change (foreign keys already
+    point at it).
+    """
+    import services.backup_service as backup_service
+    from security import hash_password, verify_password
+
+    engine = backup_env["engine"]
+    email = "duplicate.user@example.com"
+    user_id = _insert_user(
+        engine, email=email, name="Old Name", department="Sales",
+        password_hash=hash_password("OldPassword123!"),
+    )
+
+    # Pre-restore snapshot reflects the CURRENT, more-up-to-date profile
+    # (name/department/password changed since the backup was taken).
+    pre_restore_users = [{
+        "id": user_id, "email": email, "email_lc": email.lower(),
+        "name": "New Current Name", "phone_number": "555-0100", "username": "dup.user",
+        "role": "staff", "password_hash": hash_password("NewCurrentPassword123!"),
+        "is_verified": True, "is_active": True, "failed_login_attempts": 0,
+        "locked_until": None, "totp_secret_encrypted": None, "totp_enabled": False,
+        "is_deleted": False, "deleted_at": None, "purged_at": None,
+        "department": "Engineering", "department_role": "Senior Engineer",
+        "converted_to_outsider_id": None,
+    }]
+
+    result = backup_service._reconcile_post_restore_credentials(engine, pre_restore_users)
+
+    assert result["users_reconciled"] == 1
+    assert result["users_reinserted"] == 0
+
+    row = _get_user_by_email(engine, email)
+    assert row["id"] == user_id  # id preserved
+    assert row["name"] == "New Current Name"
+    assert row["department"] == "Engineering"
+    assert row["department_role"] == "Senior Engineer"
+    assert verify_password("NewCurrentPassword123!", row["password_hash"])
+    assert not verify_password("OldPassword123!", row["password_hash"])
+
+
+def test_reconcile_reinserts_missing_from_restore_account_preserving_id(backup_env):
+    """
+    BUG FIX -- case 2 (missing from restore): an account that existed
+    pre-restore but has no row at all in the restored data (e.g. created/
+    invited AFTER the backup was taken) must be re-inserted wholesale,
+    not silently dropped. Its original id is preserved when free.
+    """
+    import services.backup_service as backup_service
+    from security import hash_password, verify_password
+    from sqlalchemy import text as sa_text
+
+    engine = backup_env["engine"]
+
+    # Simulate: this account existed pre-restore (id=99999, deliberately
+    # far outside anything the restore itself created, so it's free),
+    # but the "restored" `users` table has no row for it at all.
+    email = "invited.after.backup@example.com"
+    pre_restore_users = [{
+        "id": 99999, "email": email, "email_lc": email.lower(),
+        "name": "Invited After Backup", "phone_number": None, "username": "invited.user",
+        "role": "manager", "password_hash": hash_password("TheirCurrentPassword123!"),
+        "is_verified": True, "is_active": True, "failed_login_attempts": 0,
+        "locked_until": None, "totp_secret_encrypted": None, "totp_enabled": False,
+        "is_deleted": False, "deleted_at": None, "purged_at": None,
+        "department": "Operations", "department_role": None, "converted_to_outsider_id": None,
+    }]
+
+    result = backup_service._reconcile_post_restore_credentials(engine, pre_restore_users)
+
+    assert result["users_reinserted"] == 1
+    assert result["users_reconciled"] == 0
+
+    row = _get_user_by_email(engine, email)
+    assert row is not None, "account must be re-inserted, not silently dropped"
+    assert row["id"] == 99999  # original id preserved since it was free
+    assert row["name"] == "Invited After Backup"
+    assert row["role"] == "manager"
+    assert row["department"] == "Operations"
+    assert verify_password("TheirCurrentPassword123!", row["password_hash"])
+
+    # The users_id_seq sequence must be bumped past the reinserted id --
+    # otherwise the very next ordinary INSERT (relying on the sequence,
+    # not an explicit id) could collide with this row.
+    with engine.begin() as conn:
+        new_id = conn.execute(
+            sa_text(
+                "INSERT INTO users (name, email, role, password_hash, is_verified, is_active, totp_enabled) "
+                "VALUES ('Someone Else', 'someone.else@example.com', 'staff', 'x', true, true, false) "
+                "RETURNING id"
+            )
+        ).scalar()
+    assert new_id > 99999, "sequence must be bumped past the re-inserted id to avoid a future collision"
+
+
+def test_reconcile_reinserts_missing_user_with_id_collision_falls_back_to_new_id(backup_env):
+    """
+    Same missing-from-restore case, but the pre-restore account's
+    original id is already taken by a genuinely DIFFERENT account the
+    restore brought back. The account must still be re-inserted (not
+    dropped) -- just with a fresh id instead of forcing the collision.
+    """
+    import services.backup_service as backup_service
+    from security import hash_password
+
+    engine = backup_env["engine"]
+
+    # An unrelated account that the restore brought back, occupying the
+    # id our missing account used to have.
+    unrelated_id = _insert_user(engine, email="unrelated.restored@example.com")
+
+    email = "collides.on.id@example.com"
+    pre_restore_users = [{
+        "id": unrelated_id, "email": email, "email_lc": email.lower(),
+        "name": "Collides On Id", "phone_number": None, "username": None,
+        "role": "staff", "password_hash": hash_password("Whatever123!"),
+        "is_verified": True, "is_active": True, "failed_login_attempts": 0,
+        "locked_until": None, "totp_secret_encrypted": None, "totp_enabled": False,
+        "is_deleted": False, "deleted_at": None, "purged_at": None,
+        "department": None, "department_role": None, "converted_to_outsider_id": None,
+    }]
+
+    result = backup_service._reconcile_post_restore_credentials(engine, pre_restore_users)
+    assert result["users_reinserted"] == 1
+
+    row = _get_user_by_email(engine, email)
+    assert row is not None, "account must still be re-inserted despite the id collision"
+    assert row["id"] != unrelated_id, "must not steal/overwrite the unrelated restored account's id"
+
+    # The unrelated account itself must be completely untouched.
+    unrelated_row = _get_user_by_email(engine, "unrelated.restored@example.com")
+    assert unrelated_row["id"] == unrelated_id
+    assert unrelated_row["name"] == "Test User"
+
+
+def test_reconcile_leaves_restore_only_accounts_untouched(backup_env):
+    """Case 3: an account present ONLY in the restored data (deleted
+    before this restore ran) is left completely as-is -- not touched,
+    not removed."""
+    import services.backup_service as backup_service
+
+    engine = backup_env["engine"]
+    restore_only_id = _insert_user(
+        engine, email="restore.only@example.com", name="Restore Only Original",
+    )
+
+    result = backup_service._reconcile_post_restore_credentials(engine, pre_restore_users=[])
+    assert result == {"users_reconciled": 0, "users_reinserted": 0, "super_admins_reset": 0}
+
+    row = _get_user_by_email(engine, "restore.only@example.com")
+    assert row["id"] == restore_only_id
+    assert row["name"] == "Restore Only Original"
+
+
+def test_reconcile_writes_audit_log_with_all_three_counts(backup_env):
+    """The single audit-log row this function writes must reflect both
+    reconciled AND reinserted accounts, not just the old
+    (reconciled-only) behavior."""
+    import services.backup_service as backup_service
+    from sqlalchemy import text as sa_text
+    from security import hash_password
+
+    engine = backup_env["engine"]
+    dup_email = "dup.for.audit@example.com"
+    dup_id = _insert_user(engine, email=dup_email)
+    missing_email = "missing.for.audit@example.com"
+
+    pre_restore_users = [
+        {
+            "id": dup_id, "email": dup_email, "email_lc": dup_email.lower(),
+            "name": "Dup Current", "phone_number": None, "username": None,
+            "role": "staff", "password_hash": hash_password("Whatever123!"),
+            "is_verified": True, "is_active": True, "failed_login_attempts": 0,
+            "locked_until": None, "totp_secret_encrypted": None, "totp_enabled": False,
+            "is_deleted": False, "deleted_at": None, "purged_at": None,
+            "department": None, "department_role": None, "converted_to_outsider_id": None,
+        },
+        {
+            "id": 55555, "email": missing_email, "email_lc": missing_email.lower(),
+            "name": "Missing Current", "phone_number": None, "username": None,
+            "role": "staff", "password_hash": hash_password("Whatever123!"),
+            "is_verified": True, "is_active": True, "failed_login_attempts": 0,
+            "locked_until": None, "totp_secret_encrypted": None, "totp_enabled": False,
+            "is_deleted": False, "deleted_at": None, "purged_at": None,
+            "department": None, "department_role": None, "converted_to_outsider_id": None,
+        },
+    ]
+
+    result = backup_service._reconcile_post_restore_credentials(engine, pre_restore_users)
+    assert result["users_reconciled"] == 1
+    assert result["users_reinserted"] == 1
+
+    with engine.connect() as conn:
+        audit_row = conn.execute(
+            sa_text(
+                "SELECT details FROM audit_logs WHERE action = 'RESTORE_CREDENTIAL_RECONCILIATION' "
+                "ORDER BY timestamp DESC LIMIT 1"
+            )
+        ).mappings().first()
+    assert audit_row is not None
+    assert "1 account(s)" in audit_row["details"]
+    assert missing_email in audit_row["details"]
+
+
+def test_reconcile_super_admin_reset_applies_to_both_duplicate_and_reinserted(backup_env):
+    """The existing super-admin TOTP/recovery-code hardening must keep
+    working for case 1 (duplicate) AND now also apply to a re-inserted
+    (case 2) Super Admin account -- MFA can't be trusted from an old
+    backup or from a pre-restore snapshot either."""
+    import services.backup_service as backup_service
+    from security import hash_password, SUPER_ADMIN_ROLE
+    from sqlalchemy import text as sa_text
+
+    engine = backup_env["engine"]
+
+    dup_email = "dup.super.admin@example.com"
+    dup_id = _insert_user(
+        engine, email=dup_email, role=SUPER_ADMIN_ROLE,
+    )
+    with engine.begin() as conn:
+        conn.execute(
+            sa_text("UPDATE users SET totp_secret_encrypted = 'restored-secret', totp_enabled = true WHERE id = :uid"),
+            {"uid": dup_id},
+        )
+        conn.execute(
+            sa_text("INSERT INTO recovery_codes (user_id, code_hash) VALUES (:uid, 'somehash')"),
+            {"uid": dup_id},
+        )
+
+    missing_email = "missing.super.admin@example.com"
+    pre_restore_users = [
+        {
+            "id": dup_id, "email": dup_email, "email_lc": dup_email.lower(),
+            "name": "Dup Super Admin", "phone_number": None, "username": None,
+            "role": SUPER_ADMIN_ROLE, "password_hash": hash_password("Whatever123!"),
+            "is_verified": True, "is_active": True, "failed_login_attempts": 0,
+            "locked_until": None, "totp_secret_encrypted": "current-secret", "totp_enabled": True,
+            "is_deleted": False, "deleted_at": None, "purged_at": None,
+            "department": None, "department_role": None, "converted_to_outsider_id": None,
+        },
+        {
+            "id": 77777, "email": missing_email, "email_lc": missing_email.lower(),
+            "name": "Missing Super Admin", "phone_number": None, "username": None,
+            "role": SUPER_ADMIN_ROLE, "password_hash": hash_password("Whatever123!"),
+            "is_verified": True, "is_active": True, "failed_login_attempts": 0,
+            "locked_until": None, "totp_secret_encrypted": "current-secret", "totp_enabled": True,
+            "is_deleted": False, "deleted_at": None, "purged_at": None,
+            "department": None, "department_role": None, "converted_to_outsider_id": None,
+        },
+    ]
+
+    result = backup_service._reconcile_post_restore_credentials(engine, pre_restore_users)
+    assert result["super_admins_reset"] == 2
+
+    dup_row = _get_user_by_email(engine, dup_email)
+    assert dup_row["totp_enabled"] is False
+    assert dup_row["totp_secret_encrypted"] is None
+
+    missing_row = _get_user_by_email(engine, missing_email)
+    assert missing_row["totp_enabled"] is False
+    assert missing_row["totp_secret_encrypted"] is None
+
+    with engine.connect() as conn:
+        remaining_codes = conn.execute(
+            sa_text("SELECT COUNT(*) FROM recovery_codes WHERE user_id = :uid"), {"uid": dup_id},
+        ).scalar()
+    assert remaining_codes == 0

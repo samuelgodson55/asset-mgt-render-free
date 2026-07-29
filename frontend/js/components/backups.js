@@ -313,13 +313,25 @@ export async function confirmRestore() {
     // _reconcile_post_restore_credentials() for why).
     const resetCount = restoreResult && restoreResult.credential_reconciliation
       ? restoreResult.credential_reconciliation.super_admins_reset : 0;
+    // Accounts created/invited AFTER the backup was taken have no row in
+    // the restored backup at all -- _reconcile_post_restore_credentials()
+    // (backend/services/backup_service.py) re-inserts them wholesale
+    // from the pre-restore snapshot rather than letting them silently
+    // vanish. Surface that count here so an Admin doing the restore can
+    // see it happened, same as the existing MFA-reset note below.
+    const reinsertedCount = restoreResult && restoreResult.credential_reconciliation
+      ? (restoreResult.credential_reconciliation.users_reinserted || 0) : 0;
     const mfaNote = resetCount > 0
       ? ' Your password still works, but you\'ll need to set up two-factor authentication again after logging back in.'
+      : '';
+    const reinsertedNote = reinsertedCount > 0
+      ? ` ${reinsertedCount} account(s) created since the backup was taken ${reinsertedCount === 1 ? 'was' : 'were'} restored along with their current password.`
       : '';
     alert(
       'Restore complete. The database has been replaced with the chosen backup (a safety backup of the prior '
       + 'state was taken automatically first). For security, everyone is being logged out now, including you.'
       + mfaNote
+      + reinsertedNote
     );
     pendingRestore = null;
     await logout();
