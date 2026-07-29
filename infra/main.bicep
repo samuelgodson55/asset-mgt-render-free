@@ -151,6 +151,9 @@ param frontendMaxReplicas int = 3
 @description('Custom domain for `frontend`, the public entry point (leave empty to use the generated *.azurecontainerapps.io FQDN only).')
 param customDomain string = ''
 
+@description('Resource ID of an EXISTING `Microsoft.App/managedEnvironments/managedCertificates` (or Key Vault-backed certificate) resource that already covers `customDomain`, e.g. from `az containerapp env certificate list`. This template does not provision the certificate itself -- a managed certificate requires the domain\'s CNAME/TXT ownership validation to already be in place, which only exists once the domain is live, so it has to be created out-of-band (Portal "Add custom domain" wizard, or `az containerapp hostname bind` / `az containerapp env certificate create`) the FIRST time a given customDomain goes live, same as before this parameter existed. Once that one-time step is done, pass the resulting certificate resource ID here (infra-deploy.yml\'s "Resolve existing managed certificate" step does this lookup automatically on every run) so repeat `main.bicep` deployments stay idempotent instead of trying to rebind `customDomain` with no `certificateId`, which Azure rejects with "CertificateId property is missing for customDomain". Leave empty (the default) while `customDomain` has no certificate yet -- `frontend` simply keeps serving off its default *.azurecontainerapps.io FQDN until this is set, same as leaving `customDomain` itself empty.')
+param customDomainCertificateId string = ''
+
 @description('Notification / SMTP settings -- optional, off by default, matching .env.example.')
 param notificationsEnabled bool = false
 param smtpHost string = ''
@@ -1019,8 +1022,22 @@ resource frontendApp 'Microsoft.App/containerApps@2024-03-01' = {
         targetPort: 80
         transport: 'auto'
         allowInsecure: false
-        customDomains: empty(customDomain) ? [] : [
-          { name: customDomain, bindingType: 'SniEnabled' }
+        // BUG FIX: this used to be `empty(customDomain) ? [] : [{ name:
+        // customDomain, bindingType: 'SniEnabled' }]` -- no `certificateId`
+        // at all. `bindingType: 'SniEnabled'` REQUIRES a certificateId;
+        // Azure only ever accepted that with no certificateId the very
+        // first time (before this template had ever heard of the domain,
+        // Azure silently treated the binding as pending/incomplete), and
+        // rejects it on every deployment after a certificate exists with
+        // "CertificateId property is missing for customDomain" --
+        // `customDomainCertificateId` (see its own param comment) is what
+        // was missing to make this idempotent. Until a certificate has
+        // been provisioned and its ID supplied, `frontend` simply keeps
+        // serving off its default *.azurecontainerapps.io FQDN -- exactly
+        // the pre-custom-domain behavior -- rather than attempting a
+        // binding that would fail.
+        customDomains: (empty(customDomain) || empty(customDomainCertificateId)) ? [] : [
+          { name: customDomain, bindingType: 'SniEnabled', certificateId: customDomainCertificateId }
         ]
       }
     }

@@ -1,0 +1,37 @@
+# .gitleaks.toml
+# -----------------------------------------------------------------------------
+# Gitleaks config for this repo. A bare `.gitleaks.toml` at the repo root is
+# auto-detected by gitleaks-action (see ci.yml's "Gitleaks secret scan" job)
+# with no extra flag needed -- see
+# https://github.com/gitleaks/gitleaks#configuration.
+#
+# WHY THIS FILE EXISTS: the default ruleset's generic "Identified a Private
+# Key" rule matches on the PEM header/footer shape alone
+# (`-----BEGIN ... PRIVATE KEY-----` ... `-----END ... KEY-----`), not on
+# whether the body between them is real key material. `infra-vm/
+# terraform.tfvars.example`'s `cloudflare_origin_cert_key` example value is
+# intentionally shaped like a real PEM block (so it's obvious where to paste
+# your actual cert), but its body is the literal placeholder text
+# "CHANGE-ME (from the same ... step, shown once)" -- never a real key. That
+# false positive is what failed "CI gate" / "Gitleaks secret scan" and, via
+# deploy-azure-vm.yml/deploy-azure-aca.yml's ci-result gating (see those
+# files' own "BUG FIX" comments), cascaded into blocking every real deploy.
+#
+# `useDefault = true` keeps every one of Gitleaks' built-in detection rules
+# (AWS keys, Stripe tokens, generic API keys, real private keys, ...) fully
+# active everywhere else in the repo -- this file ONLY adds a narrow,
+# path-scoped allowlist, it never disables or replaces the base ruleset.
+# -----------------------------------------------------------------------------
+title = "asset-mgt-render-free gitleaks config"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Template/example files: placeholder values only (CHANGE-ME, dummy PEM blocks, etc.) by convention -- never real secrets, see each file's own header comment."
+paths = [
+  '''infra-vm/terraform\.tfvars\.example$''',
+  '''infra/main\.parameters\.example\.json$''',
+  '''\.env\.example$''',
+  '''\.env\.azure\.example$''',
+]

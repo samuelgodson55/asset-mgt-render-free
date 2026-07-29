@@ -160,16 +160,32 @@ jobs:
 
   migrate:
     name: Run database migrations
-    needs: [build-push]
-    # Two independent gates ANDed together:
+    # BUG FIX: this used to be `needs: [build-push]` and only checked
+    # `needs.build-push.result`. `build-push` skips ITSELF (via its own
+    # `if:` above) whenever `ci` didn't succeed -- including when `ci`
+    # genuinely FAILED (e.g. Gitleaks catching a real secret). GitHub
+    # reports that as `skipped`, identical to the legitimate "workflow_call/
+    # existing-tag path, ci never even ran" case -- `migrate` couldn't tell
+    # the two apart, so a real ci failure still let this job point the
+    # `migrate` Container Apps Job at an image tag that was never actually
+    # built/pushed, failing with InvalidParameterValueInContainerTemplate /
+    # MANIFEST_UNKNOWN. Explicitly re-checking `needs.ci.result` too (not
+    # just `needs.build-push.result`) is what lets this job distinguish
+    # "ci was legitimately skipped" from "ci actually failed and
+    # build-push's skip was just a symptom of that" -- only the first case
+    # is safe to proceed on.
+    #
+    # Three independent gates ANDed together:
     #   - skip_migrate: the manual escape hatch, workflow_dispatch only
+    #   - ci: must have actually succeeded if it ran at all
     #   - build-push: must have actually succeeded if it ran at all (fresh-
-    #     build path) -- `always()` + explicit result check because a
+    #     build path) -- `always()` + explicit result checks because a
     #     needs: job that gets `if:`-skipped (the normal case on the
     #     workflow_call/existing-tag paths) would otherwise skip this job
     #     too via GitHub's default needs-propagation, blocking every
     #     release.yml-triggered production deploy.
-    if: ${{ always() && (needs.build-push.result == 'success' || needs.build-push.result == 'skipped') && !(github.event_name == 'workflow_dispatch' && inputs.skip_migrate) }}
+    needs: [ci, build-push]
+    if: ${{ always() && (needs.ci.result == 'success' || needs.ci.result == 'skipped') && (needs.build-push.result == 'success' || needs.build-push.result == 'skipped') && !(github.event_name == 'workflow_dispatch' && inputs.skip_migrate) }}
     runs-on: ubuntu-latest
     # AZURE_CLIENT_ID/AZURE_TENANT_ID/AZURE_SUBSCRIPTION_ID are configured
     # as per-environment secrets (see DEPLOYMENT.md step 5's table --
@@ -275,11 +291,22 @@ jobs:
 
   deploy:
     name: Roll out new revisions
-    needs: [migrate]
+    # BUG FIX: same class of bug as `migrate` above, one hop further down
+    # the chain -- this used to be `needs: [migrate]`, checking only
+    # `needs.migrate.result`. `migrate` can itself report `skipped` for two
+    # very different reasons: `skip_migrate: true` (fine, proceed) or `ci`/
+    # `build-push` actually failed upstream (NOT fine -- there's no new
+    # image to roll out to). Re-checking `needs.ci.result` and
+    # `needs.build-push.result` explicitly, not just `needs.migrate.result`,
+    # is what stops a real ci failure from reaching all the way down to
+    # `az containerapp update` with a backend/frontend image tag that was
+    # never actually pushed.
+    #
     # `always()` + explicit success-or-skipped so this still runs when
     # `migrate` was deliberately skipped via skip_migrate above (by
     # default, a skipped dependency skips everything downstream of it too).
-    if: ${{ always() && (needs.migrate.result == 'success' || needs.migrate.result == 'skipped') }}
+    needs: [ci, build-push, migrate]
+    if: ${{ always() && (needs.ci.result == 'success' || needs.ci.result == 'skipped') && (needs.build-push.result == 'success' || needs.build-push.result == 'skipped') && (needs.migrate.result == 'success' || needs.migrate.result == 'skipped') }}
     runs-on: ubuntu-latest
     # See `migrate`'s `environment:` line above for why this recomputes the
     # full ternary instead of referencing `env.ENVIRONMENT`.

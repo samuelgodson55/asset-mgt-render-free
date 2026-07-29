@@ -156,8 +156,22 @@ jobs:
 
   deploy:
     name: Deploy over SSH + migrate
-    needs: [build-push]
-    if: ${{ always() && (needs.build-push.result == 'success' || needs.build-push.result == 'skipped') }}
+    # BUG FIX: this used to only gate on `needs.build-push.result`, needing
+    # only [build-push]. But `build-push`'s own `if:` (above) skips ITSELF
+    # whenever `ci` didn't succeed -- including when `ci` genuinely FAILED
+    # (e.g. the Gitleaks secret scan catching something real). A skipped job
+    # and a failed-then-skipped-downstream job both report `skipped` here,
+    # so `deploy` couldn't tell those two cases apart and happily proceeded
+    # to `docker compose pull` a tag that was never actually built/pushed --
+    # exactly the "Error: ... not found" / "manifest unknown" failure this
+    # comment is fixing. Explicitly re-checking `needs.ci.result` (not just
+    # `needs.build-push.result`) is what lets `deploy` distinguish "ci was
+    # legitimately skipped" (workflow_dispatch reusing an existing
+    # image_tag -- see `ci`'s own `if:`) from "ci actually failed, and
+    # build-push's skip was just a symptom of that". Only the first case is
+    # safe to deploy through.
+    needs: [ci, build-push]
+    if: ${{ always() && (needs.ci.result == 'success' || needs.ci.result == 'skipped') && (needs.build-push.result == 'success' || needs.build-push.result == 'skipped') }}
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment || 'prod' }}
     steps:

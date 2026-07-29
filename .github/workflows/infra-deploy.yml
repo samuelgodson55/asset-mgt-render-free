@@ -221,6 +221,50 @@ jobs:
       # infra/main.bicep's `otelExporterOtlpHeaders` param). See
       # README.md's "Distributed Tracing" section for what to actually set
       # here to turn this on end-to-end.
+      # BUG FIX (the "Deploy Bicep" / "CertificateId property is missing for
+      # customDomain" failure): main.bicep's `frontend` ingress used to bind
+      # `customDomain` with `bindingType: 'SniEnabled'` and NO
+      # `certificateId` at all -- Azure only tolerated that the very first
+      # time (before any certificate existed for the domain); once a
+      # managed certificate is provisioned for it (e.g. via the Portal's
+      # "Add custom domain" wizard, or `az containerapp env certificate
+      # create` / `hostname bind`, done once out-of-band -- main.bicep
+      # still doesn't provision the certificate itself, see
+      # `customDomainCertificateId`'s own param comment for why), EVERY
+      # subsequent `az deployment group create` re-tried the same
+      # certificate-less binding and Azure rejected it outright. This step
+      # looks up whatever managed certificate (if any) already covers
+      # `CUSTOM_DOMAIN` in this environment and feeds its resource ID into
+      # `customDomainCertificateId` below, so the binding Bicep submits
+      # always matches what Azure actually has on record -- idempotent,
+      # every run, no more manually re-discovering the certificate ID by
+      # hand each time infra needs to be redeployed.
+      #
+      # First deploy ever (no `Microsoft.App/managedEnvironments` in this
+      # resource group yet) or `CUSTOM_DOMAIN` unset: both `az` calls below
+      # fail/return nothing, `id` stays empty, and main.bicep's own
+      # `empty(customDomainCertificateId)` fallback keeps `frontend` on its
+      # default *.azurecontainerapps.io FQDN -- exactly like before this
+      # step existed.
+      - name: Resolve existing managed certificate for the custom domain (if any)
+        id: cert
+        run: |
+          CERT_ID=""
+          if [ -n "${{ vars.CUSTOM_DOMAIN }}" ]; then
+            ENV_APP_NAME=$(az containerapp env list --resource-group "$RESOURCE_GROUP" \
+                             --query "[0].name" -o tsv 2>/dev/null) || true
+            if [ -n "$ENV_APP_NAME" ]; then
+              CERT_ID=$(az containerapp env certificate list \
+                          --name "$ENV_APP_NAME" --resource-group "$RESOURCE_GROUP" \
+                          --query "[?properties.subjectName=='${{ vars.CUSTOM_DOMAIN }}'] | [0].id" \
+                          -o tsv 2>/dev/null) || true
+            fi
+          fi
+          echo "id=${CERT_ID:-}" >> "$GITHUB_OUTPUT"
+          if [ -n "${{ vars.CUSTOM_DOMAIN }}" ] && [ -z "$CERT_ID" ]; then
+            echo "::notice::No existing managed certificate found for '${{ vars.CUSTOM_DOMAIN }}' yet -- frontend will deploy on its default *.azurecontainerapps.io FQDN this run. Provision the certificate for this domain (Portal 'Add custom domain' wizard, or 'az containerapp env certificate create' / 'hostname bind'), then re-run this workflow to bind it going forward."
+          fi
+
       - name: Deploy Bicep
         run: |
           az deployment group create \
@@ -242,6 +286,7 @@ jobs:
               jwtSecretKey="${{ secrets.JWT_SECRET_KEY }}" \
               rootAdminBootstrapPassword="${{ secrets.ROOT_ADMIN_BOOTSTRAP_PASSWORD }}" \
               customDomain="${{ vars.CUSTOM_DOMAIN }}" \
+              customDomainCertificateId="${{ steps.cert.outputs.id }}" \
               alertEmailAddress="${{ secrets.ALERT_EMAIL_ADDRESS }}" \
               notificationsEnabled=${{ vars.NOTIFICATIONS_ENABLED == 'true' }} \
               smtpHost="${{ secrets.SMTP_HOST }}" \

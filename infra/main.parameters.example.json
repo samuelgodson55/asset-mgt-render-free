@@ -22,6 +22,7 @@
     "jwtSecretKey": { "value": "REPLACE_ME_OR_PASS_VIA_CLI" },
     "rootAdminBootstrapPassword": { "value": "" },
     "customDomain": { "value": "" },
+    "customDomainCertificateId": { "value": "" },
     "backendMinReplicas": { "value": 0 },
     "backendMaxReplicas": { "value": 3 },
     "frontendMinReplicas": { "value": 0 },
