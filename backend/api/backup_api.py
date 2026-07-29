@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse
 
 from deps import require_true_super_admin
 import services.backup_service as backup_service
-from services.backup_service import RestoreInProgressError
+from services.backup_service import RestoreInProgressError, BackupInProgressError
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +73,14 @@ def create_backup_now(user: dict = Depends(require_true_super_admin)):
     """
     try:
         entry = backup_service.create_backup(triggered_by="manual")
+    except BackupInProgressError as exc:
+        # Distinct 409 (not 500) -- same reasoning as restore's own 409
+        # below: this isn't a failure of THIS request, it's a correct
+        # refusal because another backup (or a restore) is already
+        # running. See services.backup_service._acquire_backup_lock's
+        # docstring for why letting this one proceed anyway would risk a
+        # silently torn/inconsistent backup file instead.
+        raise HTTPException(status_code=409, detail=str(exc))
     except Exception as exc:
         logger.exception("backup: manual backup failed")
         raise HTTPException(status_code=500, detail=f"Backup failed: {exc}")

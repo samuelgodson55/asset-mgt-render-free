@@ -89,6 +89,16 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 # a normal, queryable `AuditLog` row) as any other account.
 SUPER_ADMIN_ROLE = "super_admin"
 
+# AppSetting key (see models.AppSetting) holding an ISO-8601 UTC
+# timestamp: any JWT with an `iat` (issued-at) before this value is
+# treated as stale and rejected, regardless of its own expiry. Written by
+# services/backup_service.py at the end of every successful restore (see
+# _reconcile_post_restore_credentials()) and read by deps.py's
+# get_current_user() on every request -- kept here, rather than defined
+# in either of those modules, so both can import the exact same string
+# without either one depending on the other.
+AUTH_EPOCH_SETTING_KEY = "auth_invalid_before"
+
 # The root row's `email` column, same synthetic-mailbox convention the old
 # super_admin_principal() used ("no real mailbox, just something readable
 # for audit-log operator= fields"). Used by services/audit_service.py to

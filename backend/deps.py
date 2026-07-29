@@ -10,6 +10,7 @@ any single router) specifically so every `api/*.py` file can import from
 here without creating a dependency on main.py itself.
 """
 
+import datetime
 from typing import Optional
 
 from fastapi import Depends, HTTPException, Request
@@ -19,7 +20,7 @@ import jwt
 
 import models
 from database import get_db
-from security import decode_access_token, SUPER_ADMIN_ROLE
+from security import decode_access_token, SUPER_ADMIN_ROLE, AUTH_EPOCH_SETTING_KEY
 
 security = HTTPBearer(auto_error=False)
 
@@ -60,6 +61,45 @@ def get_current_user(
         raise HTTPException(status_code=401, detail="Session expired. Please log in again.")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid authentication token.")
+
+    # ENTERPRISE HARDENING -- a database restore replaces literally
+    # everything out from under every currently-logged-in session at
+    # once, not just the account that triggered it (see
+    # services/backup_service.py's _reconcile_post_restore_credentials()
+    # for the full reasoning, and note this check runs BEFORE the
+    # per-user re-query below on purpose: a token can be stale relative
+    # to a restore even if the account it names happens to still exist
+    # and look "active" in the freshly-restored data). A JWT issued
+    # before the most recent restore is still cryptographically valid --
+    # it just no longer describes anyone's current reality -- so reject
+    # it here the same way an expired one is rejected above, rather than
+    # letting it keep working against data it was never actually issued
+    # against. AppSetting is queried directly (there's no settings
+    # cache to invalidate -- see AppSetting's own docstring) so this
+    # takes effect on the very next request after a restore completes.
+    epoch_row = db.query(models.AppSetting).filter(models.AppSetting.key == AUTH_EPOCH_SETTING_KEY).first()
+    if epoch_row is not None:
+        try:
+            epoch = datetime.datetime.fromisoformat(epoch_row.value)
+        except (ValueError, TypeError):
+            epoch = None
+        if epoch is not None:
+            # JWT "iat" is an integer Unix timestamp -- PyJWT truncates to
+            # whole seconds on encode (see security.py's create_access_token()),
+            # so comparing it against a microsecond-precision epoch would
+            # incorrectly reject a token issued in the very same second the
+            # epoch was written (truncation always rounds iat DOWN, so
+            # e.g. iat=...24.000 vs epoch=...24.686 would wrongly look
+            # "before" the epoch even though they're the same second).
+            # Floor the epoch to whole seconds too before comparing so
+            # same-second tokens are correctly treated as valid.
+            issued_at = payload["iat"]
+            epoch_floor = int(epoch.timestamp())
+            if issued_at < epoch_floor:
+                raise HTTPException(
+                    status_code=401,
+                    detail="This session predates a recent database restore and is no longer valid. Please log in again.",
+                )
 
     # Requirement #4 (Auth/User routes must exclude soft-deleted records):
     # the JWT itself is stateless and stays cryptographically valid until it

@@ -27,7 +27,7 @@
 // =============================================================================
 
 import { apiRequest, API_URL } from '../api.js';
-import { getSession } from '../auth.js';
+import { getSession, logout } from '../auth.js';
 import { escapeHtml, openModal, closeModal, showToast, showFieldError, clearFieldError } from '../ui.js';
 
 let pendingRestore = null; // { mode: 'local' | 'upload', filename?: string, file?: File }
@@ -274,8 +274,9 @@ export async function confirmRestore() {
   }
 
   try {
+    let restoreResult = null;
     if (pendingRestore.mode === 'local') {
-      await apiRequest(`/backup/restore/${encodeURIComponent(pendingRestore.filename)}`, { method: 'POST' });
+      restoreResult = await apiRequest(`/backup/restore/${encodeURIComponent(pendingRestore.filename)}`, { method: 'POST' });
     } else {
       const fileInput = document.getElementById('restoreUploadInput');
       const file = fileInput && fileInput.files && fileInput.files[0];
@@ -293,11 +294,35 @@ export async function confirmRestore() {
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || 'Restore failed.');
+      restoreResult = data;
     }
     closeModal('restoreBackupModal');
-    alert('Restore complete. The database has been replaced with the chosen backup. A safety backup of the prior state was taken automatically before the restore ran.');
+
+    // ENTERPRISE HARDENING -- a restore replaces the entire database, so
+    // the server invalidates EVERY existing session (see deps.py's
+    // get_current_user() / security.AUTH_EPOCH_SETTING_KEY), including
+    // this one -- the next API call from this tab would just bounce
+    // through apiRequest's generic 401-handler anyway (api.js), but that
+    // gives a generic "session expired" message with no context. Log out
+    // explicitly and immediately instead, with a message that actually
+    // explains what happened and what to do next -- your current
+    // password still works (it's preserved across the restore on
+    // purpose), but 2FA is reset and needs to be set up again, since a
+    // restore never trusts an old backup's MFA secret/recovery codes
+    // (see services/backup_service.py's
+    // _reconcile_post_restore_credentials() for why).
+    const resetCount = restoreResult && restoreResult.credential_reconciliation
+      ? restoreResult.credential_reconciliation.super_admins_reset : 0;
+    const mfaNote = resetCount > 0
+      ? ' Your password still works, but you\'ll need to set up two-factor authentication again after logging back in.'
+      : '';
+    alert(
+      'Restore complete. The database has been replaced with the chosen backup (a safety backup of the prior '
+      + 'state was taken automatically first). For security, everyone is being logged out now, including you.'
+      + mfaNote
+    );
     pendingRestore = null;
-    refreshBackupsPanel();
+    await logout();
   } catch (err) {
     alert(`Restore failed: ${err.message}`);
   } finally {
