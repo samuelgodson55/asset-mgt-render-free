@@ -38,6 +38,9 @@ case someone flipped the switch and forgot the rest of the settings).
 
 import logging
 import smtplib
+import socket
+import threading
+from contextlib import contextmanager
 from email.message import EmailMessage
 from typing import Iterable
 
@@ -53,6 +56,50 @@ logger = logging.getLogger(__name__)
 # VAT setting (models.AppSetting) -- runtime-editable by a Super
 # Admin/Admin without a restart, unlike everything in config.py.
 DIGEST_RECIPIENTS_SETTING_KEY = "digest_recipient_emails"
+
+# Guards the socket.getaddrinfo monkeypatch in _ipv4_only_dns() below --
+# without this, two send_email() calls racing on different threads could
+# each install/restore the patch mid-connection-attempt of the other,
+# leaving either one (or both) resolving DNS with the wrong, or no,
+# patch in place. The window is a single SMTP connection's DNS lookup,
+# not the whole send, so this is not a meaningful bottleneck even under
+# concurrent notification bursts (see tasks/notification_tasks.py).
+_dns_patch_lock = threading.Lock()
+
+
+@contextmanager
+def _ipv4_only_dns():
+    """
+    Forces `socket.getaddrinfo()` -- and therefore `smtplib`, which has no
+    public option to pick an address family itself -- to resolve IPv4 (A
+    record) addresses only, for the duration of this context.
+
+    WHY THIS EXISTS: smtplib.SMTP/SMTP_SSL always resolve the SMTP host via
+    `socket.create_connection()`, which calls `getaddrinfo()` with
+    family=AF_UNSPEC and tries whichever address comes back first. Most
+    real SMTP providers (Gmail, Microsoft 365, SendGrid, ...) publish BOTH
+    an A and an AAAA record. On a host with a working outbound IPv6 route
+    (e.g. Azure Container Apps -- see deploy-azure-aca.yml), that's a
+    complete no-op either way. On a host WITHOUT one (Render's free/starter
+    web services -- see render.yaml), the IPv6 attempt fails immediately
+    with `OSError: [Errno 101] Network is unreachable`, and CPython's
+    `socket.create_connection()` (3.11+) re-raises the FIRST exception it
+    collected rather than falling through to the IPv4 address that would
+    have worked -- so the whole send fails even though a working route
+    exists in the very same DNS answer. Forcing AF_INET here sidesteps
+    that path entirely rather than depending on it working out.
+    """
+    real_getaddrinfo = socket.getaddrinfo
+
+    def ipv4_only_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+        return real_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+
+    with _dns_patch_lock:
+        socket.getaddrinfo = ipv4_only_getaddrinfo
+        try:
+            yield
+        finally:
+            socket.getaddrinfo = real_getaddrinfo
 
 
 def send_email(to: Iterable[str] | str, subject: str, body: str) -> bool:
@@ -97,18 +144,23 @@ def send_email(to: Iterable[str] | str, subject: str, body: str) -> bool:
     message.set_content(body)
 
     try:
-        if settings.SMTP_USE_SSL:
-            with smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT, timeout=10) as smtp:
-                if settings.SMTP_USERNAME:
-                    smtp.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
-                smtp.send_message(message)
-        else:
-            with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=10) as smtp:
-                if settings.SMTP_USE_TLS:
-                    smtp.starttls()
-                if settings.SMTP_USERNAME:
-                    smtp.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
-                smtp.send_message(message)
+        # See _ipv4_only_dns()'s own docstring -- fixes "OSError: [Errno
+        # 101] Network is unreachable" on hosts with no outbound IPv6
+        # route (e.g. Render) when the SMTP host's DNS also has an AAAA
+        # record; a no-op everywhere else, including ACA.
+        with _ipv4_only_dns():
+            if settings.SMTP_USE_SSL:
+                with smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT, timeout=10) as smtp:
+                    if settings.SMTP_USERNAME:
+                        smtp.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
+                    smtp.send_message(message)
+            else:
+                with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=10) as smtp:
+                    if settings.SMTP_USE_TLS:
+                        smtp.starttls()
+                    if settings.SMTP_USERNAME:
+                        smtp.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
+                    smtp.send_message(message)
         logger.info("send_email: sent %r to %s", subject, recipients)
         return True
     except Exception:

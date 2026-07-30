@@ -145,7 +145,7 @@ services:
       - /mnt/docker-data/volumes/backup_data:/app/backups
       - /mnt/docker-data/volumes/export_data:/app/export_results
     environment:
-      ENVIRONMENT: ${ENVIRONMENT:-development}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
       UVICORN_WORKERS: ${UVICORN_WORKERS:-2}
       # Pre-encoded, ready-to-use DATABASE_URL from .env -- written by
       # infra-vm/cloud-init.yaml / sync-secrets-vm.yml using Terraform's
@@ -183,12 +183,15 @@ services:
       # schema. ENVIRONMENT itself (above) still matters for everything
       # ELSE config.py gates on it (JWT secret strength checks, secure
       # cookie flags, CORS strictness, etc.) -- it's read from this VM's
-      # /opt/snipeit/.env, defaulting to "development" if that file
-      # doesn't set it, and is written there by deploy-azure-vm.yml's
-      # "Update IMAGE_TAG + ENVIRONMENT on the VM" step on every deploy,
-      # based on whichever target ("vm-staging" or "prod") that run
-      # resolved to -- see that workflow's ENVIRONMENT/RUNTIME_ENVIRONMENT
-      # comments for the full resolution order.
+      # /opt/snipeit/.env, defaulting to "production" (the infrastructure
+      # default) if that file doesn't set ENVIRONMENT at all -- e.g. a
+      # brand-new VM before deploy-azure-vm.yml has ever run its "Update
+      # IMAGE_TAG + ENVIRONMENT on the VM" step. That step writes the real
+      # value on every deploy, sourced from the resolve-target job's
+      # build_env output -- which reads the ENVIRONMENT Actions variable
+      # configured on THIS run's target GitHub Environment (vm-staging or
+      # prod), not derived from the target's name -- see that workflow's
+      # resolve-target job comment for the full resolution.
       AUTO_INIT_DB: "false"
       AUTO_SEED_DEMO_DATA: "false"
       LOG_FORMAT: json
@@ -277,7 +280,7 @@ services:
     volumes:
       - /mnt/docker-data/volumes/export_data:/app/export_results
     environment:
-      ENVIRONMENT: ${ENVIRONMENT:-development}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
       # Pre-encoded DATABASE_URL from .env -- see the backend service's
       # DATABASE_URL comment above for why this is no longer rebuilt from
       # raw POSTGRES_USER/POSTGRES_PASSWORD here.
@@ -346,7 +349,7 @@ services:
     mem_reservation: ${BEAT_MEM_RESERVATION:-64m}
     command: ["celery", "-A", "celery_app", "beat", "--loglevel=info"]
     environment:
-      ENVIRONMENT: ${ENVIRONMENT:-development}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
       # Pre-encoded DATABASE_URL from .env -- see the backend service's
       # DATABASE_URL comment above for why this is no longer rebuilt from
       # raw POSTGRES_USER/POSTGRES_PASSWORD here.

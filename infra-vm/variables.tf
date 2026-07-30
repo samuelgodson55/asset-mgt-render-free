@@ -14,9 +14,9 @@ variable "subscription_id" {
 }
 
 variable "environment_name" {
-  description = "Short environment name: \"prod\" or \"staging\". Prefixes every resource name and is used as the VM's DNS label. Defaults to \"staging\" -- mirrors infra/main.bicep's environmentName default (see that param's own comment): a direct `terraform apply` that forgets to set this explicitly should provision a safe, non-production environment, not silently become prod. infra-deploy-vm.yml always passes TF_VAR_environment_name explicitly (no default there either) for the same reason, so this default only matters for a manual/local terraform run."
+  description = "Short environment name: \"prod\" or \"staging\". Prefixes every resource name and is used as the VM's DNS label. Defaults to \"prod\" -- the infrastructure default across this whole repo (mirrors infra/main.bicep's environmentName default, deploy-azure-vm.yml's/deploy-azure-aca.yml's dropdown defaults, and docker-compose.vm.yml's own ENVIRONMENT fallback -- see each of their own comments). infra-deploy-vm.yml always passes TF_VAR_environment_name explicitly (no default there either, `required: true` with no `default:` on that workflow_dispatch input), so this default only matters for a manual/local terraform run that forgets to set -var environment_name -- it'll provision prod-named resources rather than silently standing up a staging environment nobody asked for."
   type        = string
-  default     = "staging"
+  default     = "prod"
   validation {
     condition     = contains(["prod", "staging"], var.environment_name)
     error_message = "environment_name must be \"prod\" or \"staging\"."

@@ -66,9 +66,9 @@
 // so deploying new code never requires a full infra re-deploy.
 // =============================================================================
 
-@description('Short environment name: "prod" or "staging". Prefixes every resource name, and drives the ENVIRONMENT runtime env var below (sharedEnv) -- "prod" -> "production", "staging" -> "development". Defaults to "staging" so a direct `az deployment group create` run that forgets to pass this explicitly provisions a safe, non-production environment rather than silently becoming prod; .github/workflows/infra-deploy.yml always passes this explicitly (no default there) for the same reason.')
+@description('Short environment name: "prod" or "staging". Prefixes every resource name, and drives the ENVIRONMENT runtime env var below (sharedEnv) -- "prod" -> "production", "staging" -> "development". Defaults to "prod" -- the infrastructure default across this whole repo (mirrors infra-vm/variables.tf''s environment_name default, deploy-azure-vm.yml''s/deploy-azure-aca.yml''s dropdown defaults, and docker-compose.vm.yml''s own ENVIRONMENT fallback -- see each of their own comments). .github/workflows/infra-deploy.yml always passes this explicitly (`required: true`, no `default:` on that workflow_dispatch input), so this default only matters for a manual/local `az deployment group create` run that forgets to pass -p environmentName=... -- it provisions prod-named resources rather than silently standing up a staging environment nobody asked for.')
 @allowed(['prod', 'staging'])
-param environmentName string = 'staging'
+param environmentName string = 'prod'
 
 @description('Azure region for every resource.')
 param location string = resourceGroup().location
