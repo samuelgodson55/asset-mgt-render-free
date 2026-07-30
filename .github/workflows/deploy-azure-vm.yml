@@ -222,7 +222,13 @@ jobs:
     needs: [ci, build-push, resolve-target]
     if: ${{ always() && (needs.ci.result == 'success' || needs.ci.result == 'skipped') && (needs.build-push.result == 'success' || needs.build-push.result == 'skipped') && needs.resolve-target.result == 'success' }}
     runs-on: ubuntu-latest
-    environment: ${{ env.ENVIRONMENT }}
+    # Same restriction as build-push's `with:` block above (see its
+    # comment): a job's `environment:` field can only reference the
+    # github/needs/inputs/vars/strategy/matrix contexts, NOT `env` --
+    # referencing env.ENVIRONMENT here parses but is invalid at trigger
+    # time and produces "Unrecognized named-value: 'env'". Inlined the
+    # same expression the top-of-file `env.ENVIRONMENT` is computed from.
+    environment: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) && 'prod' || inputs.environment }}
     env:
       # What the backend/worker/beat containers actually read as their own
       # ENVIRONMENT env var (see backend/config.py's apply_environment_defaults).
