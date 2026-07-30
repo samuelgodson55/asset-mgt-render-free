@@ -21,6 +21,12 @@ on:
   pull_request:
     branches: [main, develop]
   workflow_call:
+    inputs:
+      check_infra:
+        description: 'Whether infra/main.bicep validation is relevant to the caller. infra/main.bicep is the Container Apps (ACA) path only -- the VM path (infra-vm/, provisioned by infra-deploy-vm.yml) has nothing to do with it. Defaults to true so deploy-azure-aca.yml and release.yml (both genuinely ACA/Bicep-relevant) keep validating it on every call. deploy-azure-vm.yml explicitly passes false, since without this the "no usable base commit for a diff" fallback below (which every workflow_call hits, regardless of caller) had no way to tell an ACA caller apart from a VM caller and ran bicep-lint unconditionally either way -- see that job''s own comment.'
+        required: false
+        type: boolean
+        default: true
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -63,6 +69,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PUSH_BEFORE_SHA: ${{ github.event.before }}
+          CHECK_INFRA: ${{ inputs.check_infra }}
         run: |
           # Figure out what to diff against:
           #  - pull_request: the PR's base commit, so a PR only ever pays
@@ -89,7 +96,16 @@ jobs:
             echo "No usable base commit for a diff (new branch, or a workflow_call/dispatch that should always run everything) -- treating every path as changed."
             echo "backend=true" >> "$GITHUB_OUTPUT"
             echo "frontend=true" >> "$GITHUB_OUTPUT"
-            echo "infra=true" >> "$GITHUB_OUTPUT"
+            # infra/main.bicep is the ACA path only -- see this input's own
+            # comment on the workflow_call trigger above. Only forced true
+            # here for a caller that's actually infra-relevant (default
+            # true covers plain push/PR and ACA-path callers); the VM path
+            # passes check_infra: false so it never hits this.
+            if [ "$CHECK_INFRA" = "false" ]; then
+              echo "infra=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "infra=true" >> "$GITHUB_OUTPUT"
+            fi
             exit 0
           fi
 

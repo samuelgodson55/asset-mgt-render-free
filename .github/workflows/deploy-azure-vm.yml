@@ -163,6 +163,16 @@ jobs:
   ci:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.image_tag == '' }}
     uses: ./.github/workflows/ci.yml
+    with:
+      # infra/main.bicep is the ACA path only (see infra-deploy.yml) --
+      # this VM path provisions/updates via infra-vm/ + Terraform
+      # (infra-deploy-vm.yml) instead, and never touches main.bicep at
+      # all. Without this, ci.yml's "no usable base commit for a diff"
+      # fallback (which every workflow_call hits, this one included) had
+      # no way to tell this caller apart from deploy-azure-aca.yml/
+      # release.yml and ran bicep-lint here unconditionally -- see
+      # ci.yml's check_infra input for the full story.
+      check_infra: false
 
   build-push:
     name: Build + push both images
