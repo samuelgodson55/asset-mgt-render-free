@@ -161,6 +161,27 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:-https://${DOMAIN}}
       SITE_NAME: ${SITE_NAME:-Snipe-IT Lite}
       LEAN_MODE: "false"
+      # Explicit, not left to LEAN_MODE's default: this VM is a real,
+      # persistent-data production deployment where Alembic (run as its
+      # own explicit "alembic upgrade head" step by the deploy workflow --
+      # see .github/workflows/deploy-azure-vm.yml) must be the ONLY thing
+      # that ever creates/alters schema. LEAN_MODE is forced to "false"
+      # above purely to keep this container's logging/docs behavior out of
+      # "lean mode" -- but config.py's environment-based default for
+      # AUTO_INIT_DB/AUTO_SEED_DEMO_DATA is driven by that same LEAN_MODE
+      # value, not by ENVIRONMENT=production directly, so leaving them
+      # unset here silently re-enabled AUTO_INIT_DB despite this being
+      # production. That let this container's own startup race the
+      # deploy workflow's separate "alembic upgrade head" step: whichever
+      # ran first would create any brand-new table (e.g.
+      # password_reset_tokens) straight from models.py, and the other
+      # would then fail with psycopg2.errors.DuplicateTable trying to
+      # create the same table again. Pinning both flags to "false" here
+      # -- exactly as the `worker` service below already does -- removes
+      # the race entirely: only the explicit alembic step ever touches
+      # schema.
+      AUTO_INIT_DB: "false"
+      AUTO_SEED_DEMO_DATA: "false"
       LOG_FORMAT: json
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # Operations & Observability requirement #4: distributed tracing

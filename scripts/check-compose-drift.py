@@ -49,9 +49,21 @@ ALLOWED_ONLY_IN_DEV = {
     },
 }
 ALLOWED_ONLY_IN_VM = {
-    # (none currently -- add here, with a reason, if the VM path ever
-    # legitimately needs a key local dev doesn't, e.g. something that only
-    # makes sense against a real reverse proxy/tunnel.)
+    "backend": {
+        # Explicitly pinned to "false" here (see docker-compose.vm.yml's
+        # own comment on these two keys) so this real, persistent-data
+        # deployment never lets the backend container's own startup
+        # create/seed schema itself -- the deploy workflow's separate
+        # "alembic upgrade head" step is the only thing allowed to do
+        # that. Local dev's docker-compose.yml intentionally leaves both
+        # unset so they fall through to config.py's environment-based
+        # default (AUTO_INIT_DB/AUTO_SEED_DEMO_DATA both true for a
+        # non-production ENVIRONMENT), which is exactly what a fresh
+        # local checkout wants: no separate migrate step to remember to
+        # run before the app is usable.
+        "AUTO_INIT_DB",
+        "AUTO_SEED_DEMO_DATA",
+    },
 }
 
 
