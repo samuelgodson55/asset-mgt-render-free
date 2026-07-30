@@ -217,13 +217,42 @@ services:
       # Email notifications (extension requests + overdue-checkout digest +
       # due-soon reminders) -- see backend/config.py's NOTIFICATIONS_ENABLED
       # docstring and .env.example. Disabled by default here too; flip
-      # NOTIFICATIONS_ENABLED to "true" and fill in your real SMTP
-      # provider's values once you have one. Sent from the SAME process
-      # that runs the embedded worker (see RUN_EMBEDDED_WORKER above) --
-      # unlike the old multi-service setup, there's no separate worker
-      # service to duplicate these values into.
+      # NOTIFICATIONS_ENABLED to "true" and fill in BREVO_API_KEY (or
+      # switch EMAIL_PROVIDER to "resend" and fill in RESEND_API_KEY
+      # instead) once you have one. Sent from the SAME process that runs
+      # the embedded worker (see RUN_EMBEDDED_WORKER above) -- unlike the
+      # old multi-service setup, there's no separate worker service to
+      # duplicate these values into.
+      #
+      # EMAIL_PROVIDER defaults to "brevo" HERE, not "smtp" (config.py's
+      # own default) -- see backend/services/notification_service.py's
+      # top-of-file comment and config.py's EMAIL_PROVIDER comment for the
+      # full story, but in short: Render's Free web service instance type
+      # blocks ALL outbound traffic on SMTP ports 25/465/587 at the
+      # network level (https://render.com/docs/free#free-web-services), so
+      # plain SMTP cannot reach ANY provider from this service no matter
+      # how SMTP_HOST/PORT below are configured. Brevo's free tier (300
+      # emails/day, no credit card, no domain verification required to
+      # start -- https://app.brevo.com/settings/keys/api) sends over port
+      # 443 instead, which Free Render services CAN reach, so it's the
+      # option that actually works while staying on Render's Free plan --
+      # this Blueprint's entire premise (see this file's own top-of-file
+      # comment). Brevo requires SMTP_FROM_EMAIL below to be a verified
+      # sender in your Brevo account first (Brevo dashboard > Senders,
+      # Domains & Dedicated IPs -- a one-click email confirmation, not
+      # full DNS/domain verification) -- see config.py's BREVO_API_KEY
+      # comment. The SMTP_* keys below are left in place, unused by
+      # default, purely so switching EMAIL_PROVIDER back to "smtp" later
+      # (e.g. after upgrading off the Free instance type) doesn't require
+      # re-adding them from scratch.
       - key: NOTIFICATIONS_ENABLED
         value: false
+      - key: EMAIL_PROVIDER
+        value: brevo
+      - key: BREVO_API_KEY
+        value: ""
+      - key: RESEND_API_KEY
+        value: ""
       - key: SMTP_HOST
         value: ""
       - key: SMTP_PORT

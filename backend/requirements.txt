@@ -12,6 +12,15 @@ alembic==1.13.2
 reportlab==4.2.5
 celery==5.4.0
 redis==5.0.8
+# Was already pulled in transitively (google-api-python-client, the OTLP
+# HTTP exporter below, ...) but never listed explicitly -- now a DIRECT
+# dependency too: services/notification_service.py's Brevo/Resend
+# EMAIL_PROVIDER paths call requests.post() themselves (see that file's
+# own top-of-file comment for why those exist at all). Pinning it
+# explicitly means a change to one of those transitive dependencies can
+# no longer silently change (or drop) the version this app actually
+# relies on.
+requests==2.32.3
 # Redis-backed Celery Beat scheduler with a built-in distributed lock:
 # whichever replica currently holds the lock is the only one that actually
 # fires scheduled tasks (celery_app.py's beat_schedule); if it dies, the

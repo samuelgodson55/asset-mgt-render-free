@@ -4,15 +4,31 @@ services/notification_service.py
 The ONE place in this codebase that knows how to send an email. Every other
 module (services/extension_service.py, tasks/notification_tasks.py) builds
 a subject/body and calls `send_email()` here -- nothing else touches
-`smtplib` directly.
+`smtplib`/`requests` directly.
 
-WHY THIS IS DELIBERATELY "BORING" (plain SMTP, no vendor SDK)
+WHY THIS IS DELIBERATELY "BORING" (plain SMTP by default, no vendor SDK
+EVER -- just raw HTTP via `requests` for the two alternate providers below)
 ---------------------------------------------------------------
 This app is meant to be self-hostable with zero required third-party
 accounts. Plain SMTP (Python's built-in `smtplib`) works unmodified against
 a local Postfix/Exim relay, a self-hosted mail server, OR a hosted
 provider's SMTP endpoint (SendGrid, Mailgun, AWS SES, etc. all expose one)
--- so there's no vendor lock-in and no extra dependency to install.
+-- so there's no vendor lock-in and no extra dependency to install. This is
+still `EMAIL_PROVIDER`'s default and the ONLY thing deploy-azure-vm.yml/
+deploy-azure-aca.yml ever need.
+
+WHY EMAIL_PROVIDER (config.py) CAN SELECT "brevo"/"resend" INSTEAD
+-----------------------------------------------------------------------
+One exception, forced by the platform, not a design preference: Render's
+Free web service instance type blocks ALL outbound traffic on SMTP ports
+25/465/587 at the network level (see EMAIL_PROVIDER's own comment in
+config.py) -- no code-level fix reaches around a port block. An HTTP-API
+provider sends over port 443 instead, which Free Render services CAN
+reach, so `render.yaml` sets `EMAIL_PROVIDER=brevo` (or `resend`) instead
+of leaving SMTP configured and silently timing out. `_send_via_brevo()`/
+`_send_via_resend()` below are raw `requests.post()` calls against each
+provider's plain HTTP API -- no vendor SDK package, same "boring" spirit,
+just a transport that isn't blocked.
 
 WHY EVERY CALL IS "FAIL-SOFT" (never raises)
 -----------------------------------------------
@@ -44,6 +60,7 @@ from contextlib import contextmanager
 from email.message import EmailMessage
 from typing import Iterable
 
+import requests
 from sqlalchemy.orm import Session
 
 import models
@@ -104,11 +121,13 @@ def _ipv4_only_dns():
 
 def send_email(to: Iterable[str] | str, subject: str, body: str) -> bool:
     """
-    Sends one plain-text email to one or more recipients. Returns True if
-    the message was handed off to the SMTP server successfully, False in
+    Sends one plain-text email to one or more recipients via whichever
+    transport `settings.EMAIL_PROVIDER` selects (see config.py's own
+    comment on that setting for why more than just "smtp" exists at all).
+    Returns True if the message was handed off successfully, False in
     every other case (notifications disabled, no recipients, misconfigured
-    SMTP settings, or the send itself raising) -- callers should treat a
-    False return as "logged, not fatal" rather than retrying inline.
+    provider settings, or the send itself raising) -- callers should treat
+    a False return as "logged, not fatal" rather than retrying inline.
     """
     recipients = [to] if isinstance(to, str) else [addr for addr in to if addr]
     recipients = [addr.strip() for addr in recipients if addr and addr.strip()]
@@ -129,48 +148,128 @@ def send_email(to: Iterable[str] | str, subject: str, body: str) -> bool:
         )
         return False
 
-    if not settings.SMTP_HOST or not settings.SMTP_FROM_EMAIL:
+    provider = (settings.EMAIL_PROVIDER or "smtp").strip().lower()
+    provider_config_ok, provider_config_error = {
+        "smtp": (
+            bool(settings.SMTP_HOST and settings.SMTP_FROM_EMAIL),
+            "SMTP_HOST/SMTP_FROM_EMAIL aren't both configured",
+        ),
+        "brevo": (
+            bool(settings.BREVO_API_KEY and settings.SMTP_FROM_EMAIL),
+            "BREVO_API_KEY/SMTP_FROM_EMAIL aren't both configured",
+        ),
+        "resend": (
+            bool(settings.RESEND_API_KEY and settings.SMTP_FROM_EMAIL),
+            "RESEND_API_KEY/SMTP_FROM_EMAIL aren't both configured",
+        ),
+    }.get(provider, (False, f'unrecognized EMAIL_PROVIDER "{provider}" -- must be "smtp", "brevo", or "resend"'))
+
+    if not provider_config_ok:
         logger.warning(
-            "send_email: NOTIFICATIONS_ENABLED is true but SMTP_HOST/SMTP_FROM_EMAIL "
-            "aren't both configured -- cannot send. Subject=%r To=%s",
-            subject, recipients,
+            "send_email: NOTIFICATIONS_ENABLED is true but %s -- cannot send. Subject=%r To=%s",
+            provider_config_error, subject, recipients,
         )
         return False
 
+    try:
+        if provider == "brevo":
+            _send_via_brevo(recipients, subject, body)
+        elif provider == "resend":
+            _send_via_resend(recipients, subject, body)
+        else:
+            _send_via_smtp(recipients, subject, body)
+        logger.info("send_email: sent %r to %s via %s", subject, recipients, provider)
+        return True
+    except Exception:
+        # Broad `except Exception` is intentional here -- smtplib and the
+        # HTTP-API providers below can each raise a long tail of different
+        # exception types (connection refused, auth failure, timeout,
+        # malformed address, a non-2xx HTTP response, ...) and NONE of them
+        # should ever bubble up out of an email-sending helper and take
+        # down the calling request/task with them.
+        logger.warning("send_email: failed to send %r to %s via %s", subject, recipients, provider, exc_info=True)
+        return False
+
+
+def _send_via_smtp(recipients: list[str], subject: str, body: str) -> None:
+    """Plain RFC 5321 SMTP -- see config.py's SMTP_* settings. Raises on failure; send_email() catches."""
     message = EmailMessage()
     message["Subject"] = subject
     message["From"] = settings.SMTP_FROM_EMAIL
     message["To"] = ", ".join(recipients)
     message.set_content(body)
 
-    try:
-        # See _ipv4_only_dns()'s own docstring -- fixes "OSError: [Errno
-        # 101] Network is unreachable" on hosts with no outbound IPv6
-        # route (e.g. Render) when the SMTP host's DNS also has an AAAA
-        # record; a no-op everywhere else, including ACA.
-        with _ipv4_only_dns():
-            if settings.SMTP_USE_SSL:
-                with smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT, timeout=10) as smtp:
-                    if settings.SMTP_USERNAME:
-                        smtp.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
-                    smtp.send_message(message)
-            else:
-                with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=10) as smtp:
-                    if settings.SMTP_USE_TLS:
-                        smtp.starttls()
-                    if settings.SMTP_USERNAME:
-                        smtp.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
-                    smtp.send_message(message)
-        logger.info("send_email: sent %r to %s", subject, recipients)
-        return True
-    except Exception:
-        # Broad `except Exception` is intentional here -- smtplib can raise
-        # a long tail of different exception types (connection refused,
-        # auth failure, timeout, malformed address, ...) and NONE of them
-        # should ever bubble up out of an email-sending helper and take
-        # down the calling request/task with them.
-        logger.warning("send_email: failed to send %r to %s", subject, recipients, exc_info=True)
-        return False
+    # See _ipv4_only_dns()'s own docstring -- fixes "OSError: [Errno 101]
+    # Network is unreachable" on hosts with no outbound IPv6 route when the
+    # SMTP host's DNS also has an AAAA record; a no-op everywhere else,
+    # including ACA. Does NOT fix Render's Free-plan SMTP PORT block (see
+    # EMAIL_PROVIDER's own comment) -- that's a different failure mode
+    # (ETIMEDOUT, not ENETUNREACH) with no code-level fix, which is why
+    # "brevo"/"resend" exist as alternate providers below.
+    with _ipv4_only_dns():
+        if settings.SMTP_USE_SSL:
+            with smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT, timeout=10) as smtp:
+                if settings.SMTP_USERNAME:
+                    smtp.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
+                smtp.send_message(message)
+        else:
+            with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=10) as smtp:
+                if settings.SMTP_USE_TLS:
+                    smtp.starttls()
+                if settings.SMTP_USERNAME:
+                    smtp.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
+                smtp.send_message(message)
+
+
+def _send_via_brevo(recipients: list[str], subject: str, body: str) -> None:
+    """
+    Brevo's transactional email HTTP API -- https://developers.brevo.com/reference/sendtransacemail
+    -- sent over port 443, unaffected by Render's Free-plan SMTP port
+    block (see EMAIL_PROVIDER's own comment in config.py). Raises
+    `requests.HTTPError` (via raise_for_status()) or any `requests`
+    connection-level exception on failure; send_email() catches both.
+    """
+    response = requests.post(
+        "https://api.brevo.com/v3/smtp/email",
+        headers={
+            "api-key": settings.BREVO_API_KEY,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        json={
+            "sender": {"email": settings.SMTP_FROM_EMAIL},
+            "to": [{"email": addr} for addr in recipients],
+            "subject": subject,
+            "textContent": body,
+        },
+        timeout=10,
+    )
+    response.raise_for_status()
+
+
+def _send_via_resend(recipients: list[str], subject: str, body: str) -> None:
+    """
+    Resend's HTTP API -- https://resend.com/docs/api-reference/emails/send-email
+    -- sent over port 443, unaffected by Render's Free-plan SMTP port
+    block (see EMAIL_PROVIDER's own comment in config.py). Raises
+    `requests.HTTPError` (via raise_for_status()) or any `requests`
+    connection-level exception on failure; send_email() catches both.
+    """
+    response = requests.post(
+        "https://api.resend.com/emails",
+        headers={
+            "Authorization": f"Bearer {settings.RESEND_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "from": settings.SMTP_FROM_EMAIL,
+            "to": recipients,
+            "subject": subject,
+            "text": body,
+        },
+        timeout=10,
+    )
+    response.raise_for_status()
 
 
 # -----------------------------------------------------------------------------

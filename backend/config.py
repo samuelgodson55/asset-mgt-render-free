@@ -424,6 +424,40 @@ class Settings(BaseSettings):
     # domain/sender, so this intentionally has no made-up default.
     SMTP_FROM_EMAIL: str = ""
 
+    # Which transport send_email() (services/notification_service.py)
+    # actually uses: "smtp" (default -- plain RFC 5321 SMTP against
+    # SMTP_HOST/PORT above, works against ANY provider that speaks SMTP,
+    # zero vendor lock-in) or an HTTP-API provider ("brevo"/"resend" below).
+    #
+    # WHY AN HTTP-API OPTION EXISTS AT ALL, GIVEN THE "BORING, NO VENDOR
+    # SDK" PHILOSOPHY (see notification_service.py's own module docstring):
+    # Render's Free web service instance type blocks ALL outbound traffic
+    # on ports 25/465/587 at the network level -- see
+    # https://render.com/docs/free#free-web-services -- so plain SMTP
+    # cannot reach ANY provider from a Free Render service, full stop, no
+    # amount of application-level retrying or DNS/IP-family fixing gets
+    # around a port block. An HTTP-API provider sends over port 443
+    # instead, which Free Render services can reach -- the only way to
+    # keep email working AND stay on Render's Free plan (this repo's
+    # entire premise -- see render.yaml's own top-of-file comment). Set
+    # this to "smtp" (or leave unset) for every other deployment target
+    # (deploy-azure-vm.yml/deploy-azure-aca.yml, local dev) -- SMTP has no
+    # such restriction there.
+    EMAIL_PROVIDER: str = "smtp"
+    # https://app.brevo.com/settings/keys/api -- free tier: 300 emails/day,
+    # forever, no credit card. The SENDER address (SMTP_FROM_EMAIL below)
+    # must be verified in Brevo first -- a one-click confirmation link
+    # sent to that address (Brevo dashboard > Senders, Domains & Dedicated
+    # IPs), NOT full DNS/domain verification -- sends using an unverified
+    # sender fail outright. Only read when EMAIL_PROVIDER="brevo".
+    BREVO_API_KEY: str = ""
+    # https://resend.com/api-keys -- free tier: 3,000 emails/month
+    # (100/day). Sending FROM your own domain requires verifying it first
+    # (Resend dashboard > Domains); until then, SMTP_FROM_EMAIL must stay
+    # on their shared onboarding@resend.dev sender. Only read when
+    # EMAIL_PROVIDER="resend".
+    RESEND_API_KEY: str = ""
+
     # Extra recipients who should get EVERY new-extension-request alert
     # (see services/extension_service.py) regardless of role/department --
     # e.g. an IT-operations distribution list that isn't itself a `users`
