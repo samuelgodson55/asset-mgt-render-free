@@ -45,12 +45,39 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # GUARD (matches 0002_bootstrap_root_admin.py's own
+    # already_bootstrapped idempotency check): a VM deploy of this exact
+    # migration once failed with psycopg2.errors.DuplicateTable because
+    # this container's own FastAPI startup (create_all(), via
+    # AUTO_INIT_DB) raced this workflow's separate, explicit "alembic
+    # upgrade head" step and created `password_reset_tokens` first --
+    # see config.py's apply_environment_defaults() and
+    # docker-compose.vm.yml's AUTO_INIT_DB comment for the fix that stops
+    # that race from happening again on any FUTURE deploy. That fix does
+    # nothing for a database that already got hit by the race BEFORE it
+    # shipped, though: create_all() doesn't stamp alembic_version, so
+    # such a database is left with the table already present but this
+    # migration still un-applied as far as Alembic is concerned --
+    # meaning every subsequent "alembic upgrade head" run keeps retrying
+    # the same CREATE TABLE and keeps dying the same way, forever,
+    # without ever being able to stamp past it. Checking for the table
+    # first makes this migration safe to run either way: a genuinely
+    # fresh database still gets the table created here as before, while
+    # a database where it already exists (whatever the reason) just gets
+    # the revision stamped forward, exactly like re-running this
+    # migration against a database already at head is supposed to
+    # behave.
+    #
     # NOTE: `user_id` is declared with index=True below, so Alembic's
     # create_table() already emits `CREATE INDEX
     # ix_password_reset_tokens_user_id` right after the table DDL -- do
     # NOT also call op.create_index() for this same column (see
     # 0009_recovery_codes.py's identical note for why that double-creates
     # and fails).
+    bind = op.get_bind()
+    if sa.inspect(bind).has_table("password_reset_tokens"):
+        return
+
     op.create_table(
         "password_reset_tokens",
         sa.Column("id", sa.Integer(), primary_key=True, index=True),
@@ -63,6 +90,15 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Symmetric guard: a downgrade run against a database where this
+    # table was never actually created by upgrade() here (e.g. the
+    # upgrade() guard above found it already present and just stamped
+    # past it, then a later downgrade to before 0011 is requested twice)
+    # should be a safe no-op the second time, not an error.
+    bind = op.get_bind()
+    if not sa.inspect(bind).has_table("password_reset_tokens"):
+        return
+
     # drop_table() removes the table's indexes (including
     # ix_password_reset_tokens_user_id) along with it -- no separate
     # drop_index() call needed/wanted.
