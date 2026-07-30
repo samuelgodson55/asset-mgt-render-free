@@ -62,7 +62,7 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        description: 'Target environment. "vm-staging", not "staging" -- kept deliberately distinct from the Container Apps path''s "staging" GitHub Environment (deploy-azure-aca.yml/infra-deploy.yml) so the two paths never share AZURE_CLIENT_ID or other environment-scoped secrets. See DEPLOYMENT_VM.md''s "Using both deployment targets" section. Just two options, no "from-variable" sentinel -- the infrastructure default is "prod", so that''s this dropdown''s default too; pick "vm-staging" explicitly when that''s what you mean. This choice only controls WHICH TARGET gets deployed (which GitHub Environment''s secrets get used, which image name/resource this run touches) -- it does NOT control minified-vs-obfuscated frontend build output. That''s a separate axis: each of "vm-staging"''s and "prod"''s GitHub Environments has its own `ENVIRONMENT` Actions variable set to "production" or "development" (Settings > Environments > <name> > Environment variables), read by the `resolve-target` job below and used to set BUILD_ENV/RUNTIME_ENVIRONMENT -- see that job''s comment.'
+        description: 'Target environment. "vm-staging", not "staging" -- kept deliberately distinct from the Container Apps path''s "staging" GitHub Environment so the two paths never share AZURE_CLIENT_ID or other environment-scoped secrets.'
         required: true
         type: choice
         options: [vm-staging, prod]

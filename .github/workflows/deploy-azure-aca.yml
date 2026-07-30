@@ -71,7 +71,8 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        description: 'Target Azure Container Apps environment. Just two options, no "from-variable" sentinel -- the infrastructure default is "production", so that''s this dropdown''s default too; pick "staging" explicitly when that''s what you mean. This choice only controls WHICH TARGET gets deployed (which GitHub Environment''s OIDC secrets get used, which resource group/image names this run touches) -- it does NOT control minified-vs-obfuscated frontend build output. That''s a separate axis: each of "staging"''s and "production"''s GitHub Environments has its own `ENVIRONMENT` Actions variable set to "production" or "development" (Settings > Environments > <name> > Environment variables), read by the `resolve-target` job below and used to set BUILD_ENV -- see that job''s comment.'
+        description: 'Target Azure Container Apps environment. "staging" or "production".
+          "staging" is a separate GitHub Environment from the Container Apps path''s "vm-staging" so the two paths never share environment-scoped secrets.'
         required: true
         type: choice
         options: [staging, production]
