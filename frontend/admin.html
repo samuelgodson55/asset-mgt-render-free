@@ -1683,22 +1683,30 @@
         </button>
       </div>
 
-      <!-- Account Details (name/username/email rotation) -- shown only
-           for role === 'super_admin' by profile.js's openProfileModal().
-           This exists because SUPER_ADMIN_ROLE is the one account with no
-           admin "above" it who could otherwise fix these values for it
-           (see backend/services/user_service.py's is_hidden_root_admin()
-           guard, which blocks PATCH /users/{id} from ever reaching this
-           row) -- and specifically so its bootstrap-assigned
-           "{username}@local" placeholder email (see
+      <!-- Account Details (name/username/email rotation) -- shown for
+           EVERY role by profile.js's openProfileModal(). PATCH /auth/me
+           (backend/services/auth_service.py's update_identity()) is
+           generic self-service and isn't role-restricted -- it's the
+           same self-service shape update_password() below already
+           established for the password itself, complete with its own
+           case-insensitive duplicate-username/email checks and a
+           post-change email notification. SUPER_ADMIN_ROLE is simply the
+           one account with no admin "above" it who could otherwise fix
+           these values for it (see backend/services/user_service.py's
+           is_hidden_root_admin() guard, which blocks PATCH /users/{id}
+           from ever reaching that row) -- and specifically so its
+           bootstrap-assigned "{username}@local" placeholder email (see
            backend/alembic/versions/0002_bootstrap_root_admin.py) can be
            replaced with a real, reachable mailbox, which
            POST /auth/forgot-password (js/main.js's "Forgot password?"
-           link on the login page) needs somewhere valid to send to.
-           Every other role's name/username/email is instead edited by an
-           Admin/Super Admin via the User Directory's Edit action -- see
-           services/user_service.py's update_user() -- so this section
-           doesn't need to appear for them. -->
+           link on the login page) needs somewhere valid to send to. Every
+           other role gets this exact same self-service path here, on top
+           of an Admin/Super Admin still being able to edit them via the
+           User Directory's Edit action -- see
+           services/user_service.py's update_user(). This markup is
+           identical, copy-pasted into manager.html/staff.html/
+           customer.html, same pattern as the rest of #profileModal (see
+           js/components/profile.js's module docstring). -->
       <div id="profileIdentitySection" class="hidden border-t border-border pt-4">
         <h4 class="mb-1 text-[13px] font-semibold text-slate-100">Account Details</h4>
         <p class="mb-3 text-[12px] text-slate-500">Requires your current password -- for security reasons. Only change what needs updating; leave the rest as-is.</p>

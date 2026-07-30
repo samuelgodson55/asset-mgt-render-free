@@ -761,6 +761,24 @@ def _detect_schema_revision(conn) -> str:
         return revision
     revision = "0010_partition_audit_logs"
 
+    # 0011 adds the password_reset_tokens table -- same "table presence
+    # is its own marker" pattern as 0009_recovery_codes above. Missing
+    # this check is exactly what caused a restore to fail with
+    # psycopg2.errors.DuplicateTable on password_reset_tokens: a
+    # database that ALREADY has the table (either a fresh AUTO_INIT_DB
+    # build against current models.py, or a backup taken after 0011
+    # shipped) was still detected as stuck at "0010_partition_audit_logs"
+    # -- the last revision this function used to know about -- because
+    # nothing here ever looked past it. The caller then stamped
+    # "0010_partition_audit_logs" and ran `alembic upgrade head`, which
+    # replayed 0011's `CREATE TABLE password_reset_tokens` against a
+    # database where that table already existed. Checking for the table
+    # here, the same way 0009 does, lets detection walk all the way to
+    # head in that case instead of stopping one migration short.
+    if not inspector.has_table("password_reset_tokens"):
+        return revision
+    revision = "0011_password_reset_tokens"
+
     return revision
 
 

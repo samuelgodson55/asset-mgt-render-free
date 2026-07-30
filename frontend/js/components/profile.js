@@ -93,19 +93,23 @@ export async function openProfileModal() {
     if (mfaSection) mfaSection.classList.toggle('hidden', profile.role !== 'super_admin');
 
     // Account Details (name/username/email self-service rotation) --
-    // same role gate as the MFA section just above, and for the same
-    // underlying reason: SUPER_ADMIN_ROLE is the one account nobody else
-    // can edit these fields for (see admin.html's profileIdentitySection
-    // comment for the full rationale). Pre-fill from the same fresh
+    // shown for EVERY role. PATCH /auth/me (services/auth_service.py's
+    // update_identity()) is generic self-service and was never actually
+    // role-restricted on the backend -- SUPER_ADMIN_ROLE is simply the
+    // one account with no admin "above" it who could otherwise fix these
+    // values via the User Directory's Edit action (see admin.html's
+    // profileIdentitySection comment for that history), so it's the one
+    // account that would have NO path to correct them at all without
+    // this section. Every other role gets the exact same self-service
+    // path here on top of an Admin/Super Admin still being able to edit
+    // them via the User Directory. Pre-fill from the same fresh
     // GET /auth/me response the read-only summary above just used.
     const identitySection = document.getElementById('profileIdentitySection');
     if (identitySection) {
-      identitySection.classList.toggle('hidden', profile.role !== 'super_admin');
-      if (profile.role === 'super_admin') {
-        document.getElementById('identityNameInput').value = profile.name || '';
-        document.getElementById('identityEmailInput').value = profile.email || '';
-        document.getElementById('identityUsernameInput').value = profile.username || '';
-      }
+      identitySection.classList.remove('hidden');
+      document.getElementById('identityNameInput').value = profile.name || '';
+      document.getElementById('identityEmailInput').value = profile.email || '';
+      document.getElementById('identityUsernameInput').value = profile.username || '';
     }
   } catch (err) {
     setProfileFormMessage(`Could not load profile: ${err.message}`, true);

@@ -535,7 +535,7 @@ _FORGOT_PASSWORD_GENERIC_MESSAGE = (
 )
 
 
-def request_password_reset(db: Session, req: ForgotPasswordRequest) -> dict:
+def request_password_reset(db: Session, req: ForgotPasswordRequest, frontend_base_url: str) -> dict:
     """
     POST /auth/forgot-password. Looks `req.identifier` up the exact same
     case-insensitive, email-OR-username way login() does, and -- ONLY if a
@@ -544,6 +544,15 @@ def request_password_reset(db: Session, req: ForgotPasswordRequest) -> dict:
     typed, which matters here specifically: an attacker who knows a valid
     username but not its email can't redirect the link anywhere they
     control).
+
+    `frontend_base_url` is resolved by the caller (api/auth_api.py's
+    _resolve_frontend_base_url()) from the actual incoming request rather
+    than read from a settings.FRONTEND_BASE_URL env var -- see that
+    function's docstring for the full "why" and the CORS_ORIGINS-based
+    safety check that keeps it from being spoofed. Keeping that
+    HTTP-request-shaped logic out of this module preserves the same
+    route-does-HTTP-things/service-does-business-logic split every other
+    function here already follows.
 
     Always returns the same generic message either way (see
     _FORGOT_PASSWORD_GENERIC_MESSAGE above) -- callers must never be able
@@ -573,7 +582,7 @@ def request_password_reset(db: Session, req: ForgotPasswordRequest) -> dict:
     ))
     db.commit()
 
-    reset_link = f"{settings.FRONTEND_BASE_URL.rstrip('/')}/?reset_token={plaintext_token}"
+    reset_link = f"{frontend_base_url.rstrip('/')}/?reset_token={plaintext_token}"
     sent = notification_service.send_email(
         to=user.email,
         subject="Reset your Snipe-IT Lite password",
@@ -646,18 +655,44 @@ def update_identity(db: Session, req: IdentityUpdateRequest, current_user: dict)
     """
     PATCH /auth/me. Lets the CURRENTLY LOGGED-IN account rotate its own
     name/username/email -- the same self-service shape update_password()
-    already established for the password itself (SUPER_ADMIN_ROLE's
-    username/name/email were, until now, the one part of this identity
-    with genuinely no way to ever change -- see security.py's module
-    docstring). Deliberately SELF-ONLY: this never accepts a target
-    user_id and always acts on `current_user`'s own row, so it can't be
-    used as a side-door around services/user_service.py's
-    is_hidden_root_admin() guard to edit anyone ELSE's account.
+    already established for the password itself. Available to EVERY role
+    (Super Admin, Admin, Manager, Staff, Customer alike), not just
+    SUPER_ADMIN_ROLE: that role is simply the one account with no admin
+    "above" it who could otherwise fix these values via
+    services/user_service.py's update_user() (see is_hidden_root_admin()'s
+    guard, which blocks PATCH /users/{id} from ever reaching that row), so
+    it's the one account that would have NO path to correct these values
+    at all without this endpoint -- every other role already has this same
+    self-service path available on top of an Admin/Super Admin being able
+    to fix it for them too. Deliberately SELF-ONLY either way: this never
+    accepts a target user_id and always acts on `current_user`'s own row,
+    so it can't be used as a side-door around is_hidden_root_admin() to
+    edit anyone ELSE's account.
 
     Every present field requires `req.current_password` to have already
     been re-verified below FIRST -- same reasoning as update_password()'s
     self-service branch: a leaked/still-valid session cookie alone must
     never be enough to quietly change what a person logs in as.
+
+    DUPLICATE-USERNAME/EMAIL PROTECTION: both fields are checked
+    case-insensitively against every OTHER account before being applied
+    (see the two `clash` queries below) -- same rationale as
+    user_service.py's create_user()/update_user(): login already matches
+    email/username case-insensitively, so two accounts differing only by
+    case must never both exist. A clash raises a 400 the frontend surfaces
+    inline on the form (js/components/profile.js's
+    submitUpdateIdentityForm()) instead of silently overwriting anything.
+
+    NOTIFICATION: once a change is actually committed, a summary email is
+    sent to the account's PRE-CHANGE registered address (see
+    _notify_identity_change() below) -- so if an attacker with a stolen,
+    still-valid session tries to quietly change the login details on an
+    account they don't otherwise control, the real owner still finds out,
+    even though the current-password re-check above already makes that a
+    fairly narrow attack window. If email itself was one of the changed
+    fields, the NEW address is also sent its own copy, so a "did I just
+    correctly update my own email" mistake is confirmed at the new inbox
+    too.
     """
     target = db.query(models.User).filter(models.User.id == int(current_user["sub"]), ~models.User.is_deleted).first()
     if not target:
@@ -669,17 +704,27 @@ def update_identity(db: Session, req: IdentityUpdateRequest, current_user: dict)
 
     updates = req.model_dump(exclude_unset=True, exclude={"current_password"})
 
+    # Snapshot of what this account looked like BEFORE any field below is
+    # touched -- needed both to build a readable "X changed from A to B"
+    # notification afterward, and (for email specifically) to know where
+    # the pre-change notification copy should be sent, since target.email
+    # itself may be overwritten by the time notify runs.
+    previous_email = target.email
+    changes: list[str] = []
+
     if "email" in updates and updates["email"].strip().lower() != target.email.strip().lower():
         # Case-insensitive clash check -- same rationale as
         # user_service.py's create_user()/update_user(): login matches
         # email/username case-insensitively, so two accounts differing
         # only by case must never both exist.
+        new_email = updates["email"].strip()
         clash = db.query(models.User).filter(
-            func.lower(models.User.email) == updates["email"].strip().lower(), models.User.id != target.id,
+            func.lower(models.User.email) == new_email.lower(), models.User.id != target.id,
         ).first()
         if clash:
             raise HTTPException(status_code=400, detail="A user with this email already exists.")
-        target.email = updates["email"].strip()
+        changes.append(f"Email changed from {target.email} to {new_email}.")
+        target.email = new_email
 
     if "username" in updates and updates["username"] != target.username:
         candidate = updates["username"].strip().lower()
@@ -699,9 +744,11 @@ def update_identity(db: Session, req: IdentityUpdateRequest, current_user: dict)
         clash = db.query(models.User).filter(models.User.username == candidate, models.User.id != target.id).first()
         if clash:
             raise HTTPException(status_code=400, detail="That username is already taken.")
+        changes.append(f"Username changed from {target.username} to {candidate}.")
         target.username = candidate
 
-    if "name" in updates:
+    if "name" in updates and updates["name"].strip() != target.name:
+        changes.append(f"Name changed from {target.name} to {updates['name'].strip()}.")
         target.name = updates["name"].strip()
 
     # NOTE: `operator` uses `target.email` (the row's own, just-committed
@@ -720,7 +767,42 @@ def update_identity(db: Session, req: IdentityUpdateRequest, current_user: dict)
     db.commit()
     db.refresh(target)
     logger.info("Identity updated", extra={"user_id": target.id})
+
+    if changes:
+        _notify_identity_change(target, previous_email, changes)
+
     return {
         "message": "Profile updated successfully.",
         "name": target.name, "username": target.username, "email": target.email,
     }
+
+
+def _notify_identity_change(user: "models.User", previous_email: str, changes: list[str]) -> None:
+    """
+    Fires after update_identity() commits a real change to name/username/
+    email -- a plain security notification, same fail-soft pattern as
+    every other email this app sends (see notification_service.py's
+    module docstring: NOTIFICATIONS_ENABLED off, or SMTP misconfigured,
+    just logs and returns False; never raises, never turns into a 500 on
+    an update that already succeeded).
+
+    Always sent to `previous_email` -- the account's registered address
+    BEFORE this update -- so the real owner is told even in the narrow
+    case a still-valid stolen session was used to change these fields out
+    from under them. If email itself changed, `user.email` (the NEW
+    address, already committed by the caller) also gets its own copy, so
+    the person confirms the new inbox is correct and reachable.
+    """
+    body = (
+        f"Hi {user.name},\n\n"
+        "Your Snipe-IT Lite account details were just updated:\n\n"
+        + "\n".join(f"- {line}" for line in changes)
+        + "\n\nIf this was you, no action is needed. If you didn't make this change, "
+        "reset your password immediately using the \"Forgot password?\" link on the "
+        "login page and contact your administrator.\n"
+    )
+    recipients = {previous_email, user.email}
+    sent = notification_service.send_email(
+        to=list(recipients), subject="Your Snipe-IT Lite account details were updated", body=body,
+    )
+    logger.info("Identity change notification sent", extra={"user_id": user.id, "email_sent": sent})

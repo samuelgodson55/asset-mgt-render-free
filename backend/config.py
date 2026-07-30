@@ -325,17 +325,21 @@ class Settings(BaseSettings):
     # the account indefinitely.
     PASSWORD_RESET_TOKEN_EXPIRY_MINUTES: int = 30
 
-    # The base URL request_password_reset() builds the mailed reset link
-    # from (e.g. "https://assets.corp.io" -> ".../reset-password?token=...").
-    # Deliberately its own setting rather than reusing CORS_ORIGINS' first
-    # entry -- CORS_ORIGINS is a list of origins the BACKEND trusts to call
-    # it, which isn't necessarily the one canonical address a person should
-    # click through to from their inbox (a deployment may trust several
-    # origins, e.g. a staging one, without wanting reset emails to ever
-    # point at it). No made-up production default, same reasoning as
-    # SMTP_FROM_EMAIL just below -- set this explicitly once a real
-    # public-facing URL exists.
-    FRONTEND_BASE_URL: str = "http://localhost:8080"
+    # NOTE: there used to be a FRONTEND_BASE_URL setting here that
+    # request_password_reset() used to build the mailed reset link's base
+    # URL (e.g. "https://assets.corp.io" -> ".../reset-password?token=...").
+    # It's gone -- a hardcoded/env-configured URL drifts out of sync the
+    # moment a deployment's real domain changes (a custom domain gets
+    # attached, a staging URL is renamed, etc.) unless someone remembers to
+    # also update this setting and redeploy it. The reset link's base URL
+    # is now derived directly from the incoming POST /auth/forgot-password
+    # request itself -- see api/auth_api.py's _resolve_frontend_base_url()
+    # -- so it always matches whatever address the person actually has
+    # open, with no separate setting to keep in sync. CORS_ORIGINS is still
+    # what makes that safe: the resolved value is checked against it before
+    # being trusted (see that function's docstring), so this app's existing
+    # "which origins do we trust" list is the only configuration a
+    # deployment needs to get right for both CORS AND reset links now.
 
     # --- Email notifications (extension requests + overdue + due-soon) ----
     # This app sends exactly three kinds of email:

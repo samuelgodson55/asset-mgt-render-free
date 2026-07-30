@@ -10,7 +10,9 @@ mfa_verify()/request_password_reset()/confirm_password_reset()/
 update_identity() for the actual flow.
 """
 
-from fastapi import APIRouter, Depends, Response
+import logging
+
+from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy.orm import Session
 
 from config import settings
@@ -22,7 +24,80 @@ from schemas.auth_schema import (
 )
 import services.auth_service as auth_service
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+def _resolve_frontend_base_url(request: Request) -> str:
+    """
+    Builds the browser-facing base URL a mailed "forgot password?" link is
+    built from -- e.g. "https://assets.corp.io" so the link becomes
+    "https://assets.corp.io/?reset_token=...". Derived straight from THIS
+    request rather than a fixed FRONTEND_BASE_URL setting (removed from
+    config.py -- see that field's old docstring), so it always tracks the
+    site's real, current address with nothing to fall out of sync after a
+    domain change/redeploy.
+
+    Preference order, first one present wins:
+      1. The `Origin` header -- browsers attach this to every fetch/XHR
+         request that isn't a plain top-level navigation (which is exactly
+         what js/auth.js's requestPasswordReset() makes), whether or not
+         it's cross-origin. It's the address bar the person actually has
+         open right now, arrives straight from the browser with no
+         reverse-proxy cooperation required, and isn't something a script
+         running in that browser can override.
+      2. `X-Forwarded-Proto` + `X-Forwarded-Host` -- what this app's own
+         reverse proxies (see nginx/default.conf.template's
+         proxy_set_header lines, Caddyfile's header_up block) set to the
+         scheme/host the EDGE actually received a request on, for the rare
+         caller that omits Origin.
+      3. This ASGI request's own scheme/host (`request.url`) -- correct
+         for local `docker compose up`/bare `uvicorn main:app` with no
+         proxy in front at all.
+
+    SECURITY: whichever candidate wins above is checked against
+    settings.cors_origin_list -- the exact same trusted-origins list
+    CORSMiddleware already enforces for cross-origin API calls (see
+    main.py), and which every documented deployment shape (docker-compose,
+    render.yaml, infra/main.bicep) sets to this app's real public
+    domain(s) -- before it's trusted for anything. Skipping this check
+    would let anyone hand-craft an Origin/X-Forwarded-Host header pointing
+    at an attacker-controlled domain and get this app to mail a real
+    user's password-reset link there instead of its own site -- a classic
+    Host-header-injection attack on a "forgot password" flow. A candidate
+    that isn't in the trusted list is discarded in favor of the first
+    configured CORS origin, and the mismatch is logged so a misconfigured
+    CORS_ORIGINS (or a genuine spoofing attempt) is visible in the logs.
+    """
+    def _normalize(origin: str) -> str:
+        return origin.strip().rstrip("/")
+
+    trusted = [_normalize(origin) for origin in settings.cors_origin_list]
+
+    candidate = None
+    origin_header = request.headers.get("origin")
+    if origin_header:
+        candidate = _normalize(origin_header)
+
+    if not candidate:
+        forwarded_proto = request.headers.get("x-forwarded-proto")
+        forwarded_host = request.headers.get("x-forwarded-host")
+        if forwarded_proto and forwarded_host:
+            candidate = _normalize(f"{forwarded_proto}://{forwarded_host}")
+
+    if not candidate:
+        candidate = _normalize(f"{request.url.scheme}://{request.url.netloc}")
+
+    if trusted and candidate not in trusted:
+        logger.warning(
+            "auth_api: resolved frontend base URL '%s' is not in CORS_ORIGINS -- "
+            "using the first configured origin for this password reset link instead.",
+            candidate,
+        )
+        return trusted[0]
+
+    return candidate
 
 
 def _set_session_cookie(response: Response, token: str) -> None:
@@ -110,8 +185,8 @@ def regenerate_recovery_codes(req: RecoveryCodesRegenerateRequest, db: Session =
 # either route below: by definition, whoever is calling these doesn't
 # have (or has lost) a way to log in yet.
 @router.post("/forgot-password")
-def forgot_password(req: ForgotPasswordRequest, db: Session = Depends(get_db)):
-    return auth_service.request_password_reset(db, req)
+def forgot_password(req: ForgotPasswordRequest, request: Request, db: Session = Depends(get_db)):
+    return auth_service.request_password_reset(db, req, frontend_base_url=_resolve_frontend_base_url(request))
 
 
 @router.post("/reset-password")
