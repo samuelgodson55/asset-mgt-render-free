@@ -421,6 +421,24 @@ sensitive (it's plain text, visible to anyone with repo read access) —
 that's exactly why non-secret settings like `VM_SIZE`/`AZURE_LOCATION` below
 use it instead of a secret.
 
+**One more variable, but at the REPO level, not per-Environment:**
+`Settings → Secrets and variables → Actions → Variables tab` (not inside
+either `prod`/`vm-staging` Environment page — this has to be readable
+*before* `deploy-azure-vm.yml` knows which Environment it's even
+targeting). Add `ENVIRONMENT` = `prod` or `development` (any other value,
+or leaving it unset, is treated as "not production"). This is what
+`deploy-azure-vm.yml`'s `environment` dropdown falls back to when you run
+it via **Actions → Deploy to VM → Run workflow** and leave the dropdown on
+its default (`from-variable`) instead of explicitly picking `vm-staging`
+or `prod` — see that workflow's own `ENVIRONMENT`/`RUNTIME_ENVIRONMENT`
+comments for the exact resolution order. Leave it unset (or set it to
+anything other than `prod`/`production`) and an unattended/default run
+deploys as `vm-staging` with a plain minified (not obfuscated) frontend
+build and `ENVIRONMENT=development` in the containers, instead of silently
+becoming a production deploy. A version-tag push (`git tag vX.Y.Z && git
+push origin vX.Y.Z`) always deploys `prod` regardless of this variable —
+that trigger means "cut a real release" on its own.
+
 Add these to each Environment (Secrets unless marked **Variable**):
 
 | Name | Value | Used by |

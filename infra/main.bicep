@@ -66,9 +66,9 @@
 // so deploying new code never requires a full infra re-deploy.
 // =============================================================================
 
-@description('Short environment name: "prod" or "staging". Prefixes every resource name.')
+@description('Short environment name: "prod" or "staging". Prefixes every resource name, and drives the ENVIRONMENT runtime env var below (sharedEnv) -- "prod" -> "production", "staging" -> "development". Defaults to "staging" so a direct `az deployment group create` run that forgets to pass this explicitly provisions a safe, non-production environment rather than silently becoming prod; .github/workflows/infra-deploy.yml always passes this explicitly (no default there) for the same reason.')
 @allowed(['prod', 'staging'])
-param environmentName string = 'prod'
+param environmentName string = 'staging'
 
 @description('Azure region for every resource.')
 param location string = resourceGroup().location
@@ -808,8 +808,19 @@ var publicOrigin = empty(customDomain) ? 'https://${frontendFqdn}' : 'https://${
 // safe to reference even when it wasn't provisioned this deploy.
 var appInsightsConnectionString = otelAzureMonitorEnabled ? appInsights.properties.ConnectionString : ''
 
+// BUG FIX: this used to hardcode 'production' unconditionally, so a
+// `environmentName: 'staging'` deploy still ran backend/worker/beat with
+// ENVIRONMENT=production -- every production-only behavior in
+// backend/config.py (LEAN_MODE's default, the JWT secret strength check,
+// secure-cookie/CORS strictness, etc.) silently applied to staging too.
+// Now driven by the same environmentName param that already picks
+// staging vs prod resource names/RG -- "prod" -> "production", "staging"
+// -> "development" (config.py's own vocabulary; see its
+// apply_environment_defaults()).
+var runtimeEnvironment = environmentName == 'prod' ? 'production' : 'development'
+
 var sharedEnv = [
-  { name: 'ENVIRONMENT', value: 'production' }
+  { name: 'ENVIRONMENT', value: runtimeEnvironment }
   { name: 'EXPORT_RESULT_DIR', value: '/app/export_results' }
   { name: 'JWT_ALGORITHM', value: 'HS256' }
   { name: 'JWT_EXPIRY_HOURS', value: '12' }

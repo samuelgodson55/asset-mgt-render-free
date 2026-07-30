@@ -67,11 +67,11 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        description: 'Target Azure Container Apps environment.'
+        description: 'Target Azure Container Apps environment. GitHub does not allow a workflow_dispatch dropdown''s default to read a variable, so "from-variable" (the default) is a sentinel meaning "read the repo/environment ENVIRONMENT Actions variable (Settings > Secrets and variables > Actions > Variables) instead" -- see this file''s ENVIRONMENT/BUILD_ENV comments below for the full resolution order. If that variable is also unset (or isn''t "prod"/"production"), this resolves to "staging" -- an unattended or misconfigured run never silently deploys as production. Pick "staging" or "production" explicitly to override the variable for just this run.'
         required: true
         type: choice
-        options: [staging, production]
-        default: production
+        options: [from-variable, staging, production]
+        default: from-variable
       image_tag:
         description: 'Existing tag on Docker Hub to redeploy/roll back to, e.g. "v1.4.2" or a commit SHA from a prior successful build (skips `ci` + `build-push` entirely). Leave BLANK to build FRESH from whichever branch/ref you run this workflow against.'
         required: false
@@ -85,7 +85,7 @@ on:
 concurrency:
   # workflow_call (release.yml) has no `inputs.environment` of its own --
   # always production, same fallback used throughout this file.
-  group: deploy-aca-${{ (github.event_name == 'workflow_call') && 'production' || (inputs.environment || 'production') }}
+  group: deploy-aca-${{ (github.event_name == 'workflow_call') && 'production' || (inputs.environment != 'from-variable' && inputs.environment || ((vars.ENVIRONMENT == 'prod' || vars.ENVIRONMENT == 'production') && 'production' || 'staging')) }}
   cancel-in-progress: false # never cancel a deploy mid-flight -- let it finish or fail cleanly
 
 permissions:
@@ -99,20 +99,37 @@ env:
   # deploy-azure-vm.yml's matching comment, where this pattern started).
   # $ENVIRONMENT itself is still defined, purely for jobs/steps to read
   # (that direction -- job/step reading workflow-level env -- works fine).
-  ENVIRONMENT: ${{ (github.event_name == 'workflow_call') && 'production' || (inputs.environment || 'production') }}
-  RESOURCE_GROUP: ${{ ((github.event_name == 'workflow_call') && 'production' || (inputs.environment || 'production')) == 'production' && secrets.PROD_RESOURCE_GROUP || secrets.STAGING_RESOURCE_GROUP }}
+  #
+  # Resolution order, highest priority first:
+  #   1. workflow_call (release.yml, a git-tag release) -- always
+  #      "production". There is no "staging release".
+  #   2. workflow_dispatch with the dropdown explicitly set to "staging"
+  #      or "production" -- that choice wins for this run only.
+  #   3. workflow_dispatch left on its default ("from-variable") -- reads
+  #      the repo/environment ENVIRONMENT Actions variable (`vars.ENVIRONMENT`,
+  #      Settings > Secrets and variables > Actions > Variables tab). "prod"
+  #      or "production" there resolves to "production"; anything else
+  #      (including the variable not existing at all) resolves to "staging".
+  #   4. If none of the above apply, "staging" -- the safe, non-production
+  #      default, so an unattended or misconfigured run never silently
+  #      deploys (or rebuilds the frontend obfuscated) as production. This
+  #      runtime ENVIRONMENT is what the Container App itself actually gets
+  #      -- see infra/main.bicep's `sharedEnv`, which now derives it from
+  #      the `environmentName` param instead of hardcoding "production".
+  ENVIRONMENT: ${{ (github.event_name == 'workflow_call') && 'production' || (inputs.environment != 'from-variable' && inputs.environment || ((vars.ENVIRONMENT == 'prod' || vars.ENVIRONMENT == 'production') && 'production' || 'staging')) }}
+  RESOURCE_GROUP: ${{ ((github.event_name == 'workflow_call') && 'production' || (inputs.environment != 'from-variable' && inputs.environment || ((vars.ENVIRONMENT == 'prod' || vars.ENVIRONMENT == 'production') && 'production' || 'staging'))) == 'production' && secrets.PROD_RESOURCE_GROUP || secrets.STAGING_RESOURCE_GROUP }}
   # workflow_call (release.yml) always supplies a real image_tag. On
   # workflow_dispatch, a blank image_tag means "build fresh" -- fall back to
   # the commit SHA of whatever ref this run was dispatched against, so
   # build-push below and the rest of this pipeline always have a concrete
   # tag to work with even though the human left the input blank.
   IMAGE_TAG: ${{ inputs.image_tag != '' && inputs.image_tag || github.sha }}
-  BACKEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend${{ (((github.event_name == 'workflow_call') && 'production' || (inputs.environment || 'production')) == 'staging') && '-staging' || '' }}
-  FRONTEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-frontend${{ (((github.event_name == 'workflow_call') && 'production' || (inputs.environment || 'production')) == 'staging') && '-staging' || '' }}
+  BACKEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend${{ (((github.event_name == 'workflow_call') && 'production' || (inputs.environment != 'from-variable' && inputs.environment || ((vars.ENVIRONMENT == 'prod' || vars.ENVIRONMENT == 'production') && 'production' || 'staging'))) == 'staging') && '-staging' || '' }}
+  FRONTEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-frontend${{ (((github.event_name == 'workflow_call') && 'production' || (inputs.environment != 'from-variable' && inputs.environment || ((vars.ENVIRONMENT == 'prod' || vars.ENVIRONMENT == 'production') && 'production' || 'staging'))) == 'staging') && '-staging' || '' }}
   # BUILD_ENV is the frontend/Dockerfile ARG that controls whether the built
   # frontend/ JS is minified only (development, staging) or minified AND
   # obfuscated (production) -- see frontend/Dockerfile's own comment.
-  BUILD_ENV: ${{ (((github.event_name == 'workflow_call') && 'production' || (inputs.environment || 'production')) == 'production') && 'production' || 'development' }}
+  BUILD_ENV: ${{ (((github.event_name == 'workflow_call') && 'production' || (inputs.environment != 'from-variable' && inputs.environment || ((vars.ENVIRONMENT == 'prod' || vars.ENVIRONMENT == 'production') && 'production' || 'staging'))) == 'production') && 'production' || 'development' }}
 
 jobs:
   ci:
@@ -151,11 +168,11 @@ jobs:
       # runs -- this bit both this file and deploy-azure-vm.yml's own
       # `build-push` job the same way. See build-push-images.yml's own
       # inputs for what each of these feeds.
-      backend_image_name: snipeit-lite-backend${{ (((github.event_name == 'workflow_call') && 'production' || (inputs.environment || 'production')) == 'staging') && '-staging' || '' }}
-      frontend_image_name: snipeit-lite-frontend${{ (((github.event_name == 'workflow_call') && 'production' || (inputs.environment || 'production')) == 'staging') && '-staging' || '' }}
+      backend_image_name: snipeit-lite-backend${{ (((github.event_name == 'workflow_call') && 'production' || (inputs.environment != 'from-variable' && inputs.environment || ((vars.ENVIRONMENT == 'prod' || vars.ENVIRONMENT == 'production') && 'production' || 'staging'))) == 'staging') && '-staging' || '' }}
+      frontend_image_name: snipeit-lite-frontend${{ (((github.event_name == 'workflow_call') && 'production' || (inputs.environment != 'from-variable' && inputs.environment || ((vars.ENVIRONMENT == 'prod' || vars.ENVIRONMENT == 'production') && 'production' || 'staging'))) == 'staging') && '-staging' || '' }}
       image_tags: ${{ inputs.image_tag != '' && inputs.image_tag || github.sha }} latest
-      build_env: ${{ (((github.event_name == 'workflow_call') && 'production' || (inputs.environment || 'production')) == 'production') && 'production' || 'development' }}
-      trivy_blocking: ${{ ((github.event_name == 'workflow_call') && 'production' || (inputs.environment || 'production')) == 'production' }}
+      build_env: ${{ (((github.event_name == 'workflow_call') && 'production' || (inputs.environment != 'from-variable' && inputs.environment || ((vars.ENVIRONMENT == 'prod' || vars.ENVIRONMENT == 'production') && 'production' || 'staging'))) == 'production') && 'production' || 'development' }}
+      trivy_blocking: ${{ ((github.event_name == 'workflow_call') && 'production' || (inputs.environment != 'from-variable' && inputs.environment || ((vars.ENVIRONMENT == 'prod' || vars.ENVIRONMENT == 'production') && 'production' || 'staging'))) == 'production' }}
     secrets: inherit
 
   migrate:
@@ -206,7 +223,7 @@ jobs:
     # graph at all, since the whole workflow file fails validation before
     # any job runs. See deploy-azure-vm.yml's `environment:` line for the
     # same pattern (it uses `inputs.environment`, never `env.*`).
-    environment: ${{ (github.event_name == 'workflow_call') && 'production' || (inputs.environment || 'production') }}
+    environment: ${{ (github.event_name == 'workflow_call') && 'production' || (inputs.environment != 'from-variable' && inputs.environment || ((vars.ENVIRONMENT == 'prod' || vars.ENVIRONMENT == 'production') && 'production' || 'staging')) }}
     steps:
       - name: Validate image_tag looks like a version tag (production only)
         if: ${{ env.ENVIRONMENT == 'production' }}
@@ -310,7 +327,7 @@ jobs:
     runs-on: ubuntu-latest
     # See `migrate`'s `environment:` line above for why this recomputes the
     # full ternary instead of referencing `env.ENVIRONMENT`.
-    environment: ${{ (github.event_name == 'workflow_call') && 'production' || (inputs.environment || 'production') }}
+    environment: ${{ (github.event_name == 'workflow_call') && 'production' || (inputs.environment != 'from-variable' && inputs.environment || ((vars.ENVIRONMENT == 'prod' || vars.ENVIRONMENT == 'production') && 'production' || 'staging')) }}
     steps:
       - uses: azure/login@v3
         with:

@@ -449,7 +449,21 @@ anything by itself, it only runs `ci.yml`'s fast lint/test/build gate.
 triggers a production release (see
 [Versioning & Cutting a Release](#versioning--cutting-a-release) below for
 the full walkthrough). Nothing manual after the one-time setup below either
-way. The pipeline lives in `.github/workflows/` (`ci.yml`, `infra-deploy.yml`,
+way.
+
+> **Default environment, if you leave the dropdown untouched:** when you
+> run `deploy-azure-aca.yml` from the Actions tab and leave its
+> `environment` dropdown on `from-variable` (the default) instead of
+> explicitly picking `staging` or `production`, it reads a repo-level
+> **Variable** named `ENVIRONMENT` (`Settings → Secrets and variables →
+> Actions → Variables tab`, NOT a per-Environment secret). Set it to
+> `production` to make an unattended/default run target production, or
+> `development`/anything else (or just leave it unset) to make it target
+> `staging` — the safe choice, so a run nobody deliberately configured
+> never silently ships an obfuscated, production-flagged build. This same
+> variable is read the same way by `deploy-azure-vm.yml` (see
+> DEPLOYMENT_VM.md step 6). A version-tag push always deploys `production`
+> regardless of this variable. The pipeline lives in `.github/workflows/` (`ci.yml`, `infra-deploy.yml`,
 `deploy-azure-staging.yml`, `release.yml`, `deploy-azure-production.yml`)
 and the infrastructure lives in `infra/main.bicep`.
 
