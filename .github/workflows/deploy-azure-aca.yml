@@ -72,7 +72,7 @@ on:
     inputs:
       environment:
         description: 'Target Azure Container Apps environment. "staging" or "production".
-          "staging" is a separate GitHub Environment from the Container Apps path''s "vm-staging" so the two paths never share environment-scoped secrets.'
+          "staging" is a separate GitHub Environment from the Container Apps path''s "vm-staging" so the two paths never share AZURE_CLIENT_ID or other environment-scoped secrets.'
         required: true
         type: choice
         options: [staging, production]
