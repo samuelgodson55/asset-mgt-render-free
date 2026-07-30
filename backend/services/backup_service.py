@@ -45,7 +45,6 @@ import time
 import datetime
 import uuid
 from typing import Optional
-from urllib.parse import urlparse, parse_qs, unquote
 
 import redis
 
@@ -114,70 +113,80 @@ def _db_connection_kwargs() -> dict:
     same box, whereas an env var passed only to this one subprocess does
     not.
 
-    BUG FIX -- "Backup failed: pg_dump failed (exit 1): ... FATAL:
+    BUG FIX #1 -- "Backup failed: pg_dump failed (exit 1): ... FATAL:
     password authentication failed for user '...' ... FATAL: no
     pg_hba.conf entry for host '...', ..., no encryption" on Azure, on a
     password that was NEVER changed/rotated (ruled that out -- don't
     mis-diagnose this as drift between the GitHub secret and the live
-    server, like this comment itself used to). Two independent bugs,
-    both in this one function:
+    server, like this comment itself used to).
 
-    1. THE REAL ONE, and the actual cause of the "password authentication
-       failed" line specifically: `urllib.parse.urlparse()` does NOT
-       percent-decode the username/password portion of a URL -- e.g.
-       parsing `postgresql://snipeit:x%2By%2Fz@host/db` gives you back
-       the literal 8-character string "x%2By%2Fz", not the 3-character
-       password "x+y/z" it actually encodes. infra/main.bicep's
-       `databaseUrl` variable correctly percent-encodes the password with
-       `uriComponent(postgresPassword)` before building DATABASE_URL
-       (has to -- a raw `+`/`/`/`@`/`:`/`#`/... in a password would
-       otherwise be parsed as URL syntax, not password content) -- and
-       DEPLOYMENT.md's setup instructions specifically tell you to
-       generate that password with `openssl rand -base64 24`, whose
-       output routinely CONTAINS `+` and `/` (base64's alphabet). Every
-       *other* consumer of DATABASE_URL (SQLAlchemy, used by the actual
-       running app for every real query) decodes the URL properly and
-       connects fine -- which is exactly why login/migrations/normal use
-       all worked while backups alone failed on a password that was
-       never touched. This one hand-rolled parse was the only place
-       still handing pg_dump/psql the raw, still-percent-encoded string
-       as PGPASSWORD, guaranteed to mismatch the real password the
-       moment it contains any URL-reserved character. Fixed by decoding
-       both username and password with `unquote()` below.
+    BUG FIX #2 -- "Backup failed: Port could not be cast to integer value
+    as '<fragment>'" / "Restore failed: ... same" (System Backups panel,
+    ANY deployment -- local docker-compose included, not just Azure/VM).
+    A password generated with `openssl rand -base64 24` (exactly what
+    DEPLOYMENT.md/DEPLOYMENT_VM.md tell you to run) routinely contains
+    `+`, `/`, or `=` (base64's alphabet). If that raw password ends up in
+    DATABASE_URL without being percent-encoded first -- easy to do
+    locally, since nothing enforces it the way infra/main.bicep's
+    `uriComponent()` / sync-secrets-vm.yml's `urllib.parse.quote()` do for
+    cloud deployments -- a raw unescaped `/` in the password prematurely
+    ends the URL's `netloc` (it's the path delimiter), which shoves the
+    REAL host/port into what Python's `urllib.parse` now thinks is the
+    path, leaving a leftover fragment of the password itself sitting
+    where the port should be. `ParseResult.port` then raises exactly this
+    ValueError trying to `int()` that fragment (e.g. `int("2by8lh")`).
 
-    2. `?sslmode=require` was ALSO being silently dropped entirely --
-       `urlparse(...).query` was parsed and then never read anywhere, so
-       with no sslmode communicated any other way, libpq fell back to
-       its own default (`prefer`), whose plaintext-fallback attempt is
-       what Azure's Flexible Server (which enforces SSL -- see
-       infra/main.bicep's `postgresServer` comment) rejects with "no
-       encryption", the SECOND FATAL line in that error. `PGSSLMODE` (an
-       env var libpq itself reads, same as `PGPASSWORD`) is honored
-       identically by both `pg_dump` and `psql` without needing to touch
-       either's argv, and defaults to `"prefer"` only as a last resort if
-       DATABASE_URL genuinely has no `sslmode` at all (e.g. local
-       docker-compose, which talks to `db` on the same Docker network
-       with no TLS involved) -- every Azure deployment's DATABASE_URL
-       always has `sslmode=require` already baked in, so this preserves
-       that exact value rather than hardcoding `require` unconditionally
-       here.
+    This function used to parse DATABASE_URL with `urllib.parse.urlparse()`
+    (bug #1's original fix decoded the result with `unquote()`, which
+    handled a PROPERLY percent-encoded password fine, but never protected
+    against a raw, still-unescaped one reaching urlparse in the first
+    place). SQLAlchemy's own `make_url()` -- what `database.py`'s
+    `create_engine()` actually uses for every real query the running app
+    ever makes -- parses the exact same raw string correctly regardless
+    of whether it's percent-encoded, which is exactly why login/
+    migrations/normal use all worked even on a raw base64 password while
+    backups alone crashed: `_db_connection_kwargs()` was the only
+    consumer of DATABASE_URL in this app still using the stricter,
+    RFC 3986-literal `urlparse()` instead of SQLAlchemy's own parser.
+    Switching to `make_url()` here makes pg_dump/psql see the exact same
+    host/port/user/password the live app itself successfully connects
+    with, however DATABASE_URL happens to be formatted -- percent-encoded
+    or raw -- instead of requiring a second, independent encoding
+    convention just for this one function.
 
-    Both bugs independently produced one of the two FATAL lines in that
-    error message -- neither one alone was the whole story, which is why
-    the error looked like two unrelated failures concatenated together.
+    BUG FIX #3 -- `?sslmode=require` was ALSO being silently dropped
+    entirely by the old urlparse-based code -- `urlparse(...).query` was
+    parsed and then never read anywhere, so with no sslmode communicated
+    any other way, libpq fell back to its own default (`prefer`), whose
+    plaintext-fallback attempt is what Azure's Flexible Server (which
+    enforces SSL -- see infra/main.bicep's `postgresServer` comment)
+    rejects with "no encryption", a second FATAL line alongside bug #1's.
+    `PGSSLMODE` (an env var libpq itself reads, same as `PGPASSWORD`) is
+    honored identically by both `pg_dump` and `psql` without needing to
+    touch either's argv, and defaults to `"prefer"` only as a last resort
+    if DATABASE_URL genuinely has no `sslmode` at all (e.g. local
+    docker-compose, which talks to `db` on the same Docker network with
+    no TLS involved) -- every Azure deployment's DATABASE_URL always has
+    `sslmode=require` already baked in, so this preserves that exact
+    value rather than hardcoding `require` unconditionally here.
+
+    All three bugs independently produced part of that error output --
+    none alone was the whole story, which is why past reports of this
+    looked like unrelated failures concatenated together.
     """
-    parsed = urlparse(settings.DATABASE_URL)
-    query_params = parse_qs(parsed.query)
-    sslmode = query_params.get("sslmode", ["prefer"])[0]
+    from sqlalchemy.engine import make_url
+
+    url = make_url(settings.DATABASE_URL)
+    sslmode = url.query.get("sslmode", "prefer")
     env = os.environ.copy()
-    if parsed.password:
-        env["PGPASSWORD"] = unquote(parsed.password)
+    if url.password:
+        env["PGPASSWORD"] = url.password
     env["PGSSLMODE"] = sslmode
     return {
-        "host": parsed.hostname or "localhost",
-        "port": str(parsed.port or 5432),
-        "user": unquote(parsed.username) if parsed.username else "postgres",
-        "dbname": (parsed.path or "/").lstrip("/") or "postgres",
+        "host": url.host or "localhost",
+        "port": str(url.port or 5432),
+        "user": url.username or "postgres",
+        "dbname": url.database or "postgres",
         "env": env,
     }
 

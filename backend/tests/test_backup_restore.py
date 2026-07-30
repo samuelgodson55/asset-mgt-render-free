@@ -550,7 +550,8 @@ def test_detect_schema_revision_against_partially_migrated_database(database_url
     not just assume "no alembic_version row" means either "brand new" or
     "fully current". Migrate only partway (up to 0007, deliberately
     BEFORE 0008 adds users.totp_enabled/0009 adds recovery_codes/0010
-    partitions audit_logs) and confirm detection stops exactly there.
+    partitions audit_logs/0011 adds password_reset_tokens) and confirm
+    detection stops exactly there.
     """
     from sqlalchemy import create_engine
     import services.backup_service as backup_service
@@ -566,13 +567,15 @@ def test_detect_schema_revision_against_partially_migrated_database(database_url
         test_engine.dispose()
 
     # And a fully-migrated database should be detected as being at the
-    # real head marker (0010, the partitioned-audit_logs one).
+    # real head marker -- 0011 (password_reset_tokens) now that the
+    # password-recovery feature has shipped, not 0010 (partitioned
+    # audit_logs), which was only head before 0011 existed.
     _run_alembic("upgrade", "head", database_url=database_url)
     test_engine = create_engine(database_url)
     try:
         with test_engine.connect() as conn:
             detected_full = backup_service._detect_schema_revision(conn)
-        assert detected_full == "0010_partition_audit_logs"
+        assert detected_full == "0011_password_reset_tokens"
     finally:
         test_engine.dispose()
 
