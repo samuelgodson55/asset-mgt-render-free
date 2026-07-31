@@ -177,13 +177,59 @@ jobs:
             echo "build_env=production" >> "$GITHUB_OUTPUT"
           fi
 
+  verify-ci:
+    name: Verify CI already passed for this commit
+    runs-on: ubuntu-latest
+    # Same gate `ci` itself uses below -- only relevant on the
+    # workflow_dispatch fresh-build path; release.yml's workflow_call path
+    # already ran its own equivalent gate before ever calling this workflow.
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.image_tag == '' }}
+    permissions:
+      actions: read
+    outputs:
+      already_passed: ${{ steps.check.outputs.already_passed }}
+    steps:
+      # PERFORMANCE FIX: `ci` below used to call ci.yml unconditionally on
+      # every fresh-build deploy. Since ci.yml's `workflow_call` trigger has
+      # no base commit to diff against, that ALWAYS fell through to "treat
+      # every path as changed" (see ci.yml's own comment) -- a full re-run
+      # of frontend tests, backend tests, both image builds, both Trivy
+      # scans, and nginx-config validation, every single deploy, even
+      # though this exact commit already paid for all of that once when it
+      # was pushed to its branch. This step checks whether a "CI" run
+      # already completed successfully for THIS EXACT commit SHA via a real
+      # push -- if one has, `ci` below skips itself and this run goes
+      # straight to build+push+deploy. Deliberately checks `event=push`
+      # specifically (not any completed CI run for this SHA), so a
+      # previous deploy's own full re-run can't be mistaken for an actual
+      # independent validation.
+      - name: Look up a prior successful CI run for this exact commit
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          # Falls back to "0" (i.e. "run CI") on any API hiccup -- only
+          # ever SKIPS validation when it's positively confirmed already
+          # happened.
+          COUNT=$(gh api "repos/${{ github.repository }}/actions/workflows/ci.yml/runs?head_sha=$SHA&event=push&status=success&per_page=1" --jq '.total_count' 2>/dev/null || echo "0")
+          if [ "${COUNT:-0}" -gt 0 ] 2>/dev/null; then
+            echo "Found an existing successful CI run for $SHA (already validated when this commit was pushed) -- skipping a redundant re-check."
+            echo "already_passed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No prior successful push-triggered CI run found for $SHA -- running CI now."
+            echo "already_passed=false" >> "$GITHUB_OUTPUT"
+          fi
+
   ci:
     name: CI gate (fresh-build path only)
     # Only runs on a workflow_dispatch run building fresh (image_tag left
     # blank) -- release.yml's workflow_call path already ran this exact gate
-    # itself before ever calling this workflow. Reused via `uses:`, not
-    # copy-pasted -- see ci.yml.
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.image_tag == '' }}
+    # itself before ever calling this workflow -- AND only when verify-ci
+    # above couldn't find an already-passing CI run for this exact commit.
+    # Reused via `uses:`, not copy-pasted -- see ci.yml.
+    needs: [verify-ci]
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.image_tag == '' && needs.verify-ci.outputs.already_passed != 'true' }}
     uses: ./.github/workflows/ci.yml
 
   build-push:

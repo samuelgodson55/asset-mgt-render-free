@@ -160,8 +160,60 @@ jobs:
             echo "build_env=production" >> "$GITHUB_OUTPUT"
           fi
 
-  ci:
+  verify-ci:
+    name: Verify CI already passed for this commit
+    runs-on: ubuntu-latest
+    # Same gate `ci` itself uses below: only relevant on a fresh-build path
+    # (a version-tag push, or a workflow_dispatch with image_tag left
+    # blank) -- a workflow_dispatch that reuses an existing image_tag never
+    # needed CI in the first place, on either path.
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.image_tag == '' }}
+    permissions:
+      actions: read
+    outputs:
+      already_passed: ${{ steps.check.outputs.already_passed }}
+    steps:
+      # PERFORMANCE FIX: `ci` below used to call ci.yml unconditionally on
+      # every fresh-build deploy. Since ci.yml's `workflow_call` trigger has
+      # no base commit to diff against, that ALWAYS fell through to "treat
+      # every path as changed" (see ci.yml's own comment) -- meaning a full
+      # re-run of frontend tests, backend tests, both image builds, both
+      # Trivy scans, and nginx-config validation, every single deploy, even
+      # though this exact commit already paid for all of that once when it
+      # was pushed to its branch (see ci.yml's own `push`/`pull_request`
+      # triggers). That's what stretched "Deploy to VM" out and stalled
+      # otherwise-fast rollouts. This step checks whether a "CI" run
+      # already completed successfully for THIS EXACT commit SHA (not just
+      # this branch) via a real push -- if one has, `ci` below skips
+      # itself entirely and this run goes straight to build+push+deploy.
+      # Deliberately checks `event=push` specifically, not any completed
+      # CI run for this SHA -- a previous deploy's own full re-run would
+      # also show up in this list otherwise, which would just be trusting
+      # this same shortcut recursively rather than an actual independent
+      # validation.
+      - name: Look up a prior successful CI run for this exact commit
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          # Falls back to "0" (i.e. "run CI") on any API hiccup -- this
+          # check only ever SKIPS validation when it's positively confirmed
+          # already happened; anything uncertain (rate limit, transient
+          # network error, unexpected response) fails open to the old,
+          # always-safe behavior of just running CI again.
+          COUNT=$(gh api "repos/${{ github.repository }}/actions/workflows/ci.yml/runs?head_sha=$SHA&event=push&status=success&per_page=1" --jq '.total_count' 2>/dev/null || echo "0")
+          if [ "${COUNT:-0}" -gt 0 ] 2>/dev/null; then
+            echo "Found an existing successful CI run for $SHA (already validated when this commit was pushed) -- skipping a redundant re-check."
+            echo "already_passed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No prior successful push-triggered CI run found for $SHA -- running CI now."
+            echo "already_passed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  ci:
+    needs: [verify-ci]
+    if: ${{ needs.verify-ci.outputs.already_passed != 'true' && (github.event_name != 'workflow_dispatch' || inputs.image_tag == '') }}
     uses: ./.github/workflows/ci.yml
     with:
       # infra/main.bicep is the ACA path only (see infra-deploy.yml) --
@@ -177,6 +229,10 @@ jobs:
   build-push:
     name: Build + push both images
     needs: [ci, resolve-target]
+    # `needs.ci.result == 'skipped'` covers BOTH the pre-existing "reusing
+    # an existing image_tag" skip AND the new "verify-ci already confirmed
+    # this commit passed" skip above -- both are legitimate reasons to
+    # proceed without re-running `ci` itself.
     if: ${{ always() && (needs.ci.result == 'success' || needs.ci.result == 'skipped') && needs.resolve-target.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.image_tag == '') }}
     permissions:
       contents: read
