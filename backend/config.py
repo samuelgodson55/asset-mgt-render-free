@@ -50,6 +50,33 @@ _INSECURE_JWT_SECRETS = {
 }
 _MIN_PROD_JWT_SECRET_LENGTH = 32
 
+
+def _parse_utc_hours_csv(raw: str, field_name: str, *, default_hour: int) -> list[int]:
+    """
+    Shared parser for every "*_HOURS_UTC" config field (BACKUP_HOURS_UTC,
+    OVERDUE_DIGEST_HOURS_UTC, DUE_SOON_DIGEST_HOURS_UTC): a comma-separated
+    string of hours of day, UTC, each 0-23 -- "3" for once a day, "3,15,21"
+    for three times a day -- parsed into a sorted, deduped list of ints.
+    Raises a clear ValueError for a non-numeric or out-of-range entry
+    rather than silently ignoring it, so a typo like "3,25" surfaces at
+    startup (see each field's own `_validate_*` model_validator) instead
+    of only being discovered whenever the scheduler next wakes up.
+    """
+    hours: set[int] = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            hour = int(part)
+        except ValueError:
+            raise ValueError(f"{field_name} contains a non-numeric hour: '{part}'.")
+        if not 0 <= hour <= 23:
+            raise ValueError(f"{field_name} contains an out-of-range hour: {hour} (must be 0-23).")
+        hours.add(hour)
+    return sorted(hours) or [default_hour]
+
+
 class Settings(BaseSettings):
     """
     Each attribute below maps 1:1 to an environment variable of the same
@@ -474,12 +501,19 @@ class Settings(BaseSettings):
     # wired into both without duplicating it in two places.
     ADMIN_NOTIFICATION_EMAILS: str = ""
 
-    # How often the background worker checks for overdue checkouts and
-    # sends the digest email described above. See celery_app.py's
-    # `beat_schedule` for where this is wired up. 24 hours is a sane
-    # default for a "your item is overdue" reminder -- lower it for
-    # testing (e.g. to a few minutes) if you want to see it fire sooner.
-    OVERDUE_NOTIFICATION_INTERVAL_HOURS: float = 24
+    # What time of day the background worker checks for overdue checkouts
+    # and sends the digest email described above. Comma-separated hours of
+    # day (UTC, each 0-23), same pattern as BACKUP_HOURS_UTC below --
+    # "8" for once a day at 08:00 UTC, or "8,20" for twice a day. Parsed/
+    # validated by `overdue_digest_hours_utc_list` below; invalid values
+    # (out of 0-23, non-numeric) raise a clear error at startup rather
+    # than silently being ignored. See celery_app.py's `beat_schedule`
+    # for where this is wired up as a `crontab` schedule (fires at
+    # exactly this clock time daily, not "N hours after the worker
+    # booted" -- see that file's comment for why a fixed time is what
+    # you want for a digest email, same reasoning as the backup
+    # scheduler's own BACKUP_HOURS_UTC).
+    OVERDUE_DIGEST_HOURS_UTC: str = "8"
 
     # --- "Due Soon" reminder (a nudge BEFORE something goes overdue) ------
     # DUE_SOON_REMINDER_DAYS is the single source of truth for what counts
@@ -493,11 +527,13 @@ class Settings(BaseSettings):
     # window changes every one of them consistently.
     DUE_SOON_REMINDER_DAYS: int = 2
 
-    # How often the background worker checks for checkouts about to go
-    # overdue and sends the reminder email described above. Same
-    # timedelta-since-boot reasoning as OVERDUE_NOTIFICATION_INTERVAL_HOURS
-    # just above -- see celery_app.py's `beat_schedule` comment.
-    DUE_SOON_NOTIFICATION_INTERVAL_HOURS: float = 24
+    # What time of day the background worker checks for checkouts about
+    # to go overdue and sends the reminder email described above. Same
+    # comma-separated-UTC-hours pattern as OVERDUE_DIGEST_HOURS_UTC just
+    # above -- its own independent schedule (e.g. lower it to a couple
+    # of minutes from now for local testing) without also changing when
+    # the overdue digest fires.
+    DUE_SOON_DIGEST_HOURS_UTC: str = "8"
 
     # Whether the individual "your item is overdue/due soon" reminder is
     # sent to the checkout's own holder (a logged-in User with an email
@@ -820,20 +856,17 @@ class Settings(BaseSettings):
         """
         if self.BACKUP_HOUR_UTC is not None:
             return [self.BACKUP_HOUR_UTC]
+        return _parse_utc_hours_csv(self.BACKUP_HOURS_UTC, "BACKUP_HOURS_UTC", default_hour=3)
 
-        hours: set[int] = set()
-        for part in self.BACKUP_HOURS_UTC.split(","):
-            part = part.strip()
-            if not part:
-                continue
-            try:
-                hour = int(part)
-            except ValueError:
-                raise ValueError(f"BACKUP_HOURS_UTC contains a non-numeric hour: '{part}'.")
-            if not 0 <= hour <= 23:
-                raise ValueError(f"BACKUP_HOURS_UTC contains an out-of-range hour: {hour} (must be 0-23).")
-            hours.add(hour)
-        return sorted(hours) or [3]
+    @property
+    def overdue_digest_hours_utc_list(self) -> list[int]:
+        """Parses OVERDUE_DIGEST_HOURS_UTC -- see backup_hours_utc_list above for the shared parsing rules."""
+        return _parse_utc_hours_csv(self.OVERDUE_DIGEST_HOURS_UTC, "OVERDUE_DIGEST_HOURS_UTC", default_hour=8)
+
+    @property
+    def due_soon_digest_hours_utc_list(self) -> list[int]:
+        """Parses DUE_SOON_DIGEST_HOURS_UTC -- see backup_hours_utc_list above for the shared parsing rules."""
+        return _parse_utc_hours_csv(self.DUE_SOON_DIGEST_HOURS_UTC, "DUE_SOON_DIGEST_HOURS_UTC", default_hour=8)
 
     @property
     def is_production(self) -> bool:
@@ -921,6 +954,22 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _validate_backup_hours(self) -> "Settings":
         self.backup_hours_utc_list
+        return self
+
+    # -----------------------------------------------------------------
+    # STARTUP CHECK: OVERDUE_DIGEST_HOURS_UTC / DUE_SOON_DIGEST_HOURS_UTC
+    # are well-formed
+    # -----------------------------------------------------------------
+    # Same fail-fast-at-import-time reasoning as _validate_backup_hours
+    # just above -- overdue_digest_hours_utc_list/due_soon_digest_hours_utc_list
+    # are lazy @properties that celery_app.py's beat_schedule only reads
+    # once, at worker/beat process boot, so without this a typo would
+    # otherwise surface as an opaque crontab ValueError from deep inside
+    # Celery's own startup instead of this app's own clear message.
+    @model_validator(mode="after")
+    def _validate_digest_hours(self) -> "Settings":
+        self.overdue_digest_hours_utc_list
+        self.due_soon_digest_hours_utc_list
         return self
 
 

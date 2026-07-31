@@ -4,7 +4,7 @@
 # v1.x.x` (annotated or lightweight, either works -- `--sort=-creatordate`
 # downstream in DEPLOYMENT.md's rollback runbook relies on tag creation date,
 # which both kinds have). Pushing a tag matching `v*.*.*` is now the ONLY
-# path to a production deploy -- `deploy-azure-production.yml` no longer has
+# path to a production deploy -- `deploy-azure-aca.yml` no longer has
 # its own `push` trigger; it's a reusable workflow this one calls at the end.
 #
 # What happens on `git push origin vX.Y.Z`:
@@ -69,7 +69,7 @@ jobs:
     # the full "why".
     #
     # image_tags: three tags on the same build -- VERSION (the real release
-    # artifact, e.g. v1.4.2 -- what deploy-azure-production.yml pulls), the
+    # artifact, e.g. v1.4.2 -- what deploy-azure-aca.yml pulls), the
     # commit SHA (traceability back to exactly what was built), and `latest`
     # (convenience for anyone pulling without pinning a version).
     #

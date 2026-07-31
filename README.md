@@ -231,8 +231,8 @@ enabled and configured:
    approved/denied email still goes out either way, since that's addressed
    to them directly, not to the general list).
 2. **Daily overdue digest** — a scheduled Celery Beat job
-   (`send_overdue_notifications`, every `OVERDUE_NOTIFICATION_INTERVAL_HOURS`
-   — 24 by default) emails each overdue checkout's own holder a reminder,
+   (`send_overdue_notifications`, daily at `OVERDUE_DIGEST_HOURS_UTC`
+   — 08:00 UTC by default) emails each overdue checkout's own holder a reminder,
    plus one combined system-wide summary digest to the **Digest
    Recipients** list — a runtime-editable list of email addresses
    configured by a Super Admin/Admin (see the "Daily Digest Recipients"
@@ -247,13 +247,18 @@ enabled and configured:
    distribution list works fine). If the list is empty, no digest is sent.
    The extension-request alert in #1 above draws on this exact same list.
 3. **Daily due-soon reminder digest** — the proactive counterpart to #2:
-   a second scheduled Celery Beat job (`send_due_soon_reminders`, every
-   `DUE_SOON_NOTIFICATION_INTERVAL_HOURS` — 24 by default) sends the
+   a second scheduled Celery Beat job (`send_due_soon_reminders`, daily
+   at `DUE_SOON_DIGEST_HOURS_UTC` — 08:00 UTC by default) sends the
    *same shape* of individual-holder-reminder + Digest-Recipients-audience
    summary email described in #2, just for checkouts due within
    `DUE_SOON_REMINDER_DAYS` instead of ones that have already passed their
    due date — "a reminder before something goes overdue," by email as
-   well as on the dashboard.
+   well as on the dashboard. `OVERDUE_DIGEST_HOURS_UTC`/
+   `DUE_SOON_DIGEST_HOURS_UTC` both accept the same comma-separated
+   hours-of-day-UTC syntax as the [Backups](#backups) section's
+   `BACKUP_HOURS_UTC` (e.g. `8,20` for twice a day) — a fixed clock
+   time, not "N hours after the worker booted," so you know exactly
+   when a digest lands in your inbox.
 
 Every one of these emails is **enqueued on the background `worker`
 container** (`tasks.send_email_task`, `backend/celery_app.py`) rather than
@@ -1302,8 +1307,8 @@ scales independently, with Postgres/Redis running as containers instead of
 managed services and both images pulled from Docker Hub instead of Azure
 Container Registry, to keep monthly cost as low as realistically possible)
 plus
-`.github/workflows/deploy-azure-staging.yml` /
-`deploy-azure-production.yml` / `infra-deploy.yml` — instead of the generic
+`.github/workflows/deploy-azure-aca.yml` /
+`infra-deploy.yml` — instead of the generic
 mechanics above. See [`DEPLOYMENT.md`](DEPLOYMENT.md)'s **Azure Container
 Apps Production Deployment (Cost-Optimized)** section for the full
 one-time setup, cost breakdown, and how the pipeline runs day to day.
@@ -1409,9 +1414,9 @@ see `.gitignore`) and are read by `backend/config.py` into a single typed
 | `BREVO_API_KEY` | *(empty)* | Only read when `EMAIL_PROVIDER=brevo`. From your Brevo (formerly Sendinblue) account's API Keys page. |
 | `RESEND_API_KEY` | *(empty)* | Only read when `EMAIL_PROVIDER=resend`. From your Resend account's API Keys page. |
 | `ADMIN_NOTIFICATION_EMAILS` | *(empty)* | Comma-separated extra recipients who get every new-extension-request alert, plus every daily digest (overdue + due-soon) on top of the runtime-editable **Digest Recipients** list (`GET`/`PUT /settings/digest-recipients`, Super Admin/Admin only). Being an Admin/Manager account no longer implies receiving the daily digests by itself — see [Due-Date Extensions & Notifications](#due-date-extensions--notifications). |
-| `OVERDUE_NOTIFICATION_INTERVAL_HOURS` | `24` | How often the Celery Beat job checks for overdue checkouts and sends the digest. Lower it (e.g. to a few minutes) while testing locally if you want to see it fire sooner. |
+| `OVERDUE_DIGEST_HOURS_UTC` | `8` | Comma-separated hours of day (UTC, each 0-23) the Celery Beat job checks for overdue checkouts and sends the digest — `8` fires once a day at 08:00 UTC, `8,20` fires twice a day. Same syntax as [Backups](#backups)' `BACKUP_HOURS_UTC` below — a fixed clock time, not "N hours after the worker booted." Lower to a couple of minutes from now while testing locally if you want to see it fire sooner. |
 | `DUE_SOON_REMINDER_DAYS` | `2` | "A reminder before something goes overdue" — how many days ahead of its `due_date` an active checkout counts as "due soon". Drives the "Due Soon" section of the Notification Center, the "Due Soon" badge on My Items, AND the due-soon reminder email below, all from this one setting. |
-| `DUE_SOON_NOTIFICATION_INTERVAL_HOURS` | `24` | How often the Celery Beat job checks for checkouts about to go overdue and sends the due-soon reminder digest. Same "lower it for local testing" idea as `OVERDUE_NOTIFICATION_INTERVAL_HOURS` above. |
+| `DUE_SOON_DIGEST_HOURS_UTC` | `8` | Comma-separated hours of day (UTC, each 0-23) the Celery Beat job checks for checkouts about to go overdue and sends the due-soon reminder digest. Same comma-separated-hours syntax as `OVERDUE_DIGEST_HOURS_UTC` above — its own independent schedule. |
 | `SEND_INDIVIDUAL_HOLDER_REMINDERS` | `true` | Whether the daily overdue/due-soon digests also email each affected checkout's own holder individually, on top of the combined Digest-Recipients summary. Set `false` to send only the one ops-facing summary email per run. |
 | `ACCOUNT_LOCKOUT_MAX_ATTEMPTS` | `5` | Wrong-password attempts against **the same account** before it's locked, regardless of which IP they came from. |
 | `ACCOUNT_LOCKOUT_DURATION_MINUTES` | `15` | How long that per-account lock lasts once triggered. |
@@ -2514,14 +2519,20 @@ them, completely out-of-band from any HTTP request.
 
 - **`celery_app.py`** — the shared `celery_app` instance (Redis as both
   broker and result backend), its serialization/result-TTL config, and
-  `beat_schedule` — wires `tasks.send_overdue_notifications` to run every
-  `OVERDUE_NOTIFICATION_INTERVAL_HOURS` AND `tasks.send_due_soon_reminders`
-  to run every `DUE_SOON_NOTIFICATION_INTERVAL_HOURS`, as two independent
-  schedule entries. `-B` embeds Celery Beat directly inside the `worker`
-  container's own process (see `docker-compose.yml`'s `worker` service)
-  rather than running it as a separate container — correct for one worker
-  replica, **not** something to scale to multiple replicas without
-  splitting Beat back out (see the in-code comment).
+  `beat_schedule` — wires `tasks.send_overdue_notifications` to run daily
+  at `OVERDUE_DIGEST_HOURS_UTC` AND `tasks.send_due_soon_reminders`
+  to run daily at `DUE_SOON_DIGEST_HOURS_UTC` (both `crontab` schedules,
+  not plain intervals — a fixed UTC clock time, same idea as the Backups
+  section's `BACKUP_HOURS_UTC`), as two independent schedule entries.
+  `-B` embeds Celery Beat directly inside the `worker` container's own
+  process (see `docker-compose.yml`'s `worker` service) rather than
+  running it as a separate container. Safe to scale to multiple replicas
+  of an embedded worker+beat process (Render's/Azure's cost-optimized
+  deployment shapes) without any of them double-firing a scheduled job —
+  RedBeat (`redbeat_redis_url`/`beat_scheduler` in this same file's
+  config) stores a distributed lock in Redis so only one replica is ever
+  the active scheduler at a time; see that config block's own comment
+  for the full mechanism.
 - **`tasks/export_tasks.py`** — `generate_audit_export(...)`, builds one
   audit-ledger CSV/PDF export file and returns it as a small JSON-safe
   dict (base64-encoded file bytes) that Celery stashes in Redis until
@@ -3176,7 +3187,7 @@ A checklist before you deploy this anywhere real:
 
 ## Safely Updating An Existing Production Deployment (CI/CD)
 
-**This repo ships eight GitHub Actions workflows** in `.github/workflows/`:
+**This repo ships seven GitHub Actions workflows** in `.github/workflows/`:
 [`ci.yml`](.github/workflows/ci.yml) (ruff lint, the real
 `pytest backend/tests` suite against real Postgres/Redis service
 containers — including the actual `alembic upgrade head`/`downgrade` chain
@@ -3190,20 +3201,18 @@ path (see `nginx/test-config.sh`), image build + Trivy scan, and
 is also invoked as a reusable `workflow_call` by every deploy workflow
 below; coverage isn't 100% of the app yet, see [Suggested Future
 Features](#suggested-future-features) for what's still missing),
-[`deploy-azure-staging.yml`](.github/workflows/deploy-azure-staging.yml)
-(manual `workflow_dispatch` only — no push trigger, so a push to `develop`
-never auto-deploys),
+[`deploy-azure-aca.yml`](.github/workflows/deploy-azure-aca.yml)
+(manual `workflow_dispatch` -- pick `staging` or `production` -- no push
+trigger, so a push to `develop` never auto-deploys; also callable via
+`workflow_call`, which always targets production -- see `release.yml`
+below),
 [`release.yml`](.github/workflows/release.yml) (triggered by pushing a
 `git tag v1.x.x` — builds and pushes both images tagged with that VERSION,
 not just a commit SHA, opens a pull request against `main` with a new
 [`CHANGELOG.md`](CHANGELOG.md) section (never a direct commit — this
 repo's `main` only changes via reviewed PR) and cuts a GitHub Release, and
-in parallel calls the next workflow), and
-[`deploy-azure-production.yml`](.github/workflows/deploy-azure-production.yml)
-(no push trigger of its own — reusable, called by `release.yml` with the
-version to deploy, or manually via `workflow_dispatch` for a redeploy/
-rollback; blocking Trivy scan already ran in `release.yml`, and this
-workflow still auto-rolls-back on a failed smoke test) — plus
+in parallel calls `deploy-azure-aca.yml` via `workflow_call`)
+— plus
 [`infra-deploy.yml`](.github/workflows/infra-deploy.yml), run separately and
 occasionally, for provisioning/updating `infra/main.bicep` itself. All of
 these target the **Azure Container Apps** path.
@@ -3217,7 +3226,7 @@ images → Trivy scan → SSH over the Cloudflare Tunnel → sync
 `docker-compose.vm.yml`/`Caddyfile` → `docker compose up -d` → migrate →
 smoke test — same `git tag v1.x.x`-triggers-production, everything-else-
 is-manual-`workflow_dispatch` shape as `release.yml`/
-`deploy-azure-production.yml` above, just without a Container Apps
+`deploy-azure-aca.yml` above, just without a Container Apps
 control plane in the middle), and
 [`sync-secrets-vm.yml`](.github/workflows/sync-secrets-vm.yml) (pushes
 updated `.env` values out to the running VM without a full redeploy). The
@@ -3225,6 +3234,15 @@ two paths are independent — use one, the other, or both side by side —
 and never share GitHub Environment secrets (see
 [DEPLOYMENT_VM.md](DEPLOYMENT_VM.md)'s "Using both deployment targets"
 section).
+
+> Not itemized above: `build-push-images.yml` (the reusable
+> `workflow_call`-only workflow every deploy path above delegates the
+> actual `docker build`/push/Trivy-scan step to -- see that file's own
+> header comment) and `repair-tunnel-token-vm.yml` (a standalone
+> break-glass workflow for the VM path's Cloudflare Access service token).
+> Neither is a deploy trigger you'd run directly day to day, which is why
+> they're left out of the walkthrough above, but they do exist in
+> `.github/workflows/` alongside the seven described here.
 
 All of these already follow the same rule, which is what makes any of this genuinely
 *safe* to automate rather than just fast:
@@ -3293,7 +3311,7 @@ your platform's own release-step feature (ECS's task definition + a
 one-off migration task before the service update, a Kubernetes `Job` +
 `initContainer` pattern ahead of a rolling `Deployment` update, etc.) —
 outside this project's scope to ship a ready-made workflow for every
-platform, but `deploy-azure-production.yml` (build → scan → migrate →
+platform, but `deploy-azure-aca.yml` (build → scan → migrate →
 roll out → smoke test → rollback) is a reasonable template to adapt if
 your platform doesn't have a closer native equivalent.
 

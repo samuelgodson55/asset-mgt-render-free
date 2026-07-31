@@ -451,20 +451,40 @@ triggers a production release (see
 the full walkthrough). Nothing manual after the one-time setup below either
 way.
 
-> **Default environment, if you leave the dropdown untouched:** when you
-> run `deploy-azure-aca.yml` from the Actions tab and leave its
-> `environment` dropdown on `from-variable` (the default) instead of
-> explicitly picking `staging` or `production`, it reads a repo-level
-> **Variable** named `ENVIRONMENT` (`Settings → Secrets and variables →
-> Actions → Variables tab`, NOT a per-Environment secret). Set it to
-> `production` to make an unattended/default run target production, or
-> `development`/anything else (or just leave it unset) to make it target
-> `staging` — the safe choice, so a run nobody deliberately configured
-> never silently ships an obfuscated, production-flagged build. This same
-> variable is read the same way by `deploy-azure-vm.yml` (see
-> DEPLOYMENT_VM.md step 6). A version-tag push always deploys `production`
-> regardless of this variable. The pipeline lives in `.github/workflows/` (`ci.yml`, `infra-deploy.yml`,
-`deploy-azure-staging.yml`, `release.yml`, `deploy-azure-production.yml`)
+> **Deploy target vs. frontend build mode -- two separate settings, don't
+> confuse them:**
+>
+> - **Deploy target** (`staging` or `production`): picked explicitly every
+>   run, via `deploy-azure-aca.yml`'s `environment` dropdown on the Actions
+>   tab (`workflow_dispatch`). There is no repo-level fallback for this
+>   anymore -- the dropdown defaults to `production` if you don't touch it,
+>   so an unattended/default run always targets production; pick `staging`
+>   explicitly if that's what you want. A version-tag push always deploys
+>   `production` regardless of the dropdown.
+> - **Frontend build mode** (minified-only vs. minified+obfuscated): a
+>   separate **Variable** named `ENVIRONMENT`, set PER GitHub Environment --
+>   `Settings → Environments → staging` (and again under `→ production`)
+>   `→ Environment variables`, NOT the repo-level Actions Variables tab, and
+>   NOT a per-Environment secret. Set the `production` Environment's copy to
+>   `production` to ship a minified+obfuscated frontend build there;
+>   `development`/anything else (or leaving it unset) on either Environment
+>   makes that Environment's build minified-only -- the safe default, so an
+>   Environment nobody deliberately configured never silently ships an
+>   obfuscated, production-flagged build. This is read by the
+>   `resolve-target` job (see that job's own comment in
+>   `deploy-azure-aca.yml`) and fed into `frontend/Dockerfile`'s `BUILD_ENV`
+>   build arg -- it has no effect on which Azure resource group/image name
+>   this run touches, that's entirely the dropdown's job. The run's summary
+>   (`GITHUB_STEP_SUMMARY`) prints which build mode was actually used, so
+>   you can confirm it after the fact instead of guessing. This same
+>   per-Environment variable is read the same way by `deploy-azure-vm.yml`
+>   (see DEPLOYMENT_VM.md step 6). **Redeploying an existing `image_tag`
+>   instead of building fresh skips this entirely** -- it reuses whatever
+>   build mode that image was originally built with, regardless of what the
+>   variable is set to now.
+>
+> The pipeline lives in `.github/workflows/` (`ci.yml`, `infra-deploy.yml`,
+`deploy-azure-aca.yml`, `release.yml`, `build-push-images.yml`)
 and the infrastructure lives in `infra/main.bicep`.
 
 > **If you deployed an earlier version of this architecture** — either the
@@ -688,6 +708,7 @@ Leave otelExporterOtlpHeaders (and otelExporterOtlpEndpoint) empty and use otelA
 
    | Variable | Scope | Notes |
    |---|---|---|
+   | `ENVIRONMENT` | per-environment | `production` for a minified+obfuscated frontend build (read by `deploy-azure-aca.yml`'s `resolve-target` job, fed into `frontend/Dockerfile`'s `BUILD_ENV`); `development`/unset for minified-only -- set independently on EACH GitHub Environment (`staging`, `production`). See the callout above -- this does NOT pick which Azure resource group/environment gets deployed, that's the workflow's `environment` dropdown. |
    | `AZURE_LOCATION` | repo | e.g. `eastus2` — see the note on region restrictions in step 3 above; `centralus` is the fallback if `eastus2` is also restricted on your subscription. Falls back to `eastus2` if unset. |
    | `CUSTOM_DOMAIN` | per-environment | Optional — leave unset to use the generated `*.azurecontainerapps.io` FQDN |
    | `NOTIFICATIONS_ENABLED` | per-environment | Optional, string `"true"`/`"false"` — master switch for all outbound email. Leave unset (defaults to off) until the four `SMTP_*` secrets above are set. See [POST_DEPLOYMENT.md](POST_DEPLOYMENT.md) for the full walkthrough. |
@@ -706,9 +727,9 @@ Leave otelExporterOtlpHeaders (and otelExporterOtlpEndpoint) empty and use otelA
    | `SMTP_PORT` | per-environment | Optional — only relevant once `NOTIFICATIONS_ENABLED=true`. Default `587` if unset. |
    | `SMTP_USE_TLS` | per-environment | Optional, string `"true"`/`"false"` — STARTTLS. Default `true` unless explicitly set to `"false"`. |
    | `SMTP_USE_SSL` | per-environment | Optional, string `"true"`/`"false"` — implicit TLS (e.g. port 465). Default `false` unless explicitly set to `"true"`. Mutually exclusive with `SMTP_USE_TLS` in practice — set at most one. |
-   | `OVERDUE_NOTIFICATION_INTERVAL_HOURS` | per-environment | Optional — how often the overdue-assets digest re-fires. Default `24` if unset. |
+   | `OVERDUE_DIGEST_HOURS_UTC` | per-environment | Optional — comma-separated hours of day (UTC, each 0-23) the overdue-assets digest fires, e.g. `8` or `8,20`. Same syntax as `BACKUP_HOURS_UTC` below. Default `8` if unset. |
    | `DUE_SOON_REMINDER_DAYS` | per-environment | Optional — how many days before an asset's return date the "due soon" reminder starts. Default `2` if unset. |
-   | `DUE_SOON_NOTIFICATION_INTERVAL_HOURS` | per-environment | Optional — how often the due-soon digest re-fires. Default `24` if unset. |
+   | `DUE_SOON_DIGEST_HOURS_UTC` | per-environment | Optional — comma-separated hours of day (UTC, each 0-23) the due-soon digest fires. Same syntax as `OVERDUE_DIGEST_HOURS_UTC` above. Default `8` if unset. |
    | `SEND_INDIVIDUAL_HOLDER_REMINDERS` | per-environment | Optional, string `"true"`/`"false"` — also emails the individual asset holder, not just Admins/Managers. Default `true` unless explicitly set to `"false"`. |
    | `DISPLAY_TIMEZONE` | per-environment | Optional — IANA zone (e.g. `America/New_York`) used to render timestamps in the UI, filenames, and emails. Default `Africa/Lagos` if unset. |
    | `CURRENCY_CODE` | per-environment | Optional — ISO 4217 code (e.g. `USD`) shown next to asset costs. Default `NGN` if unset. |
@@ -756,14 +777,18 @@ Leave otelExporterOtlpHeaders (and otelExporterOtlpEndpoint) empty and use otelA
    commit) one bullet per feature/fix instead of one bullet per intermediate
    commit inside the branch.
 
-9. **Manually run `deploy-azure-staging.yml`** (Actions tab → "Run
-   workflow") for Staging, or **push a `git tag v1.x.x`** off `main` for
-   Production — either builds real images, pushes them to Docker
-   Hub, runs migrations, and rolls them out (`deploy-azure-staging.yml` for
-   the former; `release.yml` → `deploy-azure-production.yml` for the
-   latter — see [Versioning & Cutting a Release](#versioning--cutting-a-release)
+9. **Manually run `deploy-azure-aca.yml`** (Actions tab → "Run
+   workflow" → `environment: staging`) for Staging, or **push a `git tag
+   v1.x.x`** off `main` for Production — either builds real images, pushes
+   them to Docker Hub, runs migrations, and rolls them out (a manual
+   `deploy-azure-aca.yml` run with `environment: staging` for the former;
+   `release.yml` → `deploy-azure-aca.yml` (called with `workflow_call`,
+   which always targets production) for the latter — see
+   [Versioning & Cutting a Release](#versioning--cutting-a-release)
    below for the full tagging walkthrough). From here on, deploys are just
-   `git push`/`git push --tags`.
+   `git push --tags` for production, or a manual `deploy-azure-aca.yml` run
+   for staging -- a plain `git push` to any branch never deploys anything
+   by itself, only `ci.yml`.
 
 ### Versioning & Cutting a Release
 
@@ -779,11 +804,15 @@ don't use pre-release-looking tags unless you mean it).
 
 1. Branch off `develop`, do the work, open a PR into `develop`. Only
    `ci.yml` runs on the feature branch itself — no deploy, no versioning.
-2. Merge that PR into `develop` → `deploy-azure-staging.yml` builds and
-   rolls out a SHA-tagged image to staging automatically. Verify it there.
+2. Merge that PR into `develop`. Only `ci.yml` runs on the merge itself --
+   there's no automatic deploy anymore (see `deploy-azure-aca.yml`'s own
+   `on:` block: `workflow_call` and `workflow_dispatch` only, no `push`
+   trigger). When you want to verify it on staging, manually run
+   `deploy-azure-aca.yml` (Actions tab → "Run workflow" → `environment:
+   staging`, leave `image_tag` blank to build fresh off `develop`) --
+   builds a SHA-tagged image and rolls it out to staging.
    **Nothing here touches `CHANGELOG.md` or any version number** — staging
-   deploys stay SHA-based on every merge, same as before this pipeline had
-   tags at all.
+   deploys stay SHA-based, same as before this pipeline had tags at all.
 3. When you're ready to promote what's on `develop`, open a PR from
    `develop` into `main` and merge it. This is also just a merge — still no
    deploy, no version bump, no changelog entry. `main` can sit any number
@@ -899,26 +928,28 @@ cost-optimized design (one combined container instead of separate
 `db` → `postgresServer` migration steps above first, then run
 `infra-deploy.yml` against the new `infra/main.bicep` (it will remove the
 old `app` Container App and create `backend`/`frontend` in its place), then
-manually run `deploy-azure-staging.yml`/`deploy-azure-production.yml` to
-populate both new apps' images.
+manually run `deploy-azure-aca.yml` once per GitHub Environment (`staging`,
+then `production`) to populate both new apps' images.
 
 ### The pipeline, branch by branch
 
-- **Manual `deploy-azure-staging.yml` run → Staging**: build BOTH
+- **Manual `deploy-azure-aca.yml` run (`environment: staging`) → Staging**:
+  build BOTH
   images (`backend`, `frontend`) in parallel → push each to its own Docker
   Hub repo, tagged with the commit SHA → Trivy scan (report-only, doesn't
   block) → run `migrate` job against the new `backend` image → roll out
   `backend` then `frontend`. Both run with min replicas 0 on staging — pure
   scale-to-zero.
 - **`git tag v1.x.x` push → Production** (`release.yml` calling
-  `deploy-azure-production.yml`): `release.yml` builds BOTH images and
+  `deploy-azure-aca.yml` via `workflow_call`, which always targets
+  production): `release.yml` builds BOTH images and
   pushes each tagged with the **version itself** (e.g. `:v1.4.2`, not just a
   SHA — see [Rollback](#rollback) for why that's the point), with Trivy
   **blocking** on CRITICAL findings for either image; opens a pull request
   against `main` with the new `CHANGELOG.md` section (never a direct commit
   — see [Cutting a production release](#azure-container-apps-production-deployment-cost-optimized)
   above) and cuts a GitHub Release; and, **in parallel, not sequentially**,
-  calls `deploy-azure-production.yml`, which runs `migrate` against the new
+  calls `deploy-azure-aca.yml`, which runs `migrate` against the new
   `backend` image, rolls out `backend` then `frontend`, and smoke tests
   `frontend`'s `/` AND `/api/auth/me` (proving the whole chain — nginx's
   reverse proxy actually reaching `backend` — works, not just that
@@ -927,9 +958,10 @@ populate both new apps' images.
   `frontend` run with min replicas 1 in production by default (see
   `infra-deploy.yml`'s "Resolve replica floors" step) — zero cold starts
   anywhere in the production request path, at the cost of two always-on
-  replicas instead of one. `deploy-azure-production.yml` itself
-  has no `push` trigger of its own anymore — it only runs when `release.yml`
-  calls it, or via manual `workflow_dispatch` (see [Rollback](#rollback)).
+  replicas instead of one. `deploy-azure-aca.yml` itself
+  has no `push` trigger of its own at all — it only runs when `release.yml`
+  calls it (always production), or via a manual `workflow_dispatch` (either
+  `staging` or `production`, see [Rollback](#rollback)).
 - **`redis` and `postgresServer` are never touched by either pipeline** —
   `redis` runs a fixed official image, only changing when
   `infra/main.bicep` itself changes (re-run `infra-deploy.yml` manually);
@@ -1335,7 +1367,7 @@ caution applies to `REDIS_PASSWORD`.
   --yes`.
 - **`migrate` job succeeds instantly with no actual migration applied** —
   usually means the job is still pointed at an old `backend` image tag.
-  `deploy-azure-production.yml`'s migrate job always runs
+  `deploy-azure-aca.yml`'s migrate job always runs
   `az containerapp job update --image` immediately before
   `az containerapp job start` for exactly this reason; if you're triggering
   the job manually, do the same.

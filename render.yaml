@@ -246,7 +246,7 @@ services:
       # (e.g. after upgrading off the Free instance type) doesn't require
       # re-adding them from scratch.
       - key: NOTIFICATIONS_ENABLED
-        value: false
+        value: true
       - key: EMAIL_PROVIDER
         value: brevo
       - key: BREVO_API_KEY
@@ -269,14 +269,14 @@ services:
         value: ""
       - key: ADMIN_NOTIFICATION_EMAILS
         value: ""
-      - key: OVERDUE_NOTIFICATION_INTERVAL_HOURS
-        value: 24
+      - key: OVERDUE_DIGEST_HOURS_UTC
+        value: 7
       - key: DUE_SOON_REMINDER_DAYS
-        value: 2
-      - key: DUE_SOON_NOTIFICATION_INTERVAL_HOURS
-        value: 24
+        value: 1
+      - key: DUE_SOON_DIGEST_HOURS_UTC
+        value: 7
       - key: SEND_INDIVIDUAL_HOLDER_REMINDERS
-        value: true
+        value: false
       # Database backups -- see backend/config.py's BACKUP_* docstring and
       # README.md's "Backups" section. Runs daily inside this same web
       # service process (a plain daemon thread, not Celery), so it works

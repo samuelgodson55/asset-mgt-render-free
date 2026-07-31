@@ -29,6 +29,7 @@ app with no Django-style "installed apps" list to scan.
 import datetime
 
 from celery import Celery
+from celery.schedules import crontab
 from celery.signals import beat_init, worker_process_init
 
 from config import settings
@@ -216,19 +217,25 @@ def _init_beat_tracing(**_kwargs) -> None:
 # backend/tasks/audit_partition_tasks.py's partition-maintenance check
 # (see its own docstring, and services/audit_partition_service.py's, for
 # why that one exists and why it's safe to run this often):
-#   - `tasks.send_overdue_notifications`, every
-#     `settings.OVERDUE_NOTIFICATION_INTERVAL_HOURS` (24 by default) --
+#   - `tasks.send_overdue_notifications`, daily at
+#     `settings.OVERDUE_DIGEST_HOURS_UTC` (08:00 UTC by default) --
 #     checkouts that have ALREADY gone overdue.
-#   - `tasks.send_due_soon_reminders`, every
-#     `settings.DUE_SOON_NOTIFICATION_INTERVAL_HOURS` (24 by default) --
-#     "a reminder before something goes overdue": checkouts still on time
+#   - `tasks.send_due_soon_reminders`, daily at
+#     `settings.DUE_SOON_DIGEST_HOURS_UTC` (08:00 UTC by default) -- "a
+#     reminder before something goes overdue": checkouts still on time
 #     but due within `settings.DUE_SOON_REMINDER_DAYS`.
-# Using a plain `timedelta` here (rather than a fixed `crontab` clock time)
-# is deliberate for both: it means the very FIRST run happens that many
-# hours after whichever moment the worker container boots, rather than
-# "wait until the next 2am" -- much easier to verify locally (e.g.
-# temporarily set one of these to a couple of minutes and watch your
-# terminal/mail-catcher for the first send) without waiting a full day.
+# Both use a `crontab` (a fixed UTC clock time), not a plain `timedelta`
+# -- deliberately the same scheduling model as
+# services/backup_service.py's BACKUP_HOURS_UTC scheduler, so "when does
+# my daily digest/backup actually land in my inbox" is one predictable
+# mental model across this whole app, and both env vars accept the exact
+# same comma-separated-hours syntax (e.g. "8,20" for twice a day).
+# `crontab(hour=..., minute=0)` accepts that comma-separated string
+# directly (Celery's own crontab syntax already supports it) -- see
+# `overdue_digest_hours_utc_list`/`due_soon_digest_hours_utc_list` in
+# config.py for the shared parsing/validation those strings go through
+# first, so a typo fails fast at startup rather than silently being
+# swallowed by Celery's own crontab parser.
 #
 # LOAD BALANCING: safe to embed in every replica (RedBeat)
 # ------------------------------------------------------------------------
@@ -252,23 +259,27 @@ def _init_beat_tracing(**_kwargs) -> None:
 celery_app.conf.beat_schedule = {
     "send-overdue-checkout-notifications": {
         "task": "tasks.send_overdue_notifications",
-        "schedule": datetime.timedelta(hours=settings.OVERDUE_NOTIFICATION_INTERVAL_HOURS),
+        "schedule": crontab(hour=",".join(str(h) for h in settings.overdue_digest_hours_utc_list), minute=0),
     },
     # "A reminder before something goes overdue" -- the proactive
-    # counterpart just above. Same timedelta-since-boot reasoning, its own
-    # independent interval (settings.DUE_SOON_NOTIFICATION_INTERVAL_HOURS)
-    # so it can be tuned (e.g. lowered for local testing) without also
-    # changing how often the overdue digest fires.
+    # counterpart just above. Its own independent schedule
+    # (settings.DUE_SOON_DIGEST_HOURS_UTC) so it can be tuned (e.g. to a
+    # couple of minutes from now for local testing) without also
+    # changing when the overdue digest fires.
     "send-due-soon-checkout-reminders": {
         "task": "tasks.send_due_soon_reminders",
-        "schedule": datetime.timedelta(hours=settings.DUE_SOON_NOTIFICATION_INTERVAL_HOURS),
+        "schedule": crontab(hour=",".join(str(h) for h in settings.due_soon_digest_hours_utc_list), minute=0),
     },
     # Keeps `audit_logs`'s future yearly Postgres partitions pre-created --
     # see tasks/audit_partition_tasks.py and
     # services/audit_partition_service.py's module docstrings. Cheap and
     # idempotent (a no-op almost every run), and a no-op entirely against
     # a non-Postgres database, so this is safe to leave in every
-    # deployment shape.
+    # deployment shape. Still a plain timedelta-since-boot, not a fixed
+    # clock time -- unlike the two digests above, there's no "landed in
+    # my inbox at a predictable time" expectation to satisfy here, just
+    # "checked recently enough that a partition is never missing when a
+    # write needs it".
     "ensure-audit-log-partitions": {
         "task": "tasks.ensure_audit_log_partitions",
         "schedule": datetime.timedelta(hours=settings.AUDIT_PARTITION_CHECK_INTERVAL_HOURS),

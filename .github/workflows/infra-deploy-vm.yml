@@ -145,6 +145,8 @@ jobs:
       TF_VAR_brevo_api_key: ${{ secrets.BREVO_API_KEY }}
       TF_VAR_resend_api_key: ${{ secrets.RESEND_API_KEY }}
       TF_VAR_admin_notification_emails: ${{ secrets.ADMIN_NOTIFICATION_EMAILS }}
+      TF_VAR_overdue_digest_hours_utc: ${{ vars.OVERDUE_DIGEST_HOURS_UTC || '8' }}
+      TF_VAR_due_soon_digest_hours_utc: ${{ vars.DUE_SOON_DIGEST_HOURS_UTC || '8' }}
       TF_VAR_enable_auto_backup: ${{ vars.ENABLE_AUTO_BACKUP || 'true' }}
       TF_VAR_backup_gdrive_enabled: ${{ vars.BACKUP_GDRIVE_ENABLED || 'false' }}
       TF_VAR_backup_gdrive_oauth_client_id: ${{ secrets.BACKUP_GDRIVE_OAUTH_CLIENT_ID }}

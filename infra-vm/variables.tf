@@ -241,6 +241,18 @@ variable "admin_notification_emails" {
   default = ""
 }
 
+variable "overdue_digest_hours_utc" {
+  description = "Comma-separated hours of day (UTC, each 0-23) the worker checks for overdue checkouts and emails the admin/manager digest, e.g. \"8\" or \"8,20\" -- matches .env.example's OVERDUE_DIGEST_HOURS_UTC."
+  type        = string
+  default     = "8"
+}
+
+variable "due_soon_digest_hours_utc" {
+  description = "Comma-separated hours of day (UTC, each 0-23) the worker checks for checkouts about to go overdue and emails the reminder digest, e.g. \"8\" or \"8,20\" -- matches .env.example's DUE_SOON_DIGEST_HOURS_UTC."
+  type        = string
+  default     = "8"
+}
+
 variable "display_timezone" {
   description = "IANA timezone name used to render CSV/PDF export timestamps. Data itself is always stored as UTC."
   type        = string

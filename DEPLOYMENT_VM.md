@@ -8,8 +8,7 @@ Terraform (`infra-vm/`); every code deploy after that goes out over SSH via
 `.github/workflows/deploy-azure-vm.yml`.
 
 **This is a different, parallel path from `DEPLOYMENT.md`'s Azure Container
-Apps guide** (`infra/main.bicep` + `deploy-azure-production.yml`/
-`deploy-azure-staging.yml`). Pick one:
+Apps guide** (`infra/main.bicep` + `deploy-azure-aca.yml`). Pick one:
 
 | | This guide (VM) | `DEPLOYMENT.md` (Container Apps) |
 |---|---|---|
@@ -422,28 +421,48 @@ sensitive (it's plain text, visible to anyone with repo read access) —
 that's exactly why non-secret settings like `VM_SIZE`/`AZURE_LOCATION` below
 use it instead of a secret.
 
-**One more variable, but at the REPO level, not per-Environment:**
-`Settings → Secrets and variables → Actions → Variables tab` (not inside
-either `prod`/`vm-staging` Environment page — this has to be readable
-*before* `deploy-azure-vm.yml` knows which Environment it's even
-targeting). Add `ENVIRONMENT` = `prod` or `development` (any other value,
-or leaving it unset, is treated as "not production"). This is what
-`deploy-azure-vm.yml`'s `environment` dropdown falls back to when you run
-it via **Actions → Deploy to VM → Run workflow** and leave the dropdown on
-its default (`from-variable`) instead of explicitly picking `vm-staging`
-or `prod` — see that workflow's own `ENVIRONMENT`/`RUNTIME_ENVIRONMENT`
-comments for the exact resolution order. Leave it unset (or set it to
-anything other than `prod`/`production`) and an unattended/default run
-deploys as `vm-staging` with a plain minified (not obfuscated) frontend
-build and `ENVIRONMENT=development` in the containers, instead of silently
-becoming a production deploy. A version-tag push (`git tag vX.Y.Z && git
-push origin vX.Y.Z`) always deploys `prod` regardless of this variable —
-that trigger means "cut a real release" on its own.
+**Deploy target vs. frontend build mode -- two separate settings, don't
+confuse them:**
+
+- **Deploy target** (`vm-staging` or `prod`): picked explicitly every run,
+  via `deploy-azure-vm.yml`'s `environment` dropdown on the Actions tab
+  (`workflow_dispatch`). There is no repo-level fallback for this anymore --
+  the dropdown defaults to `prod` if you don't touch it, so an
+  unattended/default run always targets production; pick `vm-staging`
+  explicitly if that's what you want. A version-tag push (`git tag vX.Y.Z
+  && git push origin vX.Y.Z`) always deploys `prod` regardless of the
+  dropdown -- that trigger means "cut a real release" on its own.
+- **Frontend build mode** (minified-only vs. minified+obfuscated, and the
+  `ENVIRONMENT` value the backend/worker/beat containers themselves read --
+  see `backend/config.py`'s `apply_environment_defaults`): a **Variable**
+  named `ENVIRONMENT`, set PER Environment page -- on `prod`'s Environment
+  variables section (and again on `vm-staging`'s, if you use it), NOT the
+  repo-level `Settings → Secrets and variables → Actions → Variables tab`.
+  Set `prod`'s copy to `production` to ship a minified+obfuscated frontend
+  build and `ENVIRONMENT=production` in the containers on that Environment;
+  `development`/anything else (or leaving it unset) on either Environment
+  makes that Environment's build minified-only and
+  `ENVIRONMENT=development` in the containers -- the safe default, so an
+  Environment nobody deliberately configured never silently ships an
+  obfuscated, production-flagged build. This is read by the
+  `resolve-target` job (see `deploy-azure-vm.yml`'s own
+  `ENVIRONMENT`/`RUNTIME_ENVIRONMENT` comments for the exact resolution
+  order) and fed into `frontend/Dockerfile`'s `BUILD_ENV` build arg -- it
+  has no effect on which VM/image name this run touches, that's entirely
+  the dropdown's job. The run's summary (`GITHUB_STEP_SUMMARY`) prints
+  which build mode was actually used, so you can confirm it after the fact
+  instead of guessing. This same per-Environment variable is read the same
+  way by `deploy-azure-aca.yml` (see `DEPLOYMENT.md`'s equivalent
+  callout). **Redeploying an existing `image_tag` instead of building
+  fresh skips this entirely** -- it reuses whatever build mode that image
+  was originally built with, regardless of what the variable is set to
+  now.
 
 Add these to each Environment (Secrets unless marked **Variable**):
 
 | Name | Value | Used by |
 |---|---|---|
+| `ENVIRONMENT` (**Variable**, not secret) | `production` for a minified+obfuscated frontend build and `ENVIRONMENT=production` in the containers; `development`/unset for minified-only and `ENVIRONMENT=development` -- set this independently on EACH Environment page (`prod`, and `vm-staging` if used) | `deploy-azure-vm.yml` (`resolve-target` job) |
 | `TF_STATE_RESOURCE_GROUP` (**Variable**, not secret) | `rg-snipeit-tfstate` from step 1's state backend setup | `infra-deploy-vm.yml` |
 | `TF_STATE_STORAGE_ACCOUNT` (**Variable**, not secret) | `snipeittfstate01` (or whatever you named it) from step 1 | `infra-deploy-vm.yml` |
 | `TF_STATE_CONTAINER` (**Variable**, not secret) | `vm-state` from step 1 | `infra-deploy-vm.yml` |
@@ -497,6 +516,20 @@ into a fresh VM's first-boot `.env` → `sync-secrets-vm.yml` keeps it in
 sync on an already-running VM too, the same way it does every other
 value on this page.
 
+Also optional — **daily digest send time**: `OVERDUE_DIGEST_HOURS_UTC`
+and `DUE_SOON_DIGEST_HOURS_UTC` (both **Variables**, default `8` — i.e.
+08:00 UTC), the clock time the overdue-checkout digest and the
+due-soon-reminder digest actually land in your inbox each day. Same
+comma-separated-hours-of-day-UTC syntax as `BACKUP_HOURS_UTC` (e.g.
+`8,20` for twice a day), and the same underlying idea: a fixed clock
+time you can reason about, not "N hours after whichever moment the
+worker container happened to boot." See `backend/celery_app.py`'s
+`beat_schedule` for the `crontab` these two drive. Wired through the
+same GitHub Variable → Terraform → `cloud-init.yaml` first-boot →
+`sync-secrets-vm.yml` ongoing-sync chain as `EMAIL_PROVIDER` just above
+(`infra-vm/variables.tf`'s `overdue_digest_hours_utc`/
+`due_soon_digest_hours_utc`).
+
 Also optional — distributed tracing (OpenTelemetry, off by default; see
 `README.md`'s **Distributed Tracing** section for the full walkthrough,
 which covers this VM path via `docker-compose.vm.yml`'s opt-in `jaeger`
@@ -538,8 +571,7 @@ next invocation.
 > `DEPLOYMENT.md`'s Container Apps path, which wires all of these
 > through `infra/main.bicep`): `LOG_LEVEL`, `LOGIN_RATE_LIMIT_MAX`,
 > `LOGIN_RATE_LIMIT_WINDOW_SECONDS`, `ACCOUNT_LOCKOUT_MAX_ATTEMPTS`,
-> `ACCOUNT_LOCKOUT_DURATION_MINUTES`, `OVERDUE_NOTIFICATION_INTERVAL_HOURS`,
-> `DUE_SOON_REMINDER_DAYS`, `DUE_SOON_NOTIFICATION_INTERVAL_HOURS`,
+> `ACCOUNT_LOCKOUT_DURATION_MINUTES`, `DUE_SOON_REMINDER_DAYS`,
 > `SEND_INDIVIDUAL_HOLDER_REMINDERS`, `CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER`,
 > `BACKUP_HOURS_UTC`, `BACKUP_RETENTION_COUNT`,
 > `OTEL_AZURE_MONITOR_ENABLED`. `backend/config.py` reads all of these as
@@ -553,7 +585,10 @@ next invocation.
 > from GitHub Environment secrets/variables only). Wiring these through
 > as first-class VM GitHub Variables, the same way the Container Apps
 > path already does, is a reasonable follow-up if you need to tune them
-> regularly.
+> regularly. (`OVERDUE_DIGEST_HOURS_UTC`/`DUE_SOON_DIGEST_HOURS_UTC` — the
+> daily digest send times — used to be on this list too; see the
+> "Daily digest send time" callout above for where they're documented
+> now that they're wired through.)
 
 ---
 
@@ -1034,7 +1069,7 @@ targets in parallel (e.g. VM for a cost-capped primary environment,
 Container Apps for a burst-capacity secondary).
 
 If you're **only** using the VM path, `release.yml`'s own `deploy` job
-(which calls `deploy-azure-production.yml`) will still attempt to run on
+(which calls `deploy-azure-aca.yml`) will still attempt to run on
 every version tag and fail, since it targets Container Apps
 infrastructure that was never provisioned — harmless (no destructive
 action, just a red X in Actions), but avoid the noise by removing

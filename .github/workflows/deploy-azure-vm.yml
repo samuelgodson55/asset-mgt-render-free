@@ -340,8 +340,21 @@ jobs:
         # that are safe to blindly overwrite -- because nothing reads
         # them as authoritative LIVE state -- belong in this step.
         run: |
+          # BUG FIX: this used to `mkdir -p /opt/snipeit/scripts/deploy-status`
+          # -- a path nothing ever scp's into. The REAL destination below,
+          # /mnt/docker-data/volumes/deploy_status, is on the separate data
+          # disk (see infra-vm/cloud-init.yaml's setup-disk.sh), created
+          # root-owned during first-boot provisioning; it normally already
+          # exists, but anything that leaves it missing or root-owned again
+          # (a rebuilt/re-imaged VM, a manual root-shell edit, etc.) made
+          # every future scp here fail with "No such file or directory" /
+          # silent Permission denied, exactly like the self-heal step above
+          # exists to guard against for /opt/snipeit. `mkdir -p
+          # /opt/snipeit/scripts` is kept explicit here too -- it used to
+          # only exist as a side effect of the old (wrong) mkdir path,
+          # which happened to create it as a parent directory.
           ssh -i ~/.ssh/deploy_key "$VM_SSH_USER@$VM_HOST" \
-            "mkdir -p /opt/snipeit/scripts/deploy-status"
+            "mkdir -p /opt/snipeit/scripts && sudo mkdir -p /mnt/docker-data/volumes/deploy_status && sudo chown -R $VM_SSH_USER:$VM_SSH_USER /mnt/docker-data/volumes/deploy_status"
           scp -i ~/.ssh/deploy_key \
               docker-compose.vm.yml Caddyfile \
               "$VM_SSH_USER@$VM_HOST:/opt/snipeit/"
@@ -487,6 +500,7 @@ jobs:
             echo "| **Version** | \`${{ env.VERSION }}\` |"
             echo "| **Image tag** | \`${{ env.IMAGE_TAG }}\` |"
             echo "| **Commit** | [\`${GITHUB_SHA:0:7}\`](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}) |"
+            echo "| **Frontend build mode** | \`${{ needs.resolve-target.outputs.build_env }}\`${{ (github.event_name == 'workflow_dispatch' && inputs.image_tag != '') && ' _(reused an existing image -- not rebuilt this run, so this reflects whatever mode that image was originally built with, not necessarily this environment’s current `ENVIRONMENT` variable)_' || '' }} |"
             echo "| **Deployed by** | @${{ github.actor }} |"
             if [ "${{ env.VERSION }}" = "unversioned" ]; then
               echo ""

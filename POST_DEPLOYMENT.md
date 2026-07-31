@@ -1,7 +1,7 @@
 # Post-Deployment Configuration (Azure)
 
-This is for you if `infra-deploy.yml` and `deploy-azure-staging.yml` /
-`deploy-azure-production.yml` have already run successfully, the app is
+This is for you if `infra-deploy.yml` and `deploy-azure-aca.yml`
+have already run successfully, the app is
 live at its `*.azurecontainerapps.io` FQDN, and you've logged in as
 `superadmin`. Three things are still optional and off by default at that
 point:
@@ -94,14 +94,18 @@ AWS SES's SMTP endpoint, etc. — there's no vendor-specific SDK involved.
    editable at runtime without a redeploy: log in as an Admin/Super Admin,
    and `PUT /notifications/settings/digest-recipients` (see
    `backend/api/notifications_api.py`) sets who receives it. Simplest test:
-   set that list to just your own email, then either wait for the daily
-   run or temporarily lower `DUE_SOON_NOTIFICATION_INTERVAL_HOURS` /
-   `OVERDUE_NOTIFICATION_INTERVAL_HOURS` in `infra/main.bicep`'s
-   `sharedEnv` to a few minutes so you don't have to wait 24 hours to see
-   it fire. Revert that back to `24` once confirmed. Alternatively, if you
-   have any checkout that's overdue or due soon already, it'll show up in
-   the very next scheduled run without needing that interval change at
-   all.
+   set that list to just your own email, then trigger a run without
+   waiting for the schedule at all — SSH/exec into the `worker` container
+   and run `celery -A celery_app call tasks.send_overdue_notifications`
+   (or `tasks.send_due_soon_reminders`); Celery queues it immediately and
+   the worker picks it up within seconds, same task code the daily
+   `OVERDUE_DIGEST_HOURS_UTC`/`DUE_SOON_DIGEST_HOURS_UTC` schedule would
+   have run. (Unlike the old interval-based schedule, temporarily
+   "lowering" a fixed clock-time schedule doesn't reliably shorten the
+   wait — the next crontab-scheduled hour could still be nearly 24 hours
+   away — so `celery call` is the more direct check.) Alternatively, if
+   you have any checkout that's overdue or due soon already, it'll show
+   up in the very next scheduled run without needing any of this at all.
 
 ---
 
@@ -350,9 +354,9 @@ one **is** sensitive and stays a per-environment Secret (see
 
 | Variable | Default | What it changes |
 |---|---|---|
-| `OVERDUE_NOTIFICATION_INTERVAL_HOURS` | `24` | How often the worker checks for overdue checkouts and emails the admin/manager digest |
+| `OVERDUE_DIGEST_HOURS_UTC` | `8` | Comma-separated hours of day (UTC, each 0-23) the worker checks for overdue checkouts and emails the admin/manager digest, e.g. `8` or `8,20` — same syntax as `BACKUP_HOURS_UTC` |
 | `DUE_SOON_REMINDER_DAYS` | `2` | How many days ahead of its due date a checkout counts as "due soon" (dashboard banner, My Items badge, and the reminder email) |
-| `DUE_SOON_NOTIFICATION_INTERVAL_HOURS` | `24` | How often the worker checks for checkouts about to go overdue |
+| `DUE_SOON_DIGEST_HOURS_UTC` | `8` | Comma-separated hours of day (UTC, each 0-23) the worker checks for checkouts about to go overdue |
 | `SEND_INDIVIDUAL_HOLDER_REMINDERS` | `true` | Whether the "your item is overdue/due soon" reminder also goes to the checkout's own holder, in addition to the admin/manager digest |
 
 ### Locale & catalog
@@ -445,8 +449,8 @@ If you'd rather change these by hand instead of via GitHub config +
   `logLevel`, `enableApiDocs`, `loginRateLimitMax`,
   `loginRateLimitWindowSeconds`, `accountLockoutMaxAttempts`,
   `accountLockoutDurationMinutes`, `superAdminUsername`, `superAdminName`,
-  `overdueNotificationIntervalHours`, `dueSoonReminderDays`,
-  `dueSoonNotificationIntervalHours`, `sendIndividualHolderReminders`,
+  `overdueDigestHoursUtc`, `dueSoonReminderDays`,
+  `dueSoonDigestHoursUtc`, `sendIndividualHolderReminders`,
   `displayTimezone`, `currencyCode`, `catalogShowStockToStaffCustomer`,
   `backupHoursUtc`, `backupRetentionCount` parameters, all wired into
   `sharedEnv` right alongside the SMTP/Google Drive ones above.

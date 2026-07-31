@@ -128,11 +128,31 @@ wait_for_revision_healthy() {
 curl_check() {
   # $1 url  $2 label  -- expects 200 or 401 (both prove a real response came
   # back through the whole chain, not just that something answered on 443)
+  #
+  # BUG FIX: this used to pass `-f`, which makes curl treat ANY HTTP status
+  # >=400 -- including the 401 /api/auth/me is SUPPOSED to return here
+  # (there's no auth cookie on a bare curl against the revision's own
+  # per-revision FQDN) -- as a hard failure (exit 22, "The requested URL
+  # returned error: 401"). That's exactly what was rolling back every
+  # healthy new revision at gate 2: the check was failing on the very
+  # response it was designed to accept. `-f` also suppresses the response
+  # body/status on error, which is why the log only ever showed a bare
+  # "curl: (22) ..." instead of a status code. Fixed by dropping `-f` and
+  # validating the captured status code ourselves -- `--retry` still
+  # retries real transient failures (curl itself exiting non-zero: DNS,
+  # connection refused/reset, timeout), it just no longer treats a 401 as
+  # one of them.
   local url="$1" label="$2"
-  curl -f -s -S --connect-timeout 30 --max-time 90 \
+  local code
+  code=$(curl -s -S --connect-timeout 30 --max-time 90 \
        --retry 5 --retry-delay 5 --retry-connrefused --retry-max-time 570 \
-       -o /dev/null -w "  $label: HTTP %{http_code} in %{time_total}s\n" "$url" \
+       -o /dev/null -w "%{http_code}" "$url") \
     || { echo "  $label: request failed against $url"; return 1; }
+  echo "  $label: HTTP $code"
+  case "$code" in
+    200|401) return 0 ;;
+    *) echo "  $label: unexpected status $code (expected 200 or 401) from $url"; return 1 ;;
+  esac
 }
 
 cmd_rollout() {

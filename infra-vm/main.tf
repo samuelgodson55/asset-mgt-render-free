@@ -484,6 +484,8 @@ resource "azurerm_linux_virtual_machine" "this" {
     brevo_api_key                     = var.brevo_api_key
     resend_api_key                    = var.resend_api_key
     admin_notification_emails         = var.admin_notification_emails
+    overdue_digest_hours_utc          = var.overdue_digest_hours_utc
+    due_soon_digest_hours_utc         = var.due_soon_digest_hours_utc
     display_timezone                  = var.display_timezone
     currency_code                     = var.currency_code
     enable_auto_backup                = var.enable_auto_backup

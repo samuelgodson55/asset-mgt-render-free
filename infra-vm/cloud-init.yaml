@@ -135,6 +135,8 @@ write_files:
       BREVO_API_KEY=${brevo_api_key}
       RESEND_API_KEY=${resend_api_key}
       ADMIN_NOTIFICATION_EMAILS=${admin_notification_emails}
+      OVERDUE_DIGEST_HOURS_UTC=${overdue_digest_hours_utc}
+      DUE_SOON_DIGEST_HOURS_UTC=${due_soon_digest_hours_utc}
 
       DISPLAY_TIMEZONE=${display_timezone}
       CURRENCY_CODE=${currency_code}

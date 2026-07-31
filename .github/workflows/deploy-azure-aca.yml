@@ -634,6 +634,7 @@ jobs:
             echo "| **Image tag** | \`$IMAGE_TAG\` |"
             echo "| **Backend image** | \`$BACKEND_IMAGE:$IMAGE_TAG\` |"
             echo "| **Frontend image** | \`$FRONTEND_IMAGE:$IMAGE_TAG\` |"
+            echo "| **Frontend build mode** | \`${{ needs.resolve-target.outputs.build_env }}\`${{ (github.event_name == 'workflow_dispatch' && inputs.image_tag != '') && ' _(reused an existing image -- not rebuilt this run, so this reflects whatever mode that image was originally built with, not necessarily this environment’s current `ENVIRONMENT` variable)_' || '' }} |"
             echo "| **Deployed by** | @${{ github.actor }} |"
             echo "| **Previously live** | \`${{ steps.previous.outputs.backend_image }}\` / \`${{ steps.previous.outputs.frontend_image }}\` |"
             echo ""

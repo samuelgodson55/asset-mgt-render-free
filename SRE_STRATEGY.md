@@ -340,8 +340,7 @@ digest, not extension-request notifications, with nothing useful in
 the project root (correctly launching the embedded Celery worker+beat
 when `RUN_EMBEDDED_WORKER=true`) and the stale original at
 `backend/start.sh` (missing that logic entirely, uvicorn-only). The
-backend CI build (`.github/workflows/deploy-azure-staging.yml` /
-`deploy-azure-production.yml`) builds with `context: backend`, so
+backend CI build (`.github/workflows/deploy-azure-aca.yml`) builds with `context: backend`, so
 `backend/Dockerfile`'s `COPY . /app/` only ever picked up
 `backend/start.sh` — the *wrong* one. `infra/main.bicep` correctly sets
 `RUN_EMBEDDED_WORKER=true` on the `backend` Container App, but the script
@@ -370,9 +369,9 @@ before trusting a fix to either script, verify with `find . -iname
 start.sh` (or equivalent) that there isn't a second copy elsewhere in the
 tree that the actual Docker build context is silently preferring instead.
 
-**Separately worth remembering:** `deploy-azure-staging.yml` /
-`deploy-azure-production.yml` only ever run `az containerapp update
---image ...` — they never touch env vars or secrets. All SMTP/
+**Separately worth remembering:** `deploy-azure-aca.yml`
+only ever runs `az containerapp update
+--image ...` — it never touches env vars or secrets. All SMTP/
 notification/Google-Drive configuration is applied exclusively by
 `infra-deploy.yml` (a separate, manually-triggered `workflow_dispatch`
 pipeline). Updating a GitHub *secret* alone does nothing until
