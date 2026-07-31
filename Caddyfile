@@ -67,11 +67,26 @@
 	# DEPLOY_STATUS_PASSWORD_HASH. An unset/placeholder password hash
 	# fails CLOSED (nobody can log in), never open.
 	# -------------------------------------------------------------------
-	@deploy_status path /_deploy /_deploy/*
+	# BUG FIX: file_server below serves files relative to `root`, using
+	# the REQUEST path as-is -- without stripping the /_deploy prefix
+	# first, it was looking for /srv/deploy-status/_deploy/index.html
+	# (doesn't exist; the actual file is /srv/deploy-status/index.html)
+	# and returning a bare 404 for every request here, auth or no auth.
+	# `redir` below normalizes the bare "/_deploy" request (no trailing
+	# slash) to "/_deploy/" first -- required because index.html's own
+	# JS fetches `status.json`/`checks.log` as paths RELATIVE to the
+	# page URL (see scripts/deploy-status/index.html), which only
+	# resolves correctly if the browser's address bar actually ends in
+	# the trailing slash.
+	@deploy_status_bare path /_deploy
+	redir @deploy_status_bare /_deploy/ 308
+
+	@deploy_status path /_deploy/*
 	handle @deploy_status {
 		basic_auth {
 			{$DEPLOY_STATUS_USER} {$DEPLOY_STATUS_PASSWORD_HASH}
 		}
+		uri strip_prefix /_deploy
 		root * /srv/deploy-status
 		file_server
 	}
@@ -139,11 +154,17 @@
 # the full explanation of each directive).
 # -----------------------------------------------------------------------------
 :80 {
-	@deploy_status path /_deploy /_deploy/*
+	# Same bug fix as the {$DOMAIN} block above -- see that block's
+	# comment for the full explanation.
+	@deploy_status_bare path /_deploy
+	redir @deploy_status_bare /_deploy/ 308
+
+	@deploy_status path /_deploy/*
 	handle @deploy_status {
 		basic_auth {
 			{$DEPLOY_STATUS_USER} {$DEPLOY_STATUS_PASSWORD_HASH}
 		}
+		uri strip_prefix /_deploy
 		root * /srv/deploy-status
 		file_server
 	}
