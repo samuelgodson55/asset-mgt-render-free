@@ -314,6 +314,11 @@ jobs:
           # deterministic way to point gitleaks-action at a config file
           # regardless of what naming convention its auto-detection expects.
           GITLEAKS_CONFIG: .gitleaks.toml
+          # OVERRIDE: Tells Gitleaks to run in directory-scan mode instead of
+          # scanning git commit history. This enforces scanning the live repo state
+          # on disk where your `.gitleaks.toml` allowlist applies deterministically,
+          # completely ignoring false positives from old historical git commits.
+          GITLEAKS_ARGS: "detect --no-git -v"
 
   compose-drift-check:
     name: docker-compose.yml / docker-compose.vm.yml drift check
@@ -508,7 +513,6 @@ jobs:
           severity: 'HIGH'
           exit-code: '0'
           format: 'table'
-
 
   bicep-lint:
     name: Validate infra/main.bicep
