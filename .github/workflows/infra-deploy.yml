@@ -49,7 +49,19 @@ jobs:
     env:
       RESOURCE_GROUP: ${{ github.event.inputs.target == 'production' && secrets.PROD_RESOURCE_GROUP || secrets.STAGING_RESOURCE_GROUP }}
       ENV_NAME: ${{ github.event.inputs.target == 'production' && 'prod' || 'staging' }}
-      ENV_SUFFIX: ${{ github.event.inputs.target == 'production' && '' || '-staging' }}
+      # NOTE: deliberately checked as == 'staging' (not == 'production' && ''
+      # || '-staging') -- GitHub Actions expressions use JS-style
+      # truthy/falsy && / ||, and '' is falsy, so a `production && '' ||
+      # '-staging'` ternary collapses to '-staging' on EVERY run regardless
+      # of `target`, silently pinning production's Container Apps to the
+      # staging Docker Hub repo (snipeit-lite-backend-staging /
+      # snipeit-lite-frontend-staging) on every infra redeploy. Checking
+      # for 'staging' instead keeps the only empty-string branch on the
+      # `||` fallback, which is safe. See deploy-azure-aca.yml's
+      # `resolve-target` job, which computes the equivalent `image_suffix`
+      # with an explicit bash if/else for the same reason -- that workflow
+      # was never affected by this bug, only this one.
+      ENV_SUFFIX: ${{ github.event.inputs.target == 'staging' && '-staging' || '' }}
     steps:
       - uses: actions/checkout@v7
 
