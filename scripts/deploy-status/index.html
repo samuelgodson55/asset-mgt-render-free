@@ -59,9 +59,22 @@
     gap: .75rem;
     margin-top: 1rem;
   }
-  .stat { }
+  .stat { min-width: 0; }
   .stat .label { color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; }
-  .stat .value { font-size: 1rem; font-weight: 600; margin-top: .15rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .stat .value {
+    font-size: 1rem;
+    font-weight: 600;
+    margin-top: .15rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    /* A full commit SHA / long image tag has no natural break points, so
+       without this it overflows straight into the next grid column
+       instead of wrapping -- min-width:0 above lets the grid cell
+       actually shrink to its track width, and this is what makes the
+       long text wrap onto a second line within that width rather than
+       spilling out of it. */
+    overflow-wrap: anywhere;
+    word-break: break-all;
+  }
   .bar-track {
     height: 10px;
     border-radius: 999px;
