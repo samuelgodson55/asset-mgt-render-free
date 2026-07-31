@@ -481,6 +481,22 @@ Optional (leave unset if you don't use them yet):
 `BACKUP_GDRIVE_FOLDER_ID` — see [Google Drive backup uploads](#google-drive-backup-uploads)
 below for where these five come from.
 
+Also optional — `EMAIL_PROVIDER` (**Variable**, default `smtp`) \|
+`brevo` \| `resend` — an alternative to the `SMTP_*` secrets above if
+your network blocks outbound SMTP ports (both send over plain HTTPS).
+`BREVO_API_KEY` (only read when `EMAIL_PROVIDER=brevo`) and
+`RESEND_API_KEY` (only read when `EMAIL_PROVIDER=resend`) pair with it.
+The VM itself has no outbound-port restriction the way Render's Free
+plan does, so plain `smtp` is fine here too — these exist for parity
+with the Container Apps/Render paths, or if your own network/ISP
+happens to block outbound SMTP. Wired all the way through: set here as
+a GitHub Environment secret/variable → `infra-deploy-vm.yml` passes it
+to Terraform (`infra-vm/variables.tf`'s `email_provider`/
+`brevo_api_key`/`resend_api_key`) → `infra-vm/cloud-init.yaml` writes it
+into a fresh VM's first-boot `.env` → `sync-secrets-vm.yml` keeps it in
+sync on an already-running VM too, the same way it does every other
+value on this page.
+
 Also optional — distributed tracing (OpenTelemetry, off by default; see
 `README.md`'s **Distributed Tracing** section for the full walkthrough,
 which covers this VM path via `docker-compose.vm.yml`'s opt-in `jaeger`
@@ -493,6 +509,30 @@ service the same way it covers local Docker Compose):
 (only if pointing this VM at an Application Insights resource you
 provisioned some other way — this VM path doesn't provision one itself,
 unlike the Container Apps path's `infra/main.bicep`).
+
+Also optional — app config overrides (all **Variables**, each with a
+working default baked into `sync-secrets-vm.yml` if left unset, so none
+of these are required for a working deploy): `POSTGRES_USER` (default
+`admin`), `POSTGRES_DB` (default `asset_db`), `JWT_ALGORITHM` (default
+`HS256`), `JWT_EXPIRY_HOURS` (default `12`), `SITE_NAME` (default
+`Snipe-IT Lite`), `ENABLE_API_DOCS` (default `false`), `SMTP_PORT`
+(default `587`), `DISPLAY_TIMEZONE` (default `Africa/Lagos`),
+`CURRENCY_CODE` (default `NGN`), `ENABLE_AUTO_BACKUP` (default `true`).
+See [Environment Variables Reference](README.md#environment-variables-reference)
+in `README.md` for what each one actually does.
+
+Also optional — per-service memory tuning (all **Variables**; see [Per-service
+memory limits](#per-service-memory-limits) below for what each defends
+against and its default): `DB_MEM_LIMIT`, `DB_MEM_RESERVATION`,
+`REDIS_MEM_LIMIT`, `REDIS_MEM_RESERVATION`, `BACKEND_MEM_LIMIT`,
+`BACKEND_MEM_RESERVATION`, `WORKER_MEM_LIMIT`, `WORKER_MEM_RESERVATION`,
+`BEAT_MEM_LIMIT`, `BEAT_MEM_RESERVATION`, `FRONTEND_MEM_LIMIT`,
+`FRONTEND_MEM_RESERVATION`, `CADDY_MEM_LIMIT`, `CADDY_MEM_RESERVATION`.
+Setting these here (rather than hand-editing `/opt/snipeit/.env` on the
+VM) is the durable way to retune a service's memory ceiling, since
+`sync-secrets-vm.yml` rewrites `.env` from these GitHub Environment
+values on every run and would silently overwrite a manual edit on its
+next invocation.
 
 > **Not yet exposed as GitHub Variables on this VM path** (unlike
 > `DEPLOYMENT.md`'s Container Apps path, which wires all of these
@@ -1248,9 +1288,17 @@ for light-to-moderate traffic; if your traffic is heavier, size up to
 `Standard_B2ms` (8 GiB) — see below.
 
 Every value reads from `/opt/snipeit/.env` first (`DB_MEM_LIMIT`, etc —
-see `docker-compose.vm.yml`'s services), so you can retune any single
-service without editing the compose file: SSH in, edit `.env`, then
-`docker compose -f docker-compose.vm.yml up -d` to apply.
+see `docker-compose.vm.yml`'s services). The durable way to retune one is
+setting the matching **GitHub Environment Variable** (see [Set GitHub
+Environment secrets/variables](#6-set-github-environment-secretsvariables)
+above) and re-running `sync-secrets-vm.yml` (or your next
+`deploy-azure-vm.yml` run, which calls it too) — that writes the value
+into `.env` in a way that survives future syncs. Editing `.env` directly
+over SSH works for a quick one-off test, but `sync-secrets-vm.yml`
+regenerates that file from GitHub Environment secrets/variables on every
+run, so a manual edit is silently lost the next time it runs; either way,
+`docker compose -f docker-compose.vm.yml up -d` is what actually applies
+the new value.
 
 **Resized to `Standard_B2ms` (8 GiB) or larger?** Double every `*_MEM_LIMIT`/
 `*_MEM_RESERVATION` value in `.env` (or set `vm_size = "Standard_B2ms"` in

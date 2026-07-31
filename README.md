@@ -139,12 +139,16 @@ who uses it.
   initiating it (e.g. on a phone call with the holder). See [Due-Date
   Extensions & Notifications](#due-date-extensions--notifications) below
   for how this differs from the self-service request flow.
-- **Overdue alerts** — a banner on the Admin/Manager dashboard lists every
-  active checkout whose due date has passed, most-overdue-first.
-- **Due Soon alerts** — "a reminder before something goes overdue" — a
-  second, amber banner right above it lists every active checkout due
-  within `DUE_SOON_REMINDER_DAYS` that hasn't gone overdue yet,
-  soonest-first. See [Due-Date Extensions &
+- **Overdue alerts** — the Notification Center bell (navbar, every
+  dashboard) lists every active checkout whose due date has passed,
+  most-overdue-first, with an unread-style badge count. See [The
+  Notification Center](#the-notification-center-everyone) below — this
+  used to be an always-visible dashboard banner; it's now closed by
+  default and opens on demand.
+- **Due Soon alerts** — "a reminder before something goes overdue" — the
+  same bell dropdown lists every active checkout due within
+  `DUE_SOON_REMINDER_DAYS` that hasn't gone overdue yet, soonest-first, in
+  its own section. See [Due-Date Extensions &
   Notifications](#due-date-extensions--notifications) below for the full
   picture (it also shows up on Staff/Customer's own My Items and in the
   Custody Ledger).
@@ -162,20 +166,22 @@ Everyone gets a piece of this, scoped by role. Four related pieces:
   behalf of** an Ad-Hoc Individual (Outsider), who has no login/dashboard
   of their own to do this themselves — e.g. after a phone call.
 - **Review requests (Manager / Admin / Super Admin)** — an "Extension
-  Requests" panel on the Admin/Manager dashboard lists every pending
-  request system-wide (Managers have no department-scoping — they see
-  exactly what an Admin/Super Admin sees) with one-click
-  **Approve**/**Deny** buttons. Approving is what actually moves the
+  Requests" section inside the Notification Center bell dropdown (see
+  [The Notification Center](#the-notification-center-everyone) below)
+  lists every pending request system-wide (Managers have no
+  department-scoping — they see exactly what an Admin/Super Admin sees)
+  with one-click **Approve**/**Deny** buttons, opening straight into that
+  checkout's Custody Ledger. Approving is what actually moves the
   checkout's real due date; denying leaves it untouched. Both write an
   audit log entry and email the requester back (if they're a logged-in
-  User with an email address) **and** surface a dismissible in-app banner
-  ("N extension request update(s)") the next time the requester loads
-  their own dashboard — see `GET /checkouts/my-extension-decisions` and
+  User with an email address) **and** surface in the requester's own
+  Notification Center ("N extension request update(s)") the next time
+  they open it — see `GET /checkouts/my-extension-decisions` and
   `backend/services/extension_service.py`'s
   `list_my_recent_extension_decisions()`, in case they miss the email.
   Any account can self-request an extension on their own checkout (Staff,
-  Customer, Manager, Admin alike), so this banner appears on every
-  dashboard, not just staff.html/customer.html.
+  Customer, Manager, Admin alike), so this section can appear in every
+  dashboard's bell, not just staff.html/customer.html.
 - **Grant one directly (Manager / Admin / Super Admin)** — see the
   **Extend** button described in [Custody & Returns](#custody--returns-super-admin--manager)
   above. Same unrestricted permission as approving a request, just
@@ -185,11 +191,11 @@ Everyone gets a piece of this, scoped by role. Four related pieces:
   Variables Reference](#environment-variables-reference)) drives three
   matching, proactive nudges, all surfaced BEFORE a checkout's due date
   actually passes:
-  - **Admin / Manager** — an amber **"Due Soon"** dashboard banner (right
-    above the red "Overdue" one) lists every active checkout system-wide
-    that's due within the window, soonest first — see
-    `backend/services/checkout_service.py`'s `list_due_soon_checkouts()`
-    and `GET /checkouts/due-soon`.
+  - **Admin / Manager** — a **"Due Soon"** section inside the
+    Notification Center bell dropdown (above the "Overdue" section) lists
+    every active checkout system-wide that's due within the window,
+    soonest first — see `backend/services/checkout_service.py`'s
+    `list_due_soon_checkouts()` and `GET /checkouts/due-soon`.
   - **Staff / Customer** — a row in "My Items" that's due within the
     window shows an amber **"Due Soon"** badge instead of the usual blue
     "On Loan" one, right on their own self-service dashboard.
@@ -203,9 +209,15 @@ Everyone gets a piece of this, scoped by role. Four related pieces:
   "what counts as due soon" definition can never drift between them.
 
 **Email notifications** (`backend/services/notification_service.py` +
-`backend/tasks/notification_tasks.py`) — plain SMTP, no vendor SDK, off by
-default (`NOTIFICATIONS_ENABLED=false` — see [Environment Variables
-Reference](#environment-variables-reference)). Three kinds go out once
+`backend/tasks/notification_tasks.py`) — plain SMTP by default
+(`EMAIL_PROVIDER=smtp`), no vendor SDK ever (the two alternate providers
+below are raw HTTP calls, not an installed SDK package), off by default
+(`NOTIFICATIONS_ENABLED=false` — see [Environment Variables
+Reference](#environment-variables-reference)). If you're deploying on
+Render's free plan (which blocks outbound SMTP ports at the network
+level), set `EMAIL_PROVIDER=brevo` or `EMAIL_PROVIDER=resend` instead —
+see [Environment Variables Reference](#environment-variables-reference)
+for `BREVO_API_KEY`/`RESEND_API_KEY`. Three kinds go out once
 enabled and configured:
 1. **Extension-request lifecycle** — the **Digest Recipients** list (the
    same admin-configured list described in #2 below, plus anything in
@@ -255,7 +267,33 @@ exactly the same producer/consumer split already used for audit-ledger
 exports (see [Tech Stack](#tech-stack)). If `NOTIFICATIONS_ENABLED=false`
 (the default), every notification is simply logged at `DEBUG` level
 instead of sent — nothing here requires a mail server to develop or demo
-the app locally.
+the app locally. Set `SEND_INDIVIDUAL_HOLDER_REMINDERS=false` to keep
+sending the combined Digest-Recipients summary in #2/#3 above while
+skipping the individual per-holder reminder email — useful if you only
+want one ops-facing digest and not one email per overdue person.
+
+### The Notification Center (everyone)
+
+A single bell icon in every dashboard's navbar (`js/components/notifications.js`),
+replacing what used to be a stack of always-visible dashboard banners
+(Overdue / Due Soon / Extension Requests / extension-decision updates).
+It's closed by default and shows an unread-style badge count instead:
+
+- **Super Admin / Manager** see the review-facing feeds — Overdue
+  Checkouts, Due Soon, and pending Extension Requests awaiting their
+  decision — plus the personal sections below, since they can also have
+  their own checked-out items.
+- **Staff / Customer** see only the personal sections — their own items
+  overdue/due soon, their own pending extension requests, and updates on
+  decisions made about their requests.
+- **Clicking a notification IS the action** — an Overdue/Due Soon or
+  pending Extension Request entry opens straight into that checkout's
+  Custody Ledger (where Approve/Deny for a pending request actually
+  happens), and a personal Due Soon/Overdue notification opens the
+  Request Extension modal directly.
+- Nothing needs its own dismiss/recall bookkeeping the way the old banner
+  stack did — the dropdown just always reflects whatever is currently
+  true the moment it's opened.
 
 ### Directories (Super Admin / Manager)
 
@@ -435,11 +473,26 @@ Click your name in the navbar on any dashboard to:
   Admin/Admin resetting the account's password also clears this lockout
   state early, same as the account holder finally remembering their own
   password.
-- **Locked out or forgot your password?** A Super Admin or Admin can reset
-  it for you directly from the User Directory — see
-  [Directories](#directories-super-admin--manager). This is a separate,
-  admin-only recovery path from the self-service "My Profile" password
-  change, and never requires knowing (or being told) the old password.
+- **Locked out or forgot your password? Two recovery paths:**
+  - **Self-service "Forgot password?"** on the login page (`POST
+    /auth/forgot-password`, `POST /auth/reset-password`) — emails a
+    single-use, time-limited link (`PASSWORD_RESET_TOKEN_EXPIRY_MINUTES`,
+    30 minutes by default) to the account's registered email address.
+    Works for ANY account, including the root admin itself (which has no
+    admin "above" it to reset it the other way). Always returns the same
+    generic response whether or not the email/username matched a real
+    account, so it can't be used to enumerate valid accounts; requires
+    `NOTIFICATIONS_ENABLED=true` and a working email provider (see
+    [Due-Date Extensions & Notifications](#due-date-extensions--notifications)),
+    since the whole point is not needing a Super Admin available.
+  - **Admin-issued reset** — a Super Admin or Admin can reset it for you
+    directly from the User Directory instead — see
+    [Directories](#directories-super-admin--manager). This is a separate,
+    admin-only recovery path from both the self-service email flow above
+    and the "My Profile" password change, and never requires knowing (or
+    being told) the old password.
+  - Either path also clears any active per-account lockout, same as the
+    account holder finally remembering their own password.
 - Sessions use signed JWTs; deactivating or deleting an account takes
   effect **immediately** on their next request, rather than waiting for
   their token to naturally expire.
@@ -517,41 +570,70 @@ snipe-it-lite/
 │       │                                # scan, and `infra/main.bicep`
 │       │                                # validation;
 │       │                                # reusable (workflow_call) -- also
-│       │                                # gates deploy-azure-staging.yml and
+│       │                                # gates deploy-azure-aca.yml,
+│       │                                # deploy-azure-vm.yml, and
 │       │                                # release.yml below
-│       ├── deploy-azure-staging.yml    # Push-to-deploy on `develop` --
-│       │                                # builds, scans, migrates, then rolls
-│       │                                # out to the staging Container Apps
+│       ├── build-push-images.yml       # Reusable (workflow_call) -- the ONE
+│       │                                  # place that builds, tags, pushes,
+│       │                                  # and Trivy-scans the backend +
+│       │                                  # frontend images. release.yml,
+│       │                                  # deploy-azure-vm.yml, and
+│       │                                  # deploy-azure-aca.yml all call this
+│       │                                  # instead of each running their own
+│       │                                  # copy-pasted `docker build` matrix
+│       ├── deploy-azure-aca.yml        # ONE workflow for the Container Apps
+│       │                                  # target -- pick `staging` or
+│       │                                  # `production` from the Actions tab
+│       │                                  # (workflow_dispatch; no push-to-
+│       │                                  # deploy on `develop` anymore), or
+│       │                                  # it's called by release.yml on a
+│       │                                  # `git tag v1.x.x` push (always
+│       │                                  # production). Builds -> migrates ->
+│       │                                  # rolls out via a blue-green canary
+│       │                                  # (see .github/scripts/aca-blue-
+│       │                                  # green.sh) with automatic rollback
+│       │                                  # on a failed smoke test. Replaces
+│       │                                  # what used to be two separate
+│       │                                  # copy-pasted files
+│       │                                  # (deploy-azure-staging.yml /
+│       │                                  # deploy-azure-production.yml)
 │       ├── release.yml                 # Triggered by `git tag v1.x.x` push --
 │       │                                # builds + tags both images with the
 │       │                                # VERSION (not just a SHA), updates
 │       │                                # CHANGELOG.md, cuts a GitHub Release,
-│       │                                # then calls deploy-azure-production.yml
-│       ├── deploy-azure-production.yml # Reusable -- no push trigger of its
-│       │                                # own; called by release.yml (or
-│       │                                # manually via workflow_dispatch for a
-│       │                                # redeploy/rollback) with an image_tag
-│       │                                # to migrate + roll out, blocking Trivy
-│       │                                # scan already done by release.yml, and
-│       │                                # automatic rollback on a failed smoke
-│       │                                # test
+│       │                                # then calls deploy-azure-aca.yml
+│       │                                # (always production on this path)
 │       ├── infra-deploy.yml            # One-time/occasional: provisions or
 │       │                                  # updates infra/main.bicep itself
 │       │                                  # (separate from the workflows
 │       │                                  # above, which only ship new images)
 │       ├── deploy-azure-vm.yml         # VM-path equivalent of
-│       │                                  # deploy-azure-staging.yml/
-│       │                                  # deploy-azure-production.yml above --
-│       │                                  # build + push both images, blocking
-│       │                                  # Trivy scan, SSH over the Cloudflare
-│       │                                  # Tunnel, sync docker-compose.vm.yml/
-│       │                                  # Caddyfile, migrate, smoke test
+│       │                                  # deploy-azure-aca.yml above -- pick
+│       │                                  # `vm-staging`/`prod` from the
+│       │                                  # Actions tab (or a `git tag`
+│       │                                  # release for prod) -- build + push
+│       │                                  # both images via build-push-
+│       │                                  # images.yml, blocking Trivy scan,
+│       │                                  # SSH over the Cloudflare Tunnel,
+│       │                                  # sync docker-compose.vm.yml/
+│       │                                  # Caddyfile, migrate, blue-green
+│       │                                  # rollout (scripts/blue-green-
+│       │                                  # deploy.sh), smoke test
 │       ├── infra-deploy-vm.yml         # VM-path equivalent of infra-deploy.yml --
 │       │                                  # provisions the VM itself via
 │       │                                  # infra-vm/'s Terraform
 │       ├── sync-secrets-vm.yml         # Pushes updated .env values out to an
 │       │                                  # already-running VM without a full
 │       │                                  # image redeploy
+│       ├── repair-tunnel-token-vm.yml  # Scripted recovery for a stale
+│       │                                  # CLOUDFLARE_TUNNEL_TOKEN after
+│       │                                  # Terraform recreates the tunnel --
+│       │                                  # pushes the current token to the
+│       │                                  # VM over Azure's control plane
+│       │                                  # (az vm run-command), which still
+│       │                                  # works even when SSH/cloudflared
+│       │                                  # itself is down -- see
+│       │                                  # DEPLOYMENT_VM.md's Troubleshooting
 │       └── dependabot.yml              # Weekly PR for every package manifest +
 │                                          # both Dockerfiles' base images (see
 │                                          # "Automated Dependency Updates" below)
@@ -674,12 +756,27 @@ snipe-it-lite/
 │   │
 │   ├── scripts/                    # One-off/manual admin scripts -- never run
 │   │   │                             # by Docker automatically
-│   │   └── gdrive_oauth_setup.py     # Interactive, run-once helper that
-│   │                                   # exchanges a downloaded Google OAuth
-│   │                                   # client JSON for a long-lived refresh
-│   │                                   # token -- prints the three
-│   │                                   # BACKUP_GDRIVE_OAUTH_* env values to
-│   │                                   # paste into .env. See "Backups" below.
+│   │   ├── gdrive_oauth_setup.py     # Interactive, run-once helper that
+│   │   │                               # exchanges a downloaded Google OAuth
+│   │   │                               # client JSON for a long-lived refresh
+│   │   │                               # token -- prints the three
+│   │   │                               # BACKUP_GDRIVE_OAUTH_* env values to
+│   │   │                               # paste into .env. See "Backups" below.
+│   │   ├── audit_partition_status.py    # Read-only report of every
+│   │   │                                  # `audit_logs` partition that
+│   │   │                                  # exists today (year, row count,
+│   │   │                                  # on-disk size) -- run by hand once
+│   │   │                                  # a year when deciding whether to
+│   │   │                                  # retire the oldest one. See
+│   │   │                                  # SRE_STRATEGY.md.
+│   │   └── dev_seed_fake_old_partition.py  # Dev/staging-only helper that
+│   │                                          # backdates a throwaway
+│   │                                          # partition so the annual
+│   │                                          # retirement runbook can be
+│   │                                          # rehearsed safely without
+│   │                                          # waiting for a real year to
+│   │                                          # roll over -- see
+│   │                                          # SRE_STRATEGY.md §6.4
 │   │
 │   ├── assets/                     # Static binary assets bundled INTO the
 │   │   │                             # backend image (not user-uploaded data)
@@ -692,11 +789,16 @@ snipe-it-lite/
 │   ├── tasks/                     # Celery tasks -- run on the `worker` container
 │   │   ├── export_tasks.py          # generate_audit_export(): builds the CSV/PDF
 │   │   │                              # off the request/response cycle
-│   │   └── notification_tasks.py     # send_email_task() (generic async email --
-│   │                                    # used by extension_service.py too) +
-│   │                                    # send_overdue_notifications() +
-│   │                                    # send_due_soon_reminders() (Celery
-│   │                                    # Beat digests -- see celery_app.py)
+│   │   ├── notification_tasks.py     # send_email_task() (generic async email --
+│   │   │                                # used by extension_service.py too) +
+│   │   │                                # send_overdue_notifications() +
+│   │   │                                # send_due_soon_reminders() (Celery
+│   │   │                                # Beat digests -- see celery_app.py)
+│   │   └── audit_partition_tasks.py   # ensure_audit_log_partitions() -- daily
+│   │                                     # Celery Beat job that pre-creates
+│   │                                     # `audit_logs`'s future yearly
+│   │                                     # partitions (see
+│   │                                     # services/audit_partition_service.py)
 │   │
 │   ├── middleware/                # ASGI middleware, one concern per file
 │   │   ├── request_context.py       # Request Correlation ID (X-Request-ID)
@@ -713,23 +815,29 @@ snipe-it-lite/
 │   │                                    # block for why this is conditional)
 │   │
 │   ├── api/                       # Thin FastAPI routers (HTTP layer only)
-│   │   ├── auth.py, assets.py, users.py, outsiders.py, checkouts.py, audit.py
-│   │   ├── backup.py                  # System Backups panel -- status, list,
+│   │   ├── auth_api.py, assets_api.py, users_api.py, outsiders_api.py,
+│   │   │     checkouts_api.py, audit_api.py
+│   │   ├── backup_api.py               # System Backups panel -- status, list,
 │   │   │                                # create, download, delete, restore
-│   │   └── quotations.py               # Self-service Asset Catalog + the
-│   │                                      # whole Equipment Quotation /
-│   │                                      # quote-to-checkout workflow (see
-│   │                                      # "Equipment Quotations" below)
+│   │   ├── quotations_api.py            # Self-service Asset Catalog + the
+│   │   │                                  # whole Equipment Quotation /
+│   │   │                                  # quote-to-checkout workflow (see
+│   │   │                                  # "Equipment Quotations" below)
+│   │   └── notifications_api.py         # Admin/Super Admin-only Daily Digest
+│   │                                       # Recipients setting -- GET/PUT
+│   │                                       # /settings/digest-recipients
 │   │
 │   ├── schemas/                   # Pydantic request/response models
-│   │   ├── auth.py, assets.py, users.py, checkouts.py
-│   │   └── quotations.py               # QuotationItemCreate,
-│   │                                      # QuotationItemQuantityUpdate,
-│   │                                      # VatUpdateRequest,
-│   │                                      # QuotationAssignRequest,
-│   │                                      # QuotationMetaUpdate,
-│   │                                      # QuotationCreateRequest,
-│   │                                      # QuotationOutsourcedItemCreate
+│   │   ├── auth_schema.py, assets_schema.py, users_schema.py,
+│   │   │     checkouts_schema.py, outsiders_schema.py
+│   │   ├── quotations_schema.py        # QuotationItemCreate,
+│   │   │                                 # QuotationItemQuantityUpdate,
+│   │   │                                 # VatUpdateRequest,
+│   │   │                                 # QuotationAssignRequest,
+│   │   │                                 # QuotationMetaUpdate,
+│   │   │                                 # QuotationCreateRequest,
+│   │   │                                 # QuotationOutsourcedItemCreate
+│   │   └── notifications_schema.py      # DigestRecipientsUpdateRequest
 │   │
 │   ├── services/                  # All business logic / DB queries live here
 │   │   ├── auth_service.py           # Login, password changes, account lockout
@@ -754,11 +862,19 @@ snipe-it-lite/
 │   │   ├── export_service.py               # Shared CSV/PDF builders
 │   │   ├── search_utils.py                  # Shared ILIKE search-filter helper
 │   │   │                                       # (GET /assets, /users, /outsiders)
-│   │   └── stock.py                         # The Available-quantity formula
+│   │   ├── stock.py                         # The Available-quantity formula
+│   │   └── audit_partition_service.py       # Keeps `audit_logs`'s native
+│   │                                           # Postgres RANGE partitions
+│   │                                           # healthy -- pre-creates future
+│   │                                           # yearly partitions, reports
+│   │                                           # partition status; NEVER drops
+│   │                                           # one (see SRE_STRATEGY.md's
+│   │                                           # "Audit log partitioning &
+│   │                                           # annual archive" runbook)
 │   │
 │   └── alembic/                    # Database migration scripts
 │       ├── env.py
-│       └── versions/                 # 9 migrations, each additive-only --
+│       └── versions/                 # 11 migrations, each additive-only --
 │           │                          # see "Database & Migrations" below
 │           ├── 0001_baseline_schema.py         # starting schema
 │           ├── 0002_bootstrap_root_admin.py    # inserts the one root
@@ -774,8 +890,19 @@ snipe-it-lite/
 │           │                                     # email/phone_number
 │           ├── 0008_super_admin_totp.py        # TOTP secret/enabled columns
 │           │                                     # (2FA)
-│           └── 0009_recovery_codes.py          # recovery_codes table (2FA
-│                                                  # backup codes)
+│           ├── 0009_recovery_codes.py          # recovery_codes table (2FA
+│           │                                      # backup codes)
+│           ├── 0010_partition_audit_logs.py    # Converts `audit_logs` to a
+│           │                                      # native Postgres RANGE-
+│           │                                      # partitioned table (one
+│           │                                      # partition per calendar
+│           │                                      # year, plus a DEFAULT
+│           │                                      # catch-all) -- see
+│           │                                      # SRE_STRATEGY.md
+│           └── 0011_password_reset_tokens.py   # `password_reset_tokens`
+│                                                   # table backing the
+│                                                   # self-service "forgot
+│                                                   # password" email flow
 │
 ├── build-tailwind/              # Build tooling ONLY -- never shipped/run in
 │   │                              # Docker. Compiles frontend/css/tailwind.css.
@@ -817,16 +944,38 @@ snipe-it-lite/
         │                           # the saved theme before first paint so
         │                           # there's no flash of the wrong theme
         ├── dashboard.js         # refreshDashboard() orchestrates all loads
+        ├── vendor/
+        │   └── qrcode.js          # Vendored qrcode-generator (npm), unmodified
+        │                            # apart from the .mjs->.js rename -- renders
+        │                            # the 2FA enrollment QR code only
         └── components/           # One file per feature area
             ├── assets.js           # Inventory table, dispatch, exceptions, CSV import
             ├── audit.js             # Audit ledger table + CSV/PDF export
+            ├── backups.js            # System Backups panel (admin.html,
+            │                           # true Super Admin only) -- status,
+            │                           # list, create, download, delete, restore
             ├── custody.js            # Custody Ledger modal + returns + direct Extend
-            ├── due-soon.js            # "Due Soon" alert banner (reminder before overdue)
+            ├── due-soon.js            # "Due Soon" feed -- rendered inside the
+            │                            # Notification Center bell dropdown
+            │                            # (see components/notifications.js)
             ├── exports.js             # Properties-assigned CSV/PDF downloads
             ├── extensions.js           # Request/Approve/Deny + direct-extend modals
             ├── myitems.js               # Staff/Customer "what do I have?" view
+            ├── notifications.js          # THE NOTIFICATION CENTER -- a single
+            │                               # bell icon (every dashboard's navbar)
+            │                               # with an unread-style badge, replacing
+            │                               # the old always-visible dashboard
+            │                               # banner stack (Overdue/Due Soon/
+            │                               # Extension Requests/decisions). Pulls
+            │                               # together overdue.js/due-soon.js/
+            │                               # extensions.js's review-facing feeds
+            │                               # (Super Admin/Manager) plus each
+            │                               # person's own item alerts (everyone)
+            │                               # into one closed-by-default dropdown
             ├── outsiders.js             # Ad-Hoc directory table
-            ├── overdue.js                # Overdue-checkouts alert banner
+            ├── overdue.js                # Overdue-checkouts feed -- rendered
+            │                               # inside the Notification Center bell
+            │                               # dropdown (see components/notifications.js)
             ├── profile.js                 # "My Profile" modal + change password
             ├── quotation.js                # Asset Catalog browsing, the
             │                                 # self-service cart, the
@@ -1250,19 +1399,26 @@ see `.gitignore`) and are read by `backend/config.py` into a single typed
 | `SUPER_ADMIN_NAME` | `Super Admin` | Display name for that account (shown in the navbar/profile, same as any other user's `name`). Also read by the bootstrap migration. |
 | `ROOT_ADMIN_BOOTSTRAP_PASSWORD` | *(empty — auto-generated if unset)* | OPTIONAL. Read once, directly, by `alembic/versions/0002_bootstrap_root_admin.py` the first time it inserts the root admin row in production — never by the running app. Leave unset to have that migration generate a random password and print it to the migration job's own output exactly once instead. Not needed at all for local dev (`database.py`'s `seed_db()` uses a fixed demo password there). |
 | `NOTIFICATIONS_ENABLED` | `false` | Master switch for all email (see [Due-Date Extensions & Notifications](#due-date-extensions--notifications)). Leave `false` for local dev with no mail server — every send is logged at `DEBUG` instead. |
-| `SMTP_HOST` | *(empty)* | Mail server hostname. Required if `NOTIFICATIONS_ENABLED=true`. |
+| `EMAIL_PROVIDER` | `smtp` | `smtp` \| `brevo` \| `resend`. Plain SMTP works everywhere except Render's free plan, which blocks outbound SMTP ports at the network level — set this to `brevo` or `resend` there instead (both send over plain HTTPS via `requests`, no vendor SDK installed). `render.yaml` defaults this to `brevo` for exactly that reason. |
+| `SMTP_HOST` | *(empty)* | Mail server hostname. Required if `NOTIFICATIONS_ENABLED=true` and `EMAIL_PROVIDER=smtp`. |
 | `SMTP_PORT` | `587` | Mail server port (587 = STARTTLS, the standard). |
 | `SMTP_USERNAME` / `SMTP_PASSWORD` | *(empty)* | SMTP auth credentials, if your provider requires them. |
 | `SMTP_USE_TLS` | `true` | STARTTLS vs. a plain/unencrypted connection (only appropriate for a local/private relay). |
+| `SMTP_USE_SSL` | `false` | Use implicit TLS (typically port 465) instead of STARTTLS — for providers/relays that require it. |
 | `SMTP_FROM_EMAIL` | *(empty)* | The `From:` address. Required if `NOTIFICATIONS_ENABLED=true` — most providers reject sends where this doesn't match a verified domain/sender. |
+| `BREVO_API_KEY` | *(empty)* | Only read when `EMAIL_PROVIDER=brevo`. From your Brevo (formerly Sendinblue) account's API Keys page. |
+| `RESEND_API_KEY` | *(empty)* | Only read when `EMAIL_PROVIDER=resend`. From your Resend account's API Keys page. |
 | `ADMIN_NOTIFICATION_EMAILS` | *(empty)* | Comma-separated extra recipients who get every new-extension-request alert, plus every daily digest (overdue + due-soon) on top of the runtime-editable **Digest Recipients** list (`GET`/`PUT /settings/digest-recipients`, Super Admin/Admin only). Being an Admin/Manager account no longer implies receiving the daily digests by itself — see [Due-Date Extensions & Notifications](#due-date-extensions--notifications). |
 | `OVERDUE_NOTIFICATION_INTERVAL_HOURS` | `24` | How often the Celery Beat job checks for overdue checkouts and sends the digest. Lower it (e.g. to a few minutes) while testing locally if you want to see it fire sooner. |
-| `DUE_SOON_REMINDER_DAYS` | `2` | "A reminder before something goes overdue" — how many days ahead of its `due_date` an active checkout counts as "due soon". Drives the "Due Soon" dashboard banner, the "Due Soon" badge on My Items, AND the due-soon reminder email below, all from this one setting. |
+| `DUE_SOON_REMINDER_DAYS` | `2` | "A reminder before something goes overdue" — how many days ahead of its `due_date` an active checkout counts as "due soon". Drives the "Due Soon" section of the Notification Center, the "Due Soon" badge on My Items, AND the due-soon reminder email below, all from this one setting. |
 | `DUE_SOON_NOTIFICATION_INTERVAL_HOURS` | `24` | How often the Celery Beat job checks for checkouts about to go overdue and sends the due-soon reminder digest. Same "lower it for local testing" idea as `OVERDUE_NOTIFICATION_INTERVAL_HOURS` above. |
+| `SEND_INDIVIDUAL_HOLDER_REMINDERS` | `true` | Whether the daily overdue/due-soon digests also email each affected checkout's own holder individually, on top of the combined Digest-Recipients summary. Set `false` to send only the one ops-facing summary email per run. |
 | `ACCOUNT_LOCKOUT_MAX_ATTEMPTS` | `5` | Wrong-password attempts against **the same account** before it's locked, regardless of which IP they came from. |
 | `ACCOUNT_LOCKOUT_DURATION_MINUTES` | `15` | How long that per-account lock lasts once triggered. |
+| `PASSWORD_RESET_TOKEN_EXPIRY_MINUTES` | `30` | How long a self-service "Forgot password?" email link stays valid before it must be requested again — see [Account Security](#account-security-built-in-mostly-invisible-until-you-need-it). |
 | `ENABLE_AUTO_BACKUP` | `true` | Runs a `pg_dump` backup inside this same process (a plain daemon thread — no Celery/Redis dependency) at each hour in `BACKUP_HOURS_UTC`. See [Backups](#backups). |
 | `BACKUP_HOURS_UTC` | `3` | Comma-separated hours of day (UTC, each 0–23) the backup runs at — `3` for once a day, `3,15,21` for three times a day. |
+| `BACKUP_HOUR_UTC` | *(unset)* | DEPRECATED single-hour alias kept for backward compatibility — if set, it wins outright over `BACKUP_HOURS_UTC`. New setups should use `BACKUP_HOURS_UTC` instead. |
 | `BACKUP_DIR` | `/app/backups` | Where local backup files + their `index.json` metadata live inside the container. |
 | `BACKUP_RETENTION_COUNT` | `7` | How many local backup files to keep before deleting the oldest. Google Drive copies (if enabled) are unaffected. |
 | `BACKUP_GDRIVE_ENABLED` | `false` | Uploads every backup to Google Drive right after it's written locally — the only thing that makes a backup survive a Render redeploy/spin-down. |
@@ -1274,6 +1430,8 @@ see `.gitignore`) and are read by `backend/config.py` into a single typed
 | `CURRENCY_CODE` | `NGN` | ISO 4217 currency code applied to every price shown/exported anywhere in the app — the Asset Inventory's per-unit price, the Quotation Catalog's day-rate, and every line/subtotal/VAT/total on a Quotation PDF export. See [Equipment Quotations](#equipment-quotations-quote-to-checkout). |
 | `SITE_NAME` | `Snipe-IT Lite` | Brand name shown across the deployment — the on-screen navbar/login brand + browser tab `<title>` (read live from `GET /config/public` on every page load) AND the letterhead printed on the Quotation PDF. One setting rebrands both. |
 | `CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER` | `false` | Whether a Staff/Customer account browsing the self-service Quotation Catalog can see each pool's available-quantity/in-stock status. `false` (recommended for production) shows them only name, category, and price. A Manager/Admin/Super Admin's own Asset Inventory view is unaffected either way. |
+| `AUDIT_PARTITION_YEARS_AHEAD` | `2` | Postgres-only. How many years of FUTURE `audit_logs` partitions the daily `ensure_audit_log_partitions` Celery Beat job keeps pre-created, so a write never falls through to the DEFAULT catch-all partition just because the calendar rolled over. No-op against non-Postgres databases. See `SRE_STRATEGY.md`. |
+| `AUDIT_PARTITION_CHECK_INTERVAL_HOURS` | `24` | How often that same Celery Beat job runs. |
 
 The four below are read by the **`frontend`** service (the nginx reverse
 proxy), not the backend — see [Deploying Across Environments](#deploying-across-environments-nginx-reverse-proxy).
@@ -1569,7 +1727,7 @@ disable it (`AUTO_INIT_DB=false`) and let `alembic upgrade head` be the
 only thing that ever changes your schema.
 
 **Current migrations** (`backend/alembic/versions/`, applied in order by
-`alembic upgrade head`) — nine so far, each one additive-only (see the
+`alembic upgrade head`) — eleven so far, each one additive-only (see the
 "migrate first, only ever ADD" rule in the CI/CD section below):
 
 | Revision | What it does |
@@ -1583,8 +1741,10 @@ only thing that ever changes your schema.
 | `0007_split_contact_details` | Splits outsider `contact_details` into `email`/`phone_number`; adds `users.phone_number`. |
 | `0008_super_admin_totp` | Adds `users.totp_secret_encrypted` / `users.totp_enabled` — see [Two-factor authentication (2FA)](#two-factor-authentication-2fa). |
 | `0009_recovery_codes` | Adds the `recovery_codes` table (2FA backup codes). |
+| `0010_partition_audit_logs` | Converts `audit_logs` into a native Postgres RANGE-partitioned table (one partition per calendar year, plus a DEFAULT catch-all) — a no-op shape-wise against non-Postgres databases. See `SRE_STRATEGY.md`'s "Audit log partitioning & annual archive" section for the full rationale and the ongoing-maintenance/retirement runbook (`services/audit_partition_service.py`, `tasks/audit_partition_tasks.py`). |
+| `0011_password_reset_tokens` | Adds the `password_reset_tokens` table backing the self-service "Forgot password?" email flow — see [Account Security](#account-security-built-in-mostly-invisible-until-you-need-it). |
 
-A fresh install just runs `alembic upgrade head` and applies all nine in
+A fresh install just runs `alembic upgrade head` and applies all eleven in
 order — nothing special to do. `backend/tests/test_migrations.py` runs
 this exact `upgrade head` → `downgrade` chain against a throwaway Postgres
 database in CI on every push (see `.github/workflows/ci.yml`), so a
@@ -1593,7 +1753,7 @@ reaches a real database.
 
 **Going forward, every schema change should be its own NEW migration**
 (via `alembic revision --autogenerate -m "description"`) layered on top of
-`0009_recovery_codes.py` — don't hand-edit an already-applied migration
+`0011_password_reset_tokens.py` — don't hand-edit an already-applied migration
 file once any real data exists anywhere; write a new one instead, even for
 a one-line fix.
 
@@ -1765,7 +1925,12 @@ trace that produced it.
 
 **Off by default** — `OTEL_ENABLED=false`, matching every other opt-in
 flag in this app. Turning it on costs nothing until you also point it at
-somewhere to send spans.
+somewhere to send spans. `OTEL_SERVICE_NAME` (default
+`snipeit-lite-backend`) is the base name spans/logs are tagged with —
+it's what shows up in Jaeger's/Application Insights' service picker
+(`telemetry.py` also derives a `-db` suffixed name for SQLAlchemy spans
+from it), so change it if you're running more than one deployment of
+this app and want to tell their traces apart in a shared collector.
 
 ### Try it locally in 3 steps (no Azure account needed)
 
@@ -1902,7 +2067,10 @@ once the backend is running. This table is the high-level map:
 | `POST /auth/mfa/recovery-codes/regenerate` | Super Admin (self) | Invalidates every existing one-time recovery code and issues ten brand-new ones — requires re-confirming the current password first. |
 | `POST /auth/logout` | logged in | Clears the `HttpOnly` session cookie set at login (see [Security Model](#security-model)). |
 | `GET /auth/me` | logged in | "Who am I?" — fresh profile data for the "My Profile" window. |
+| `PATCH /auth/me` | self (any role) | Self-service: rotate your own name/username/email. Requires re-confirming `current_password` first; a summary email goes to the pre-change (and, if email itself changed, the new) address. Self-only by design — the one path the root admin account has to correct its own details, since no Admin/Super Admin can edit that hidden row. |
 | `POST /auth/update-password` | self or Super Admin/Admin | Change a password (self-service requires the current password; a Super Admin resetting someone else's does not). |
+| `POST /auth/forgot-password` | anyone (unauthenticated) | Self-service password recovery: emails a single-use reset link to the matched account's registered email address if `identifier` (email or username) matches a real, active account. Always returns the same generic response either way, so it can't be used to enumerate accounts. Works for any account, including the root admin. |
+| `POST /auth/reset-password` | anyone holding a valid token | Redeems a still-valid, not-yet-used token from the emailed link (`PASSWORD_RESET_TOKEN_EXPIRY_MINUTES`) for a brand-new password, and clears any account lockout as a side effect. |
 | `GET /assets` | logged in | List asset pools. TRUE server-side pagination + search — `?limit=&offset=&search=` (searches pool name). |
 | `GET /assets/deleted` | Super Admin / Admin | List soft-deleted asset pools, so one can be found to restore or purge. TRUE server-side pagination + search, same as `GET /assets`. |
 | `POST /assets` | Super Admin / Admin | Create a new pool. |
@@ -2189,7 +2357,15 @@ the actual logic lives. Use this section as a map when you need to find
 
 ### Backend — API Routes (`backend/api/`)
 
-- **`api/auth_api.py`** — `login`, `get_my_profile`, `update_password`.
+- **`api/auth_api.py`** — `login`, `mfa_setup_confirm`, `mfa_verify`,
+  `logout`, `get_my_profile`, `update_password`,
+  `mfa_recovery_codes_regenerate`, `forgot_password`, `reset_password`,
+  `update_my_identity` (the `PATCH /auth/me` behind "My Profile"'s
+  name/username/email editing). `_resolve_frontend_base_url()` derives
+  the mailed password-reset link's base URL from the actual incoming
+  request (checked against `CORS_ORIGINS`) rather than a hardcoded
+  setting, so it can never be spoofed into pointing a reset link at an
+  attacker's own site.
 - **`api/assets_api.py`** — `create_asset_type`, `list_assets`,
   `get_asset_details`, `update_asset_quantity`, `delete_asset_type`,
   `flag_asset_exception`, `recall_asset_exception`, `checkin_asset`,
@@ -3157,18 +3333,17 @@ Small, well-scoped follow-ups if you want to keep extending this project:
   of ground (auth/MFA, asset pools, checkouts/extensions, CSV import,
   Outsiders and both conversion directions, the full Quotation workflow,
   clean URLs, health/readiness, RedBeat scheduling, migrations, the
-  global error handler, and role permission gates — see [Testing Your
-  Changes](#testing-your-changes) for the full file-by-file breakdown),
-  but audit-log/export service functions and the Backups panel's
-  create/restore paths still don't have dedicated test files — a good
-  first PR for getting familiar with the `client`/`db_session`/`as_*`
-  fixtures in `backend/tests/conftest.py`.
+  global error handler, distributed tracing, and role permission gates —
+  see [Testing Your Changes](#testing-your-changes) for the full
+  file-by-file breakdown; the Backups panel's create/restore paths in
+  particular are now covered in depth by `test_backup_restore.py`,
+  including cross-schema restores and the reconciliation logic), but
+  audit-log/export service functions still don't have a dedicated test
+  file — a good first PR for getting familiar with the
+  `client`/`db_session`/`as_*` fixtures in `backend/tests/conftest.py`.
 - **A `deleted_by` column** recording which admin performed a given
   soft-delete (good first Alembic migration exercise) — `restore_user()`
   itself (undoing a soft-delete) already shipped; see [Directories](#directories-super-admin--manager).
-- **Case-sensitive login** (the auth layer now uses exact-match lookup for
-  usernames/emails rather than normalizing casing) so `T.Okafor@corp.io`
-  and `t.okafor@corp.io` are treated as distinct identifiers.
 - **`Strict-Transport-Security` (HSTS)**, set at your TLS-terminating
   reverse proxy once deployed with HTTPS. (A real `Content-Security-Policy`
   is no longer on this list — see `nginx/default.conf.template`, which now
@@ -3178,10 +3353,6 @@ Small, well-scoped follow-ups if you want to keep extending this project:
   Notifications](#due-date-extensions--notifications)); a `users` table
   column for "email me my own overdue/due-soon reminders: yes/no" would
   be a small, well-scoped follow-up.
-- **OpenTelemetry tracing** — the request-ID/structured-logging
-  foundation (`middleware/request_context.py`, `logging_config.py`) is a
-  natural stepping stone toward full distributed tracing if this app ever
-  calls out to other services.
 
 ## Troubleshooting
 
