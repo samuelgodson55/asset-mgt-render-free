@@ -140,4 +140,19 @@ provider "azurerm" {
 # exact token permissions to select when creating it.
 provider "cloudflare" {
   api_token = var.cloudflare_api_token
+
+  # Cloudflare's edge intermittently returns transient errors (most often
+  # "HTTP 520, please try again later") when Terraform reads back
+  # cloudflare_zero_trust_tunnel_cloudflared_config during plan/refresh --
+  # a known flaky spot in Cloudflare's own API, not a config problem (see
+  # e.g. github.com/cloudflare/terraform-provider-cloudflare/issues/2435).
+  # The v4 provider line (only -- these three arguments were removed in
+  # v5, see issue #5092) will automatically retry failed API calls with
+  # backoff; the defaults (retries = 3, max_backoff = 30s) just aren't
+  # generous enough to reliably ride out a 520. Bumped here instead of
+  # relying on a manual "just re-run the job" every time this resource
+  # gets touched.
+  retries     = 12
+  min_backoff = 2
+  max_backoff = 60
 }
