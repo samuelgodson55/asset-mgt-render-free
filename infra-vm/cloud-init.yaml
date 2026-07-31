@@ -88,15 +88,20 @@ write_files:
 
       # HTTP Basic Auth for the /_deploy/ live rollout-status dashboard
       # (see Caddyfile and DEPLOYMENT_VM.md's "Monitoring a rollout"
-      # section). This is a REAL, validly-formatted bcrypt hash (so Caddy
-      # loads it without error) of a random, never-recorded password --
-      # i.e. it's a hash nobody, including us, knows the plaintext for,
-      # so the route fails CLOSED (nobody can log in) until you replace
-      # it with your own: `docker run --rm caddy:2-alpine caddy
-      # hash-password`, then update this line and re-run `docker compose
-      # -f docker-compose.vm.yml up -d --no-deps caddy`.
-      DEPLOY_STATUS_USER=admin
-      DEPLOY_STATUS_PASSWORD_HASH=$2b$14$1FLbT3EqJ/ebM2oPXK/FEOSjkHp1XCSTe3KyB99xEas.JdktP0JMm
+      # section). Sourced from the DEPLOY_STATUS_USER/DEPLOY_STATUS_PASSWORD_HASH
+      # GitHub secrets (infra-vm/variables.tf's deploy_status_user/
+      # deploy_status_password_hash -- see infra-deploy-vm.yml's env block)
+      # so first boot already has real credentials, no SSH required. Leave
+      # those secrets unset and Terraform substitutes a real,
+      # validly-formatted bcrypt hash of a random, never-recorded password
+      # instead -- i.e. a hash nobody, including us, knows the plaintext
+      # for, so the route fails CLOSED (nobody can log in) rather than
+      # open. To change credentials on an ALREADY-provisioned VM without
+      # SSHing in, set/update the two secrets and run
+      # sync-secrets-vm.yml -- it writes these same two keys and restarts
+      # only `caddy`.
+      DEPLOY_STATUS_USER=${deploy_status_user}
+      DEPLOY_STATUS_PASSWORD_HASH=${deploy_status_password_hash}
 
       POSTGRES_USER=${postgres_user}
       POSTGRES_PASSWORD=${postgres_password}

@@ -202,6 +202,12 @@ individual health check is also appended to `checks.log` alongside it.
 On a failed GitHub Actions run, the workflow additionally dumps both files
 plus `caddy/weights.conf`'s current contents into the run's own logs.
 
+Credentials come from the `DEPLOY_STATUS_USER`/`DEPLOY_STATUS_PASSWORD_HASH`
+GitHub Environment variable/secret — set once and both a fresh VM's first
+boot (`infra-deploy-vm.yml`) and any later rotation
+(`sync-secrets-vm.yml`) pick them up automatically, no SSH required. See
+`DEPLOYMENT_VM.md`'s "Monitoring a rollout" section.
+
 ---
 
 ## Quick reference

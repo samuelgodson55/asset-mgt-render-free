@@ -38,7 +38,13 @@
 # driven off the same `$ENVIRONMENT`/`$RESOURCE_GROUP`/`$BACKEND_IMAGE`/
 # `$FRONTEND_IMAGE` variables, plus the `resolve-target` job's `build_env`
 # output):
-#   - Resource group + image names: `-staging` suffix vs. none.
+#   - Resource group: `staging` vs. `production` GitHub Environment secret
+#     (`STAGING_RESOURCE_GROUP`/`PROD_RESOURCE_GROUP`), picked by the
+#     `environment` dropdown.
+#   - Image repo (`-staging` suffix vs. none): picked independently, by
+#     each target GitHub Environment's own `ENVIRONMENT` Actions variable
+#     -- see the `build_env` bullet below, `resolve-target`'s
+#     `image_suffix` output comment.
 #   - GitHub Environment used for OIDC secrets: `staging` vs. `production`
 #     (separate Azure AD App Registrations/federated credentials -- see the
 #     `migrate`/`deploy` jobs' own comments).
@@ -46,7 +52,12 @@
 #     as BUILD_ENV): `development` (minified only) vs. `production`
 #     (minified + obfuscated) -- see frontend/Dockerfile's own comment and
 #     `resolve-target`'s own comment for how this is resolved from each
-#     target GitHub Environment's own `ENVIRONMENT` Actions variable.
+#     target GitHub Environment's own `ENVIRONMENT` Actions variable. That
+#     SAME variable also now drives `$BACKEND_IMAGE`/`$FRONTEND_IMAGE`'s
+#     `-staging` suffix (see `resolve-target`'s `image_suffix` output) --
+#     whichever GitHub Environment you pick in the `environment` dropdown,
+#     its own `ENVIRONMENT` variable decides which Docker Hub repo gets
+#     pulled: `production` -> no suffix, `development`/unset -> `-staging`.
 #   - Trivy blocking: staging reports CRITICAL findings but doesn't fail the
 #     build on them; production does.
 #   - Blue-green canary shape: both environments now roll out via
@@ -116,10 +127,10 @@ env:
   # "from-variable" sentinel to resolve anymore, and its own default is
   # "production" -- see that input's description). This only decides
   # which GitHub Environment's OIDC secrets get used and which resource
-  # group/image names this run touches -- NOT whether the frontend build
-  # is minified-only or minified+obfuscated. That's BUILD_ENV, computed by
-  # the `resolve-target` job below from each target's own `ENVIRONMENT`
-  # Actions variable.
+  # group this run touches -- NOT the frontend build mode or which Docker
+  # Hub image repo gets pulled. Both of those are BUILD_ENV/image_suffix,
+  # computed by the `resolve-target` job below from each target's own
+  # `ENVIRONMENT` Actions variable (see that job's own comment for why).
   ENVIRONMENT: ${{ (github.event_name == 'workflow_call') && 'production' || inputs.environment }}
   RESOURCE_GROUP: ${{ ((github.event_name == 'workflow_call') && 'production' || inputs.environment) == 'production' && secrets.PROD_RESOURCE_GROUP || secrets.STAGING_RESOURCE_GROUP }}
   # workflow_call (release.yml) always supplies a real image_tag. On
@@ -128,8 +139,16 @@ env:
   # build-push below and the rest of this pipeline always have a concrete
   # tag to work with even though the human left the input blank.
   IMAGE_TAG: ${{ inputs.image_tag != '' && inputs.image_tag || github.sha }}
-  BACKEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend${{ (((github.event_name == 'workflow_call') && 'production' || inputs.environment) == 'staging') && '-staging' || '' }}
-  FRONTEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-frontend${{ (((github.event_name == 'workflow_call') && 'production' || inputs.environment) == 'staging') && '-staging' || '' }}
+  # NOTE: BACKEND_IMAGE/FRONTEND_IMAGE deliberately do NOT live here
+  # anymore -- they used to be a ternary on `inputs.environment` alone
+  # (the dropdown), which meant this GitHub Environment's own `ENVIRONMENT`
+  # variable had zero effect on which Docker Hub repo got pulled (see
+  # `resolve-target`'s `image_suffix` output comment for the bug this
+  # caused). A workflow-level `env:` block like this one is evaluated
+  # before any job runs and can't see a job's `needs.*` outputs, so
+  # BACKEND_IMAGE/FRONTEND_IMAGE now get set per-job instead (`build-push`,
+  # `migrate`, `deploy` below), each built from
+  # `needs.resolve-target.outputs.image_suffix`.
 
 jobs:
   resolve-target:
@@ -155,6 +174,22 @@ jobs:
     environment: ${{ (github.event_name == 'workflow_call') && 'production' || inputs.environment }}
     outputs:
       build_env: ${{ steps.resolve.outputs.build_env }}
+      # BUG FIX -- this used to be computed purely from the workflow_dispatch
+      # `environment` dropdown ('staging' -> '-staging' suffix, 'production'
+      # -> no suffix), completely independent of this GitHub Environment's
+      # own `ENVIRONMENT` Actions variable. That meant setting
+      # `ENVIRONMENT=production` under the "production" GitHub Environment
+      # did nothing to image selection -- a `production` dropdown run with
+      # that Environment's `ENVIRONMENT` variable left on `development` (or
+      # never set) would still deploy PRODUCTION resources/secrets while
+      # pulling the `-staging` Docker Hub images, and vice versa. Now BOTH
+      # the deploy target (dropdown: which resource group/secrets) AND the
+      # image repo (this `ENVIRONMENT` variable: which Docker Hub tag) are
+      # explicit, independent choices you set per GitHub Environment --
+      # `image_suffix` here is the single source of truth every downstream
+      # job (`build-push`, `migrate`, `deploy`) now reads instead of
+      # re-deriving it from `inputs.environment` itself.
+      image_suffix: ${{ steps.resolve.outputs.image_suffix }}
     steps:
       - name: Read this environment's ENVIRONMENT variable
         id: resolve
@@ -163,18 +198,24 @@ jobs:
         # "production" or "development" -- the app's own build-type
         # vocabulary (see frontend/Dockerfile's own comment), matching
         # what's configured under Settings > Environments > <name> >
-        # Environment variables. Infrastructure default is "production":
+        # Environment variables. Drives TWO independent things from the
+        # one value: `build_env` (frontend minified-only vs.
+        # minified+obfuscated) and `image_suffix` (plain Docker Hub repo
+        # vs. the `-staging` one). Infra default for both is "production":
         # anything other than exactly "development" (including the
-        # variable not being set at all) resolves to "production", so an
-        # unset/misconfigured variable never silently ships an
-        # unobfuscated build.
+        # variable not being set at all) resolves to "production"/no
+        # suffix, so an unset/misconfigured variable never silently ships
+        # an unobfuscated build OR silently pulls a `-staging` image into
+        # what you thought was a real deploy.
         env:
           RAW_ENVIRONMENT_VAR: ${{ vars.ENVIRONMENT }}
         run: |
           if [ "$RAW_ENVIRONMENT_VAR" = "development" ]; then
             echo "build_env=development" >> "$GITHUB_OUTPUT"
+            echo "image_suffix=-staging" >> "$GITHUB_OUTPUT"
           else
             echo "build_env=production" >> "$GITHUB_OUTPUT"
+            echo "image_suffix=" >> "$GITHUB_OUTPUT"
           fi
 
   verify-ci:
@@ -248,8 +289,8 @@ jobs:
     # comment for the full "why".
     uses: ./.github/workflows/build-push-images.yml
     with:
-      # NOTE: these inline the full $ENVIRONMENT/$IMAGE_TAG ternaries
-      # rather than referencing env.ENVIRONMENT/env.IMAGE_TAG -- the
+      # NOTE: image_tags/build_env/trivy_blocking inline the full
+      # $IMAGE_TAG ternary rather than referencing env.IMAGE_TAG -- the
       # `with:` block of a job that calls a reusable workflow (`uses:`)
       # can only reference the github/needs/inputs/vars/strategy/matrix
       # contexts, NOT `env`. Referencing `env.*` here parses but is
@@ -258,11 +299,12 @@ jobs:
       # "Startup failure" with no job graph, before anything runs -- this
       # bit both this file and deploy-azure-vm.yml's own `build-push` job
       # the same way. See build-push-images.yml's own inputs for what each
-      # of these feeds. build_env comes from `needs` (a job output), which
-      # -- unlike `env` -- IS allowed here; see resolve-target's own
-      # comment for why it has to be resolved in a separate job.
-      backend_image_name: snipeit-lite-backend${{ (((github.event_name == 'workflow_call') && 'production' || inputs.environment) == 'staging') && '-staging' || '' }}
-      frontend_image_name: snipeit-lite-frontend${{ (((github.event_name == 'workflow_call') && 'production' || inputs.environment) == 'staging') && '-staging' || '' }}
+      # of these feeds. build_env/image_suffix come from `needs` (job
+      # outputs), which -- unlike `env` -- IS allowed here; see
+      # resolve-target's own comment for why both have to be resolved in
+      # a separate job.
+      backend_image_name: snipeit-lite-backend${{ needs.resolve-target.outputs.image_suffix }}
+      frontend_image_name: snipeit-lite-frontend${{ needs.resolve-target.outputs.image_suffix }}
       image_tags: ${{ inputs.image_tag != '' && inputs.image_tag || github.sha }} latest
       build_env: ${{ needs.resolve-target.outputs.build_env }}
       # Trivy blocking follows the deploy TARGET (staging vs production --
@@ -322,6 +364,13 @@ jobs:
     # any job runs. See deploy-azure-vm.yml's `environment:` line for the
     # same pattern (it uses `inputs.environment`, never `env.*`).
     environment: ${{ (github.event_name == 'workflow_call') && 'production' || inputs.environment }}
+    # BACKEND_IMAGE now built from resolve-target's `image_suffix` output
+    # (this GitHub Environment's own `ENVIRONMENT` variable), not from
+    # `inputs.environment` -- see that job's output comment. Job-level
+    # `env:` CAN reference `needs.*`, unlike the workflow-level `env:`
+    # block above (which is why this couldn't just live there).
+    env:
+      BACKEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend${{ needs.resolve-target.outputs.image_suffix }}
     steps:
       - name: Validate image_tag looks like a version tag (production only)
         if: ${{ env.ENVIRONMENT == 'production' }}
@@ -426,6 +475,11 @@ jobs:
     # See `migrate`'s `environment:` line above for why this recomputes the
     # ternary instead of referencing `env.ENVIRONMENT`.
     environment: ${{ (github.event_name == 'workflow_call') && 'production' || inputs.environment }}
+    # See `migrate`'s matching `env:` comment -- same reasoning, both
+    # images needed here for the backend/frontend rollout steps below.
+    env:
+      BACKEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend${{ needs.resolve-target.outputs.image_suffix }}
+      FRONTEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-frontend${{ needs.resolve-target.outputs.image_suffix }}
     steps:
       # Needed now (wasn't before) -- this job runs aca-blue-green.sh out of
       # .github/scripts/, unlike every other step here, which only ever

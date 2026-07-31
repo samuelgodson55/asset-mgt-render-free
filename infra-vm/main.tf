@@ -220,6 +220,14 @@ resource "azurerm_network_interface" "this" {
 locals {
   effective_domain = var.custom_domain
 
+  # Falls back to a real, validly-formatted bcrypt hash of a random,
+  # never-recorded password when var.deploy_status_password_hash is left
+  # empty (its default) -- same fail-closed behavior cloud-init.yaml used
+  # to hardcode directly. Set the DEPLOY_STATUS_PASSWORD_HASH secret to
+  # override with a hash of your own choosing (docker run --rm
+  # caddy:2-alpine caddy hash-password) -- see variables.tf's comment.
+  effective_deploy_status_password_hash = var.deploy_status_password_hash != "" ? var.deploy_status_password_hash : "$2b$14$1FLbT3EqJ/ebM2oPXK/FEOSjkHp1XCSTe3KyB99xEas.JdktP0JMm"
+
   # DNS record names are relative to the zone, e.g. custom_domain
   # "assets.example.com" in zone "example.com" needs record name "assets"
   # (and "ssh-assets" for the SSH hostname); an apex custom_domain (equal
@@ -472,6 +480,8 @@ resource "azurerm_linux_virtual_machine" "this" {
     postgres_db                       = var.postgres_db
     jwt_secret_key                    = var.jwt_secret_key
     root_admin_bootstrap_password     = var.root_admin_bootstrap_password
+    deploy_status_user                = var.deploy_status_user
+    deploy_status_password_hash       = local.effective_deploy_status_password_hash
     site_name                         = var.site_name
     enable_api_docs                   = var.enable_api_docs
     notifications_enabled             = var.notifications_enabled

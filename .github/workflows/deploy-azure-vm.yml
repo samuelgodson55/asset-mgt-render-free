@@ -94,9 +94,9 @@ env:
   # "prod" in inputs.environment (the dropdown has no "from-variable"
   # sentinel to resolve anymore, and its own default is "prod" -- see that
   # input's description). This only decides which GitHub Environment's
-  # secrets get used and which image name/resource this run touches --
-  # NOT whether the frontend build is minified-only or
-  # minified+obfuscated. That's BUILD_ENV, computed by the `resolve-target`
+  # secrets get used and which resource this run touches -- NOT the
+  # frontend build mode or which Docker Hub image repo gets pulled. Both
+  # of those are BUILD_ENV/image_suffix, computed by the `resolve-target`
   # job below from each target's own `ENVIRONMENT` Actions variable.
   ENVIRONMENT: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) && 'prod' || inputs.environment }}
   # IMAGE_TAG is the literal Docker tag pulled/deployed. VERSION is the
@@ -109,8 +109,16 @@ env:
   # trustworthy for "is this a stable named release or a dev build".
   IMAGE_TAG: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) && github.ref_name || (inputs.image_tag || github.sha) }}
   VERSION: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) && github.ref_name || (inputs.image_tag != '' && inputs.image_tag || 'unversioned') }}
-  BACKEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend${{ ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) && 'prod' || inputs.environment) == 'vm-staging' && '-staging' || '' }}
-  FRONTEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-frontend${{ ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) && 'prod' || inputs.environment) == 'vm-staging' && '-staging' || '' }}
+  # NOTE: BACKEND_IMAGE/FRONTEND_IMAGE deliberately do NOT live here
+  # anymore -- they used to be a ternary on `inputs.environment` alone
+  # (the dropdown), which meant this GitHub Environment's own `ENVIRONMENT`
+  # variable had zero effect on which Docker Hub repo got pulled (same bug
+  # as deploy-azure-aca.yml had -- see that file's `resolve-target` output
+  # comment for the full story). A workflow-level `env:` block like this
+  # one is evaluated before any job runs and can't see a job's `needs.*`
+  # outputs, so BACKEND_IMAGE/FRONTEND_IMAGE now get set per-job instead
+  # (`build-push`, `deploy` below), each built from
+  # `needs.resolve-target.outputs.image_suffix`.
   REUSE_EXISTING_IMAGE: ${{ github.event_name == 'workflow_dispatch' && inputs.image_tag != '' }}
 
 jobs:
@@ -137,6 +145,13 @@ jobs:
     environment: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) && 'prod' || inputs.environment }}
     outputs:
       build_env: ${{ steps.resolve.outputs.build_env }}
+      # BUG FIX -- see this file's top-of-file BACKEND_IMAGE/FRONTEND_IMAGE
+      # comment. This GitHub Environment's own `ENVIRONMENT` Actions
+      # variable now decides the Docker Hub `-staging` suffix, independent
+      # of which target the `environment` dropdown selected -- both
+      # `build-push` and `deploy` below read this output instead of
+      # re-deriving it from `inputs.environment` themselves.
+      image_suffix: ${{ steps.resolve.outputs.image_suffix }}
     steps:
       - name: Read this environment's ENVIRONMENT variable
         id: resolve
@@ -146,18 +161,24 @@ jobs:
         # vocabulary (see frontend/Dockerfile and
         # backend/config.py's apply_environment_defaults), matching what's
         # configured under Settings > Environments > <name> > Environment
-        # variables. Infrastructure default is "production": anything
-        # other than exactly "development" (including the variable not
-        # being set at all) resolves to "production", so an
+        # variables. Drives TWO independent things from the one value:
+        # `build_env` (frontend minified-only vs. minified+obfuscated) and
+        # `image_suffix` (plain Docker Hub repo vs. the `-staging` one).
+        # Infra default for both is "production": anything other than
+        # exactly "development" (including the variable not being set at
+        # all) resolves to "production"/no suffix, so an
         # unset/misconfigured variable never silently ships an
-        # unobfuscated build.
+        # unobfuscated build OR silently pulls a `-staging` image into
+        # what you thought was a real deploy.
         env:
           RAW_ENVIRONMENT_VAR: ${{ vars.ENVIRONMENT }}
         run: |
           if [ "$RAW_ENVIRONMENT_VAR" = "development" ]; then
             echo "build_env=development" >> "$GITHUB_OUTPUT"
+            echo "image_suffix=-staging" >> "$GITHUB_OUTPUT"
           else
             echo "build_env=production" >> "$GITHUB_OUTPUT"
+            echo "image_suffix=" >> "$GITHUB_OUTPUT"
           fi
 
   verify-ci:
@@ -249,8 +270,8 @@ jobs:
     # a harmless duplicate tag/push in that case), and `latest`.
     uses: ./.github/workflows/build-push-images.yml
     with:
-      backend_image_name: snipeit-lite-backend${{ ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) && 'prod' || inputs.environment) == 'vm-staging' && '-staging' || '' }}
-      frontend_image_name: snipeit-lite-frontend${{ ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) && 'prod' || inputs.environment) == 'vm-staging' && '-staging' || '' }}
+      backend_image_name: snipeit-lite-backend${{ needs.resolve-target.outputs.image_suffix }}
+      frontend_image_name: snipeit-lite-frontend${{ needs.resolve-target.outputs.image_suffix }}
       # NOTE: these inline the full IMAGE_TAG/VERSION expressions rather
       # than referencing env.IMAGE_TAG/env.VERSION -- the `with:` block of
       # a job that calls a reusable workflow (`uses:`) can only reference
@@ -260,9 +281,10 @@ jobs:
       # named-value: 'env'" and every run shows a bare "Startup failure"
       # with no job graph, before anything runs. See
       # build-push-images.yml's own inputs for what each of these feeds.
-      # build_env comes from `needs` (a job output), which -- unlike
-      # `env` -- IS allowed here; see resolve-target's own comment for why
-      # it has to be resolved in a separate job in the first place.
+      # build_env/image_suffix come from `needs` (job outputs), which --
+      # unlike `env` -- IS allowed here; see resolve-target's own comment
+      # for why both have to be resolved in a separate job in the first
+      # place.
       image_tags: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) && github.ref_name || (inputs.image_tag || github.sha) }} ${{ github.sha }} latest
       version_label: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) && github.ref_name || (inputs.image_tag != '' && inputs.image_tag || 'unversioned') }}
       build_env: ${{ needs.resolve-target.outputs.build_env }}
@@ -304,6 +326,13 @@ jobs:
       # recomputed here, since it depends on THIS environment's own
       # `ENVIRONMENT` Actions variable -- see resolve-target's comment.
       RUNTIME_ENVIRONMENT: ${{ needs.resolve-target.outputs.build_env }}
+      # BACKEND_IMAGE/FRONTEND_IMAGE now built from resolve-target's
+      # `image_suffix` output (this GitHub Environment's own `ENVIRONMENT`
+      # variable), not from `inputs.environment` -- see this file's
+      # top-of-file BACKEND_IMAGE/FRONTEND_IMAGE comment and
+      # resolve-target's `image_suffix` output comment.
+      BACKEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend${{ needs.resolve-target.outputs.image_suffix }}
+      FRONTEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-frontend${{ needs.resolve-target.outputs.image_suffix }}
     steps:
       - uses: actions/checkout@v7
 

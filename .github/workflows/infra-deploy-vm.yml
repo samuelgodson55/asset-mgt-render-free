@@ -136,6 +136,14 @@ jobs:
       TF_VAR_postgres_password: ${{ secrets.POSTGRES_PASSWORD }}
       TF_VAR_jwt_secret_key: ${{ secrets.JWT_SECRET_KEY }}
       TF_VAR_root_admin_bootstrap_password: ${{ secrets.ROOT_ADMIN_BOOTSTRAP_PASSWORD }}
+      # /_deploy/ dashboard Basic Auth -- see infra-vm/variables.tf's
+      # deploy_status_user/deploy_status_password_hash comments. Leave
+      # DEPLOY_STATUS_PASSWORD_HASH unset and main.tf substitutes a real,
+      # never-recorded random hash so the route fails closed on first
+      # boot instead of open. Generate a real one with:
+      #   docker run --rm caddy:2-alpine caddy hash-password
+      TF_VAR_deploy_status_user: ${{ vars.DEPLOY_STATUS_USER || 'admin' }}
+      TF_VAR_deploy_status_password_hash: ${{ secrets.DEPLOY_STATUS_PASSWORD_HASH }}
       TF_VAR_notifications_enabled: ${{ vars.NOTIFICATIONS_ENABLED || 'false' }}
       TF_VAR_smtp_host: ${{ secrets.SMTP_HOST }}
       TF_VAR_smtp_username: ${{ secrets.SMTP_USERNAME }}

@@ -485,6 +485,8 @@ Add these to each Environment (Secrets unless marked **Variable**):
 | `POSTGRES_PASSWORD` | From step 4 | `infra-deploy-vm.yml` |
 | `JWT_SECRET_KEY` | From step 4 | `infra-deploy-vm.yml` |
 | `ROOT_ADMIN_BOOTSTRAP_PASSWORD` | Leave empty, or a specific password | `infra-deploy-vm.yml` |
+| `DEPLOY_STATUS_USER` (**Variable**, not secret) | Optional — Basic Auth username for the `/_deploy/` dashboard, defaults to `admin` | `infra-deploy-vm.yml`, `sync-secrets-vm.yml` |
+| `DEPLOY_STATUS_PASSWORD_HASH` | Optional but recommended — bcrypt hash from `docker run --rm caddy:2-alpine caddy hash-password`; see [Monitoring a rollout](#monitoring-a-rollout). Leave unset and the route stays fail-closed with a random, never-recorded hash | `infra-deploy-vm.yml`, `sync-secrets-vm.yml` |
 | `DOCKERHUB_USERNAME` | Your Docker Hub username | both workflows |
 | `DOCKERHUB_TOKEN` | A Docker Hub [Personal Access Token](https://app.docker.com/settings/personal-access-tokens) (not your password) | both workflows |
 | `CUSTOM_DOMAIN` (**Variable**, not secret) | REQUIRED — a hostname in the `CLOUDFLARE_ZONE_ID` zone, e.g. `assets.example.com` | `infra-deploy-vm.yml` |
@@ -841,20 +843,38 @@ HTTP Basic Auth (Caddy's `basic_auth`, see `Caddyfile`) so it's never just
 sitting open on the same origin as the public app. **Set your own
 credentials before relying on this** — the values `cloud-init.yaml` seeds
 on first boot are random/unknown by design (the route fails *closed*, not
-open, until you set your own):
+open, until you set your own).
+
+This is fully automated — no SSH required, in either direction:
 
 ```bash
 # Generates a bcrypt hash of a password you choose (prompted interactively)
 docker run --rm -it caddy:2-alpine caddy hash-password
 ```
 
-Then SSH in, edit `/opt/snipeit/.env`, set `DEPLOY_STATUS_USER` and paste
-the hash into `DEPLOY_STATUS_PASSWORD_HASH`, and apply it:
-
-```bash
-cd /opt/snipeit
-docker compose -f docker-compose.vm.yml up -d --no-deps caddy
-```
+- **Before a VM's first boot** — set the `DEPLOY_STATUS_USER` repo/
+  environment *Variable* (defaults to `admin` if you skip it) and the
+  `DEPLOY_STATUS_PASSWORD_HASH` repo/environment *Secret* (paste the
+  bcrypt hash above) on the `vm-staging`/`prod` GitHub Environment(s), the
+  same place `JWT_SECRET_KEY`/`POSTGRES_PASSWORD` already live. The next
+  `infra-deploy-vm.yml` run (provisioning a new VM) bakes them straight
+  into `/opt/snipeit/.env` via `infra-vm/variables.tf` — see that file's
+  `deploy_status_user`/`deploy_status_password_hash` comments. Leaving
+  `DEPLOY_STATUS_PASSWORD_HASH` unset keeps the same fail-closed random
+  hash cloud-init always used.
+- **On an already-provisioned VM** (rotating credentials, or setting them
+  for the first time after skipping the step above) — update the same two
+  values, then run **`sync-secrets-vm.yml`** (`workflow_dispatch`, pick
+  `vm-staging`/`prod`, leave `restart_services` on its `auto` default).
+  It writes the new `DEPLOY_STATUS_USER`/`DEPLOY_STATUS_PASSWORD_HASH`
+  into `/opt/snipeit/.env` over the same Cloudflare-Access-proxied SSH
+  connection `deploy-azure-vm.yml` uses (no interactive shell, no manual
+  edit), then recreates only the `caddy` container since that's the only
+  service whose config actually changed. If you leave
+  `DEPLOY_STATUS_PASSWORD_HASH` unset for a given run, the workflow reads
+  back and keeps whatever hash is already live on the VM instead of
+  blanking it out — so a routine secrets sync (e.g. rotating `SMTP_PASSWORD`)
+  can never accidentally lock you out of, or fail open on, this dashboard.
 
 **From the command line** — tail everything at once:
 

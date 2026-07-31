@@ -179,7 +179,21 @@ variable "root_admin_bootstrap_password" {
   default     = ""
 }
 
+variable "deploy_status_user" {
+  description = "HTTP Basic Auth username for the /_deploy/ rollout-status dashboard (see Caddyfile and DEPLOYMENT_VM.md's \"Monitoring a rollout\" section). Set this via a repo/environment secret (DEPLOY_STATUS_USER) so first boot comes up with real credentials instead of the fail-closed placeholder below -- no SSH required. sync-secrets-vm.yml can also push a changed value onto an already-provisioned VM."
+  type        = string
+  default     = "admin"
+}
+
+variable "deploy_status_password_hash" {
+  description = "OPTIONAL. Bcrypt hash (as produced by `docker run --rm caddy:2-alpine caddy hash-password`) for the /_deploy/ dashboard's Basic Auth password. Set this via a repo/environment secret (DEPLOY_STATUS_PASSWORD_HASH) so first boot -- and every later sync-secrets-vm.yml run -- uses real credentials without ever SSHing in by hand. Leave empty to fall back to a random, never-recorded hash: the route then fails CLOSED (nobody can log in) rather than open, until you set a real one."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
 variable "site_name" {
+
   description = "Brand name shown in the navbar/login header and PDF export letterhead."
   type        = string
   default     = "Snipe-IT Lite"
