@@ -28,10 +28,10 @@ title = "asset-mgt-render-free gitleaks config"
 useDefault = true
 
 [[allowlists]]
-description = "Template/example files: placeholder values only (CHANGE-ME, dummy PEM blocks, etc.) by convention -- never real secrets, see each file's own header comment."
+description = "Ignore placeholder and example configuration files containing safe sample values."
 paths = [
-  '''infra-vm/terraform\.tfvars\.example$''',
-  '''infra/main\.parameters\.example\.json$''',
-  '''\.env\.example$''',
-  '''\.env\.azure\.example$''',
+  '''^infra-vm/terraform\.tfvars\.example$''',
+  '''^infra/main\.parameters\.example\.json$''',
+  '''^\.env\.example$''',
+  '''^\.env\.azure\.example$'''
 ]
