@@ -116,11 +116,21 @@ write_files:
       JWT_EXPIRY_HOURS=12
 
       CORS_ORIGINS=https://${domain}
-      SITE_NAME=${site_name}
+      # QUOTED -- SITE_NAME/SUPER_ADMIN_NAME are free-text and routinely
+      # contain spaces (default "Snipe-IT Lite" / "Super Admin"). Left
+      # unquoted, `source .env` (scripts/blue-green-deploy.sh,
+      # `set -a; source .env; set +a`) parses only the text up to the
+      # first space as the value, then tries to RUN the remaining word(s)
+      # as a shell command -- e.g. "Lite: command not found" -- which
+      # aborts the whole deploy under `set -euo pipefail`. Quoting is
+      # required for every .env value that can contain whitespace, not
+      # just these two; see sync-secrets-vm.yml's matching "Render new
+      # .env" step, which has the identical requirement.
+      SITE_NAME="${site_name}"
       ENABLE_API_DOCS=${enable_api_docs}
 
       SUPER_ADMIN_USERNAME=superadmin
-      SUPER_ADMIN_NAME=Super Admin
+      SUPER_ADMIN_NAME="Super Admin"
       ROOT_ADMIN_BOOTSTRAP_PASSWORD=${root_admin_bootstrap_password}
 
       NOTIFICATIONS_ENABLED=${notifications_enabled}
