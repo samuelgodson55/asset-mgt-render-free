@@ -28,6 +28,9 @@
     "frontendMinReplicas": { "value": 0 },
     "frontendMaxReplicas": { "value": 3 },
     "notificationsEnabled": { "value": false },
+    "emailProvider": { "value": "smtp" },
+    "brevoApiKey": { "value": "" },
+    "resendApiKey": { "value": "" },
     "enableApiDocs": { "value": false },
     "alertEmailAddress": { "value": "" }
   }

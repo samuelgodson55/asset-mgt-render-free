@@ -442,6 +442,9 @@ resource "azurerm_linux_virtual_machine" "this" {
   custom_data = base64encode(templatefile("${path.module}/cloud-init.yaml", {
     docker_compose_vm_yml             = file("${path.module}/../docker-compose.vm.yml")
     caddyfile                         = file("${path.module}/../Caddyfile")
+    caddy_weights_conf                = file("${path.module}/../caddy/weights.conf")
+    deploy_status_index_html          = file("${path.module}/../scripts/deploy-status/index.html")
+    deploy_status_seed_json           = file("${path.module}/../scripts/deploy-status/status.json")
     admin_username                    = var.admin_username
     domain                            = local.effective_domain
     cloudflare_tunnel_token           = cloudflare_zero_trust_tunnel_cloudflared.this.tunnel_token
@@ -477,6 +480,9 @@ resource "azurerm_linux_virtual_machine" "this" {
     smtp_username                     = var.smtp_username
     smtp_password                     = var.smtp_password
     smtp_from_email                   = var.smtp_from_email
+    email_provider                    = var.email_provider
+    brevo_api_key                     = var.brevo_api_key
+    resend_api_key                    = var.resend_api_key
     admin_notification_emails         = var.admin_notification_emails
     display_timezone                  = var.display_timezone
     currency_code                     = var.currency_code

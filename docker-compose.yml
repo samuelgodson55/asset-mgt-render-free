@@ -260,6 +260,14 @@ services:
       SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
       SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
       SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-}
+      # EMAIL_PROVIDER selects the transport ("smtp" default, or
+      # "brevo"/"resend" for an HTTP-API provider -- see config.py's
+      # EMAIL_PROVIDER docstring). BREVO_API_KEY/RESEND_API_KEY are only
+      # read when EMAIL_PROVIDER selects that provider; harmless to pass
+      # through unconditionally otherwise.
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-smtp}
+      BREVO_API_KEY: ${BREVO_API_KEY:-}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
       ADMIN_NOTIFICATION_EMAILS: ${ADMIN_NOTIFICATION_EMAILS:-}
       OVERDUE_NOTIFICATION_INTERVAL_HOURS: ${OVERDUE_NOTIFICATION_INTERVAL_HOURS:-24}
       # "A reminder before something goes overdue" -- see
@@ -403,6 +411,14 @@ services:
       SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
       SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
       SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-}
+      # EMAIL_PROVIDER selects the transport ("smtp" default, or
+      # "brevo"/"resend" for an HTTP-API provider -- see config.py's
+      # EMAIL_PROVIDER docstring). BREVO_API_KEY/RESEND_API_KEY are only
+      # read when EMAIL_PROVIDER selects that provider; harmless to pass
+      # through unconditionally otherwise.
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-smtp}
+      BREVO_API_KEY: ${BREVO_API_KEY:-}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
       ADMIN_NOTIFICATION_EMAILS: ${ADMIN_NOTIFICATION_EMAILS:-}
       OVERDUE_NOTIFICATION_INTERVAL_HOURS: ${OVERDUE_NOTIFICATION_INTERVAL_HOURS:-24}
       DUE_SOON_REMINDER_DAYS: ${DUE_SOON_REMINDER_DAYS:-2}
@@ -477,6 +493,14 @@ services:
       SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
       SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
       SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-}
+      # EMAIL_PROVIDER selects the transport ("smtp" default, or
+      # "brevo"/"resend" for an HTTP-API provider -- see config.py's
+      # EMAIL_PROVIDER docstring). BREVO_API_KEY/RESEND_API_KEY are only
+      # read when EMAIL_PROVIDER selects that provider; harmless to pass
+      # through unconditionally otherwise.
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-smtp}
+      BREVO_API_KEY: ${BREVO_API_KEY:-}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
       ADMIN_NOTIFICATION_EMAILS: ${ADMIN_NOTIFICATION_EMAILS:-}
       OVERDUE_NOTIFICATION_INTERVAL_HOURS: ${OVERDUE_NOTIFICATION_INTERVAL_HOURS:-24}
       DUE_SOON_REMINDER_DAYS: ${DUE_SOON_REMINDER_DAYS:-2}

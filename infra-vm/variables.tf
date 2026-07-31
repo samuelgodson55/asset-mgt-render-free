@@ -218,6 +218,24 @@ variable "smtp_from_email" {
   type    = string
   default = ""
 }
+
+variable "email_provider" {
+  description = "Which transport send_email() uses on the VM: \"smtp\" (default), or an HTTP-API provider (\"brevo\"/\"resend\") -- matches .env.example's EMAIL_PROVIDER and backend/config.py's EMAIL_PROVIDER docstring. The VM has no outbound-port restriction the way Render's Free plan does (see that docstring), so \"smtp\" is fine here too -- brevo/resend are still available for parity with the other deploy targets, or if your own network/ISP blocks outbound SMTP."
+  type        = string
+  default     = "smtp"
+}
+variable "brevo_api_key" {
+  description = "https://app.brevo.com/settings/keys/api -- only read when email_provider is \"brevo\"."
+  type      = string
+  sensitive = true
+  default   = ""
+}
+variable "resend_api_key" {
+  description = "https://resend.com/api-keys -- only read when email_provider is \"resend\"."
+  type      = string
+  sensitive = true
+  default   = ""
+}
 variable "admin_notification_emails" {
   type    = string
   default = ""

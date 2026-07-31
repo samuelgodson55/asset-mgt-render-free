@@ -74,6 +74,30 @@ write_files:
       DOCKERHUB_BACKEND_IMAGE=${dockerhub_backend_image}
       DOCKERHUB_FRONTEND_IMAGE=${dockerhub_frontend_image}
 
+      # Zero-downtime blue-green deploys (see docker-compose.vm.yml's own
+      # "ZERO-DOWNTIME BLUE-GREEN DEPLOYMENTS" header comment,
+      # scripts/blue-green-deploy.sh, and DEPLOYMENT_VM.md). ACTIVE_SLOT is
+      # informational/human-readable; COMPOSE_PROFILES is what actually
+      # tells `docker compose up -d` (systemd's snipeit.service, and any
+      # reboot) which slot's backend/frontend pair to start -- the two are
+      # kept in lockstep by scripts/blue-green-deploy.sh on every rollout,
+      # never hand-edited independently. "blue" is this VM's first-ever
+      # active slot purely by convention -- nothing is special about it.
+      ACTIVE_SLOT=blue
+      COMPOSE_PROFILES=blue
+
+      # HTTP Basic Auth for the /_deploy/ live rollout-status dashboard
+      # (see Caddyfile and DEPLOYMENT_VM.md's "Monitoring a rollout"
+      # section). This is a REAL, validly-formatted bcrypt hash (so Caddy
+      # loads it without error) of a random, never-recorded password --
+      # i.e. it's a hash nobody, including us, knows the plaintext for,
+      # so the route fails CLOSED (nobody can log in) until you replace
+      # it with your own: `docker run --rm caddy:2-alpine caddy
+      # hash-password`, then update this line and re-run `docker compose
+      # -f docker-compose.vm.yml up -d --no-deps caddy`.
+      DEPLOY_STATUS_USER=admin
+      DEPLOY_STATUS_PASSWORD_HASH=$2b$14$1FLbT3EqJ/ebM2oPXK/FEOSjkHp1XCSTe3KyB99xEas.JdktP0JMm
+
       POSTGRES_USER=${postgres_user}
       POSTGRES_PASSWORD=${postgres_password}
       POSTGRES_DB=${postgres_db}
@@ -107,6 +131,9 @@ write_files:
       SMTP_USE_TLS=true
       SMTP_USE_SSL=false
       SMTP_FROM_EMAIL=${smtp_from_email}
+      EMAIL_PROVIDER=${email_provider}
+      BREVO_API_KEY=${brevo_api_key}
+      RESEND_API_KEY=${resend_api_key}
       ADMIN_NOTIFICATION_EMAILS=${admin_notification_emails}
 
       DISPLAY_TIMEZONE=${display_timezone}
@@ -212,6 +239,47 @@ write_files:
       ${indent(6, caddyfile)}
 
   # ---------------------------------------------------------------------
+  # caddy/weights.conf -- the live blue/green traffic split (see
+  # Caddyfile and docker-compose.vm.yml's own comments). Seeded here at
+  # "100 0" (100% blue, matching ACTIVE_SLOT=blue above) for a brand-new
+  # VM; scripts/blue-green-deploy.sh rewrites this file in place on every
+  # future rollout -- this initial write is NOT re-applied on redeploys
+  # (see this file's top comment), so a VM mid-rollout is never yanked
+  # back to 100/0 by anything other than that script's own rollback path.
+  # ---------------------------------------------------------------------
+  - path: /opt/snipeit/caddy/weights.conf
+    permissions: "0644"
+    content: |
+      ${indent(6, caddy_weights_conf)}
+
+  # ---------------------------------------------------------------------
+  # /_deploy/ rollout-status dashboard -- seeded so the route renders
+  # something sane (an "idle" placeholder) immediately after `terraform
+  # apply`, before the first GitHub Actions deploy has ever run
+  # scripts/blue-green-deploy.sh. Written here under /opt/snipeit (the OS
+  # disk) rather than directly under /mnt/docker-data, because
+  # `write_files` (this whole section) runs BEFORE the data disk is
+  # formatted/mounted (that happens in setup-disk.sh, invoked from
+  # `runcmd` below) -- writing straight to /mnt/docker-data/... here
+  # would land on the OS disk instead and then be hidden the moment the
+  # real data disk mounts over it. The "5. App directory + first deploy"
+  # runcmd step below copies these into their real place
+  # (/mnt/docker-data/volumes/deploy_status/) AFTER that mount exists.
+  # status.json/checks.log are then owned entirely by
+  # scripts/blue-green-deploy.sh from the first real rollout onward;
+  # index.html is re-synced by deploy-azure-vm.yml like Caddyfile is.
+  # ---------------------------------------------------------------------
+  - path: /opt/snipeit/seed/deploy-status-index.html
+    permissions: "0644"
+    content: |
+      ${indent(6, deploy_status_index_html)}
+
+  - path: /opt/snipeit/seed/deploy-status-status.json
+    permissions: "0644"
+    content: |
+      ${indent(6, deploy_status_seed_json)}
+
+  # ---------------------------------------------------------------------
   # Swap file -- Standard_B2s's 4 GiB RAM is fully allocated by the
   # per-service mem_limits in docker-compose.vm.yml (~2.9 GiB) plus the
   # OS/Docker daemon itself; a small swap file is cheap insurance against
@@ -284,7 +352,8 @@ write_files:
                /mnt/docker-data/volumes/backup_data \
                /mnt/docker-data/volumes/export_data \
                /mnt/docker-data/volumes/caddy_data \
-               /mnt/docker-data/volumes/caddy_config
+               /mnt/docker-data/volumes/caddy_config \
+               /mnt/docker-data/volumes/deploy_status
 
   - path: /opt/snipeit/scripts/install-docker.sh
     permissions: "0755"
@@ -386,6 +455,13 @@ runcmd:
   # -----------------------------------------------------------------------
   - mkdir -p /opt/snipeit
   - chown -R ${admin_username}:${admin_username} /opt/snipeit
+  # Data disk is already mounted at this point (setup-disk.sh, step 1
+  # above) -- now it's safe to place these where Caddy actually mounts
+  # them from (see docker-compose.vm.yml's `caddy` service and the
+  # write_files comment on these two source files above for why they
+  # couldn't be written directly to their final path).
+  - cp /opt/snipeit/seed/deploy-status-index.html /mnt/docker-data/volumes/deploy_status/index.html
+  - cp /opt/snipeit/seed/deploy-status-status.json /mnt/docker-data/volumes/deploy_status/status.json
 %{ if dockerhub_username != "" }
   - |
     echo "${dockerhub_token}" | docker login -u "${dockerhub_username}" --password-stdin
@@ -403,19 +479,23 @@ runcmd:
   - systemctl start snipeit.service
 
   # -----------------------------------------------------------------------
-  # 6. Run the initial DB schema migration + seed the root admin account.
-  #    Retries for a couple of minutes since `backend`'s image itself may
-  #    still be finishing its very first pull from Docker Hub when this
-  #    line runs. Safe to re-run any time (Alembic migrations are
-  #    idempotent) -- deploy-azure-vm.yml runs this exact same command
-  #    again after every future deploy too.
+  # 6. Run the initial DB schema migration + seed the root admin account,
+  #    against `backend-blue` -- ACTIVE_SLOT=blue/COMPOSE_PROFILES=blue
+  #    above make blue this VM's first-ever active slot, so that's the
+  #    service that's actually running after step 5. Retries for a couple
+  #    of minutes since backend-blue's image itself may still be
+  #    finishing its very first pull from Docker Hub when this line runs.
+  #    Safe to re-run any time (Alembic migrations are idempotent) --
+  #    every future deploy runs this same style of command itself, via
+  #    scripts/blue-green-deploy.sh (against whichever slot is being
+  #    deployed TO, not necessarily blue) rather than this inline step.
   # -----------------------------------------------------------------------
   - |
     cd /opt/snipeit
     for i in $(seq 1 20); do
-      docker compose -f docker-compose.vm.yml run --rm backend alembic upgrade head && break
+      docker compose -f docker-compose.vm.yml run --rm backend-blue alembic upgrade head && break
       echo "Migration attempt $i failed, retrying in 10s..."
       sleep 10
     done
 
-final_message: "snipeit-lite VM provisioning complete after $UPTIME seconds. Docker data-root: /mnt/docker-data/docker. App should now be reachable -- see the app_url Terraform output (allow a minute for the `cloudflared` container to establish the Tunnel and for Cloudflare's DNS to propagate). SSH access: this VM has NO open inbound SSH port on its NSG by default -- reach it via the Cloudflare Tunnel instead (see the ssh_hostname/ssh_command Terraform outputs, and DEPLOYMENT_VM.md's 'Set up Cloudflare Tunnel' section for the one-time ~/.ssh/config entry). Root admin credentials: see ROOT_ADMIN_BOOTSTRAP_PASSWORD in /opt/snipeit/.env, or check `docker compose -f /opt/snipeit/docker-compose.vm.yml logs backend` for the auto-generated one if that was left blank. Future deploys go through .github/workflows/deploy-azure-vm.yml -- see DEPLOYMENT_VM.md step 9."
+final_message: "snipeit-lite VM provisioning complete after $UPTIME seconds. Docker data-root: /mnt/docker-data/docker. App should now be reachable -- see the app_url Terraform output (allow a minute for the `cloudflared` container to establish the Tunnel and for Cloudflare's DNS to propagate). SSH access: this VM has NO open inbound SSH port on its NSG by default -- reach it via the Cloudflare Tunnel instead (see the ssh_hostname/ssh_command Terraform outputs, and DEPLOYMENT_VM.md's 'Set up Cloudflare Tunnel' section for the one-time ~/.ssh/config entry). Root admin credentials: see ROOT_ADMIN_BOOTSTRAP_PASSWORD in /opt/snipeit/.env, or check `docker compose -f /opt/snipeit/docker-compose.vm.yml logs backend-blue` for the auto-generated one if that was left blank. Future deploys go through .github/workflows/deploy-azure-vm.yml -- see DEPLOYMENT_VM.md step 9."

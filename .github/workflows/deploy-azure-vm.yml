@@ -324,14 +324,35 @@ jobs:
           ssh -i ~/.ssh/deploy_key "$VM_SSH_USER@$VM_HOST" \
             "sudo chown -R $VM_SSH_USER:$VM_SSH_USER /opt/snipeit"
 
-      - name: Sync docker-compose.vm.yml + Caddyfile to the VM
+      - name: Sync docker-compose.vm.yml + Caddyfile + scripts to the VM
         env:
           VM_HOST: ${{ secrets.VM_HOST }}
           VM_SSH_USER: ${{ secrets.VM_SSH_USER }}
+        # Deliberately does NOT sync caddy/weights.conf -- that file is
+        # LIVE STATE on the VM (see its own header comment), rewritten by
+        # scripts/blue-green-deploy.sh itself during the rollout below.
+        # Overwriting it here with this repo's static "100 0" seed
+        # BEFORE the rollout runs would risk briefly routing 100% of
+        # traffic to the WRONG slot if this VM's actual active slot is
+        # currently green, not blue -- a self-inflicted mini-outage right
+        # at deploy start, corrected only once blue-green-deploy.sh's own
+        # first `set_weights` call runs a few steps later. Only files
+        # that are safe to blindly overwrite -- because nothing reads
+        # them as authoritative LIVE state -- belong in this step.
         run: |
+          ssh -i ~/.ssh/deploy_key "$VM_SSH_USER@$VM_HOST" \
+            "mkdir -p /opt/snipeit/scripts/deploy-status"
           scp -i ~/.ssh/deploy_key \
               docker-compose.vm.yml Caddyfile \
               "$VM_SSH_USER@$VM_HOST:/opt/snipeit/"
+          scp -i ~/.ssh/deploy_key \
+              scripts/health-check.sh scripts/blue-green-deploy.sh \
+              "$VM_SSH_USER@$VM_HOST:/opt/snipeit/scripts/"
+          scp -i ~/.ssh/deploy_key \
+              scripts/deploy-status/index.html \
+              "$VM_SSH_USER@$VM_HOST:/mnt/docker-data/volumes/deploy_status/index.html"
+          ssh -i ~/.ssh/deploy_key "$VM_SSH_USER@$VM_HOST" \
+            "chmod +x /opt/snipeit/scripts/health-check.sh /opt/snipeit/scripts/blue-green-deploy.sh"
 
       - name: Update IMAGE_TAG + ENVIRONMENT on the VM and pull new images
         env:
@@ -353,6 +374,13 @@ jobs:
         # nothing would ever have written a non-production value there --
         # this is the actual fix for "the VM deployed with values set to
         # true/production even for a staging run".
+        #
+        # `docker compose pull` here pulls only the CURRENTLY ACTIVE
+        # profile's images (COMPOSE_PROFILES in .env) -- that's fine and
+        # sufficient: backend-blue/backend-green (and frontend-blue/
+        # frontend-green) share the exact same `image:` reference, so
+        # pulling it once makes it available to whichever slot
+        # scripts/blue-green-deploy.sh starts next regardless of profile.
         run: |
           ssh -i ~/.ssh/deploy_key "$VM_SSH_USER@$VM_HOST" bash -s <<EOF
             set -euo pipefail
@@ -370,22 +398,31 @@ jobs:
             docker compose -f docker-compose.vm.yml pull
           EOF
 
-      - name: Roll out (docker compose up -d)
+      - name: Blue-green rollout (migrate -> replica -> health-check -> ramp traffic -> retire old slot)
+        id: rollout
         env:
           VM_HOST: ${{ secrets.VM_HOST }}
           VM_SSH_USER: ${{ secrets.VM_SSH_USER }}
+          SKIP_MIGRATE: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_migrate }}
+        # scripts/blue-green-deploy.sh does everything the old "Roll out"
+        # + "Run alembic upgrade head" steps used to do, PLUS the actual
+        # zero-downtime mechanics (see that script's own header comment
+        # and DEPLOYMENT_VM.md's "Zero-Downtime Blue-Green Deployments"
+        # section): it exits non-zero -- failing this step -- if any
+        # health check fails at any point, having already restored 100%
+        # traffic to the still-good old slot and stopped the new one
+        # before returning. SKIP_MIGRATE (from the `skip_migrate` input)
+        # only ever skips the `alembic upgrade head` step itself -- the
+        # replica/health-check/gradual-ramp mechanics always run in full
+        # either way, so this escape hatch never trades away zero
+        # downtime. Watch this step's own log for a live, phase-by-phase
+        # account of the rollout, or https://<DOMAIN>/_deploy/ for the
+        # same thing as a dashboard -- see that section for how to set
+        # its credentials.
         run: |
           ssh -i ~/.ssh/deploy_key "$VM_SSH_USER@$VM_HOST" \
-            "cd /opt/snipeit && docker compose -f docker-compose.vm.yml up -d --remove-orphans"
+            "cd /opt/snipeit && SKIP_MIGRATE=$SKIP_MIGRATE ./scripts/blue-green-deploy.sh"
 
-      - name: Run alembic upgrade head
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.skip_migrate) }}
-        env:
-          VM_HOST: ${{ secrets.VM_HOST }}
-          VM_SSH_USER: ${{ secrets.VM_SSH_USER }}
-        run: |
-          ssh -i ~/.ssh/deploy_key "$VM_SSH_USER@$VM_HOST" \
-            "cd /opt/snipeit && docker compose -f docker-compose.vm.yml run --rm backend alembic upgrade head"
 
       - name: Reclaim disk space (drop superseded image layers)
         env:
@@ -395,25 +432,21 @@ jobs:
           ssh -i ~/.ssh/deploy_key "$VM_SSH_USER@$VM_HOST" \
             "docker image prune -af --filter 'until=72h'"
 
-      - name: Smoke test
+      - name: Smoke test (public domain, post-cutover)
         id: smoke
         env:
           VM_HOST: ${{ secrets.VM_HOST }}
           VM_SSH_USER: ${{ secrets.VM_SSH_USER }}
+        # Same criteria scripts/health-check.sh already held the REPLICA
+        # to before it received any traffic (see the rollout step above)
+        # -- run here in --mode external, against the live public domain,
+        # as a final end-to-end confirmation of the whole path including
+        # Cloudflare/Caddy, not just the container pair directly.
         run: |
           DOMAIN=$(ssh -i ~/.ssh/deploy_key "$VM_SSH_USER@$VM_HOST" "grep '^DOMAIN=' /opt/snipeit/.env | cut -d= -f2")
-          echo "Testing https://$DOMAIN"
-          curl -f -s -S --connect-timeout 15 --max-time 60 \
-               --retry 5 --retry-delay 5 --retry-connrefused --retry-max-time 300 \
-               -o /dev/null -w "HTTP %{http_code} in %{time_total}s\n" \
-               "https://$DOMAIN/"
+          ssh -i ~/.ssh/deploy_key "$VM_SSH_USER@$VM_HOST" \
+            "cd /opt/snipeit && ./scripts/health-check.sh --mode external --url https://$DOMAIN"
 
-          curl -f -s -S --connect-timeout 15 --max-time 30 \
-               "https://$DOMAIN/api/auth/me" -o /dev/null -w "HTTP %{http_code} in %{time_total}s\n" \
-               | grep -qE "200|401" || {
-                 echo "::error::GET /api/auth/me did not return 200 or 401"
-                 exit 1
-               }
 
       - name: Write release marker on the VM
         # Deliberately AFTER the smoke test, not before -- this file is
@@ -465,7 +498,7 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Dump container status + recent logs (on failure)
+      - name: Dump container status + recent logs + rollout status (on failure)
         if: failure()
         env:
           VM_HOST: ${{ secrets.VM_HOST }}
@@ -473,10 +506,17 @@ jobs:
         run: |
           ssh -i ~/.ssh/deploy_key "$VM_SSH_USER@$VM_HOST" bash -s <<'EOF'
             cd /opt/snipeit
+            echo "::group::deploy-status/status.json + checks.log"
+            cat /mnt/docker-data/volumes/deploy_status/status.json 2>/dev/null || echo "(no status.json yet)"
+            cat /mnt/docker-data/volumes/deploy_status/checks.log 2>/dev/null || echo "(no checks.log yet)"
+            echo "::endgroup::"
+            echo "::group::current caddy/weights.conf"
+            cat caddy/weights.conf 2>/dev/null || echo "(missing)"
+            echo "::endgroup::"
             echo "::group::docker compose ps"
             docker compose -f docker-compose.vm.yml ps
             echo "::endgroup::"
-            for svc in db redis backend worker beat frontend caddy cloudflared; do
+            for svc in db redis backend-blue backend-green worker beat frontend-blue frontend-green caddy cloudflared; do
               echo "::group::logs: $svc (last 100 lines)"
               docker compose -f docker-compose.vm.yml logs --tail 100 "$svc" || true
               echo "::endgroup::"

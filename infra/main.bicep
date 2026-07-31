@@ -163,6 +163,15 @@ param smtpPassword string = ''
 param smtpFromEmail string = ''
 param adminNotificationEmails string = ''
 
+@description('Which transport send_email() uses: "smtp" (default), or an HTTP-API provider ("brevo"/"resend") for when outbound SMTP ports are blocked. Matches .env.example\'s EMAIL_PROVIDER and backend/config.py\'s EMAIL_PROVIDER docstring.')
+param emailProvider string = 'smtp'
+@description('https://app.brevo.com/settings/keys/api -- only read when emailProvider is "brevo". Matches .env.example\'s BREVO_API_KEY.')
+@secure()
+param brevoApiKey string = ''
+@description('https://resend.com/api-keys -- only read when emailProvider is "resend". Matches .env.example\'s RESEND_API_KEY.')
+@secure()
+param resendApiKey string = ''
+
 @description('Google Drive backup upload -- optional, off by default, matching .env.example. OAuth mode only (a personal Google account\'s own Drive quota) -- see backend/scripts/gdrive_oauth_setup.py for the one-time script that produces gdriveOauthClientId/gdriveOauthClientSecret/gdriveOauthRefreshToken, and backend/config.py\'s BACKUP_GDRIVE_* docstring for why the service-account mode that script\'s docstring also describes is deliberately NOT exposed as a bicep param here (it requires a Google Workspace Shared Drive, not applicable to this app\'s typical personal-Drive use case). Leave gdriveBackupEnabled false (the default) to keep local-disk-only backups, same as before this parameter existed.')
 param gdriveBackupEnabled bool = false
 param gdriveOauthClientId string = ''
@@ -843,6 +852,7 @@ var sharedEnv = [
   { name: 'SMTP_USE_TLS', value: string(smtpUseTls) }
   { name: 'SMTP_USE_SSL', value: string(smtpUseSsl) }
   { name: 'SMTP_FROM_EMAIL', value: smtpFromEmail }
+  { name: 'EMAIL_PROVIDER', value: emailProvider }
   { name: 'ADMIN_NOTIFICATION_EMAILS', value: adminNotificationEmails }
   { name: 'OVERDUE_NOTIFICATION_INTERVAL_HOURS', value: overdueNotificationIntervalHours }
   { name: 'DUE_SOON_REMINDER_DAYS', value: string(dueSoonReminderDays) }
@@ -876,6 +886,8 @@ var sharedSecrets = concat([
   { name: 'database-url', value: databaseUrl }
   { name: 'redis-url', value: redisUrl }
   { name: 'smtp-password', value: empty(smtpPassword) ? 'unset' : smtpPassword }
+  { name: 'brevo-api-key', value: empty(brevoApiKey) ? 'unset' : brevoApiKey }
+  { name: 'resend-api-key', value: empty(resendApiKey) ? 'unset' : resendApiKey }
   { name: 'gdrive-oauth-client-secret', value: empty(gdriveOauthClientSecret) ? 'unset' : gdriveOauthClientSecret }
   { name: 'gdrive-oauth-refresh-token', value: empty(gdriveOauthRefreshToken) ? 'unset' : gdriveOauthRefreshToken }
   { name: 'otel-exporter-otlp-headers', value: empty(otelExporterOtlpHeaders) ? 'unset' : otelExporterOtlpHeaders }
@@ -894,6 +906,8 @@ var sharedSecretEnvRefs = [
   { name: 'DATABASE_URL', secretRef: 'database-url' }
   { name: 'REDIS_URL', secretRef: 'redis-url' }
   { name: 'SMTP_PASSWORD', secretRef: 'smtp-password' }
+  { name: 'BREVO_API_KEY', secretRef: 'brevo-api-key' }
+  { name: 'RESEND_API_KEY', secretRef: 'resend-api-key' }
   { name: 'BACKUP_GDRIVE_OAUTH_CLIENT_SECRET', secretRef: 'gdrive-oauth-client-secret' }
   { name: 'BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN', secretRef: 'gdrive-oauth-refresh-token' }
   { name: 'OTEL_EXPORTER_OTLP_HEADERS', secretRef: 'otel-exporter-otlp-headers' }
@@ -920,7 +934,15 @@ resource backendApp 'Microsoft.App/containerApps@2024-03-01' = {
   properties: {
     managedEnvironmentId: env.id
     configuration: {
-      activeRevisionsMode: 'Single'
+      // 'Multiple' (not 'Single') -- this is what makes zero-downtime
+      // blue-green possible at all: the OLD and NEW revisions run side by
+      // side as two independent, individually addressable "slots," and
+      // traffic between them is a weight the deploy pipeline controls
+      // explicitly, decoupled from "which one is newest." See
+      // .github/scripts/aca-blue-green.sh's top-of-file comment for the
+      // full rollout/finalize/rollback mechanics this enables, and
+      // DEPLOYMENT.md's "Zero-downtime rollout mechanics" section.
+      activeRevisionsMode: 'Multiple'
       registries: registries
       secrets: sharedSecrets
       ingress: {
@@ -933,6 +955,20 @@ resource backendApp 'Microsoft.App/containerApps@2024-03-01' = {
         // set. Only affects traffic inside the environment -- `backend`
         // still has `external: false`, so it's never internet-reachable.
         allowInsecure: true
+        // Default rule for a brand-new environment / the very first
+        // revision ever created: 100% to whichever revision is newest, no
+        // deploy-pipeline intervention needed to bring the app up in the
+        // first place. From the SECOND deploy onward,
+        // aca-blue-green.sh's `rollout` subcommand takes over traffic
+        // control explicitly (pinning weight to named revisions instead
+        // of `latestRevision`) -- see that script's own comments. Re-
+        // running infra-deploy.yml (a rare, deliberate infra change, not
+        // part of the app deploy pipeline) resets this rule back to
+        // `latestRevision: true`; avoid re-running it while a blue-green
+        // rollout is mid-flight for the same app.
+        traffic: [
+          { latestRevision: true, weight: 100 }
+        ]
       }
     }
     template: {
@@ -1012,7 +1048,17 @@ resource frontendApp 'Microsoft.App/containerApps@2024-03-01' = {
   properties: {
     managedEnvironmentId: env.id
     configuration: {
-      activeRevisionsMode: 'Single'
+      // 'Multiple' -- same reasoning as `backendApp` above. `frontend`
+      // being externally reachable additionally means every revision gets
+      // its OWN public FQDN once this is set (Azure's standard
+      // `<app>---<revision-suffix>.<default-domain>` pattern), which is
+      // what lets aca-blue-green.sh smoke test the new revision directly
+      // -- real HTTP, real proxy-to-backend chain -- before it receives
+      // any share of production traffic. `backend`'s internal-only
+      // ingress gets this too, but a GitHub-hosted runner can't reach an
+      // internal FQDN, so only `frontend`'s rollout uses it (see that
+      // script's `--public` argument).
+      activeRevisionsMode: 'Multiple'
       registries: registries
       // `frontend` never touches the database, Redis, JWTs, or SMTP, so it
       // gets none of `sharedSecrets` -- but Container Apps still requires
@@ -1049,6 +1095,12 @@ resource frontendApp 'Microsoft.App/containerApps@2024-03-01' = {
         // binding that would fail.
         customDomains: (empty(customDomain) || empty(customDomainCertificateId)) ? [] : [
           { name: customDomain, bindingType: 'SniEnabled', certificateId: customDomainCertificateId }
+        ]
+        // Same default-rule reasoning as `backendApp`'s `ingress.traffic`
+        // comment above -- 100% to the newest revision until
+        // aca-blue-green.sh's `rollout` takes over on the second deploy.
+        traffic: [
+          { latestRevision: true, weight: 100 }
         ]
       }
     }

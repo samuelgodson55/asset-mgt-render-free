@@ -293,6 +293,9 @@ jobs:
               smtpUsername="${{ secrets.SMTP_USERNAME }}" \
               smtpPassword="${{ secrets.SMTP_PASSWORD }}" \
               smtpFromEmail="${{ secrets.SMTP_FROM_EMAIL }}" \
+              emailProvider="${{ vars.EMAIL_PROVIDER || 'smtp' }}" \
+              brevoApiKey="${{ secrets.BREVO_API_KEY }}" \
+              resendApiKey="${{ secrets.RESEND_API_KEY }}" \
               adminNotificationEmails="${{ secrets.ADMIN_NOTIFICATION_EMAILS }}" \
               gdriveBackupEnabled=${{ vars.BACKUP_GDRIVE_ENABLED == 'true' }} \
               gdriveOauthClientId="${{ secrets.BACKUP_GDRIVE_OAUTH_CLIENT_ID }}" \

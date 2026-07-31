@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex, nofollow">
+<title>Deploy status — Snipe-IT Lite</title>
+<style>
+  :root {
+    --bg: #0b0f17;
+    --panel: #121826;
+    --border: #232d42;
+    --text: #e6ebf5;
+    --muted: #8b93a7;
+    --ok: #34d399;
+    --warn: #fbbf24;
+    --fail: #f87171;
+    --accent: #60a5fa;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    padding: 2rem 1.25rem 4rem;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 1.25rem; font-weight: 600; margin: 0 0 .25rem; }
+  .sub { color: var(--muted); font-size: .85rem; margin-bottom: 1.5rem; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 1.25rem;
+  }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+  .phase {
+    font-size: 1.1rem;
+    font-weight: 600;
+    text-transform: capitalize;
+  }
+  .badge {
+    display: inline-block;
+    padding: .15rem .6rem;
+    border-radius: 999px;
+    font-size: .75rem;
+    font-weight: 600;
+    letter-spacing: .02em;
+  }
+  .badge.ok   { background: rgba(52,211,153,.15); color: var(--ok); }
+  .badge.warn { background: rgba(251,191,36,.15); color: var(--warn); }
+  .badge.fail { background: rgba(248,113,113,.15); color: var(--fail); }
+  .badge.idle { background: rgba(139,147,167,.15); color: var(--muted); }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: .75rem;
+    margin-top: 1rem;
+  }
+  .stat { }
+  .stat .label { color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; }
+  .stat .value { font-size: 1rem; font-weight: 600; margin-top: .15rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .bar-track {
+    height: 10px;
+    border-radius: 999px;
+    background: #1b2436;
+    overflow: hidden;
+    margin-top: .5rem;
+    display: flex;
+  }
+  .bar-old { background: #3a4763; height: 100%; transition: width .4s ease; }
+  .bar-new { background: var(--accent); height: 100%; transition: width .4s ease; }
+  .bar-caption { display: flex; justify-content: space-between; font-size: .72rem; color: var(--muted); margin-top: .35rem; }
+  h2 { font-size: .85rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 .75rem; }
+  .checks { display: flex; flex-direction: column; gap: .4rem; max-height: 340px; overflow-y: auto; }
+  .check-line {
+    display: flex;
+    align-items: baseline;
+    gap: .6rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: .8rem;
+    padding: .3rem .5rem;
+    border-radius: 6px;
+    background: rgba(255,255,255,.02);
+  }
+  .check-line .dot { width: 8px; height: 8px; border-radius: 999px; flex: none; }
+  .dot.pass { background: var(--ok); }
+  .dot.fail { background: var(--fail); }
+  .check-line .name { color: var(--text); }
+  .check-line .detail { color: var(--muted); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .check-line .ts { color: var(--muted); font-size: .7rem; }
+  .empty { color: var(--muted); font-size: .85rem; padding: .5rem; }
+  .err { color: var(--fail); font-size: .85rem; }
+  footer { color: var(--muted); font-size: .75rem; text-align: center; margin-top: 2rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Snipe-IT Lite — Deployment status</h1>
+  <div class="sub">Auto-refreshes every 3s. Data from <code>/_deploy/status.json</code> and <code>/_deploy/checks.log</code>.</div>
+
+  <div class="card">
+    <div class="row">
+      <div class="phase" id="phase">loading…</div>
+      <span class="badge idle" id="phase-badge">—</span>
+    </div>
+    <div class="grid">
+      <div class="stat"><div class="label">Image tag</div><div class="value" id="image-tag">—</div></div>
+      <div class="stat"><div class="label">Active slot</div><div class="value" id="active-slot">—</div></div>
+      <div class="stat"><div class="label">New slot</div><div class="value" id="new-slot">—</div></div>
+      <div class="stat"><div class="label">Started</div><div class="value" id="started-at">—</div></div>
+      <div class="stat"><div class="label">Updated</div><div class="value" id="updated-at">—</div></div>
+    </div>
+    <div class="bar-track">
+      <div class="bar-old" id="bar-old" style="width:100%"></div>
+      <div class="bar-new" id="bar-new" style="width:0%"></div>
+    </div>
+    <div class="bar-caption">
+      <span id="bar-caption-old">old slot</span>
+      <span id="bar-caption-new">new slot</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Health check log</h2>
+    <div class="checks" id="checks"><div class="empty">No checks recorded yet.</div></div>
+  </div>
+
+  <footer>scripts/blue-green-deploy.sh · scripts/health-check.sh</footer>
+</div>
+
+<script>
+async function poll() {
+  try {
+    const statusRes = await fetch('status.json', { cache: 'no-store' });
+    if (statusRes.ok) {
+      const s = await statusRes.json();
+      renderStatus(s);
+    }
+  } catch (e) { /* status.json may not exist yet on a brand-new VM */ }
+
+  try {
+    const logRes = await fetch('checks.log', { cache: 'no-store' });
+    if (logRes.ok) {
+      const text = await logRes.text();
+      renderChecks(text);
+    }
+  } catch (e) { /* no checks yet */ }
+}
+
+function badgeClassFor(phase) {
+  if (phase === 'done' || phase === 'cutover_complete') return 'ok';
+  if (phase === 'failed' || phase === 'rolled_back') return 'fail';
+  if (!phase || phase === 'idle') return 'idle';
+  return 'warn';
+}
+
+function renderStatus(s) {
+  document.getElementById('phase').textContent = (s.phase || '—').replace(/_/g, ' ');
+  const badge = document.getElementById('phase-badge');
+  badge.className = 'badge ' + badgeClassFor(s.phase);
+  badge.textContent = badgeClassFor(s.phase) === 'ok' ? 'HEALTHY'
+                     : badgeClassFor(s.phase) === 'fail' ? 'FAILED'
+                     : badgeClassFor(s.phase) === 'idle' ? 'IDLE' : 'IN PROGRESS';
+
+  document.getElementById('image-tag').textContent = s.image_tag || '—';
+  document.getElementById('active-slot').textContent = s.active_slot || '—';
+  document.getElementById('new-slot').textContent = s.new_slot || '—';
+  document.getElementById('started-at').textContent = s.started_at || '—';
+  document.getElementById('updated-at').textContent = s.updated_at || '—';
+
+  const pct = typeof s.traffic_to_new_slot_pct === 'number'
+    ? s.traffic_to_new_slot_pct
+    : (s.phase === 'done' || s.phase === 'cutover_complete' || s.phase === 'spinning_down_old' ? 100 : 0);
+  document.getElementById('bar-old').style.width = (100 - pct) + '%';
+  document.getElementById('bar-new').style.width = pct + '%';
+  document.getElementById('bar-caption-old').textContent = `${s.active_slot || 'old'} — ${100 - pct}%`;
+  document.getElementById('bar-caption-new').textContent = `${s.new_slot || 'new'} — ${pct}%`;
+}
+
+function renderChecks(text) {
+  const lines = text.trim().split('\n').filter(Boolean);
+  const container = document.getElementById('checks');
+  if (lines.length === 0) {
+    container.innerHTML = '<div class="empty">No checks recorded yet.</div>';
+    return;
+  }
+  const parsed = lines.map(l => {
+    try { return JSON.parse(l); } catch (e) { return null; }
+  }).filter(Boolean).reverse();
+
+  container.innerHTML = parsed.map(c => `
+    <div class="check-line">
+      <span class="dot ${c.status === 'pass' ? 'pass' : 'fail'}"></span>
+      <span class="name">${escapeHtml(c.check || '')}</span>
+      <span class="detail">${escapeHtml(c.detail || '')}</span>
+      <span class="ts">${escapeHtml(c.ts || '')}</span>
+    </div>
+  `).join('');
+}
+
+function escapeHtml(str) {
+  return String(str).replace(/[&<>"']/g, m => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[m]));
+}
+
+poll();
+setInterval(poll, 3000);
+</script>
+</body>
+</html>

@@ -295,10 +295,23 @@ at 2am without reasoning from scratch:
   not failing a health probe — check for the RedBeat
   lock-contention/`LockNotOwnedError` case documented in
   `celery_app.py`'s comments first.
-- **Need to roll back a bad release** → `workflow_dispatch` on
-  `deploy-azure-production.yml` with the previous `image_tag`, per
-  DEPLOYMENT.md's Rollback section. Don't hand-run `az containerapp
-  update` — you'd bypass the migrate/smoke-test safety net.
+- **Need to roll back a bad release** → if the deploy is still running (or
+  just finished failing), you likely don't need to do anything —
+  `deploy-azure-aca.yml`'s blue-green rollout already flips traffic back
+  to the still-running old revision automatically on a failed health check
+  or smoke test (see DEPLOYMENT.md's "Zero-downtime rollout mechanics" and
+  Rollback sections). Watch it happen with
+  `bash .github/scripts/aca-blue-green.sh status backend <resource-group> --watch`.
+  For a rollback requested well after a deploy finished cleanly (the old
+  revision is already spun down), use `workflow_dispatch` on
+  `deploy-azure-aca.yml` with the previous `image_tag`, per DEPLOYMENT.md's
+  Rollback section — this still gets a fresh migrate/health-gate/smoke-test
+  pass, just like a forward deploy. Don't hand-run
+  `az containerapp update --image` directly — with `backend`/`frontend` now
+  in Multiple revision mode with pinned traffic, that creates a new
+  revision at 0% traffic and silently routes nothing to it; use
+  `aca-blue-green.sh rollout` instead (see DEPLOYMENT.md's Rollback
+  section for the exact commands).
 
 For each real incident going forward, write a short postmortem: what
 broke, what the user-facing impact was, what the fix was, and one

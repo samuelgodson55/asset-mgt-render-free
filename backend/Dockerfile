@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # =============================================================================
 # backend/Dockerfile
 # -----------------------------------------------------------------------------
@@ -28,19 +29,43 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Python install.
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH" \
-    PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # Copy requirements and install dependencies first so Docker can cache this
 # layer and skip re-installing packages every time only the app code changes.
 COPY requirements.txt /app/
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends build-essential libpq-dev && \
+#
+# BUG FIX -- this RUN used to `apt-get install build-essential libpq-dev`
+# before `pip install`, on the assumption that some dependency needed a C
+# compiler to build. On a from-scratch build that apt-get step alone was
+# the single biggest cost in the entire image build (~87 MB of gcc/g++/
+# binutils/etc. downloaded, installed, then immediately removed again a few
+# lines later -- 10+ minutes on an ordinary connection, all of it pure
+# overhead). It bought nothing: every package this project actually
+# depends on -- psycopg2-binary (bundles libpq itself, doesn't need
+# libpq-dev at all), cryptography, argon2-cffi-bindings, pydantic-core,
+# etc. -- ships a prebuilt manylinux wheel for both amd64 and arm64, so
+# pip was never compiling anything; it was only ever installing wheels.
+# If a future `requirements.txt` addition genuinely has no wheel for your
+# platform, pip's error will say so explicitly ("Failed building wheel
+# for X" / "no such option" about a missing compiler) -- that's the
+# signal to reintroduce a scoped `apt-get install -y --no-install-
+# recommends build-essential <only what X needs>` for that one package,
+# not to bring this back unconditionally for everything.
+#
+# `--mount=type=cache,target=/root/.cache/pip` (needs the `# syntax=`
+# line at the top of this file) persists pip's download cache in a
+# BuildKit cache volume OUTSIDE this layer -- so it survives even when
+# Docker's own layer cache doesn't (e.g. requirements.txt actually
+# changed). Editing one line in requirements.txt no longer means
+# re-downloading the other ~90 packages from PyPI; only whatever
+# actually changed gets fetched. (The final image is unaffected either
+# way -- this cache lives in the builder stage, which is discarded, and
+# PIP_NO_CACHE_DIR=1 in the runtime stage below still applies to
+# anything installed there.)
+RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --upgrade pip && \
-    pip install --default-timeout=100 -r requirements.txt && \
-    apt-get remove -y build-essential libpq-dev && \
-    apt-get autoremove -y && \
-    rm -rf /var/lib/apt/lists/*
+    pip install --default-timeout=100 -r requirements.txt
 
 # ---------------------------------------------------------------------------
 # Stage 2/2: runtime -- this is the image that actually ships.

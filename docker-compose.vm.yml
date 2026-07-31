@@ -1,11 +1,21 @@
 # =============================================================================
 # docker-compose.vm.yml
 # -----------------------------------------------------------------------------
-# The VM deployment target's compose file. Deliberately mirrors
-# docker-compose.yml's SIX services one-for-one -- db, redis, backend,
-# worker, beat, frontend -- as separate containers, exactly like local dev
-# and the Container Apps path. Nothing is merged or refactored into fewer
-# containers; only four things differ from docker-compose.yml:
+# The VM deployment target's compose file. Mirrors docker-compose.yml's six
+# roles -- db, redis, backend, worker, beat, frontend -- but `backend` and
+# `frontend` (the two roles that actually serve production HTTP traffic) are
+# each split into a BLUE and a GREEN pair (backend-blue/backend-green,
+# frontend-blue/frontend-green) so a deploy can run entirely on the inactive
+# slot -- with zero production traffic and its own health checks -- before
+# `caddy` gradually shifts real traffic onto it. See "ZERO-DOWNTIME
+# BLUE-GREEN DEPLOYMENTS" below and DEPLOYMENT_VM.md's matching section for
+# the full mechanics; scripts/blue-green-deploy.sh is what actually drives a
+# rollout. db/redis/worker/beat stay singleton (a second Postgres/Redis would
+# just be a second copy of the same data; `beat` in particular must never
+# run twice at once -- see its own comment below) -- only the two
+# HTTP-serving roles need two copies to avoid downtime.
+#
+# Differences from docker-compose.yml, beyond the blue/green split above:
 #
 #   1. `image:` (pulled from Docker Hub, tagged by CI) instead of `build:` --
 #      the VM never builds images itself, it only ever runs ones
@@ -16,10 +26,10 @@
 #      down -- Compose enforces these as real cgroup limits even outside
 #      Swarm mode, unlike `deploy.resources.limits` which Swarm ignores.
 #   3. A `caddy` service replaces the host port publish on `frontend` --
-#      Caddy reverse-proxies to `frontend:80` internally and presents a
-#      free Cloudflare Origin CA certificate for whatever domain DOMAIN
-#      resolves to (see DEPLOYMENT_VM.md's "Set up Cloudflare Tunnel"
-#      section).
+#      Caddy reverse-proxies to a WEIGHTED pair (frontend-blue:80,
+#      frontend-green:80) internally and presents a free Cloudflare Origin
+#      CA certificate for whatever domain DOMAIN resolves to (see
+#      DEPLOYMENT_VM.md's "Set up Cloudflare Tunnel" section).
 #   4. A `cloudflared` service is the ONLY thing that ever connects
 #      outbound -- it's the Cloudflare Tunnel that replaces both Tailscale
 #      (for SSH) and any open inbound port at all (for the app). See that
@@ -42,22 +52,68 @@
 #              see that service's own comment). See README.md's
 #              "Distributed Tracing" section.
 #
-# Memory budget (Standard_B2s = 4 GiB RAM total, the default vm_size in
-# infra-vm/variables.tf) -- limits sum to ~2.9 GiB, leaving ~1.1 GiB
-# headroom for the OS, Docker's own daemon, and page cache:
+# -----------------------------------------------------------------------------
+# ZERO-DOWNTIME BLUE-GREEN DEPLOYMENTS -- the short version
+# -----------------------------------------------------------------------------
+# `ACTIVE_SLOT` and `COMPOSE_PROFILES` in /opt/snipeit/.env together decide
+# which slot ("blue" or "green") a plain `docker compose up -d` (systemd's
+# snipeit.service, or a reboot) brings up -- ONLY that slot's backend-*/
+# frontend-* pair starts; the other slot's services are defined but dormant
+# (Compose profile filtering -- see each service's own `profiles:` comment).
 #
-#   service    limit   reservation   why
-#   --------   -----   -----------   ---------------------------------------
-#   db         768m    256m          Postgres; grows with data volume
-#   redis      256m    128m          small queue + short-lived export blobs
-#   backend    768m    256m          FastAPI/uvicorn, UVICORN_WORKERS procs
-#   worker     640m    256m          Celery worker; CSV/PDF export jobs
-#   beat       128m    64m           scheduler only, no request handling
-#   frontend   128m    64m           nginx serving static assets + proxy
-#   caddy      160m    64m           TLS re-presentation (Origin CA cert)
-#   cloudflared 128m   32m           outbound-only Tunnel connector
-#   --------   -----   -----------
-#   total      2976m   1120m
+# A real deploy (scripts/blue-green-deploy.sh, invoked by
+# .github/workflows/deploy-azure-vm.yml) does NOT just flip COMPOSE_PROFILES
+# and restart, though -- it:
+#   1. Runs `alembic upgrade head` against the incoming image (shared `db`,
+#      so migrations must stay backward-compatible with the still-running
+#      old slot for the duration of the rollout).
+#   2. Starts ONLY the inactive slot's backend-*/frontend-* pair, by naming
+#      them explicitly (Compose starts an explicitly-named service
+#      regardless of active profile) -- `caddy` is still sending 100% of
+#      traffic to the active slot at this point, so the new slot receives
+#      NO production traffic yet.
+#   3. Runs scripts/health-check.sh --mode internal directly against that
+#      replica (GET /healthz, GET /readyz, a static-asset fetch, and an
+#      /api/auth/me round-trip through its own nginx to its own backend) --
+#      the SAME criteria the post-cutover smoke test (--mode external) in
+#      deploy-azure-vm.yml already holds the live domain to, so the replica
+#      is held to that bar too, not a lesser one, before it ever sees a
+#      real request.
+#   4. Only if every check passes: gradually reweights `caddy`'s
+#      reverse_proxy between frontend-blue/frontend-green (10/25/50/75/100%,
+#      re-checking the replica at each step -- see Caddyfile's
+#      /etc/caddy/snippets/weights.conf import and
+#      scripts/blue-green-deploy.sh), then spins the old slot down.
+#   5. On ANY failed check at ANY point, traffic is left at (or restored to)
+#      100% on the still-good old slot, and the new slot's containers are
+#      stopped -- the old slot is never touched until the new one has
+#      already proven itself, so a bad deploy never causes an outage.
+#
+# scripts/deploy-status.json (written live during a rollout, watchable at
+# https://<DOMAIN>/_deploy/ -- see Caddyfile and DEPLOYMENT_VM.md's
+# "Monitoring a rollout" section) is how you watch all of this happen.
+#
+# Memory budget (Standard_B2s = 4 GiB RAM total, the default vm_size in
+# infra-vm/variables.tf) -- STEADY STATE (only one slot's backend/frontend
+# running) limits sum to ~2.9 GiB, leaving ~1.1 GiB headroom for the OS,
+# Docker's own daemon, and page cache. DURING a rollout, both slots'
+# backend+frontend briefly run together (+~896m) -- see "Cost / sizing" in
+# DEPLOYMENT_VM.md for the Standard_B2ms recommendation if that peak
+# headroom feels too tight for your traffic:
+#
+#   service           limit   reservation   why
+#   ---------------   -----   -----------   ----------------------------------
+#   db                768m    256m          Postgres; grows with data volume
+#   redis             256m    128m          small queue + short-lived export blobs
+#   backend-<slot>    768m    256m          FastAPI/uvicorn, UVICORN_WORKERS procs
+#   worker            640m    256m          Celery worker; CSV/PDF export jobs
+#   beat              128m    64m           scheduler only, no request handling
+#   frontend-<slot>   128m    64m           nginx serving static assets + proxy
+#   caddy             160m    64m           TLS re-presentation (Origin CA cert)
+#   cloudflared        128m   32m           outbound-only Tunnel connector
+#   ---------------   -----   -----------
+#   total (1 slot)    2976m   1120m
+#   total (mid-rollout, 2 slots' backend+frontend) ~3872m   ~1440m
 #
 #   jaeger     256m    96m           OPT-IN (profile: tracing) -- not part
 #                                    of the always-on total above; only
@@ -133,11 +189,24 @@ services:
         max-file: "3"
 
   # ---------------------------------------------------------------------
-  # backend (identical role to docker-compose.yml's backend)
+  # backend-blue / backend-green -- the FastAPI/uvicorn app, split into two
+  # slots for zero-downtime blue-green deploys (see this file's own
+  # "ZERO-DOWNTIME BLUE-GREEN DEPLOYMENTS" header comment). Identical to
+  # each other and to docker-compose.yml's `backend` in every way except
+  # `container_name` and which Compose `profiles:` entry gates them.
   # ---------------------------------------------------------------------
-  backend:
+  backend-blue:
     image: ${DOCKERHUB_BACKEND_IMAGE}:${IMAGE_TAG:-latest}
-    container_name: snipeit_lite_backend
+    container_name: snipeit_lite_backend_blue
+    # Only auto-started by a bare `docker compose up -d` when
+    # COMPOSE_PROFILES (.env) is "blue" -- i.e. when blue is the
+    # ACTIVE_SLOT. scripts/blue-green-deploy.sh starts/stops this
+    # service EXPLICITLY BY NAME during a rollout regardless of the
+    # active profile (Compose always honors an explicitly-named
+    # service even if its profile isn't active) -- see that script
+    # and DEPLOYMENT_VM.md's "Zero-Downtime Blue-Green Deployments"
+    # section.
+    profiles: ["blue"]
     restart: unless-stopped
     mem_limit: ${BACKEND_MEM_LIMIT:-768m}
     mem_reservation: ${BACKEND_MEM_RESERVATION:-256m}
@@ -234,6 +303,163 @@ services:
       SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
       SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
       SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-}
+      # EMAIL_PROVIDER selects the transport ("smtp" default, or
+      # "brevo"/"resend" for an HTTP-API provider -- see config.py's
+      # EMAIL_PROVIDER docstring). BREVO_API_KEY/RESEND_API_KEY are only
+      # read when EMAIL_PROVIDER selects that provider; harmless to pass
+      # through unconditionally otherwise.
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-smtp}
+      BREVO_API_KEY: ${BREVO_API_KEY:-}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      ADMIN_NOTIFICATION_EMAILS: ${ADMIN_NOTIFICATION_EMAILS:-}
+      OVERDUE_NOTIFICATION_INTERVAL_HOURS: ${OVERDUE_NOTIFICATION_INTERVAL_HOURS:-24}
+      DUE_SOON_REMINDER_DAYS: ${DUE_SOON_REMINDER_DAYS:-2}
+      DUE_SOON_NOTIFICATION_INTERVAL_HOURS: ${DUE_SOON_NOTIFICATION_INTERVAL_HOURS:-24}
+      SEND_INDIVIDUAL_HOLDER_REMINDERS: ${SEND_INDIVIDUAL_HOLDER_REMINDERS:-true}
+      ENABLE_AUTO_BACKUP: ${ENABLE_AUTO_BACKUP:-true}
+      BACKUP_HOURS_UTC: ${BACKUP_HOURS_UTC:-3}
+      BACKUP_DIR: /app/backups
+      BACKUP_RETENTION_COUNT: ${BACKUP_RETENTION_COUNT:-7}
+      BACKUP_GDRIVE_ENABLED: ${BACKUP_GDRIVE_ENABLED:-false}
+      BACKUP_GDRIVE_OAUTH_CLIENT_ID: ${BACKUP_GDRIVE_OAUTH_CLIENT_ID:-}
+      BACKUP_GDRIVE_OAUTH_CLIENT_SECRET: ${BACKUP_GDRIVE_OAUTH_CLIENT_SECRET:-}
+      BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN: ${BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN:-}
+      # Mode 2 -- Google Workspace service account + Shared Drive. BUG FIX:
+      # this line was missing entirely on the VM path (present in
+      # docker-compose.yml/render.yaml/backend/config.py the whole time) --
+      # see backend/services/backup_service.py's BACKUP_GDRIVE_CREDENTIALS_JSON
+      # branch and infra-vm/variables.tf's matching variable.
+      BACKUP_GDRIVE_CREDENTIALS_JSON: ${BACKUP_GDRIVE_CREDENTIALS_JSON:-}
+      BACKUP_GDRIVE_FOLDER_ID: ${BACKUP_GDRIVE_FOLDER_ID:-}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # No host `ports:` -- reached only via `frontend`'s nginx reverse proxy
+    # (see nginx/default.conf.template), same as docker-compose.yml.
+
+  backend-green:
+    image: ${DOCKERHUB_BACKEND_IMAGE}:${IMAGE_TAG:-latest}
+    container_name: snipeit_lite_backend_green
+    # Only auto-started by a bare `docker compose up -d` when
+    # COMPOSE_PROFILES (.env) is "green" -- i.e. when green is the
+    # ACTIVE_SLOT. scripts/blue-green-deploy.sh starts/stops this
+    # service EXPLICITLY BY NAME during a rollout regardless of the
+    # active profile (Compose always honors an explicitly-named
+    # service even if its profile isn't active) -- see that script
+    # and DEPLOYMENT_VM.md's "Zero-Downtime Blue-Green Deployments"
+    # section.
+    profiles: ["green"]
+    restart: unless-stopped
+    mem_limit: ${BACKEND_MEM_LIMIT:-768m}
+    mem_reservation: ${BACKEND_MEM_RESERVATION:-256m}
+    volumes:
+      - /mnt/docker-data/volumes/backup_data:/app/backups
+      - /mnt/docker-data/volumes/export_data:/app/export_results
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      UVICORN_WORKERS: ${UVICORN_WORKERS:-2}
+      # Pre-encoded, ready-to-use DATABASE_URL from .env -- written by
+      # infra-vm/cloud-init.yaml / sync-secrets-vm.yml using Terraform's
+      # urlencode() on POSTGRES_USER/POSTGRES_PASSWORD, so special
+      # characters from `openssl rand -base64 24` (`+`/`/`/`=`) don't
+      # corrupt postgresql:// URL parsing. Consumed verbatim, not rebuilt.
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
+      REDIS_URL: redis://redis:6379/0
+      EXPORT_RESULT_DIR: /app/export_results
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      JWT_EXPIRY_HOURS: ${JWT_EXPIRY_HOURS:-12}
+      CORS_ORIGINS: ${CORS_ORIGINS:-https://${DOMAIN}}
+      SITE_NAME: ${SITE_NAME:-Snipe-IT Lite}
+      LEAN_MODE: "false"
+      # Explicit, not left to LEAN_MODE's default: this VM is a real,
+      # persistent-data deployment (prod OR vm-staging -- both use real
+      # Postgres, not a throwaway DB) where Alembic (run as its own
+      # explicit "alembic upgrade head" step by the deploy workflow -- see
+      # .github/workflows/deploy-azure-vm.yml) must be the ONLY thing that
+      # ever creates/alters schema. LEAN_MODE is forced to "false" above
+      # purely to keep this container's logging/docs behavior out of "lean
+      # mode" regardless of what ENVIRONMENT resolves to -- but config.py's
+      # environment-based default for AUTO_INIT_DB/AUTO_SEED_DEMO_DATA is
+      # driven by that same LEAN_MODE value, not by ENVIRONMENT directly,
+      # so leaving them unset here would silently re-enable AUTO_INIT_DB.
+      # That would let this container's own startup race the deploy
+      # workflow's separate "alembic upgrade head" step: whichever ran
+      # first would create any brand-new table (e.g.
+      # password_reset_tokens) straight from models.py, and the other
+      # would then fail with psycopg2.errors.DuplicateTable trying to
+      # create the same table again. Pinning both flags to "false" here
+      # -- exactly as the `worker` service below already does -- removes
+      # the race entirely: only the explicit alembic step ever touches
+      # schema. ENVIRONMENT itself (above) still matters for everything
+      # ELSE config.py gates on it (JWT secret strength checks, secure
+      # cookie flags, CORS strictness, etc.) -- it's read from this VM's
+      # /opt/snipeit/.env, defaulting to "production" (the infrastructure
+      # default) if that file doesn't set ENVIRONMENT at all -- e.g. a
+      # brand-new VM before deploy-azure-vm.yml has ever run its "Update
+      # IMAGE_TAG + ENVIRONMENT on the VM" step. That step writes the real
+      # value on every deploy, sourced from the resolve-target job's
+      # build_env output -- which reads the ENVIRONMENT Actions variable
+      # configured on THIS run's target GitHub Environment (vm-staging or
+      # prod), not derived from the target's name -- see that workflow's
+      # resolve-target job comment for the full resolution.
+      AUTO_INIT_DB: "false"
+      AUTO_SEED_DEMO_DATA: "false"
+      LOG_FORMAT: json
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Operations & Observability requirement #4: distributed tracing
+      # (OpenTelemetry) -- see backend/telemetry.py's module docstring and
+      # docker-compose.yml's identical block for the full comment. Off by
+      # default; flip OTEL_ENABLED to "true" in /opt/snipeit/.env and
+      # traces flow to the `jaeger` service below with no other change
+      # needed -- remember `jaeger` itself only starts with `docker
+      # compose -f docker-compose.vm.yml --profile tracing up -d` (see
+      # this file's top comment).
+      OTEL_ENABLED: ${OTEL_ENABLED:-false}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-snipeit-lite-backend}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://jaeger:4318}
+      OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
+      OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-http/protobuf}
+      OTEL_TRACES_SAMPLE_RATIO: ${OTEL_TRACES_SAMPLE_RATIO:-1.0}
+      OTEL_CONSOLE_EXPORTER: ${OTEL_CONSOLE_EXPORTER:-false}
+      # Alternative/additional export target -- see .env.azure.example and
+      # README.md's "Distributed Tracing" section. Empty by default since
+      # this VM path provisions no Application Insights resource of its
+      # own (that's the Container Apps path's infra/main.bicep) -- set it
+      # yourself if you have an Application Insights resource elsewhere
+      # you want this VM's traces to reach.
+      APPLICATIONINSIGHTS_CONNECTION_STRING: ${APPLICATIONINSIGHTS_CONNECTION_STRING:-}
+      LOGIN_RATE_LIMIT_MAX: ${LOGIN_RATE_LIMIT_MAX:-5}
+      LOGIN_RATE_LIMIT_WINDOW_SECONDS: ${LOGIN_RATE_LIMIT_WINDOW_SECONDS:-60}
+      ACCOUNT_LOCKOUT_MAX_ATTEMPTS: ${ACCOUNT_LOCKOUT_MAX_ATTEMPTS:-5}
+      ACCOUNT_LOCKOUT_DURATION_MINUTES: ${ACCOUNT_LOCKOUT_DURATION_MINUTES:-15}
+      ENABLE_API_DOCS: ${ENABLE_API_DOCS:-false}
+      SUPER_ADMIN_USERNAME: ${SUPER_ADMIN_USERNAME:-superadmin}
+      SUPER_ADMIN_NAME: ${SUPER_ADMIN_NAME:-Super Admin}
+      ROOT_ADMIN_BOOTSTRAP_PASSWORD: ${ROOT_ADMIN_BOOTSTRAP_PASSWORD:-}
+      NOTIFICATIONS_ENABLED: ${NOTIFICATIONS_ENABLED:-false}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
+      SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-}
+      # EMAIL_PROVIDER selects the transport ("smtp" default, or
+      # "brevo"/"resend" for an HTTP-API provider -- see config.py's
+      # EMAIL_PROVIDER docstring). BREVO_API_KEY/RESEND_API_KEY are only
+      # read when EMAIL_PROVIDER selects that provider; harmless to pass
+      # through unconditionally otherwise.
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-smtp}
+      BREVO_API_KEY: ${BREVO_API_KEY:-}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
       ADMIN_NOTIFICATION_EMAILS: ${ADMIN_NOTIFICATION_EMAILS:-}
       OVERDUE_NOTIFICATION_INTERVAL_HOURS: ${OVERDUE_NOTIFICATION_INTERVAL_HOURS:-24}
       DUE_SOON_REMINDER_DAYS: ${DUE_SOON_REMINDER_DAYS:-2}
@@ -314,6 +540,14 @@ services:
       SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
       SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
       SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-}
+      # EMAIL_PROVIDER selects the transport ("smtp" default, or
+      # "brevo"/"resend" for an HTTP-API provider -- see config.py's
+      # EMAIL_PROVIDER docstring). BREVO_API_KEY/RESEND_API_KEY are only
+      # read when EMAIL_PROVIDER selects that provider; harmless to pass
+      # through unconditionally otherwise.
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-smtp}
+      BREVO_API_KEY: ${BREVO_API_KEY:-}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
       ADMIN_NOTIFICATION_EMAILS: ${ADMIN_NOTIFICATION_EMAILS:-}
       OVERDUE_NOTIFICATION_INTERVAL_HOURS: ${OVERDUE_NOTIFICATION_INTERVAL_HOURS:-24}
       DUE_SOON_REMINDER_DAYS: ${DUE_SOON_REMINDER_DAYS:-2}
@@ -382,6 +616,14 @@ services:
       SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
       SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
       SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-}
+      # EMAIL_PROVIDER selects the transport ("smtp" default, or
+      # "brevo"/"resend" for an HTTP-API provider -- see config.py's
+      # EMAIL_PROVIDER docstring). BREVO_API_KEY/RESEND_API_KEY are only
+      # read when EMAIL_PROVIDER selects that provider; harmless to pass
+      # through unconditionally otherwise.
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-smtp}
+      BREVO_API_KEY: ${BREVO_API_KEY:-}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
       ADMIN_NOTIFICATION_EMAILS: ${ADMIN_NOTIFICATION_EMAILS:-}
       OVERDUE_NOTIFICATION_INTERVAL_HOURS: ${OVERDUE_NOTIFICATION_INTERVAL_HOURS:-24}
       DUE_SOON_REMINDER_DAYS: ${DUE_SOON_REMINDER_DAYS:-2}
@@ -401,31 +643,80 @@ services:
         max-file: "3"
 
   # ---------------------------------------------------------------------
-  # frontend (identical role to docker-compose.yml's frontend -- nginx
-  # serving the built SPA + proxying /api/* to backend:8000 internally,
-  # per nginx/default.conf.template baked into the image)
+  # frontend-blue / frontend-green -- nginx serving the built SPA + proxying
+  # /api/* to THIS SLOT's own backend-<slot>:8000 internally (per
+  # nginx/default.conf.template baked into the image), split into two slots
+  # for zero-downtime blue-green deploys (see this file's own "ZERO-DOWNTIME
+  # BLUE-GREEN DEPLOYMENTS" header comment). `caddy` below is what actually
+  # decides how much traffic each one gets.
   # ---------------------------------------------------------------------
-  frontend:
+  frontend-blue:
     image: ${DOCKERHUB_FRONTEND_IMAGE}:${IMAGE_TAG:-latest}
-    container_name: snipeit_lite_frontend
+    container_name: snipeit_lite_frontend_blue
+    # Same profile-gating story as backend-blue above -- see that
+    # service's own comment.
+    profiles: ["blue"]
     restart: unless-stopped
     mem_limit: ${FRONTEND_MEM_LIMIT:-128m}
     mem_reservation: ${FRONTEND_MEM_RESERVATION:-64m}
     environment:
       PORT: "80"
-      BACKEND_HOST: backend
+      # Points THIS slot's nginx at THIS slot's backend, never the other
+      # one -- that pairing is the whole point of blue-green: a request
+      # that lands on frontend-blue is guaranteed to be served entirely
+      # by blue's own code, never a mix of old and new.
+      BACKEND_HOST: backend-blue
       BACKEND_PORT: "8000"
       RESOLVER_IP: 127.0.0.11
       ENABLE_API_DOCS: ${ENABLE_API_DOCS:-false}
     # NO host `ports:` publish here (unlike docker-compose.yml's
     # "8080:80") -- `caddy` below is the only container bound to the
-    # host's 80/443, and reaches this one over the internal Compose
-    # network at "frontend:80" instead. Keeping the SPA/API entry point
-    # itself completely unpublished mirrors the same "shrink the public
-    # attack surface to one hardened entry point" reasoning
-    # docker-compose.yml already applies to `backend`.
+    # host's 80/443, and reaches frontend-blue/frontend-green over the
+    # internal Compose network by name instead, weighting traffic between
+    # them (see Caddyfile and DEPLOYMENT_VM.md's "Zero-Downtime Blue-Green
+    # Deployments" section). Keeping the SPA/API entry point itself
+    # completely unpublished mirrors the same "shrink the public attack
+    # surface to one hardened entry point" reasoning docker-compose.yml
+    # already applies to `backend`.
     depends_on:
-      backend:
+      backend-blue:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  frontend-green:
+    image: ${DOCKERHUB_FRONTEND_IMAGE}:${IMAGE_TAG:-latest}
+    container_name: snipeit_lite_frontend_green
+    # Same profile-gating story as backend-green above -- see that
+    # service's own comment.
+    profiles: ["green"]
+    restart: unless-stopped
+    mem_limit: ${FRONTEND_MEM_LIMIT:-128m}
+    mem_reservation: ${FRONTEND_MEM_RESERVATION:-64m}
+    environment:
+      PORT: "80"
+      # Points THIS slot's nginx at THIS slot's backend, never the other
+      # one -- that pairing is the whole point of blue-green: a request
+      # that lands on frontend-green is guaranteed to be served entirely
+      # by green's own code, never a mix of old and new.
+      BACKEND_HOST: backend-green
+      BACKEND_PORT: "8000"
+      RESOLVER_IP: 127.0.0.11
+      ENABLE_API_DOCS: ${ENABLE_API_DOCS:-false}
+    # NO host `ports:` publish here (unlike docker-compose.yml's
+    # "8080:80") -- `caddy` below is the only container bound to the
+    # host's 80/443, and reaches frontend-blue/frontend-green over the
+    # internal Compose network by name instead, weighting traffic between
+    # them (see Caddyfile and DEPLOYMENT_VM.md's "Zero-Downtime Blue-Green
+    # Deployments" section). Keeping the SPA/API entry point itself
+    # completely unpublished mirrors the same "shrink the public attack
+    # surface to one hardened entry point" reasoning docker-compose.yml
+    # already applies to `backend`.
+    depends_on:
+      backend-green:
         condition: service_healthy
     logging:
       driver: json-file
@@ -440,6 +731,15 @@ services:
   # ACME/Let's Encrypt step on this VM at all anymore). See Caddyfile for
   # the actual proxy/TLS config, and DEPLOYMENT_VM.md's "Set up Cloudflare
   # Tunnel" section for how DOMAIN and the Origin CA cert get set.
+  #
+  # ALSO the blue-green traffic switch: Caddyfile's reverse_proxy load-
+  # balances between frontend-blue:80/frontend-green:80 using weights
+  # imported from /etc/caddy/snippets/weights.conf (the `weights.conf`
+  # bind mount below) -- scripts/blue-green-deploy.sh rewrites that file
+  # and runs `caddy reload` (a graceful, zero-dropped-connection reload,
+  # not a restart) to shift traffic between slots. It also serves the
+  # live rollout status dashboard at /_deploy/ from `deploy_status` below
+  # -- see DEPLOYMENT_VM.md's "Monitoring a rollout" section.
   # ---------------------------------------------------------------------
   caddy:
     image: caddy:2-alpine
@@ -455,16 +755,49 @@ services:
     # infra-vm/main.tf's "Cloudflare Tunnel" section.
     environment:
       DOMAIN: ${DOMAIN}
+      # HTTP Basic Auth guarding the /_deploy/ rollout-status dashboard --
+      # see DEPLOYMENT_VM.md's "Monitoring a rollout" section for how to
+      # generate your own DEPLOY_STATUS_PASSWORD_HASH (`docker run --rm
+      # caddy:2-alpine caddy hash-password`). The fallback default below
+      # is a REAL, validly-formatted bcrypt hash of a random,
+      # never-recorded password (so Caddy loads it without a config
+      # error) -- every `$` is doubled (`$$`) because this is a Compose
+      # YAML file, where a single `$` would otherwise be parsed as the
+      # start of a `${VAR}` reference. It fails CLOSED (nobody can log
+      # in, not "anybody can") only as a last-resort fallback -- in
+      # practice /opt/snipeit/.env always sets a real value (see
+      # infra-vm/cloud-init.yaml), so this default is rarely what's
+      # actually used.
+      DEPLOY_STATUS_USER: ${DEPLOY_STATUS_USER:-admin}
+      DEPLOY_STATUS_PASSWORD_HASH: ${DEPLOY_STATUS_PASSWORD_HASH:-$$2b$$14$$xkxwohsBNLl9Qd7uw00zf.h.nQ4Ntazc39oQvd81GIjtK0xpLI3p6}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Rewritten in place by scripts/blue-green-deploy.sh during a
+      # rollout; imported into Caddyfile's reverse_proxy block (see that
+      # file). Seeded once by cloud-init at "100 0" (100% blue) -- safe to
+      # hand-edit for a manual/emergency traffic shift too, just follow it
+      # with `docker compose -f docker-compose.vm.yml exec caddy caddy
+      # reload --config /etc/caddy/Caddyfile --adapter caddyfile`.
+      - ./caddy/weights.conf:/etc/caddy/snippets/weights.conf:ro
       - /mnt/docker-data/volumes/caddy_data:/data
       - /mnt/docker-data/volumes/caddy_config:/config
       # Cloudflare Origin CA cert/key -- written by cloud-init from the
       # cloudflare_origin_cert/_key Terraform variables (see Caddyfile).
       - /opt/snipeit/certs:/etc/caddy/certs:ro
-    depends_on:
-      frontend:
-        condition: service_started
+      # Live rollout status (status.json) + the small dashboard that polls
+      # it -- written by scripts/blue-green-deploy.sh / synced by
+      # deploy-azure-vm.yml, served read-only at /_deploy/ (see
+      # Caddyfile). On the data disk so a rollout's final status survives
+      # a VM reboot/rebuild.
+      - /mnt/docker-data/volumes/deploy_status:/srv/deploy-status:ro
+    # DELIBERATELY no `depends_on` on frontend-blue/frontend-green here --
+    # Compose auto-activates a dependency's profile even when it isn't
+    # otherwise enabled, which would defeat the whole point of
+    # profile-gating the inactive slot (both slots' frontend would end up
+    # running all the time). Caddy tolerates a currently-stopped upstream
+    # fine on its own (passive health checking just routes around it --
+    # see Caddyfile) -- there being only one slot up in steady state is
+    # the normal, expected case, not an error condition.
     logging:
       driver: json-file
       options:

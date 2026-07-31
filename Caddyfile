@@ -12,6 +12,20 @@
 # on this VM at all since nothing but Cloudflare's edge ever validates that
 # cert. See DEPLOYMENT_VM.md's "Set up Cloudflare Tunnel" section for how
 # cloudflare-origin.pem/-key.pem (mounted below) get onto this VM.
+#
+# ALSO where the zero-downtime blue-green traffic switch actually lives:
+# the app itself is now TWO upstreams (frontend-blue:80, frontend-green:80,
+# each already proxying its own /api/* to its own backend-<slot>:8000 --
+# see nginx/default.conf.template), and Caddy's `reverse_proxy` below
+# splits traffic between them by WEIGHT, imported from
+# /etc/caddy/snippets/weights.conf (docker-compose.vm.yml's `weights.conf`
+# bind mount) rather than hardcoded here. scripts/blue-green-deploy.sh
+# rewrites that one-line file and runs `caddy reload` (graceful -- Caddy
+# finishes in-flight requests and never drops a connection reloading) to
+# gradually shift 0/10/25/50/75/100% of traffic onto whichever slot just
+# passed its health checks. See DEPLOYMENT_VM.md's "Zero-Downtime
+# Blue-Green Deployments" section for the full mechanics, and its
+# "Monitoring a rollout" section for the /_deploy/ dashboard below.
 # =============================================================================
 
 {$DOMAIN} {
@@ -23,23 +37,6 @@
 	# needs rotating (Cloudflare's dashboard shows no expiry warning of its
 	# own for these -- track the 15-year date yourself).
 	tls /etc/caddy/certs/cloudflare-origin.pem /etc/caddy/certs/cloudflare-origin-key.pem
-
-	# Everything the app needs -- the SPA, its static assets, and /api/* --
-	# is already served by ONE upstream (`frontend`'s nginx, which proxies
-	# /api/* on to `backend:8000` itself -- see
-	# nginx/default.conf.template). Caddy only needs to know about that
-	# single upstream; it never talks to `backend` directly.
-	reverse_proxy frontend:80 {
-		# CF-Connecting-IP is the real visitor's IP as Cloudflare's edge
-		# saw it -- {remote_host} here would just be the `cloudflared`
-		# container's internal Docker IP, since that's now the only thing
-		# that ever connects to Caddy directly. This is what the app's own
-		# request logs and rate limiter (see backend/config.py's
-		# LOGIN_RATE_LIMIT_* settings) see as the client IP.
-		header_up X-Real-IP {header.CF-Connecting-IP}
-		header_up X-Forwarded-For {header.CF-Connecting-IP}
-		header_up X-Forwarded-Proto {scheme}
-	}
 
 	encode gzip zstd
 
@@ -57,6 +54,64 @@
 	log {
 		output stdout
 		format json
+	}
+
+	# -------------------------------------------------------------------
+	# /_deploy/ -- the live rollout-status dashboard (status.json + a
+	# small polling HTML page, written by scripts/blue-green-deploy.sh and
+	# synced by deploy-azure-vm.yml -- see docker-compose.vm.yml's
+	# `deploy_status` bind mount). NOT linked from the app anywhere, and
+	# gated by HTTP Basic Auth so it's never just sitting open on the same
+	# origin as the public app -- see DEPLOYMENT_VM.md's "Monitoring a
+	# rollout" section for how to set DEPLOY_STATUS_USER/
+	# DEPLOY_STATUS_PASSWORD_HASH. An unset/placeholder password hash
+	# fails CLOSED (nobody can log in), never open.
+	# -------------------------------------------------------------------
+	@deploy_status path /_deploy /_deploy/*
+	handle @deploy_status {
+		basic_auth {
+			{$DEPLOY_STATUS_USER} {$DEPLOY_STATUS_PASSWORD_HASH}
+		}
+		root * /srv/deploy-status
+		file_server
+	}
+
+	# -------------------------------------------------------------------
+	# Everything else -- the SPA, its static assets, and /api/* -- goes to
+	# whichever slot(s) are currently weighted to receive it. Each
+	# upstream is a full frontend+backend pair for ONE slot (nginx
+	# proxying /api/* to that same slot's backend -- see
+	# nginx/default.conf.template), so a given request is always served
+	# entirely by one slot's code, never a mix of old and new.
+	# -------------------------------------------------------------------
+	handle {
+		reverse_proxy frontend-blue:80 frontend-green:80 {
+			# The actual blue/green split -- see this file's top comment.
+			# Order matters: weight N here corresponds to the Nth upstream
+			# listed above (frontend-blue first, frontend-green second).
+			import /etc/caddy/snippets/weights.conf
+
+			# Passive health checking (built into reverse_proxy regardless
+			# of lb_policy): if a slot starts failing requests outright
+			# (e.g. its backend crashed after passing its own pre-cutover
+			# checks), Caddy stops sending it new traffic for
+			# `fail_duration` without needing a human to touch weights.conf
+			# -- this is defense in depth on top of, not instead of,
+			# scripts/blue-green-deploy.sh's own explicit health checks.
+			lb_try_duration 5s
+			fail_duration 10s
+			max_fails 3
+
+			# CF-Connecting-IP is the real visitor's IP as Cloudflare's edge
+			# saw it -- {remote_host} here would just be the `cloudflared`
+			# container's internal Docker IP, since that's now the only thing
+			# that ever connects to Caddy directly. This is what the app's own
+			# request logs and rate limiter (see backend/config.py's
+			# LOGIN_RATE_LIMIT_* settings) see as the client IP.
+			header_up X-Real-IP {header.CF-Connecting-IP}
+			header_up X-Forwarded-For {header.CF-Connecting-IP}
+			header_up X-Forwarded-Proto {scheme}
+		}
 	}
 }
 
@@ -78,12 +133,31 @@
 # CLOUDFLARE_TUNNEL_TOKEN is set, `cloudflared` stops using this block
 # entirely and switches to the named Tunnel + {$DOMAIN} above -- see
 # DEPLOYMENT_VM.md's "Test with a free Cloudflare subdomain first" section.
+#
+# Same weighted blue/green upstream + /_deploy/ dashboard as the main
+# block above -- kept in sync deliberately (see that block's comments for
+# the full explanation of each directive).
 # -----------------------------------------------------------------------------
 :80 {
-	reverse_proxy frontend:80 {
-		header_up X-Real-IP {header.CF-Connecting-IP}
-		header_up X-Forwarded-For {header.CF-Connecting-IP}
-		header_up X-Forwarded-Proto https
+	@deploy_status path /_deploy /_deploy/*
+	handle @deploy_status {
+		basic_auth {
+			{$DEPLOY_STATUS_USER} {$DEPLOY_STATUS_PASSWORD_HASH}
+		}
+		root * /srv/deploy-status
+		file_server
+	}
+
+	handle {
+		reverse_proxy frontend-blue:80 frontend-green:80 {
+			import /etc/caddy/snippets/weights.conf
+			lb_try_duration 5s
+			fail_duration 10s
+			max_fails 3
+			header_up X-Real-IP {header.CF-Connecting-IP}
+			header_up X-Forwarded-For {header.CF-Connecting-IP}
+			header_up X-Forwarded-Proto https
+		}
 	}
 	encode gzip zstd
 	log {

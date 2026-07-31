@@ -38,6 +38,7 @@ with no Azure resources yet.
 - [9. Point `deploy-azure-vm.yml` at the new VM](#9-point-deploy-azure-vmyml-at-the-new-vm)
 - [10. Deploy the application (`deploy-azure-vm.yml`)](#10-deploy-the-application-deploy-azure-vmyml)
 - [11. Verify](#11-verify)
+- [Zero-Downtime Blue-Green Deployments](#zero-downtime-blue-green-deployments)
 - [Tagging & Versioning](#tagging--versioning)
 - [Free domain + HTTPS](#free-domain--https)
 - [Updating secrets on an already-running VM](#updating-secrets-on-an-already-running-vm)
@@ -658,9 +659,13 @@ origin vX.Y.Z` does (see "Tagging & Versioning" below); everything else
 goes through the manual `workflow_dispatch` run described here.
 
 This runs: `ci.yml` (full test suite) → build + push both images to Docker
-Hub → SSH in, sync `docker-compose.vm.yml`/`Caddyfile`, update `IMAGE_TAG`
-→ `docker compose up -d` → `alembic upgrade head` → prune old image layers
-→ smoke test `https://<domain>/` and `https://<domain>/api/auth/me`.
+Hub → SSH in, sync `docker-compose.vm.yml`/`Caddyfile`/`caddy/weights.conf`/
+`scripts/*`, update `IMAGE_TAG` → `scripts/blue-green-deploy.sh` (migrate →
+start the idle slot with zero production traffic → health-check it
+directly → gradually ramp traffic onto it → spin the old slot down) →
+prune old image layers → smoke test `https://<domain>/` and
+`https://<domain>/api/auth/me`. See "Zero-Downtime Blue-Green Deployments"
+below for the full mechanics and how to watch it happen live.
 
 First run takes the longest (full CI + two Docker builds + `cloudflared`
 establishing the Tunnel for the first time) — expect 5-10 minutes.
@@ -681,8 +686,13 @@ then:
 
 ```bash
 ssh -i snipeit_vm_deploy_key azureuser@<VM_HOST> \
-  "docker compose -f /opt/snipeit/docker-compose.vm.yml logs backend | grep -A2 'root admin'"
+  'cd /opt/snipeit && docker compose -f docker-compose.vm.yml logs "backend-$(grep ^ACTIVE_SLOT= .env | cut -d= -f2)" | grep -A2 "root admin"'
 ```
+
+(`backend-blue`/`backend-green` are this VM's two blue-green slots — see
+"Zero-Downtime Blue-Green Deployments" below; the command above reads
+whichever one is currently active straight out of `.env` so you don't have
+to know it in advance.)
 
 (`<VM_HOST>` here is the `ssh_hostname` output from step 8, e.g.
 `ssh-assets.example.com` — same value everywhere else in this doc that
@@ -690,6 +700,128 @@ shows `<VM_HOST>`.)
 
 Log in as `superadmin` with that password, then change it immediately
 (Settings → your account).
+
+---
+
+## Zero-Downtime Blue-Green Deployments
+
+Every deploy on this path (`deploy-azure-vm.yml` → `scripts/blue-green-deploy.sh`)
+runs entirely on the currently-**inactive** slot before it ever receives a
+real request, and only shifts production traffic onto it gradually, after
+it proves itself:
+
+1. **Migrate.** `alembic upgrade head` runs against the incoming image,
+   against the one shared Postgres `db` — this is why migrations on this
+   path need to stay backward-compatible with the still-running old
+   slot's code for the duration of a rollout (add columns, don't rename
+   or drop them in the same release that also stops writing to them).
+2. **Start the replica, cold.** Only the idle slot's `backend-<slot>`/
+   `frontend-<slot>` pair starts. `caddy` is still sending 100% of
+   traffic to the active slot — the replica exists but is invisible to
+   real users.
+3. **Health-check the replica directly**, bypassing Caddy/production
+   traffic entirely (`scripts/health-check.sh --mode internal`):
+   `GET /healthz` (liveness), `GET /readyz` (DB reachable + schema
+   matches this build), a static-asset fetch through the replica's own
+   nginx, and a full `GET /api/auth/me` round trip through that same
+   nginx to that same slot's backend — proving the *pairing* works, not
+   just each half alone. This is the exact same bar the post-cutover
+   external smoke test already holds the live domain to
+   (`--mode external`) — see that script's own header comment.
+4. **Ramp traffic**, 10% → 25% → 50% → 75% → 100%, re-running the health
+   check against the replica after each step (now under real, if
+   partial, traffic — catches things an empty-load check can't). Each
+   step rewrites `caddy/weights.conf` and runs `caddy reload` — a
+   *graceful* reload that finishes in-flight requests and drops zero
+   connections, not a restart.
+5. **Spin the old slot down**, and flip `ACTIVE_SLOT`/`COMPOSE_PROFILES`
+   in `.env` so a future reboot comes back up on the new slot.
+
+**On any failed check at any point**, the rollout stops immediately:
+traffic is left at (or restored to) 100% on the still-good old slot, and
+the new slot's containers are stopped. The old slot is never touched
+until the new one has already proven itself end to end — a bad deploy
+never causes an outage, it just doesn't roll out.
+
+`worker`/`beat` aren't behind Caddy at all (they don't serve HTTP), so
+they aren't blue-green'd — they're just restarted in place once the new
+image has passed migration, right alongside starting the replica. A few
+seconds of no background task processing here is invisible to end users,
+unlike an HTTP-serving restart would be.
+
+### Monitoring a rollout
+
+**Live, while it's running** — the GitHub Actions run itself streams every
+phase (`migrating`, `starting_replica`, `health_checking`, each ramp
+percentage, `cutover_complete`, `spinning_down_old`) and every individual
+check's pass/fail as it happens, in the "Deploy over SSH + migrate" step's
+log.
+
+**The `/_deploy/` dashboard** — a small live-updating page (auto-refreshes
+every 3s) showing the current phase, which slot is active/new, the live
+traffic split as a bar, and the full health-check log, backed by
+`status.json`/`checks.log` that `scripts/blue-green-deploy.sh` writes on
+every phase transition. Reachable at `https://<domain>/_deploy/`, gated by
+HTTP Basic Auth (Caddy's `basic_auth`, see `Caddyfile`) so it's never just
+sitting open on the same origin as the public app. **Set your own
+credentials before relying on this** — the values `cloud-init.yaml` seeds
+on first boot are random/unknown by design (the route fails *closed*, not
+open, until you set your own):
+
+```bash
+# Generates a bcrypt hash of a password you choose (prompted interactively)
+docker run --rm -it caddy:2-alpine caddy hash-password
+```
+
+Then SSH in, edit `/opt/snipeit/.env`, set `DEPLOY_STATUS_USER` and paste
+the hash into `DEPLOY_STATUS_PASSWORD_HASH`, and apply it:
+
+```bash
+cd /opt/snipeit
+docker compose -f docker-compose.vm.yml up -d --no-deps caddy
+```
+
+**From the command line** — tail everything at once:
+
+```bash
+ssh -i snipeit_vm_deploy_key azureuser@<VM_HOST> bash -s <<'EOF'
+  cd /opt/snipeit
+  echo "--- status.json ---"; cat /mnt/docker-data/volumes/deploy_status/status.json
+  echo "--- docker compose ps ---"; docker compose -f docker-compose.vm.yml ps
+  echo "--- current weights ---"; cat caddy/weights.conf
+EOF
+```
+
+**A manual/emergency traffic shift** (bypassing the script entirely — e.g.
+you want to force 100% back onto one slot right now) is just editing
+`caddy/weights.conf` and reloading:
+
+```bash
+ssh -i snipeit_vm_deploy_key azureuser@<VM_HOST>
+cd /opt/snipeit
+echo "lb_policy weighted_round_robin 100 0" > caddy/weights.conf   # 100% blue
+docker compose -f docker-compose.vm.yml exec caddy \
+  caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
+```
+
+### Running a rollout by hand (outside CI)
+
+Everything `deploy-azure-vm.yml` does over SSH is also just a script you
+can run directly, useful for debugging a stuck rollout or deploying
+without waiting on CI:
+
+```bash
+ssh -i snipeit_vm_deploy_key azureuser@<VM_HOST>
+cd /opt/snipeit
+# .env's IMAGE_TAG must already point at an image tag that's been pulled
+# (docker compose -f docker-compose.vm.yml pull) before running this.
+./scripts/blue-green-deploy.sh
+```
+
+Exit code 0 means the new slot is fully active and the old one is
+stopped; non-zero means it aborted and rolled back — check
+`/mnt/docker-data/volumes/deploy_status/status.json`'s `"phase": "failed"`
+entry and `checks.log` for which check failed.
 
 ---
 
@@ -821,7 +953,7 @@ otherwise immediately re-apply it:
 ```bash
 ssh -i snipeit_vm_deploy_key azureuser@<VM_HOST>
 cd /opt/snipeit
-docker compose -f docker-compose.vm.yml run --rm backend alembic downgrade -1
+docker compose -f docker-compose.vm.yml run --rm "backend-$(grep ^ACTIVE_SLOT= .env | cut -d= -f2)" alembic downgrade -1
 ```
 
 Then run step 3 with `skip_migrate: true` (the schema is now already at
@@ -1090,19 +1222,30 @@ leak) can only ever consume up to its own ceiling, never the whole VM's
 RAM, and never starve a sibling container of the memory it needs to keep
 running.
 
-Defaults, sized for the Terraform default `Standard_B2s` (2 vCPU / 4 GiB):
+Defaults, sized for the Terraform default `Standard_B2s` (2 vCPU / 4 GiB),
+STEADY STATE (only one slot's `backend-*`/`frontend-*` running -- see
+"Zero-Downtime Blue-Green Deployments" below):
 
 | Service | Limit | Reservation | Role |
 |---|---|---|---|
 | `db` | 768m | 256m | Postgres |
 | `redis` | 256m | 128m | Celery broker + export result cache |
-| `backend` | 768m | 256m | FastAPI/uvicorn |
+| `backend-blue` / `backend-green` | 768m | 256m | FastAPI/uvicorn (only ONE of these two runs at a time in steady state) |
 | `worker` | 640m | 256m | Celery worker (CSV/PDF export jobs) |
 | `beat` | 128m | 64m | Celery scheduler (no request handling) |
-| `frontend` | 128m | 64m | nginx, static assets + internal proxy |
-| `caddy` | 160m | 64m | reverse proxy, TLS re-presentation (Origin CA cert) |
+| `frontend-blue` / `frontend-green` | 128m | 64m | nginx, static assets + internal proxy (only ONE runs at a time in steady state) |
+| `caddy` | 160m | 64m | reverse proxy, TLS re-presentation (Origin CA cert), blue/green traffic split |
 | `cloudflared` | 128m | 32m | outbound-only Cloudflare Tunnel connector |
-| **Total** | **~2.98 GiB** | **~1.13 GiB** | leaves ~1 GiB for the OS/Docker daemon |
+| **Total (steady state)** | **~2.98 GiB** | **~1.13 GiB** | leaves ~1 GiB for the OS/Docker daemon |
+| **Total (mid-rollout, both slots' backend+frontend briefly up)** | **~3.87 GiB** | **~1.45 GiB** | see the note below |
+
+A rollout (`scripts/blue-green-deploy.sh`) briefly runs BOTH slots'
+`backend-*`+`frontend-*` together — from step [2/6] (starting the replica)
+until step [6/6] (the old slot is stopped), typically a couple of minutes
+end to end. On the default `Standard_B2s`, that peak leaves only ~130 MiB
+of headroom for the OS/Docker daemon, which is tight but has proven fine
+for light-to-moderate traffic; if your traffic is heavier, size up to
+`Standard_B2ms` (8 GiB) — see below.
 
 Every value reads from `/opt/snipeit/.env` first (`DB_MEM_LIMIT`, etc —
 see `docker-compose.vm.yml`'s services), so you can retune any single
@@ -1450,24 +1593,27 @@ rule not applied — check `main.tf`'s `AllowHTTP` rule specifically uses
 `source_address_prefix = "*"`, which it always does regardless of
 `ssh_allowed_source_ips`, since the two rules are entirely independent).
 
-**`docker compose run --rm backend alembic upgrade head` hangs** —
-`db` probably isn't healthy yet. Check: `docker compose -f
-docker-compose.vm.yml ps` — `db` should show `(healthy)`. If not,
-`docker compose logs db`.
+**`docker compose run --rm backend-<slot> alembic upgrade head` hangs**
+(`scripts/blue-green-deploy.sh` step [1/6], or the first-boot migration in
+`cloud-init.yaml`) — `db` probably isn't healthy yet. Check: `docker
+compose -f docker-compose.vm.yml ps` — `db` should show `(healthy)`. If
+not, `docker compose logs db`.
 
 **System Backups panel shows "Backup failed: Port could not be cast to
 integer value as '\<random-looking fragment\>'"** — fixed (see
-`docker-compose.vm.yml`'s `DATABASE_URL` comment on the `backend` service
-for the full root-cause writeup); a pre-fix VM still needs the corrected
-`DATABASE_URL` pushed to it once: re-run **Actions → Sync secrets to
-Azure VM** (`sync-secrets-vm.yml`) — no secret values actually need to
-change, this workflow always recomputes `DATABASE_URL` from the current
-`POSTGRES_USER`/`POSTGRES_PASSWORD` on every run — then confirm
-`docker compose -f /opt/snipeit/docker-compose.vm.yml exec backend env |
-grep ^DATABASE_URL=` on the VM shows a `%`-encoded password (e.g. `%2B`
-for a literal `+`) rather than a raw one. The Container Apps path
-(`DEPLOYMENT.md`) was never affected — `infra/main.bicep` already
-percent-encodes the password with `uriComponent()`.
+`docker-compose.vm.yml`'s `DATABASE_URL` comment on the `backend-blue`/
+`backend-green` services for the full root-cause writeup); a pre-fix VM
+still needs the corrected `DATABASE_URL` pushed to it once: re-run
+**Actions → Sync secrets to Azure VM** (`sync-secrets-vm.yml`) — no secret
+values actually need to change, this workflow always recomputes
+`DATABASE_URL` from the current `POSTGRES_USER`/`POSTGRES_PASSWORD` on
+every run — then confirm `docker compose -f
+/opt/snipeit/docker-compose.vm.yml exec "backend-$(grep ^ACTIVE_SLOT=
+/opt/snipeit/.env | cut -d= -f2)" env | grep ^DATABASE_URL=` on the VM
+shows a `%`-encoded password (e.g. `%2B` for a literal `+`) rather than a
+raw one. The Container Apps path (`DEPLOYMENT.md`) was never affected --
+`infra/main.bicep` already percent-encodes the password with
+`uriComponent()`.
 
 **Out of memory / a container keeps restarting** — check which one:
 `docker compose -f docker-compose.vm.yml ps` (a repeatedly restarting

@@ -64,6 +64,9 @@ smtp_port                  = 587
 smtp_username              = ""
 smtp_password              = ""
 smtp_from_email            = ""
+email_provider             = "smtp" # or "brevo" / "resend" -- see variables.tf's email_provider description
+brevo_api_key              = ""     # only read when email_provider = "brevo"
+resend_api_key             = ""     # only read when email_provider = "resend"
 admin_notification_emails  = ""
 
 display_timezone = "Africa/Lagos"

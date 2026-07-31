@@ -933,26 +933,86 @@ populate both new apps' images.
   `postgresServer` is a managed PaaS resource with no image or deploy step
   at all.
 
-### Zero-downtime rollout mechanics
+### Zero-downtime rollout mechanics: blue-green
 
-Container Apps' Single revision mode creates new replicas of `backend` (and
-separately, `frontend`) alongside the old ones, waits for each app's
-readiness probe to pass, then shifts traffic and removes the old replicas —
-no separate load balancer step needed. `backend` is always updated before
-`frontend` in the pipeline, so `frontend`'s proxy target is already correct
-by the time `frontend` itself rolls out. `redis` is pinned to exactly 1
-replica always and is never part of a rolling update; `postgresServer`
-isn't a Container App at all, so the concept doesn't apply to it either.
+`backend` and `frontend` both run in Container Apps' **Multiple**
+active-revisions mode (`infra/main.bicep`'s `activeRevisionsMode`), not
+Single — the old revision ("blue") and a new one ("green") run side by
+side as two fully independent, individually addressable slots, with
+traffic between them a weight the deploy pipeline controls explicitly.
+`.github/workflows/deploy-azure-aca.yml`'s `deploy` job drives the actual
+rollout through
+[`.github/scripts/aca-blue-green.sh`](.github/scripts/aca-blue-green.sh),
+per app, in this order:
+
+1. **Replicate the slot.** Create the new revision at **0% traffic** —
+   nothing routes to it yet, so this step alone can never affect anything
+   live.
+2. **Health-check the replica that actually received the push**, not just
+   the image CI already validated. Container Apps' own readiness probe
+   (`/readyz` on `backend`, `/` on `frontend` — `infra/main.bicep`'s
+   `probes` blocks) polls the new revision directly; the script waits for
+   it to report `Healthy` before doing anything else.
+3. **Direct smoke test the new slot** — `frontend` only, since it's the
+   one app with a public FQDN (every revision gets its own once
+   `activeRevisionsMode` is `Multiple`: `<app>---<suffix>.<domain>`).
+   Real HTTP, hitting `/` and `/api/auth/me` (proving the reverse-proxy →
+   `backend` chain, not just static files) — still zero production
+   traffic, since nothing but this direct URL request reaches it.
+   `backend`'s internal-only ingress isn't reachable this way from a
+   GitHub-hosted runner; step 2 plus step 4's re-checks are what cover it.
+4. **Migrate traffic gradually.** Production walks the new revision
+   across 10% → 25% → 50% → 75% → 100%, re-verifying health after each
+   step (a revision that was fine at 0% can still degrade under real
+   concurrent load) — the same five-step ramp the VM path uses. Staging
+   (min replicas 0 on both apps — no standing traffic to protect) jumps
+   straight to 100% once step 2 passes.
+5. **Spin down the other slot** — only after `backend` AND `frontend`
+   have both reached 100% AND the end-to-end smoke test
+   (`deploy-azure-aca.yml`'s `Smoke test` step) has passed against the
+   fully-cut-over app. The old revision is deactivated at that point, not
+   before — see [Rollback](#rollback) for why it's kept alive and at 0%
+   traffic (not deleted, not scaled down) for the entire rollout instead.
+
+`backend` always finishes its full rollout before `frontend`'s begins, so
+`frontend`'s proxy target (`BACKEND_HOST`) is already the new `backend`
+revision's traffic split by the time `frontend` itself starts rolling out.
+`redis` is pinned to exactly 1 replica, still in Single revision mode, and
+is never part of a rollout; `postgresServer` isn't a Container App at all,
+so the concept doesn't apply to it either.
+
+**Monitor a rollout live** — from a laptop, no GitHub Actions access
+needed, any time during or after a deploy:
+```bash
+bash .github/scripts/aca-blue-green.sh status backend rg-snipeit-lite-prod --watch
+```
+Shows every revision's health, replica count, and live traffic weight,
+refreshed every 5 seconds. `deploy-azure-aca.yml` also writes the same
+information (old/new revision names per app) into the run's own
+`GITHUB_STEP_SUMMARY`, so the Actions tab alone is enough if you're not at
+a terminal.
 
 ### Rollback
 
-`deploy-azure-production.yml`'s `deploy` job snapshots both currently-live
-image tags before updating (its "Snapshot currently-live images" step), and
-automatically re-points both `backend` and `frontend` at them if the
-post-deploy smoke test fails — most bad releases never need a manual
-rollback at all. The runbook below is for the cases that do: a regression
+**During a deploy (automatic):** because the rollout is blue-green (see
+above), the old revision is never stopped or scaled down while the new one
+is being proven — it just sits at 0% traffic until the very end. If the
+final end-to-end smoke test fails, `deploy-azure-aca.yml`'s `deploy` job
+calls `aca-blue-green.sh rollback` for whichever app(s) had already
+finished their own rollout, which is just a **traffic-weight flip back to
+the still-running old revision** (no redeploy, no cold start, no image
+pull) — the fastest possible recovery, and now available on staging too,
+not just production, since it no longer depends on there having been prior
+live traffic to roll back to. If a new revision instead fails its OWN
+health check or direct smoke test mid-rollout (before ever reaching real
+traffic), `aca-blue-green.sh` rolls that one back itself, inline, without
+waiting for the smoke test step at all. Most bad releases never need a
+manual rollback. The runbook below is for the cases that do: a regression
 that passes the smoke test but is caught later, or a rollback requested
-well after the deploy finished.
+well after the deploy finished — at which point the bad revision has
+already been fully cut over to and the old one deactivated (see
+"Spin down the old slots" above), so this is a genuine redeploy again, not
+a traffic flip.
 
 **Step 1 — find out what's actually running right now.** Don't assume the
 tag you *think* is live is the one that's live — ask Azure directly:
@@ -961,10 +1021,13 @@ az containerapp show --name backend --resource-group rg-snipeit-lite-prod \
   --query "properties.template.containers[0].image" -o tsv
 # -> e.g. <you>/snipeit-lite-backend:v1.4.2
 ```
-(This is the same command `deploy-azure-production.yml`'s own snapshot step
-runs — see its `GITHUB_STEP_SUMMARY` on the most recent successful run of
-that workflow in the Actions tab for a ready-made record of "what was live
-right before" and "what got deployed," without running anything yourself.)
+(This is the same command `deploy-azure-aca.yml`'s own snapshot step runs —
+see its `GITHUB_STEP_SUMMARY` on the most recent successful run of that
+workflow in the Actions tab for a ready-made record of "what was live right
+before," "what got deployed," and the old/new revision names for both apps,
+without running anything yourself. Swap `--name backend` for `--name
+frontend` to check that app too, and drop `-staging` from the resource
+group for the staging environment.)
 
 **Step 2 — name the actual previous version**, not an abstract placeholder.
 Tags sort by creation date, so the previous release is whichever one comes
@@ -995,30 +1058,50 @@ you need them sooner.
 preference:
 
 - **Preferred: re-run the pipeline against the older tag**, so the rollback
-  gets the same migrate-first-and-wait-for-healthy discipline (and
-  automatic smoke test) as a forward deploy, rather than a raw image swap:
+  gets the same migrate-first, blue-green-with-health-gates-and-automatic-
+  smoke-test discipline as a forward deploy, rather than a raw image swap:
   ```bash
-  gh workflow run deploy-azure-production.yml -f image_tag=v1.4.1
+  gh workflow run deploy-azure-aca.yml -f environment=production -f image_tag=v1.4.1
   ```
-  (Actions tab → "Deploy to Azure (Production)" → Run workflow →
+  (Actions tab → "Deploy to ACA" → Run workflow → `environment: production`,
   `image_tag: v1.4.1` works identically if you'd rather not use the CLI.)
-  ⚠️ Only safe if `v1.4.1`'s database schema is compatible with what's
-  currently migrated — i.e. the bad release didn't itself introduce a
-  migration that later code depends on. If it did, you need a
-  forward-fixing migration instead of a rollback; see the "migrate first,
-  deploy second" rule in `README.md`'s CI/CD section.
+  This goes through the exact same blue-green rollout as any other deploy —
+  `v1.4.1` becomes the new "green" revision, health-gated and canaried in
+  before it takes over, with the currently-bad revision left as the
+  fallback the whole time. ⚠️ Only safe if `v1.4.1`'s database schema is
+  compatible with what's currently migrated — i.e. the bad release didn't
+  itself introduce a migration that later code depends on. If it did, you
+  need a forward-fixing migration instead of a rollback; see the "migrate
+  first, deploy second" rule in `README.md`'s CI/CD section.
 
-- **Direct, no pipeline**: swap the images by hand, e.g. if the automatic
-  rollback already fired but you want to jump back further than one
-  version:
+- **Direct, no pipeline**: use `aca-blue-green.sh` yourself, e.g. if you
+  want to jump back further than one version without waiting on `ci`/
+  `build-push`/`migrate` first. This still gets the same 0%-traffic
+  replicate → health-gate → gradual-cutover treatment as the pipeline, just
+  skipping `migrate` — only safe once you've confirmed the schema-
+  compatibility caveat above yourself:
   ```bash
-  az containerapp update --name backend --resource-group rg-snipeit-lite-prod \
-    --image <you>/snipeit-lite-backend:v1.4.1
-  az containerapp update --name frontend --resource-group rg-snipeit-lite-prod \
-    --image <you>/snipeit-lite-frontend:v1.4.1
+  az login   # or `az account show` to confirm you're already signed in
+  bash .github/scripts/aca-blue-green.sh rollout backend rg-snipeit-lite-prod \
+    <you>/snipeit-lite-backend:v1.4.1 "10,25,50,75,100" 20 false
+  bash .github/scripts/aca-blue-green.sh rollout frontend rg-snipeit-lite-prod \
+    <you>/snipeit-lite-frontend:v1.4.1 "10,25,50,75,100" 20 true
   ```
-  This skips `migrate` and the smoke test entirely — only use it once
-  you've confirmed step 3's schema-compatibility caveat above yourself.
+  Each command prints the old/new revision names it used as it goes; once
+  you're satisfied the rolled-back version is good, spin down the slot it
+  replaced:
+  ```bash
+  bash .github/scripts/aca-blue-green.sh finalize backend rg-snipeit-lite-prod <old-revision-name>
+  bash .github/scripts/aca-blue-green.sh finalize frontend rg-snipeit-lite-prod <old-revision-name>
+  ```
+  ⚠️ A plain `az containerapp update --image ...` with no revision-suffix
+  or traffic handling still WORKS to create a new revision, but since
+  `backend`/`frontend` now run in Multiple revision mode with traffic
+  pinned to explicit revision names (not `latestRevision: true` — see
+  `infra/main.bicep`'s `ingress.traffic` comment), that new revision comes
+  up at **0% traffic** and nothing will actually route to it until you also
+  run `az containerapp ingress traffic set` yourself — use
+  `aca-blue-green.sh rollout` above instead of reproducing that by hand.
 
 ### Scaling
 
@@ -1047,6 +1130,20 @@ preference:
   and `postgresSkuName` to a matching D-series size.
 
 ### Monitoring
+
+**Watching a blue-green rollout in progress:**
+```bash
+bash .github/scripts/aca-blue-green.sh status backend rg-snipeit-lite-prod --watch
+```
+Refreshes every 5 seconds with a table of every revision for that app —
+name, active/inactive, health state, replica count, and live traffic
+weight — so you can watch the old ("blue") and new ("green") revisions
+side by side as a deploy walks traffic between them. Drop `--watch` for a
+single point-in-time snapshot instead of a loop; swap `backend` for
+`frontend` to watch the other app. Works from anywhere with `az login`
+access to the resource group — you don't need to be watching the GitHub
+Actions run itself, though `deploy-azure-aca.yml` writes the same old-
+revision/new-revision summary into that run's `GITHUB_STEP_SUMMARY` too.
 
 All three Container Apps' console and system logs flow into one Log
 Analytics workspace (`infra/main.bicep`'s `logAnalytics` resource, 30-day
