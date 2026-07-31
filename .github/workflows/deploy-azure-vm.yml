@@ -13,12 +13,27 @@
 # update`, since there's no Container Apps control plane on this path --
 # just a VM.
 #
-# TRIGGERS: only two. (1) `git tag vX.Y.Z && git push origin vX.Y.Z` --
-# always deploys `prod`, this is the one automatic path left. (2) manual
-# `workflow_dispatch` from the Actions tab -- covers everything else,
-# including deploying `vm-staging`, or redeploying `prod` outside of a
-# tagged release. A plain push to `main`/`develop` no longer triggers any
-# deploy on its own; it only runs ci.yml.
+# TRIGGERS: only two, same split as deploy-azure-aca.yml.
+#   A. TAG RELEASE (workflow_call, prod only): `git tag vX.Y.Z && git push
+#      origin vX.Y.Z` runs release.yml, which builds + Trivy-scans + pushes
+#      both images tagged with that VERSION and then calls THIS workflow
+#      (`uses: ./.github/workflows/deploy-azure-vm.yml`) with that
+#      already-built `image_tag`. This is the ONLY deploy target release.yml
+#      currently calls -- the ACA path (deploy-azure-aca.yml) still exists
+#      and is fully usable, but only via its own `workflow_dispatch` entry
+#      point, so there is exactly one thing "cut a tagged release" means in
+#      this repo right now, instead of two independent pipelines quietly
+#      firing off the same tag push. `ci`/`build-push` below both skip
+#      themselves out on this path, since release.yml already ran an
+#      equivalent gate -- same pattern as deploy-azure-aca.yml's own
+#      workflow_call entry point.
+#   B. MANUAL (workflow_dispatch): open this workflow in the Actions tab,
+#      choose `vm-staging` or `prod`, and "Run workflow". Leave `image_tag`
+#      BLANK to build fresh from whichever branch/ref you run it against --
+#      `ci` + `build-push` run first. Supply an EXISTING Docker Hub tag to
+#      skip straight to `deploy` with that already-built image instead --
+#      also the rollback/redeploy path. A plain push to `main`/`develop` no
+#      longer triggers any deploy on its own; it only runs ci.yml.
 #
 # Required repo/environment secrets (see DEPLOYMENT_VM.md step 5-9 and
 # its "Set up Cloudflare Tunnel" section for how each one is produced):
@@ -47,18 +62,25 @@
 name: Deploy to VM
 
 on:
-  # NO `branches: [main]` here anymore -- a plain push to `main` no longer
-  # auto-deploys anything on this path. Pushing `git tag vX.Y.Z && git push
-  # origin vX.Y.Z` is still THE way to cut a real, named, rollback-able
-  # release on this path -- see DEPLOYMENT_VM.md's "Tagging & Versioning"
-  # section. Mirrors release.yml's `on.push.tags` trigger for the Container
-  # Apps path, kept independent/self-contained here rather than calling
-  # into that workflow, since the two deploy targets can be used
-  # separately or together without depending on each other. Everything
-  # else (a normal push to `main`/`develop`/any branch, or deploying to
-  # `vm-staging`) goes through `workflow_dispatch` below instead.
-  push:
-    tags: ['v*.*.*']
+  # NO independent `push: tags` trigger here anymore. It used to mirror
+  # release.yml's `on.push.tags` trigger directly, self-contained -- which
+  # meant a single `git tag vX.Y.Z && git push origin vX.Y.Z` fired TWO
+  # completely separate, uncoordinated pipelines (this file's own trigger,
+  # AND release.yml, which also builds + pushes the same images and cuts a
+  # GitHub Release/CHANGELOG entry). Both would build the images
+  # independently, and there was nothing tying "a tagged release" to one
+  # authoritative workflow to look at. Now release.yml is the ONLY thing a
+  # version tag triggers -- it runs the CI gate, builds + Trivy-scans +
+  # pushes the images ONCE, cuts the changelog/GitHub Release, and then
+  # calls this workflow (`uses:`, below) with that already-built
+  # `image_tag` to actually roll it out here. Same shape as
+  # deploy-azure-aca.yml's `workflow_call` entry point.
+  workflow_call:
+    inputs:
+      image_tag:
+        description: 'Docker image tag to deploy, e.g. v1.4.2 (must already exist on Docker Hub -- see release.yml). This entry point always targets prod.'
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       environment:
@@ -78,18 +100,19 @@ on:
         default: false
 
 concurrency:
-  # A version TAG push always targets prod; a workflow_dispatch run always
-  # carries a concrete "vm-staging" or "prod" in inputs.environment now
-  # that the dropdown has no "from-variable" sentinel to resolve.
-  group: deploy-vm-${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) && 'prod' || inputs.environment }}
+  # A tagged release (workflow_call, from release.yml) always targets prod;
+  # a workflow_dispatch run always carries a concrete "vm-staging" or
+  # "prod" in inputs.environment now that the dropdown has no
+  # "from-variable" sentinel to resolve.
+  group: deploy-vm-${{ (github.event_name == 'workflow_call') && 'prod' || inputs.environment }}
   cancel-in-progress: false
 
 env:
-  # A version TAG push always targets prod, exactly like release.yml's
-  # equivalent trigger does for the Container Apps path -- there's no
-  # such thing as a "staging" named release.
-  IS_VERSION_TAG: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
-  # WHICH TARGET this run deploys to. A version TAG push is always "prod";
+  # A tagged release (workflow_call, from release.yml) always targets prod,
+  # exactly like release.yml's equivalent call does for the Container Apps
+  # path -- there's no such thing as a "staging" named release.
+  IS_VERSION_TAG: ${{ github.event_name == 'workflow_call' }}
+  # WHICH TARGET this run deploys to. A tagged release is always "prod";
   # a workflow_dispatch run always carries a concrete "vm-staging" or
   # "prod" in inputs.environment (the dropdown has no "from-variable"
   # sentinel to resolve anymore, and its own default is "prod" -- see that
@@ -98,17 +121,21 @@ env:
   # frontend build mode or which Docker Hub image repo gets pulled. Both
   # of those are BUILD_ENV/image_suffix, computed by the `resolve-target`
   # job below from each target's own `ENVIRONMENT` Actions variable.
-  ENVIRONMENT: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) && 'prod' || inputs.environment }}
+  ENVIRONMENT: ${{ (github.event_name == 'workflow_call') && 'prod' || inputs.environment }}
   # IMAGE_TAG is the literal Docker tag pulled/deployed. VERSION is the
   # human-facing release name recorded on the VM and in this run's
-  # summary (see the "Write release marker" step below) -- for a version
-  # tag push they're identical; for a plain branch push or a
-  # workflow_dispatch without image_tag, VERSION stays "unversioned"
-  # even though IMAGE_TAG still resolves to a real, pullable SHA tag.
-  # This is what makes `cat /opt/snipeit/CURRENT_RELEASE` on the VM
-  # trustworthy for "is this a stable named release or a dev build".
-  IMAGE_TAG: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) && github.ref_name || (inputs.image_tag || github.sha) }}
-  VERSION: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) && github.ref_name || (inputs.image_tag != '' && inputs.image_tag || 'unversioned') }}
+  # summary (see the "Write release marker" step below). Both now derive
+  # from the single shared `image_tag` input rather than re-deriving a tag
+  # release from `github.ref` -- release.yml's workflow_call always
+  # supplies a real `image_tag` (the tag name itself, e.g. "v1.4.2"), so
+  # this ternary picks that up the same way it already picks up an
+  # existing tag supplied to workflow_dispatch. Only a workflow_dispatch
+  # fresh build (image_tag left blank) falls through to `github.sha` for
+  # IMAGE_TAG and "unversioned" for VERSION -- that's the only case where
+  # `cat /opt/snipeit/CURRENT_RELEASE` on the VM should NOT show a real
+  # release name.
+  IMAGE_TAG: ${{ inputs.image_tag != '' && inputs.image_tag || github.sha }}
+  VERSION: ${{ inputs.image_tag != '' && inputs.image_tag || 'unversioned' }}
   # NOTE: BACKEND_IMAGE/FRONTEND_IMAGE deliberately do NOT live here
   # anymore -- they used to be a ternary on `inputs.environment` alone
   # (the dropdown), which meant this GitHub Environment's own `ENVIRONMENT`
@@ -142,7 +169,7 @@ jobs:
     # gates approval twice in one run (here, then again on `deploy`) --
     # accepted trade-off for reading that environment's own variable
     # correctly.
-    environment: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) && 'prod' || inputs.environment }}
+    environment: ${{ (github.event_name == 'workflow_call') && 'prod' || inputs.environment }}
     outputs:
       build_env: ${{ steps.resolve.outputs.build_env }}
       # BUG FIX -- see this file's top-of-file BACKEND_IMAGE/FRONTEND_IMAGE
@@ -184,11 +211,14 @@ jobs:
   verify-ci:
     name: Verify CI already passed for this commit
     runs-on: ubuntu-latest
-    # Same gate `ci` itself uses below: only relevant on a fresh-build path
-    # (a version-tag push, or a workflow_dispatch with image_tag left
-    # blank) -- a workflow_dispatch that reuses an existing image_tag never
-    # needed CI in the first place, on either path.
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.image_tag == '' }}
+    # Same gate `ci` itself uses below: only relevant on the
+    # workflow_dispatch fresh-build path (image_tag left blank) --
+    # release.yml's workflow_call path already ran this exact gate itself
+    # before ever calling this workflow (same reasoning as
+    # deploy-azure-aca.yml's identical `verify-ci` job), and a
+    # workflow_dispatch that reuses an existing image_tag never needed CI
+    # in the first place either.
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.image_tag == '' }}
     permissions:
       actions: read
     outputs:
@@ -234,7 +264,7 @@ jobs:
 
   ci:
     needs: [verify-ci]
-    if: ${{ needs.verify-ci.outputs.already_passed != 'true' && (github.event_name != 'workflow_dispatch' || inputs.image_tag == '') }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.image_tag == '' && needs.verify-ci.outputs.already_passed != 'true' }}
     uses: ./.github/workflows/ci.yml
     with:
       # infra/main.bicep is the ACA path only (see infra-deploy.yml) --
@@ -254,7 +284,7 @@ jobs:
     # an existing image_tag" skip AND the new "verify-ci already confirmed
     # this commit passed" skip above -- both are legitimate reasons to
     # proceed without re-running `ci` itself.
-    if: ${{ always() && (needs.ci.result == 'success' || needs.ci.result == 'skipped') && needs.resolve-target.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.image_tag == '') }}
+    if: ${{ always() && (needs.ci.result == 'success' || needs.ci.result == 'skipped') && needs.resolve-target.result == 'success' && github.event_name == 'workflow_dispatch' && inputs.image_tag == '' }}
     permissions:
       contents: read
     # Delegates to build-push-images.yml -- the single source of truth for
@@ -285,8 +315,16 @@ jobs:
       # unlike `env` -- IS allowed here; see resolve-target's own comment
       # for why both have to be resolved in a separate job in the first
       # place.
-      image_tags: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) && github.ref_name || (inputs.image_tag || github.sha) }} ${{ github.sha }} latest
-      version_label: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) && github.ref_name || (inputs.image_tag != '' && inputs.image_tag || 'unversioned') }}
+      # This job's `if:` above only ever lets it run on the workflow_dispatch
+      # fresh-build path (image_tag left blank) -- a tagged release
+      # (workflow_call) always skips it, since release.yml already built
+      # and pushed the images itself before calling this workflow. So
+      # `inputs.image_tag` is always empty here in practice; this falls
+      # back straight to `github.sha`/'unversioned' rather than carrying
+      # the old tag-release branch of the ternary, which could never be
+      # true on this path anymore.
+      image_tags: ${{ github.sha }} latest
+      version_label: unversioned
       build_env: ${{ needs.resolve-target.outputs.build_env }}
       trivy_blocking: true
     secrets: inherit
@@ -316,7 +354,7 @@ jobs:
     # referencing env.ENVIRONMENT here parses but is invalid at trigger
     # time and produces "Unrecognized named-value: 'env'". Inlined the
     # same expression the top-of-file `env.ENVIRONMENT` is computed from.
-    environment: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) && 'prod' || inputs.environment }}
+    environment: ${{ (github.event_name == 'workflow_call') && 'prod' || inputs.environment }}
     env:
       # What the backend/worker/beat containers actually read as their own
       # ENVIRONMENT env var (see backend/config.py's apply_environment_defaults).
