@@ -679,7 +679,6 @@ not you ever push an image).
    | `JWT_SECRET_KEY` | per-environment | Generate with `openssl rand -hex 32` |
    | `ROOT_ADMIN_BOOTSTRAP_PASSWORD` | per-environment | Optional — the root admin's initial password. Leave unset to have `0002_bootstrap_root_admin.py` generate a random one and print it once instead (see README's "Viewing the one-time-generated root admin password"). The root admin's username/display name (`SUPER_ADMIN_USERNAME`/`SUPER_ADMIN_NAME`) are set separately — see the Variables table below, not here. |
    | `SMTP_HOST` / `SMTP_USERNAME` / `SMTP_PASSWORD` / `SMTP_FROM_EMAIL` | per-environment | Optional — required together if `NOTIFICATIONS_ENABLED=true` (see the Variables list below). Any RFC 5321 SMTP server works (your own Postfix, SendGrid, Mailgun, AWS SES's SMTP endpoint, ...) — no vendor-specific SDK. See [POST_DEPLOYMENT.md](POST_DEPLOYMENT.md). |
-   | `EMAIL_PROVIDER` | per-environment | Optional, `smtp` (default) \| `brevo` \| `resend` — which transport `send_email()` uses. Set this to `brevo` or `resend` instead of using the four `SMTP_*` secrets above if your outbound network blocks plain SMTP ports (both alternatives send over plain HTTPS). See `infra/main.bicep`'s `emailProvider` param. |
    | `BREVO_API_KEY` | per-environment | Only read when `EMAIL_PROVIDER=brevo` — from your Brevo (formerly Sendinblue) account's API Keys page. |
    | `RESEND_API_KEY` | per-environment | Only read when `EMAIL_PROVIDER=resend` — from your Resend account's API Keys page. |
    | `ADMIN_NOTIFICATION_EMAILS` | per-environment | Optional — comma-separated extra recipients for extension-request alerts, on top of Admins/Managers/the Super Admin, who are covered automatically. |
@@ -722,6 +721,7 @@ Leave otelExporterOtlpHeaders (and otelExporterOtlpEndpoint) empty and use otelA
    | `LOGIN_RATE_LIMIT_WINDOW_SECONDS` | per-environment | Optional — the window `LOGIN_RATE_LIMIT_MAX` is measured over, in seconds. Default `60` if unset. |
    | `ACCOUNT_LOCKOUT_MAX_ATTEMPTS` | per-environment | Optional — failed logins before an account is locked out entirely (separate from, and on top of, the rate limit above). Default `5` if unset. |
    | `ACCOUNT_LOCKOUT_DURATION_MINUTES` | per-environment | Optional — how long a lockout from the setting above lasts. Default `15` if unset. |
+   | `EMAIL_PROVIDER` | per-environment | Optional, `smtp` (default) \| `brevo` \| `resend` — which transport `send_email()` uses. Set this to `brevo` or `resend` instead of using the four `SMTP_*` secrets above if your outbound network blocks plain SMTP ports (both alternatives send over plain HTTPS). See `infra/main.bicep`'s `emailProvider` param. |
    | `SUPER_ADMIN_USERNAME` | per-environment | Optional — the root admin's login username. Default `superadmin` if unset. |
    | `SUPER_ADMIN_NAME` | per-environment | Optional — the root admin's display name. Default `Super Admin` if unset. |
    | `SMTP_PORT` | per-environment | Optional — only relevant once `NOTIFICATIONS_ENABLED=true`. Default `587` if unset. |
