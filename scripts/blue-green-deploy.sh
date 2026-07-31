@@ -59,10 +59,33 @@ RAMP_PAUSE_SECONDS="${RAMP_PAUSE_SECONDS:-20}"
 mkdir -p "$STATUS_DIR"
 
 # --- load current state ------------------------------------------------------
-set -a
-# shellcheck disable=SC1091
-source .env
-set +a
+# Deliberately NOT a literal `source .env` / `. .env` anymore. That runs
+# .env as actual shell code, so any value containing whitespace that isn't
+# quoted (e.g. an old/hand-edited `SITE_NAME=Snipe-IT Lite`) gets word-split
+# and bash tries to RUN the leftover word as a command -- e.g.
+# ".env: line 31: Lite: command not found" -- which aborts this whole
+# script under `set -euo pipefail` before the rollout ever starts. This
+# repo's own infra-vm/cloud-init.yaml and sync-secrets-vm.yml both already
+# quote every free-text value for exactly this reason when they WRITE
+# .env, but that only protects `.env` at the moment those scripts run --
+# it does nothing for a `.env` that already exists unquoted (created
+# before that fix, or hand-edited on the VM directly), which is the
+# failure mode this loop guards against instead: it reads .env as plain
+# KEY=VALUE data (never executed as shell), so a value's internal spaces
+# can never be parsed as a separate command, quoted or not.
+while IFS='=' read -r _env_key _env_value; do
+  # Skip blank lines and comments; a bare `#` first char is enough since
+  # .env never legitimately has a key starting with `#`.
+  [[ -z "$_env_key" || "$_env_key" == \#* ]] && continue
+  # Strip one layer of surrounding double or single quotes, if present,
+  # so already-quoted values (the common/correct case) come out the same
+  # as before rather than keeping their literal quote characters.
+  if [[ "$_env_value" == \"*\" || "$_env_value" == \'*\' ]]; then
+    _env_value="${_env_value:1:-1}"
+  fi
+  export "$_env_key=$_env_value"
+done < .env
+unset _env_key _env_value
 ACTIVE_SLOT="${ACTIVE_SLOT:-blue}"
 if [[ "$ACTIVE_SLOT" == "blue" ]]; then NEW_SLOT="green"; else NEW_SLOT="blue"; fi
 STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
