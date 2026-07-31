@@ -91,6 +91,53 @@ if [[ "$ACTIVE_SLOT" == "blue" ]]; then NEW_SLOT="green"; else NEW_SLOT="blue"; 
 STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 : > "$STATUS_LOG"
 
+# infra-vm/cloud-init.yaml seeds $WEIGHTS_FILE ONCE, on a brand-new VM's
+# first boot, at "100 0" (100% ACTIVE_SLOT) -- see that file's own
+# comment. It is deliberately NOT re-applied on later deploys (so an
+# in-progress rollout's live weights are never stomped -- see
+# deploy-azure-vm.yml's sync step comment), which also means a VM
+# provisioned before caddy/weights.conf existed in cloud-init, or one
+# where the file/directory was later lost some other way, is left with
+# nothing to ever create it -- every rollout hits `caddy/weights.conf: No
+# such file or directory` at the very first set_weights call and fails
+# before doing anything. Reproduce that same one-time seed here instead,
+# gated on the file not already existing, so this is a no-op noop on
+# every VM that already has it (the normal case) and a one-time
+# self-heal on one that doesn't -- matching whatever $ACTIVE_SLOT .env
+# already claims is live, not necessarily "blue", so this never
+# contradicts containers that are already running.
+if [[ ! -f "$WEIGHTS_FILE" ]]; then
+  echo "$WEIGHTS_FILE missing or not a regular file -- seeding 100% traffic to current ACTIVE_SLOT ($ACTIVE_SLOT) before starting rollout"
+  mkdir -p "$(dirname "$WEIGHTS_FILE")"
+  # Docker's default behavior for a bind-mount source that doesn't exist
+  # on the host at container-start time is to auto-create it AS A
+  # DIRECTORY (it can't know it was meant to be a file) -- which is
+  # exactly what caddy's own "File to import not found" error means:
+  # /etc/caddy/snippets/weights.conf inside the container is that same
+  # empty directory, not a file Caddy's `import` can read. `[[ ! -f ]]`
+  # above is already false for a directory too, so this branch catches
+  # that case as well as truly-missing; rmdir only removes it if it's
+  # actually empty (the normal case for something Docker auto-created
+  # and nothing has written to since) -- anything else here is
+  # unexpected and left alone rather than force-deleted.
+  [[ -d "$WEIGHTS_FILE" ]] && { rmdir "$WEIGHTS_FILE" 2>/dev/null || true; }
+  if [[ "$ACTIVE_SLOT" == "blue" ]]; then
+    echo "lb_policy weighted_round_robin 100 0" > "$WEIGHTS_FILE"
+  else
+    echo "lb_policy weighted_round_robin 0 100" > "$WEIGHTS_FILE"
+  fi
+  # A directory-to-file swap underneath an already-established bind
+  # mount isn't reliably picked up by a container that's already
+  # running -- `caddy reload` alone (what set_weights normally does)
+  # re-reads Caddy's config from within the SAME stale mount, not a
+  # fresh one. Recreating (not just restarting) `caddy` here forces
+  # Docker to re-resolve the mount against the real file that now
+  # exists. A brief blip on this one self-heal is a one-time cost;
+  # every deploy after this one lands on a VM that already has a real
+  # $WEIGHTS_FILE and never takes this branch again.
+  docker compose -f "$COMPOSE_FILE" up -d --force-recreate --no-deps caddy
+fi
+
 write_status() {
   # write_status <phase> [extra_json_fields_without_braces]
   local phase="$1" extra="${2:-}"
