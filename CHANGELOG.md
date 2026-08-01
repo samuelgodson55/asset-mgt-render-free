@@ -15,6 +15,12 @@ above the marker are yours to keep.
 
 <!-- release-notes-insertion-point -->
 
+## [v1.0.1] - 2026-08-01
+- ground 1 (6176a23)
+- ground o (8a598e9)
+- release workflow bug #2 (59e9269)
+- VM worflow issue #1 (cd1906d)
+
 ## [v1.0.1] - 2026-07-28
 - infra fix (a927219)
 - VM not provisioned well fix (2660753)
