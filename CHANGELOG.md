@@ -15,6 +15,12 @@ above the marker are yours to keep.
 
 <!-- release-notes-insertion-point -->
 
+## [v1.0.1] - 2026-08-01
+- fix branding (8a7e45d)
+- update ci (c214824)
+- mfa improvement (1d40688)
+- docs(changelog): v1.0.0 (838c78d)
+
 ## [v1.0.0] - 2026-08-01
 - tag push calls VM & ACA (994e0fc)
 - docs(changelog): v1.0.1 (90544c3)
