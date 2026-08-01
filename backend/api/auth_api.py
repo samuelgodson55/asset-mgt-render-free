@@ -139,8 +139,16 @@ def mfa_setup_confirm(req: MfaSetupConfirmRequest, db: Session = Depends(get_db)
 @router.post("/mfa/verify")
 def mfa_verify(req: MfaVerifyRequest, db: Session = Depends(get_db), response: Response = None):
     result = auth_service.mfa_verify(db, req.mfa_pending_token, req.code)
-    _set_session_cookie(response, result["token"])
-    result.pop("token", None)
+    # SECURITY: a correct RECOVERY code doesn't grant a session here --
+    # it retires the old TOTP secret and comes back as an
+    # `mfa_setup_required` challenge instead (see auth_service.py's
+    # mfa_verify() docstring), same "no `token` means no cookie yet"
+    # shape login() above already handles for mfa_required/
+    # mfa_setup_required. The browser isn't authenticated until
+    # POST /auth/mfa/setup/confirm also succeeds against the NEW secret.
+    if "token" in result:
+        _set_session_cookie(response, result["token"])
+        result.pop("token", None)
     return result
 
 

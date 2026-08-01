@@ -151,7 +151,13 @@ def test_enrollment_issues_ten_distinct_recovery_codes(client):
         assert len(code) == 11 and code[5] == "-"  # XXXXX-XXXXX
 
 
-def test_recovery_code_logs_in_and_is_single_use(client):
+def test_recovery_code_triggers_reenrollment_not_immediate_login(client, db_session):
+    """A correct recovery code means the original device is gone, so
+    login isn't completed under the OLD (now-untrusted) secret -- the
+    caller instead gets a fresh mfa_setup_required challenge, exactly
+    like a brand-new account's first login, so a NEW device can enroll."""
+    import models
+
     secret, codes = _enroll_super_admin(client)
     client.post("/api/auth/logout")
 
@@ -161,19 +167,76 @@ def test_recovery_code_logs_in_and_is_single_use(client):
     first_use = client.post("/api/auth/mfa/verify", json={"mfa_pending_token": pending_token, "code": code})
     assert first_use.status_code == 200
     body = first_use.json()
+    assert body["mfa_setup_required"] is True
     assert body["recovery_code_used"] is True
-    assert body["recovery_codes_remaining"] == 9
+    assert body["mfa_setup_token"]
+    new_secret = body["totp_secret"]
+    assert new_secret != secret  # a genuinely fresh secret, not the old (compromised-device) one
+    assert body["otpauth_uri"].startswith("otpauth://totp/")
+    # No session was granted yet -- only a setup challenge.
+    assert client.get("/api/auth/me").status_code == 401
+
+    # The recovery code itself is still single-use, exactly as before --
+    # reuse the still-valid pending token from the first attempt (a fresh
+    # login no longer hands back a NEW mfa_pending_token at this point,
+    # since totp_enabled is now False -- see the DB assertion below).
+    reuse = client.post("/api/auth/mfa/verify", json={"mfa_pending_token": pending_token, "code": code})
+    assert reuse.status_code == 401
+
+    # And the account is genuinely mid-re-enrollment in the DB: the old
+    # secret is gone and totp_enabled is back to False.
+    su = db_session.query(models.User).filter(models.User.role == "super_admin").first()
+    assert su.totp_enabled is False
+    assert su.totp_secret_encrypted is not None  # a NEW (unconfirmed) secret, not the old one
+
+
+def test_recovery_code_reenrollment_completes_login_and_issues_fresh_codes(client):
+    """Finishing the challenge from a recovery-code login (confirming a
+    LIVE code from the new secret via the normal mfa/setup/confirm
+    endpoint) grants the real session and reissues a whole new batch of
+    recovery codes -- invalidating every remaining old one too."""
+    secret, codes = _enroll_super_admin(client)
+    client.post("/api/auth/logout")
+
+    pending_token = client.post("/api/auth/login", json=SUPER_ADMIN).json()["mfa_pending_token"]
+    challenge = client.post(
+        "/api/auth/mfa/verify", json={"mfa_pending_token": pending_token, "code": codes[0]}
+    ).json()
+    new_secret = challenge["totp_secret"]
+
+    confirm = client.post(
+        "/api/auth/mfa/setup/confirm",
+        json={"mfa_setup_token": challenge["mfa_setup_token"], "code": pyotp.TOTP(new_secret).now()},
+    )
+    assert confirm.status_code == 200
+    confirm_body = confirm.json()
+    assert confirm_body["role"] == "super_admin"
+    new_codes = confirm_body["recovery_codes"]
+    assert len(new_codes) == 10
+    assert set(new_codes).isdisjoint(set(codes))  # remaining old codes are gone too
+
+    # Real session now exists.
     assert client.get("/api/auth/me").status_code == 200
 
-    # Same code again, fresh login attempt -- must be rejected (single-use).
+    # The OLD TOTP secret no longer works for a subsequent login.
     client.post("/api/auth/logout")
     pending_token_2 = client.post("/api/auth/login", json=SUPER_ADMIN).json()["mfa_pending_token"]
-    reuse = client.post("/api/auth/mfa/verify", json={"mfa_pending_token": pending_token_2, "code": code})
-    assert reuse.status_code == 401
+    old_secret_attempt = client.post(
+        "/api/auth/mfa/verify", json={"mfa_pending_token": pending_token_2, "code": pyotp.TOTP(secret).now()}
+    )
+    assert old_secret_attempt.status_code == 401
+
+    # ...but the NEW one does.
+    pending_token_3 = client.post("/api/auth/login", json=SUPER_ADMIN).json()["mfa_pending_token"]
+    new_secret_attempt = client.post(
+        "/api/auth/mfa/verify", json={"mfa_pending_token": pending_token_3, "code": pyotp.TOTP(new_secret).now()}
+    )
+    assert new_secret_attempt.status_code == 200
 
 
 def test_recovery_code_accepted_lowercase(client):
-    """Codes are generated uppercase but a lowercase paste should still work."""
+    """Codes are generated uppercase but a lowercase paste should still
+    work -- still triggers the re-enrollment challenge, not a 401."""
     secret, codes = _enroll_super_admin(client)
     client.post("/api/auth/logout")
     pending_token = client.post("/api/auth/login", json=SUPER_ADMIN).json()["mfa_pending_token"]
@@ -181,6 +244,7 @@ def test_recovery_code_accepted_lowercase(client):
         "/api/auth/mfa/verify", json={"mfa_pending_token": pending_token, "code": codes[0].lower()}
     )
     assert verify.status_code == 200
+    assert verify.json()["mfa_setup_required"] is True
 
 
 def test_garbage_recovery_shaped_code_rejected(client):
@@ -212,12 +276,15 @@ def test_regenerate_recovery_codes_invalidates_old_ones(client):
     assert old_rejected.status_code == 401
 
     # ...but a NEW one does (fresh pending token, since the failed attempt
-    # above didn't lock the account out on its own).
+    # above didn't lock the account out on its own). Accepting it starts
+    # the re-enrollment challenge (see test_recovery_code_triggers_
+    # reenrollment_not_immediate_login) rather than an immediate session.
     pending_token_2 = client.post("/api/auth/login", json=SUPER_ADMIN).json()["mfa_pending_token"]
     new_accepted = client.post(
         "/api/auth/mfa/verify", json={"mfa_pending_token": pending_token_2, "code": new_codes[0]}
     )
     assert new_accepted.status_code == 200
+    assert new_accepted.json()["mfa_setup_required"] is True
 
 
 def test_regenerate_recovery_codes_requires_correct_password(client):

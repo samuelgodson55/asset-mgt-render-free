@@ -313,9 +313,29 @@ def mfa_verify(db: Session, mfa_pending_token: str, code: str) -> dict:
     live 6-digit TOTP code OR one of the account's unused recovery codes
     (see models.py's RecoveryCode docstring -- format-detected via
     security.py's is_recovery_code_format(), so the caller doesn't need
-    to say up front which kind it's submitting) and, on success, issues
-    the real session cookie exactly like a normal password-only login()
-    would.
+    to say up front which kind it's submitting).
+
+    A live TOTP code, on success, issues the real session cookie exactly
+    like a normal password-only login() would.
+
+    A recovery code is different: recovery codes exist for exactly one
+    scenario -- the device holding the TOTP secret (phone lost, wiped,
+    traded in, app uninstalled, whatever) is no longer available, so the
+    account's *only* other route back in is used. Simply logging the
+    person in at that point, still trusting the same TOTP secret, would
+    leave them right back where they started: enrolled against a secret
+    that lives on a device they no longer have, with no way to ever see
+    that secret again (see mfa_setup_confirm()'s docstring -- it's
+    intentionally never re-shown) and one fewer recovery code before
+    they're locked out for good. Instead, a correct recovery code here
+    ends the account's trust in the old secret immediately (totp_enabled
+    reset to False, the encrypted secret cleared) and hands back the
+    exact same `mfa_setup_required` shape login() returns for a
+    brand-new account -- a fresh secret to enroll on whatever device is
+    at hand right now. The real session (and a fresh batch of recovery
+    codes, replacing every remaining old one) is only granted once
+    mfa_setup_confirm() below verifies a live code from that new
+    enrollment, same as any other first-time setup.
 
     SECURITY: wrong-code attempts of EITHER kind increment/consult the
     SAME per-account `failed_login_attempts`/`locked_until` columns a
@@ -324,6 +344,7 @@ def mfa_verify(db: Session, mfa_pending_token: str, code: str) -> dict:
     repeated-guessing attack that lockout already exists to slow down,
     so it's reused rather than building parallel counters per code type.
     """
+
     user = _load_mfa_target_user(db, mfa_pending_token, MFA_PENDING_TOKEN_PURPOSE)
     if not user.totp_enabled or not user.totp_secret_encrypted:
         raise HTTPException(status_code=401, detail="Invalid login session. Please log in again.")
@@ -341,7 +362,7 @@ def mfa_verify(db: Session, mfa_pending_token: str, code: str) -> dict:
             detail=f"Account temporarily locked due to repeated failed attempts. Try again in {remaining_minutes} minute(s).",
         )
 
-    recovery_codes_remaining = None
+    used_recovery_code = False
     if is_recovery_code_format(code):
         normalized = normalize_recovery_code(code)
         matched_row = None
@@ -354,14 +375,7 @@ def mfa_verify(db: Session, mfa_pending_token: str, code: str) -> dict:
         code_is_valid = matched_row is not None
         if code_is_valid:
             matched_row.used_at = now
-            db.commit()
-            recovery_codes_remaining = db.query(models.RecoveryCode).filter(
-                models.RecoveryCode.user_id == user.id, models.RecoveryCode.used_at.is_(None),
-            ).count()
-            logger.info(
-                "2FA verification succeeded via recovery code",
-                extra={"user_id": user.id, "recovery_codes_remaining": recovery_codes_remaining},
-            )
+            used_recovery_code = True
     else:
         try:
             secret = decrypt_totp_secret(user.totp_secret_encrypted)
@@ -385,22 +399,50 @@ def mfa_verify(db: Session, mfa_pending_token: str, code: str) -> dict:
     if user.failed_login_attempts or user.locked_until:
         user.failed_login_attempts = 0
         user.locked_until = None
-        db.commit()
 
+    if used_recovery_code:
+        # The device that held the old TOTP secret is, by definition,
+        # unavailable right now -- that's the only reason a recovery code
+        # was needed at all. Stop trusting that secret immediately and
+        # fall back into the exact same "not enrolled yet" shape login()
+        # uses for a first-ever super_admin login, so this device can
+        # enroll a fresh one. Nothing here grants a session: that still
+        # only happens once mfa_setup_confirm() verifies a live code
+        # against the NEW secret below (which also reissues a full,
+        # fresh batch of recovery codes -- see _issue_recovery_codes()
+        # -- invalidating whatever was left of the old batch too, since
+        # a lost device is reason enough to treat the old codes as
+        # potentially compromised right along with the old secret).
+        user.totp_enabled = False
+        user.totp_secret_encrypted = None
+        secret = generate_totp_secret()
+        user.totp_secret_encrypted = encrypt_totp_secret(secret)
+        db.commit()
+        setup_token = create_mfa_token(user, MFA_SETUP_TOKEN_PURPOSE)
+        logger.info(
+            "2FA re-enrollment started via recovery code (original device unavailable)",
+            extra={"user_id": user.id, "email": user.email},
+        )
+        return {
+            "mfa_setup_required": True,
+            "recovery_code_used": True,
+            "message": (
+                "Recovery code accepted. Your previous authenticator is no longer trusted -- "
+                "set up two-factor authentication on this device to finish signing in."
+            ),
+            "mfa_setup_token": setup_token,
+            "totp_secret": secret,
+            "otpauth_uri": totp_provisioning_uri(secret, user.email),
+        }
+
+    db.commit()
     token = create_access_token(user)
     logger.info("2FA verification succeeded, login complete", extra={"user_id": user.id, "email": user.email})
-    result = _build_login_result(
+    return _build_login_result(
         {"user_id": user.id, "name": user.name, "username": user.username, "role": user.role, "department": user.department},
         token,
         not user.is_verified,
     )
-    if recovery_codes_remaining is not None:
-        # Only present when this login was completed WITH a recovery code
-        # -- lets the frontend nudge "you're running low, consider
-        # regenerating" without needing a separate lookup.
-        result["recovery_code_used"] = True
-        result["recovery_codes_remaining"] = recovery_codes_remaining
-    return result
 
 
 def regenerate_recovery_codes(db: Session, current_user: dict, password: str) -> dict:

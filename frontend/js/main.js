@@ -268,6 +268,20 @@ function toggleMfaVerifyMode() {
   setMfaVerifyMode(mfaVerifyMode === 'totp' ? 'recovery' : 'totp');
 }
 
+// #mfa-setup-screen is shown for two different situations that share the
+// same fields (fresh secret + QR + confirm form) but need different
+// framing: a brand-new account's FIRST-ever enrollment (login()'s
+// mfa_setup_required), vs. re-enrolling on a new device after a recovery
+// code retired the old secret (mfa_verify()'s mfa_setup_required -- see
+// auth_service.py's mfa_verify() docstring). `message` is the backend's
+// own wording for the latter case; omit it (or pass nothing) to fall back
+// to the generic first-time-setup copy.
+const MFA_SETUP_DEFAULT_DESCRIPTION = 'This account requires 2FA. Add it to an authenticator app (Google Authenticator, Authy, 1Password, etc.), then confirm the code it shows below.';
+function setMfaSetupDescription(message) {
+  const description = document.getElementById('mfa-setup-description');
+  if (description) description.textContent = message || MFA_SETUP_DEFAULT_DESCRIPTION;
+}
+
 function cancelMfaFlow() {
   pendingMfaToken = null;
   const verifyCode = document.getElementById('mfa-verify-code');
@@ -723,6 +737,7 @@ document.addEventListener('DOMContentLoaded', () => {
           document.getElementById('mfa-setup-secret').textContent = data.totp_secret;
           document.getElementById('mfa-setup-uri').textContent = data.otpauth_uri;
           renderMfaSetupQr(data.otpauth_uri);
+          setMfaSetupDescription();
           showAuthScreen('mfa-setup-screen');
           document.getElementById('mfa-setup-code')?.focus();
           return;
@@ -741,6 +756,21 @@ document.addEventListener('DOMContentLoaded', () => {
       const code = document.getElementById('mfa-verify-code').value;
       try {
         const data = await verifyMfa(pendingMfaToken, code);
+        // A recovery code was accepted, but the account's old TOTP
+        // secret has now been retired along with it (see
+        // auth_service.py's mfa_verify() and auth.js's verifyMfa()) --
+        // this device still needs to enroll a fresh one before a real
+        // session is granted, exactly like a first-ever login would.
+        if (data.mfa_setup_required) {
+          pendingMfaToken = data.mfa_setup_token;
+          document.getElementById('mfa-setup-secret').textContent = data.totp_secret;
+          document.getElementById('mfa-setup-uri').textContent = data.otpauth_uri;
+          renderMfaSetupQr(data.otpauth_uri);
+          setMfaSetupDescription(data.message);
+          showAuthScreen('mfa-setup-screen');
+          document.getElementById('mfa-setup-code')?.focus();
+          return;
+        }
         pendingMfaToken = null;
         redirectByUserRole(data.role);
       } catch (error) {

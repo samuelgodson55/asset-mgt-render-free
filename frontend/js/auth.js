@@ -203,6 +203,19 @@ export async function verifyMfa(mfaPendingToken, code) {
   const data = await response.json();
   if (!response.ok) throw new Error(buildErrorMessage(response, data, 'Incorrect code. Please try again.'));
 
+  // A correct RECOVERY code doesn't grant a session by itself -- see
+  // backend/services/auth_service.py's mfa_verify(): losing the device
+  // that held the old TOTP secret means that secret can no longer be
+  // trusted either, so the backend responds with the same
+  // `mfa_setup_required` shape login() uses for a brand-new account
+  // instead of a completed login, and js/main.js's mfa-verify-form
+  // handler pivots to the 2FA setup screen so this (new) device can
+  // enroll. No cookie was set for this response either -- don't persist
+  // a session that doesn't exist yet.
+  if (data.mfa_setup_required) {
+    return data;
+  }
+
   persistSession({
     user_id: data.user_id,
     name: data.name,
