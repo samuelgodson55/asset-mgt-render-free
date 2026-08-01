@@ -495,6 +495,24 @@ server {
         proxy_pass https://$deploy_status_upstream/deploy-status/$deploy_status_path${DEPLOY_STATUS_SAS};
         proxy_http_version 1.1;
         proxy_set_header Host $deploy_status_upstream;
+        # BUG FIX: `auth_basic` above only authenticates the BROWSER's
+        # request to nginx -- it does not strip that request's own
+        # `Authorization: Basic ...` header before nginx proxies onward.
+        # Left alone, that header rides along on the upstream request
+        # ALONGSIDE the ?sv=...&sig=... SAS query string appended above.
+        # Blob Storage's REST API treats ANY Authorization header as an
+        # attempt at Shared Key/Bearer auth and validates THAT instead of
+        # falling back to the SAS in the query string -- so a client's
+        # Basic-auth header (which is not a valid Azure signature) makes
+        # every proxied request fail with a generic
+        # "AuthenticationFailed: Server failed to authenticate the
+        # request. Make sure the value of Authorization header is formed
+        # correctly including the signature." even though the SAS token
+        # itself is fine. Clearing the header here (an empty
+        # proxy_set_header value removes it entirely rather than sending
+        # it empty) ensures the SAS query string is the ONLY credential
+        # Blob Storage ever sees on this hop.
+        proxy_set_header Authorization "";
         # Required whenever proxy_pass's target host comes from a variable
         # AND the upstream is HTTPS -- without it nginx doesn't send SNI on
         # the upstream TLS handshake at all, which Blob Storage's
