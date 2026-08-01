@@ -373,6 +373,20 @@ server {
         return 308 /_deploy/;
     }
 
+    # Safety net for "/_deploy/index" specifically (no trailing slash, no
+    # .html). This exact path is what browsers autocomplete from history
+    # saved BEFORE the try_files BUG FIX below existed -- back when the old
+    # `index index.html;` directive really did 301 every "/_deploy/"
+    # request to "/_deploy/index" and then 404 (see that comment). The
+    # server-side bug is fixed, but a browser's address-bar suggestion
+    # keeps offering the now-dead URL from its history, and there's no
+    # real file at that path for try_files below to find. Redirect it
+    # rather than 404 so a stale suggestion (or an old bookmark/link) still
+    # lands on the working dashboard instead of looking broken again.
+    location = /_deploy/index {
+        return 308 /_deploy/;
+    }
+
     location /_deploy/ {
         alias /mnt/deploy-status/;
 
