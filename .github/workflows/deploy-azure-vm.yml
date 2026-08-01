@@ -104,14 +104,14 @@ concurrency:
   # a workflow_dispatch run always carries a concrete "vm-staging" or
   # "prod" in inputs.environment now that the dropdown has no
   # "from-variable" sentinel to resolve.
-  group: deploy-vm-${{ inputs.environment || 'prod' }}
+  group: deploy-vm-${{ (github.event_name == 'workflow_call') && 'prod' || inputs.environment }}
   cancel-in-progress: false
 
 env:
   # A tagged release (workflow_call, from release.yml) always targets prod,
   # exactly like release.yml's equivalent call does for the Container Apps
   # path -- there's no such thing as a "staging" named release.
-  IS_VERSION_TAG: ${{ inputs.environment == '' }}
+  IS_VERSION_TAG: ${{ github.event_name == 'workflow_call' }}
   # WHICH TARGET this run deploys to. A tagged release is always "prod";
   # a workflow_dispatch run always carries a concrete "vm-staging" or
   # "prod" in inputs.environment (the dropdown has no "from-variable"
@@ -121,7 +121,7 @@ env:
   # frontend build mode or which Docker Hub image repo gets pulled. Both
   # of those are BUILD_ENV/image_suffix, computed by the `resolve-target`
   # job below from each target's own `ENVIRONMENT` Actions variable.
-  ENVIRONMENT: ${{ inputs.environment || 'prod' }}
+  ENVIRONMENT: ${{ (github.event_name == 'workflow_call') && 'prod' || inputs.environment }}
   # IMAGE_TAG is the literal Docker tag pulled/deployed. VERSION is the
   # human-facing release name recorded on the VM and in this run's
   # summary (see the "Write release marker" step below). Both now derive
@@ -169,24 +169,7 @@ jobs:
     # gates approval twice in one run (here, then again on `deploy`) --
     # accepted trade-off for reading that environment's own variable
     # correctly.
-    #
-    # BUG FIX: this used to be `(github.event_name == 'workflow_call') &&
-    # 'prod' || inputs.environment`. That's always false when this
-    # workflow is called from release.yml -- github.event_name inside a
-    # called reusable workflow reflects the event that triggered the
-    # CALLER (release.yml's own `push` tag trigger), not 'workflow_call'.
-    # So this always fell through to `inputs.environment`, which doesn't
-    # exist on the workflow_call path (only `image_tag` does) and
-    # resolves to an empty string -- silently binding this job to NO
-    # GitHub Environment at all, instead of 'prod'. `resolve-target`'s own
-    # production-by-default fallback below masked the symptom here; the
-    # `deploy` job's identical bug (see its own `environment:` line) is
-    # what actually surfaced it, as every 'prod'-scoped secret
-    # (VM_HOST/VM_SSH_USER/etc.) reading back empty. `inputs.environment`
-    # is the reliable signal instead: always set on workflow_dispatch,
-    # always empty on workflow_call -- no dependence on github.event_name
-    # semantics at all.
-    environment: ${{ inputs.environment || 'prod' }}
+    environment: ${{ (github.event_name == 'workflow_call') && 'prod' || inputs.environment }}
     outputs:
       build_env: ${{ steps.resolve.outputs.build_env }}
       # BUG FIX -- see this file's top-of-file BACKEND_IMAGE/FRONTEND_IMAGE
@@ -371,20 +354,7 @@ jobs:
     # referencing env.ENVIRONMENT here parses but is invalid at trigger
     # time and produces "Unrecognized named-value: 'env'". Inlined the
     # same expression the top-of-file `env.ENVIRONMENT` is computed from.
-    #
-    # BUG FIX: this used to be `(github.event_name == 'workflow_call') &&
-    # 'prod' || inputs.environment` -- see resolve-target's own
-    # `environment:` comment above for the full "why". This is the copy
-    # of that bug that actually surfaced it: with this evaluating to an
-    # empty string on the tag-release (workflow_call) path, this job was
-    # never actually bound to the 'prod' GitHub Environment at runtime,
-    # so every Environment-scoped secret it reads (VM_HOST, VM_SSH_USER,
-    # VM_SSH_PRIVATE_KEY, CF_ACCESS_CLIENT_ID/SECRET) came back empty --
-    # "Validate required deploy secrets are set for this Environment"
-    # correctly caught it and failed fast with "Missing/empty secret(s)
-    # for GitHub Environment ''" (note the EMPTY environment name in that
-    # message -- the actual tell that this was never really 'prod').
-    environment: ${{ inputs.environment || 'prod' }}
+    environment: ${{ (github.event_name == 'workflow_call') && 'prod' || inputs.environment }}
     env:
       # What the backend/worker/beat containers actually read as their own
       # ENVIRONMENT env var (see backend/config.py's apply_environment_defaults).
