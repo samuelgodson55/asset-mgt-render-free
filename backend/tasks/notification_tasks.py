@@ -136,7 +136,7 @@ def send_overdue_notifications(self) -> dict:
                     days_overdue = (utc_now() - c.due_date).days
                     ok = notification_service.send_email(
                         to=c.user.email,
-                        subject=f"[Snipe-IT Lite] Overdue: {asset_name}",
+                        subject=f"[{settings.SITE_NAME}] Overdue: {asset_name}",
                         body=(
                             f"'{asset_name}' was due back on {c.due_date.strftime('%Y-%m-%d')} "
                             f"({days_overdue} day{'s' if days_overdue != 1 else ''} overdue).\n\n"
@@ -158,7 +158,7 @@ def send_overdue_notifications(self) -> dict:
             lines = "\n".join(_format_line(c) for c in overdue)
             ok = notification_service.send_email(
                 to=digest_emails,
-                subject=f"[Snipe-IT Lite] {len(overdue)} overdue checkout(s) system-wide",
+                subject=f"[{settings.SITE_NAME}] {len(overdue)} overdue checkout(s) system-wide",
                 body=f"The following checkouts are overdue:\n\n{lines}",
             )
             if ok:
@@ -205,7 +205,7 @@ def send_due_soon_reminders(self) -> dict:
                     days_until_due = max(1, math.ceil((c.due_date - utc_now()).total_seconds() / 86400))
                     ok = notification_service.send_email(
                         to=c.user.email,
-                        subject=f"[Snipe-IT Lite] Due soon: {asset_name}",
+                        subject=f"[{settings.SITE_NAME}] Due soon: {asset_name}",
                         body=(
                             f"'{asset_name}' is due back on {c.due_date.strftime('%Y-%m-%d')} "
                             f"(in {days_until_due} day{'s' if days_until_due != 1 else ''}).\n\n"
@@ -226,7 +226,7 @@ def send_due_soon_reminders(self) -> dict:
             lines = "\n".join(_format_line(c) for c in due_soon)
             ok = notification_service.send_email(
                 to=digest_emails,
-                subject=f"[Snipe-IT Lite] {len(due_soon)} checkout(s) due soon system-wide",
+                subject=f"[{settings.SITE_NAME}] {len(due_soon)} checkout(s) due soon system-wide",
                 body=f"The following checkouts are due within {settings.DUE_SOON_REMINDER_DAYS} day(s):\n\n{lines}",
             )
             if ok:

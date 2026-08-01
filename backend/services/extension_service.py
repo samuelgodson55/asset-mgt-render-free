@@ -200,7 +200,7 @@ def create_extension_request(db: Session, checkout_id: int, req: ExtensionReques
         asset_name = models.checkout_display_name(checkout)
         _notify(
             to=recipients,
-            subject=f"[Snipe-IT Lite] Extension requested: {asset_name}",
+            subject=f"[{settings.SITE_NAME}] Extension requested: {asset_name}",
             body=(
                 f"{requested_by_label} has requested to extend the due date on '{asset_name}'.\n\n"
                 f"Current due date: {checkout.due_date.strftime('%Y-%m-%d') if checkout.due_date else 'None'}\n"
@@ -400,14 +400,14 @@ def decide_extension_request(db: Session, request_id: int, decision: ExtensionDe
     # here.)
     if checkout.user and checkout.user.email:
         if decision.approve:
-            subject = f"[Snipe-IT Lite] Extension approved: {asset_name}"
+            subject = f"[{settings.SITE_NAME}] Extension approved: {asset_name}"
             body = (
                 f"Your extension request on '{asset_name}' was approved.\n\n"
                 f"New due date: {final_due_date.strftime('%Y-%m-%d')}\n"
                 f"Note from {user['email']}: {decision.note or '(none)'}"
             )
         else:
-            subject = f"[Snipe-IT Lite] Extension denied: {asset_name}"
+            subject = f"[{settings.SITE_NAME}] Extension denied: {asset_name}"
             body = (
                 f"Your extension request on '{asset_name}' was denied.\n\n"
                 f"Current due date remains: {checkout.due_date.strftime('%Y-%m-%d') if checkout.due_date else 'None'}\n"
@@ -477,7 +477,7 @@ def extend_checkout_directly(db: Session, checkout_id: int, req: DirectExtension
     if checkout.user and checkout.user.email:
         _notify(
             to=checkout.user.email,
-            subject=f"[Snipe-IT Lite] Due date extended: {asset_name}",
+            subject=f"[{settings.SITE_NAME}] Due date extended: {asset_name}",
             body=(
                 f"{user['email']} extended the due date on '{asset_name}'.\n\n"
                 f"New due date: {new_due_date.strftime('%Y-%m-%d')}\n"

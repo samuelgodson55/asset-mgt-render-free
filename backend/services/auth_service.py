@@ -627,7 +627,7 @@ def request_password_reset(db: Session, req: ForgotPasswordRequest, frontend_bas
     reset_link = f"{frontend_base_url.rstrip('/')}/?reset_token={plaintext_token}"
     sent = notification_service.send_email(
         to=user.email,
-        subject="Reset your Snipe-IT Lite password",
+        subject=f"Reset your {settings.SITE_NAME} password",
         body=(
             f"Hi {user.name},\n\n"
             "A password reset was requested for your account. If this was you, "
@@ -837,7 +837,7 @@ def _notify_identity_change(user: "models.User", previous_email: str, changes: l
     """
     body = (
         f"Hi {user.name},\n\n"
-        "Your Snipe-IT Lite account details were just updated:\n\n"
+        f"Your {settings.SITE_NAME} account details were just updated:\n\n"
         + "\n".join(f"- {line}" for line in changes)
         + "\n\nIf this was you, no action is needed. If you didn't make this change, "
         "reset your password immediately using the \"Forgot password?\" link on the "
@@ -845,6 +845,6 @@ def _notify_identity_change(user: "models.User", previous_email: str, changes: l
     )
     recipients = {previous_email, user.email}
     sent = notification_service.send_email(
-        to=list(recipients), subject="Your Snipe-IT Lite account details were updated", body=body,
+        to=list(recipients), subject=f"Your {settings.SITE_NAME} account details were updated", body=body,
     )
     logger.info("Identity change notification sent", extra={"user_id": user.id, "email_sent": sent})

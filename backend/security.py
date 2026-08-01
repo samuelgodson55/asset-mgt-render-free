@@ -260,7 +260,7 @@ def totp_provisioning_uri(secret: str, account_name: str) -> str:
     encodes the secret, issuer, and account label together so the app
     doesn't need a QR code specifically (most authenticator apps also
     accept typing the raw base32 secret in manually)."""
-    return pyotp.TOTP(secret).provisioning_uri(name=account_name, issuer_name="Snipe-IT Lite")
+    return pyotp.TOTP(secret).provisioning_uri(name=account_name, issuer_name=settings.SITE_NAME)
 
 
 def verify_totp_code(secret: str, code: str) -> bool:
