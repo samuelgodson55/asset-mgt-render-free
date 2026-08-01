@@ -24,7 +24,8 @@ summarizes.
 | Rollout driver | `.github/scripts/aca-blue-green.sh` (runs on the GitHub-hosted runner, talks to Azure via `az`) | `scripts/blue-green-deploy.sh` (runs **on the VM itself**, invoked over SSH) |
 | Traffic steps | 10% → 25% → 50% → 75% → 100% (production) / straight to 100% (staging, scale-to-zero) | 10% → 25% → 50% → 75% → 100% |
 | Rollback | Instant traffic-weight flip back to the still-running old revision | Instant Caddy reweight back to the still-running old slot |
-| Live status | `bash .github/scripts/aca-blue-green.sh status <app> <rg> --watch` | `https://<domain>/_deploy/` dashboard |
+| Live status (deployment's own view) | `bash .github/scripts/aca-blue-green.sh status <app> <rg> --watch` | `https://<domain>/_deploy/` dashboard |
+| Zero-downtime evidence (client's-eye view) | `scripts/poll-live-endpoint.sh` against the public frontend FQDN, backgrounded on the runner for the whole rollout | `scripts/poll-live-endpoint.sh` against `https://<domain>/`, backgrounded on the runner for the whole rollout |
 
 ---
 
@@ -105,6 +106,26 @@ Shows every revision's health, replica count, and live traffic weight,
 refreshed every 5s — works from a laptop with just `az login`, no GitHub
 Actions access needed. The workflow also writes old/new revision names and
 final traffic state into the run's own `GITHUB_STEP_SUMMARY`.
+
+This is the **deployment's own view** — proof each revision's readiness
+probe passed, and proof of the one end-to-end smoke test once both apps
+hit 100%. It is deliberately not proof that a real request stream against
+the live domain was uninterrupted **while** traffic was actually moving.
+That's a separate, independent check:
+
+```bash
+scripts/poll-live-endpoint.sh --url https://<frontend-fqdn>/
+```
+
+`deploy-azure-aca.yml`'s `deploy` job now runs this automatically —
+backgrounded on the runner, started before either app's rollout begins and
+stopped only after both slots are spun down — so every deploy produces a
+timestamped CSV of every request the live domain answered (or didn't)
+for the full rollout window, uploaded as the `zero-downtime-poll-evidence-*`
+workflow artifact. A `FAIL`/`ERROR` row anywhere in that CSV fails the job
+even if every internal health gate passed — see `scripts/poll-live-endpoint.sh`'s
+own header comment for why that's a meaningfully different check than the
+platform's own readiness probes.
 
 ---
 
@@ -207,6 +228,26 @@ GitHub Environment variable/secret — set once and both a fresh VM's first
 boot (`infra-deploy-vm.yml`) and any later rotation
 (`sync-secrets-vm.yml`) pick them up automatically, no SSH required. See
 `DEPLOYMENT_VM.md`'s "Monitoring a rollout" section.
+
+Like the ACA path, this dashboard is the **deployment's own view** — the
+rollout script's phase and each health check it ran against the slot
+directly. It's not proof a real client-facing request was uninterrupted
+while `blue-green-deploy.sh` was actually ramping Caddy's weights. That's
+what `scripts/poll-live-endpoint.sh` is for:
+
+```bash
+scripts/poll-live-endpoint.sh --url https://<domain>/
+```
+
+`deploy-azure-vm.yml` now runs this automatically too — backgrounded on
+the runner (not the VM, not over SSH: it has to observe the exact same
+path a real browser tab does, through Cloudflare and Caddy, not a
+shortcut) from just before the rollout starts through the smoke test
+after cutover. Every deploy produces a timestamped CSV of the live
+domain's request-by-request behavior for the full rollout window,
+uploaded as the `zero-downtime-poll-evidence-vm-*` workflow artifact, and
+a `FAIL`/`ERROR` row anywhere in it fails the job — independent of
+whether `blue-green-deploy.sh`'s own internal health checks all passed.
 
 ---
 

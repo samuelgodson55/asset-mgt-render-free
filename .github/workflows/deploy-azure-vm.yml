@@ -402,6 +402,43 @@ jobs:
           sudo dpkg -i /tmp/cloudflared.deb
           cloudflared --version
 
+      - name: Validate required deploy secrets are set for this Environment
+        # BUG FIX: without this, an unset/empty VM_HOST or VM_SSH_USER
+        # under this job's `environment:` (see this job's own comment on
+        # why that's a distinct GitHub Environment from the ACA path's)
+        # doesn't fail here -- GitHub Actions silently resolves a missing
+        # Environment secret to an empty string rather than erroring at
+        # trigger time. That empty value then flows all the way down into
+        # "$VM_SSH_USER@$VM_HOST" in "Self-heal /opt/snipeit ownership"
+        # (the first step that actually TRIES to use it), collapsing to a
+        # bare "@" -- which ssh's own argument parser rejects by dumping
+        # its full usage banner and exiting 255. That failure is real, but
+        # three steps and zero information away from "VM_HOST is unset for
+        # the 'prod' GitHub Environment" -- exactly the failure this repo
+        # already flagged as a known class (see `migrate`'s own
+        # `azure/login@v3` comment for the ACA-side equivalent). Checked
+        # here, immediately, against the actual Environment this run
+        # resolved to, so a missing secret is obvious the moment CI runs
+        # instead of masquerading as an ssh syntax error.
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_SSH_USER: ${{ secrets.VM_SSH_USER }}
+          VM_SSH_PRIVATE_KEY: ${{ secrets.VM_SSH_PRIVATE_KEY }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          MISSING=()
+          [ -z "$VM_HOST" ] && MISSING+=("VM_HOST")
+          [ -z "$VM_SSH_USER" ] && MISSING+=("VM_SSH_USER")
+          [ -z "$VM_SSH_PRIVATE_KEY" ] && MISSING+=("VM_SSH_PRIVATE_KEY")
+          [ -z "$CF_ACCESS_CLIENT_ID" ] && MISSING+=("CF_ACCESS_CLIENT_ID")
+          [ -z "$CF_ACCESS_CLIENT_SECRET" ] && MISSING+=("CF_ACCESS_CLIENT_SECRET")
+          if [ "${#MISSING[@]}" -gt 0 ]; then
+            echo "::error::Missing/empty secret(s) for GitHub Environment '$ENVIRONMENT': ${MISSING[*]}. Set these under Settings > Environments > $ENVIRONMENT > Environment secrets (Environment-scoped, not repo-level -- see this job's environment: line for why). This job will otherwise fail several steps later with an opaque 'ssh: usage: ...' / exit 255 instead of this message."
+            exit 1
+          fi
+          echo "All required deploy secrets are present for Environment '$ENVIRONMENT'."
+
       - name: Set up SSH (proxied through Cloudflare Access)
         env:
           VM_HOST: ${{ secrets.VM_HOST }}
@@ -534,6 +571,44 @@ jobs:
             docker compose -f docker-compose.vm.yml pull
           EOF
 
+      - name: Look up the live domain
+        id: domain
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_SSH_USER: ${{ secrets.VM_SSH_USER }}
+        # Fetched here (moved earlier from the "Smoke test" step below,
+        # which still uses this same output) purely so the poller started
+        # next has a URL to hit before the rollout itself begins -- the
+        # domain doesn't change mid-rollout, only which slot answers for it.
+        run: |
+          DOMAIN=$(ssh -i ~/.ssh/deploy_key "$VM_SSH_USER@$VM_HOST" "grep '^DOMAIN=' /opt/snipeit/.env | cut -d= -f2")
+          echo "domain=$DOMAIN" >> "$GITHUB_OUTPUT"
+
+      # CLIENT'S-EYE EVIDENCE, running on the RUNNER (not over SSH, not on
+      # the VM) for the same reason a browser tab left open during the
+      # swap would be off the VM too -- this has to observe the SAME path
+      # a real user's request takes (through Cloudflare/Caddy), not a
+      # shortcut that happens to skip whatever the actual outage risk is.
+      # scripts/deploy-status/ (the VM's own dashboard) and the health
+      # checks inside blue-green-deploy.sh below already prove the
+      # DEPLOYMENT's view of its own rollout; this proves the opposite
+      # side -- a real request stream against the live domain never saw a
+      # dropped or errored response DURING the ramp. Started here, before
+      # the rollout begins, and stopped only after the "Smoke test" step
+      # below, so it's running for the migration, replica start, health
+      # check, and the entire traffic ramp -- not just part of it.
+      - name: Start continuous endpoint poll (zero-downtime evidence)
+        id: poll_start
+        run: |
+          mkdir -p evidence
+          POLL_OUT="evidence/poll-vm-${{ github.run_id }}.csv"
+          echo "poll_out=$POLL_OUT" >> "$GITHUB_OUTPUT"
+          nohup bash scripts/poll-live-endpoint.sh \
+            --url "https://${{ steps.domain.outputs.domain }}/" --interval 1 --out "$POLL_OUT" \
+            > evidence/poll.log 2>&1 &
+          echo $! > evidence/poll.pid
+          echo "Polling https://${{ steps.domain.outputs.domain }}/ every 1s in the background (PID $(cat evidence/poll.pid)) -- will run through the full blue-green rollout and the smoke test below."
+
       - name: Blue-green rollout (migrate -> replica -> health-check -> ramp traffic -> retire old slot)
         id: rollout
         env:
@@ -577,11 +652,52 @@ jobs:
         # to before it received any traffic (see the rollout step above)
         # -- run here in --mode external, against the live public domain,
         # as a final end-to-end confirmation of the whole path including
-        # Cloudflare/Caddy, not just the container pair directly.
+        # Cloudflare/Caddy, not just the container pair directly. DOMAIN
+        # now comes from the "Look up the live domain" step above (also
+        # what the poller started before the rollout is using) rather than
+        # being re-fetched here, so both checks are guaranteed to be
+        # looking at the exact same domain.
         run: |
-          DOMAIN=$(ssh -i ~/.ssh/deploy_key "$VM_SSH_USER@$VM_HOST" "grep '^DOMAIN=' /opt/snipeit/.env | cut -d= -f2")
           ssh -i ~/.ssh/deploy_key "$VM_SSH_USER@$VM_HOST" \
-            "cd /opt/snipeit && ./scripts/health-check.sh --mode external --url https://$DOMAIN"
+            "cd /opt/snipeit && ./scripts/health-check.sh --mode external --url https://${{ steps.domain.outputs.domain }}"
+
+      # `always()` so this runs -- and the evidence gets uploaded -- even
+      # if an earlier step (migration, health check, ramp, or the smoke
+      # test above) failed. A poll log covering a FAILED rollout is exactly
+      # as valuable as one covering a clean success: it's proof of what the
+      # live domain actually did while blue-green-deploy.sh's own failure
+      # trap was restoring 100% traffic to the old slot. SIGTERM (not
+      # kill -9) so scripts/poll-live-endpoint.sh's own EXIT/TERM trap gets
+      # to run and write its pass/fail/error summary to evidence/poll.log.
+      - name: Stop continuous endpoint poll and collect evidence
+        id: poll_stop
+        if: always() && steps.poll_start.outcome == 'success'
+        run: |
+          if [ -f evidence/poll.pid ]; then
+            PID="$(cat evidence/poll.pid)"
+            kill -TERM "$PID" 2>/dev/null || true
+            for _ in $(seq 1 5); do
+              kill -0 "$PID" 2>/dev/null || break
+              sleep 1
+            done
+          fi
+          echo "::group::Live-endpoint poll summary (client's-eye view of the whole rollout)"
+          cat evidence/poll.log || echo "No poll.log found."
+          echo "::endgroup::"
+          POLL_OUT="${{ steps.poll_start.outputs.poll_out }}"
+          if [ -f "$POLL_OUT" ] && grep -q ',FAIL$\|,ERROR$' "$POLL_OUT"; then
+            echo "::error::Live-endpoint poll recorded at least one FAIL/ERROR during this rollout -- see evidence/poll.log above and the uploaded CSV artifact. This means a real client-facing request did NOT get an uninterrupted response during cutover, even though blue-green-deploy.sh's own internal health checks passed."
+            exit 1
+          fi
+          echo "Zero dropped/failed requests against the live domain for the full rollout -- see the uploaded CSV artifact for the full record."
+
+      - name: Upload live-endpoint poll evidence
+        if: always() && steps.poll_start.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: zero-downtime-poll-evidence-vm-${{ github.run_id }}
+          path: evidence/
+          retention-days: 90
 
 
       - name: Write release marker on the VM
