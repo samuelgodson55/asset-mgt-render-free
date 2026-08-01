@@ -738,9 +738,10 @@ goes through the manual `workflow_dispatch` run described here.
 This runs: `ci.yml` (full test suite) → build + push both images to Docker
 Hub → SSH in, sync `docker-compose.vm.yml`/`Caddyfile`/`caddy/weights.conf`/
 `scripts/*`, update `IMAGE_TAG` → `scripts/blue-green-deploy.sh` (migrate →
-start the idle slot with zero production traffic → health-check it
-directly → gradually ramp traffic onto it → spin the old slot down) →
-prune old image layers → smoke test `https://<domain>/` and
+start blue (the incoming slot) with zero production traffic → health-check
+it directly → gradually ramp traffic onto it → promote green onto the
+same image → spin blue back down) → prune old image layers → smoke test
+`https://<domain>/` and
 `https://<domain>/api/auth/me`. See "Zero-Downtime Blue-Green Deployments"
 below for the full mechanics and how to watch it happen live.
 
@@ -783,42 +784,68 @@ Log in as `superadmin` with that password, then change it immediately
 ## Zero-Downtime Blue-Green Deployments
 
 Every deploy on this path (`deploy-azure-vm.yml` → `scripts/blue-green-deploy.sh`)
-runs entirely on the currently-**inactive** slot before it ever receives a
-real request, and only shifts production traffic onto it gradually, after
-it proves itself:
+runs entirely on the idle slot before it ever receives a real request, and
+only shifts production traffic onto it gradually, after it proves itself.
+**Roles are fixed, not swapped from one deploy to the next:** `green` is
+always the active/production slot, `blue` is always the incoming candidate
+a rollout deploys into — see `scripts/blue-green-deploy.sh`'s own
+top-of-file comment for the full rationale. `docker compose -f
+docker-compose.vm.yml ps backend-green` (or the `/_deploy/` dashboard
+below) always answers "what's live right now," with no need to also check
+which slot most recently won a rollout.
 
 1. **Migrate.** `alembic upgrade head` runs against the incoming image,
-   against the one shared Postgres `db` — this is why migrations on this
-   path need to stay backward-compatible with the still-running old
-   slot's code for the duration of a rollout (add columns, don't rename
-   or drop them in the same release that also stops writing to them).
-2. **Start the replica, cold.** Only the idle slot's `backend-<slot>`/
-   `frontend-<slot>` pair starts. `caddy` is still sending 100% of
-   traffic to the active slot — the replica exists but is invisible to
-   real users.
-3. **Health-check the replica directly**, bypassing Caddy/production
-   traffic entirely (`scripts/health-check.sh --mode internal`):
-   `GET /healthz` (liveness), `GET /readyz` (DB reachable + schema
-   matches this build), a static-asset fetch through the replica's own
-   nginx, and a full `GET /api/auth/me` round trip through that same
-   nginx to that same slot's backend — proving the *pairing* works, not
-   just each half alone. This is the exact same bar the post-cutover
-   external smoke test already holds the live domain to
-   (`--mode external`) — see that script's own header comment.
-4. **Ramp traffic**, 10% → 25% → 50% → 75% → 100%, re-running the health
-   check against the replica after each step (now under real, if
-   partial, traffic — catches things an empty-load check can't). Each
-   step rewrites `caddy/weights.conf` and runs `caddy reload` — a
-   *graceful* reload that finishes in-flight requests and drops zero
-   connections, not a restart.
-5. **Spin the old slot down**, and flip `ACTIVE_SLOT`/`COMPOSE_PROFILES`
-   in `.env` so a future reboot comes back up on the new slot.
+   through `backend-blue`, against the one shared Postgres `db` — this is
+   why migrations on this path need to stay backward-compatible with the
+   still-running `green` slot's code for the duration of a rollout (add
+   columns, don't rename or drop them in the same release that also stops
+   writing to them).
+2. **Start the replica, cold.** Only `backend-blue`/`frontend-blue` start.
+   `caddy` is still sending 100% of traffic to `green` — the replica
+   exists but is invisible to real users.
+3. **Health-check `blue` directly**, bypassing Caddy/production traffic
+   entirely (`scripts/health-check.sh --mode internal`): `GET /healthz`
+   (liveness), `GET /readyz` (DB reachable + schema matches this build), a
+   static-asset fetch through the replica's own nginx, and a full `GET
+   /api/auth/me` round trip through that same nginx to that same slot's
+   backend — proving the *pairing* works, not just each half alone. This
+   is the exact same bar the post-cutover external smoke test already
+   holds the live domain to (`--mode external`) — see that script's own
+   header comment.
+4. **Ramp traffic onto `blue`**, 10% → 25% → 50% → 75% → 100%, re-running
+   the health check after each step (now under real, if partial, traffic —
+   catches things an empty-load check can't). Each step rewrites
+   `caddy/weights.conf` and runs `caddy reload` — a *graceful* reload that
+   finishes in-flight requests and drops zero connections, not a restart.
+5. **Promote.** Now that `blue` has proven itself under 100% real traffic,
+   bring `green` up on the exact same image `blue` is already running
+   (both share `docker-compose.vm.yml`'s `${IMAGE_TAG}` reference, so this
+   starts the identical build, not a separate deploy), health-check it
+   internally, then flip Caddy's weight straight back to 100% `green` /
+   0% `blue` — both slots are running the identical, already-proven image
+   at this point, so this is a same-code swap, not a second canary.
+   Finally stop+remove `blue`'s containers so it's idle again, ready for
+   the next incoming image.
 
-**On any failed check at any point**, the rollout stops immediately:
-traffic is left at (or restored to) 100% on the still-good old slot, and
-the new slot's containers are stopped. The old slot is never touched
-until the new one has already proven itself end to end — a bad deploy
-never causes an outage, it just doesn't roll out.
+**On any failed check before step 5**, the rollout stops immediately:
+traffic is left at (or restored to) 100% on the still-good `green` slot,
+and `blue`'s containers are stopped — `green` is never touched until
+`blue` has already proven itself end to end, so a bad deploy never causes
+an outage, it just doesn't roll out. **A failure DURING step 5 itself**
+(green's own health check failing after blue had already proven itself at
+100% traffic) is handled differently: the already-proven new image is
+left serving traffic on `blue` rather than reverting to `green`'s old,
+potentially-stale image. That state is flagged loudly (a non-zero exit,
+and `status.json`'s phase left as `promotion_failed`, not `done`) since
+it's the one case where "`green` = active" doesn't hold until the next
+successful deploy re-runs promotion.
+
+Unlike earlier versions of this script, `.env`'s `ACTIVE_SLOT`/
+`COMPOSE_PROFILES` are no longer flipped at the end of a rollout — with
+roles fixed, `COMPOSE_PROFILES` is simply `green`, permanently, set once
+by `infra-vm/cloud-init.yaml` on first boot. A reboot (or a bare `docker
+compose up -d`) always comes back up on `green` with no rollout needing to
+run first.
 
 `worker`/`beat` aren't behind Caddy at all (they don't serve HTTP), so
 they aren't blue-green'd — they're just restarted in place once the new
@@ -830,20 +857,21 @@ unlike an HTTP-serving restart would be.
 
 **Live, while it's running** — the GitHub Actions run itself streams every
 phase (`migrating`, `starting_replica`, `health_checking`, each ramp
-percentage, `cutover_complete`, `spinning_down_old`) and every individual
-check's pass/fail as it happens, in the "Deploy over SSH + migrate" step's
-log.
+percentage, `promoting`, `spinning_down_incoming`, `done`) and every
+individual check's pass/fail as it happens, in the "Deploy over SSH +
+migrate" step's log.
 
 **The `/_deploy/` dashboard** — a small live-updating page (auto-refreshes
-every 3s) showing the current phase, which slot is active/new, the live
-traffic split as a bar, and the full health-check log, backed by
-`status.json`/`checks.log` that `scripts/blue-green-deploy.sh` writes on
-every phase transition. Reachable at `https://<domain>/_deploy/`, gated by
-HTTP Basic Auth (Caddy's `basic_auth`, see `Caddyfile`) so it's never just
-sitting open on the same origin as the public app. **Set your own
-credentials before relying on this** — the values `cloud-init.yaml` seeds
-on first boot are random/unknown by design (the route fails *closed*, not
-open, until you set your own).
+every 3s) showing the current phase, which slot is active (green) and
+incoming (blue), the live traffic split as a bar, and the full
+health-check log, backed by `status.json`/`checks.log` that
+`scripts/blue-green-deploy.sh` writes on every phase transition. Reachable
+at `https://<domain>/_deploy/`, gated by HTTP Basic Auth (Caddy's
+`basic_auth`, see `Caddyfile`) so it's never just sitting open on the same
+origin as the public app. **Set your own credentials before relying on
+this** — the values `cloud-init.yaml` seeds on first boot are
+random/unknown by design (the route fails *closed*, not open, until you
+set your own).
 
 This is fully automated — no SSH required, in either direction:
 
@@ -888,13 +916,15 @@ EOF
 ```
 
 **A manual/emergency traffic shift** (bypassing the script entirely — e.g.
-you want to force 100% back onto one slot right now) is just editing
-`caddy/weights.conf` and reloading:
+you want to force traffic back onto the known-good `green` slot right
+now) is just editing `caddy/weights.conf` and reloading. The two numbers
+are `<blue-weight> <green-weight>`, in that order (see the file's own
+top comment):
 
 ```bash
 ssh -i snipeit_vm_deploy_key azureuser@<VM_HOST>
 cd /opt/snipeit
-echo "lb_policy weighted_round_robin 100 0" > caddy/weights.conf   # 100% blue
+echo "lb_policy weighted_round_robin 0 100" > caddy/weights.conf   # 100% green (active), 0% blue
 docker compose -f docker-compose.vm.yml exec caddy \
   caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
 ```
@@ -913,10 +943,12 @@ cd /opt/snipeit
 ./scripts/blue-green-deploy.sh
 ```
 
-Exit code 0 means the new slot is fully active and the old one is
-stopped; non-zero means it aborted and rolled back — check
+Exit code 0 means `green` is now active and serving 100% of traffic on the
+new image, `blue` is stopped; non-zero means it aborted (see the "On any
+failed check" note above for the one case — a failure during promotion —
+where `green` may not be what's currently serving) — check
 `/mnt/docker-data/volumes/deploy_status/status.json`'s `"phase": "failed"`
-entry and `checks.log` for which check failed.
+(or `"promotion_failed"`) entry and `checks.log` for which check failed.
 
 ---
 
@@ -1335,8 +1367,9 @@ STEADY STATE (only one slot's `backend-*`/`frontend-*` running -- see
 | **Total (mid-rollout, both slots' backend+frontend briefly up)** | **~3.87 GiB** | **~1.45 GiB** | see the note below |
 
 A rollout (`scripts/blue-green-deploy.sh`) briefly runs BOTH slots'
-`backend-*`+`frontend-*` together — from step [2/6] (starting the replica)
-until step [6/6] (the old slot is stopped), typically a couple of minutes
+`backend-*`+`frontend-*` together — from step [2/6] (starting blue, the
+incoming slot) until step [6/6] (blue is spun back down after green is
+promoted), typically a couple of minutes
 end to end. On the default `Standard_B2s`, that peak leaves only ~130 MiB
 of headroom for the OS/Docker daemon, which is tight but has proven fine
 for light-to-moderate traffic; if your traffic is heavier, size up to

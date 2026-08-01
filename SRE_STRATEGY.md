@@ -298,12 +298,12 @@ at 2am without reasoning from scratch:
 - **Need to roll back a bad release** → if the deploy is still running (or
   just finished failing), you likely don't need to do anything —
   `deploy-azure-aca.yml`'s blue-green rollout already flips traffic back
-  to the still-running old revision automatically on a failed health check
+  to the still-active revision automatically on a failed health check
   or smoke test (see DEPLOYMENT.md's "Zero-downtime rollout mechanics" and
   Rollback sections). Watch it happen with
   `bash .github/scripts/aca-blue-green.sh status backend <resource-group> --watch`.
   For a rollback requested well after a deploy finished cleanly (the old
-  revision is already spun down), use `workflow_dispatch` on
+  active revision is already spun down), use `workflow_dispatch` on
   `deploy-azure-aca.yml` with the previous `image_tag`, per DEPLOYMENT.md's
   Rollback section — this still gets a fresh migrate/health-gate/smoke-test
   pass, just like a forward deploy. Don't hand-run

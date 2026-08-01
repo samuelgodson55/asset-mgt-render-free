@@ -1608,11 +1608,31 @@ dashboard.
 one of these recovery codes interchangeably —
 `security.py`'s `is_recovery_code_format()` tells them apart by shape, so
 the frontend never needs to ask which kind the person is submitting. A
-matched recovery code is stamped `used_at` (`models.py`'s `RecoveryCode`)
-and can never be replayed; the response also carries
-`recovery_codes_remaining` so the frontend can eventually surface a
-"running low" nudge. Wrong recovery-code attempts count against the same
-lockout counters wrong TOTP/password attempts do.
+live TOTP code, on success, completes the login exactly like a normal
+password-only login would. A recovery code is handled differently on
+purpose: it means the device holding the TOTP secret is no longer
+available, so simply logging the person back in against that same
+(now-unreachable) secret would leave them no better off. Instead, a
+correct recovery code immediately retires the account's TOTP secret
+(`totp_enabled` reset to `False`, the encrypted secret cleared) and hands
+back the exact same `mfa_setup_required` shape `login()` returns for a
+brand-new account — a fresh secret to enroll on whatever device is at
+hand right now (the response also carries `recovery_code_used: true` and
+a human-readable `message` so the frontend can explain why it's showing
+the setup screen again). No session is granted at this point. The
+frontend's `#mfa-setup-screen` (`index.html`/`js/main.js`) picks this up
+the same way it handles first-time enrollment, just with that message
+displayed instead of the generic copy. Only once `POST
+/auth/mfa/setup/confirm` verifies a live code from that *new* secret does
+the real session get issued — which also reissues a whole fresh batch of
+10 recovery codes, invalidating every remaining code from the old batch
+too, since a lost device is reason enough to treat the old codes as
+potentially compromised right along with the old secret. The matched
+recovery code itself is stamped `used_at` (`models.py`'s `RecoveryCode`)
+the moment it's accepted and can never be replayed, whether or not the
+re-enrollment that follows is ever completed. Wrong recovery-code
+attempts count against the same lockout counters wrong TOTP/password
+attempts do.
 
 Lost your authenticator app AND used up your recovery codes? There's
 deliberately no self-service reset for that combination — it would defeat

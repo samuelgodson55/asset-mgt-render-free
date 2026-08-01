@@ -365,6 +365,14 @@ server {
     # DEPLOY_STATUS_USER/DEPLOY_STATUS_PASSWORD_APR1_HASH (that workflow's
     # own comment shows the exact `openssl passwd -apr1` command to
     # generate the hash).
+    # Bare `/_deploy` (no trailing slash) doesn't match the `alias`-based
+    # location below at all -- nginx would otherwise fall through to the
+    # SPA catch-all further down and 404. Redirect it explicitly, same as
+    # the VM path's Caddyfile does for its own `/_deploy` bare path.
+    location = /_deploy {
+        return 308 /_deploy/;
+    }
+
     location /_deploy/ {
         alias /mnt/deploy-status/;
         index index.html;

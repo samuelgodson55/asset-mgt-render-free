@@ -972,42 +972,50 @@ then `production`) to populate both new apps' images.
 
 `backend` and `frontend` both run in Container Apps' **Multiple**
 active-revisions mode (`infra/main.bicep`'s `activeRevisionsMode`), not
-Single — the old revision ("blue") and a new one ("green") run side by
-side as two fully independent, individually addressable slots, with
-traffic between them a weight the deploy pipeline controls explicitly.
-`.github/workflows/deploy-azure-aca.yml`'s `deploy` job drives the actual
-rollout through
-[`.github/scripts/aca-blue-green.sh`](.github/scripts/aca-blue-green.sh),
-per app, in this order:
+Single — two fully independent, individually addressable revisions run
+side by side, with traffic between them a weight the deploy pipeline
+controls explicitly. **Roles are fixed, not swapped from one deploy to
+the next:** green is always the active/production revision, blue is
+always the incoming candidate being validated — see
+[`.github/scripts/aca-blue-green.sh`](.github/scripts/aca-blue-green.sh)'s
+own top-of-file comment for the full rationale. Once a rollout finalizes,
+the revision that was blue simply *is* green (the active role) from that
+point on — there's no permanent "blue container" the way the VM path has
+`backend-blue`/`backend-green`; a revision's own suffix is whatever this
+run generated for it. `.github/workflows/deploy-azure-aca.yml`'s `deploy`
+job drives the actual rollout through that script, per app, in this
+order:
 
-1. **Replicate the slot.** Create the new revision at **0% traffic** —
-   nothing routes to it yet, so this step alone can never affect anything
-   live.
+1. **Create the incoming ("blue") revision at 0% traffic** — nothing
+   routes to it yet, so this step alone can never affect anything live.
 2. **Health-check the replica that actually received the push**, not just
    the image CI already validated. Container Apps' own readiness probe
    (`/readyz` on `backend`, `/` on `frontend` — `infra/main.bicep`'s
-   `probes` blocks) polls the new revision directly; the script waits for
-   it to report `Healthy` before doing anything else.
-3. **Direct smoke test the new slot** — `frontend` only, since it's the
-   one app with a public FQDN (every revision gets its own once
-   `activeRevisionsMode` is `Multiple`: `<app>---<suffix>.<domain>`).
-   Real HTTP, hitting `/` and `/api/auth/me` (proving the reverse-proxy →
-   `backend` chain, not just static files) — still zero production
-   traffic, since nothing but this direct URL request reaches it.
-   `backend`'s internal-only ingress isn't reachable this way from a
-   GitHub-hosted runner; step 2 plus step 4's re-checks are what cover it.
-4. **Migrate traffic gradually.** Production walks the new revision
+   `probes` blocks) polls the incoming revision directly; the script
+   waits for it to report `Healthy` before doing anything else.
+3. **Direct smoke test the incoming revision's own slot** — `frontend`
+   only, since it's the one app with a public FQDN (every revision gets
+   its own once `activeRevisionsMode` is `Multiple`:
+   `<app>---<suffix>.<domain>`). Real HTTP, hitting `/` and
+   `/api/auth/me` (proving the reverse-proxy → `backend` chain, not just
+   static files) — still zero production traffic, since nothing but this
+   direct URL request reaches it. `backend`'s internal-only ingress isn't
+   reachable this way from a GitHub-hosted runner; step 2 plus step 4's
+   re-checks are what cover it.
+4. **Migrate traffic gradually.** Production walks the incoming revision
    across 10% → 25% → 50% → 75% → 100%, re-verifying health after each
    step (a revision that was fine at 0% can still degrade under real
    concurrent load) — the same five-step ramp the VM path uses. Staging
    (min replicas 0 on both apps — no standing traffic to protect) jumps
    straight to 100% once step 2 passes.
-5. **Spin down the other slot** — only after `backend` AND `frontend`
-   have both reached 100% AND the end-to-end smoke test
+5. **Spin down the active ("green") revision** — only after `backend` AND
+   `frontend` have both reached 100% AND the end-to-end smoke test
    (`deploy-azure-aca.yml`'s `Smoke test` step) has passed against the
-   fully-cut-over app. The old revision is deactivated at that point, not
-   before — see [Rollback](#rollback) for why it's kept alive and at 0%
-   traffic (not deleted, not scaled down) for the entire rollout instead.
+   fully-cut-over app. The active revision is deactivated at that point,
+   not before — see [Rollback](#rollback) for why it's kept alive and at
+   0% traffic (not deleted, not scaled down) for the entire rollout
+   instead. Once spun down, the revision that was blue for this rollout
+   is simply green (the active role) going forward.
 
 `backend` always finishes its full rollout before `frontend`'s begins, so
 `frontend`'s proxy target (`BACKEND_HOST`) is already the new `backend`
@@ -1016,38 +1024,65 @@ revision's traffic split by the time `frontend` itself starts rolling out.
 is never part of a rollout; `postgresServer` isn't a Container App at all,
 so the concept doesn't apply to it either.
 
-**Monitor a rollout live** — from a laptop, no GitHub Actions access
-needed, any time during or after a deploy:
-```bash
-bash .github/scripts/aca-blue-green.sh status backend rg-snipeit-lite-prod --watch
-```
-Shows every revision's health, replica count, and live traffic weight,
-refreshed every 5 seconds. `deploy-azure-aca.yml` also writes the same
-information (old/new revision names per app) into the run's own
-`GITHUB_STEP_SUMMARY`, so the Actions tab alone is enough if you're not at
-a terminal.
+**Monitor a rollout live** — three equivalent ways, no SSH required in
+any direction:
+
+- **From a laptop**, no GitHub Actions access needed, any time during or
+  after a deploy:
+  ```bash
+  bash .github/scripts/aca-blue-green.sh status backend rg-snipeit-lite-prod --watch
+  ```
+  Shows every revision's health, replica count, and live traffic weight,
+  refreshed every 5 seconds.
+- **The run's own `GITHUB_STEP_SUMMARY`** — `deploy-azure-aca.yml` writes
+  the same information (active/incoming revision names per app) there, so
+  the Actions tab alone is enough if you're not at a terminal.
+- **The `/_deploy/` dashboard** — the ACA-path equivalent of the VM path's
+  Caddy-served dashboard (see `DEPLOYMENT_VM.md`'s "Monitoring a
+  rollout"), served by `frontend`'s nginx (`nginx/default.conf.template`'s
+  `/_deploy/` location) straight out of the `deploy-status` Azure Files
+  share (`infra/main.bicep`'s `deployStatusShare`/`deployStatusStorage`),
+  which only `.github/scripts/aca-deploy-status.sh` (called from
+  `deploy-azure-aca.yml` at every phase transition) ever writes to —
+  `frontend`'s mount of it is read-only. Reachable at
+  `https://<domain>/_deploy/`, gated by HTTP Basic Auth (nginx's
+  `auth_basic`, a different hash format than the VM path's Caddy —
+  nginx needs an `$apr1$` hash, not bcrypt). **Set your own credentials
+  before relying on this**, same reasoning as the VM path:
+  ```bash
+  openssl passwd -apr1 'your-password-here'
+  ```
+  Set the `DEPLOY_STATUS_USER` GitHub Environment *Variable* (defaults to
+  `admin` if you skip it) and the `DEPLOY_STATUS_PASSWORD_APR1_HASH`
+  *Secret* (paste the `$apr1$` hash above) on the `staging`/`production`
+  Environment(s), the same place `AZURE_CLIENT_ID`/`PROD_RESOURCE_GROUP`
+  already live — the next `deploy-azure-aca.yml` run picks them up
+  automatically via its "Write ACA deploy status - init" step. If no
+  storage account is found in the target resource group yet (a fresh
+  environment that hasn't run `infra-deploy.yml`), that step warns and
+  skips the dashboard for that run rather than failing the rollout.
 
 ### Rollback
 
 **During a deploy (automatic):** because the rollout is blue-green (see
-above), the old revision is never stopped or scaled down while the new one
-is being proven — it just sits at 0% traffic until the very end. If the
-final end-to-end smoke test fails, `deploy-azure-aca.yml`'s `deploy` job
-calls `aca-blue-green.sh rollback` for whichever app(s) had already
-finished their own rollout, which is just a **traffic-weight flip back to
-the still-running old revision** (no redeploy, no cold start, no image
+above), the active revision is never stopped or scaled down while the
+incoming one is being proven — it just sits at 0% traffic until the very
+end. If the final end-to-end smoke test fails, `deploy-azure-aca.yml`'s
+`deploy` job calls `aca-blue-green.sh rollback` for whichever app(s) had
+already finished their own rollout, which is just a **traffic-weight flip
+back to the still-active revision** (no redeploy, no cold start, no image
 pull) — the fastest possible recovery, and now available on staging too,
-not just production, since it no longer depends on there having been prior
-live traffic to roll back to. If a new revision instead fails its OWN
-health check or direct smoke test mid-rollout (before ever reaching real
-traffic), `aca-blue-green.sh` rolls that one back itself, inline, without
-waiting for the smoke test step at all. Most bad releases never need a
-manual rollback. The runbook below is for the cases that do: a regression
-that passes the smoke test but is caught later, or a rollback requested
-well after the deploy finished — at which point the bad revision has
-already been fully cut over to and the old one deactivated (see
-"Spin down the old slots" above), so this is a genuine redeploy again, not
-a traffic flip.
+not just production, since it no longer depends on there having been
+prior live traffic to roll back to. If an incoming revision instead fails
+its OWN health check or direct smoke test mid-rollout (before ever
+reaching real traffic), `aca-blue-green.sh` rolls that one back itself,
+inline, without waiting for the smoke test step at all. Most bad releases
+never need a manual rollback. The runbook below is for the cases that do:
+a regression that passes the smoke test but is caught later, or a
+rollback requested well after the deploy finished — at which point the
+bad revision has already been fully cut over to and the old (former
+"green") revision deactivated (see "Spin down the active slots" above),
+so this is a genuine redeploy again, not a traffic flip.
 
 **Step 1 — find out what's actually running right now.** Don't assume the
 tag you *think* is live is the one that's live — ask Azure directly:
@@ -1059,10 +1094,10 @@ az containerapp show --name backend --resource-group rg-snipeit-lite-prod \
 (This is the same command `deploy-azure-aca.yml`'s own snapshot step runs —
 see its `GITHUB_STEP_SUMMARY` on the most recent successful run of that
 workflow in the Actions tab for a ready-made record of "what was live right
-before," "what got deployed," and the old/new revision names for both apps,
-without running anything yourself. Swap `--name backend` for `--name
-frontend` to check that app too, and drop `-staging` from the resource
-group for the staging environment.)
+before," "what got deployed," and the active/incoming revision names for
+both apps, without running anything yourself. Swap `--name backend` for
+`--name frontend` to check that app too, and drop `-staging` from the
+resource group for the staging environment.)
 
 **Step 2 — name the actual previous version**, not an abstract placeholder.
 Tags sort by creation date, so the previous release is whichever one comes
@@ -1101,13 +1136,14 @@ preference:
   (Actions tab → "Deploy to ACA" → Run workflow → `environment: production`,
   `image_tag: v1.4.1` works identically if you'd rather not use the CLI.)
   This goes through the exact same blue-green rollout as any other deploy —
-  `v1.4.1` becomes the new "green" revision, health-gated and canaried in
-  before it takes over, with the currently-bad revision left as the
-  fallback the whole time. ⚠️ Only safe if `v1.4.1`'s database schema is
-  compatible with what's currently migrated — i.e. the bad release didn't
-  itself introduce a migration that later code depends on. If it did, you
-  need a forward-fixing migration instead of a rollback; see the "migrate
-  first, deploy second" rule in `README.md`'s CI/CD section.
+  `v1.4.1` becomes the new incoming ("blue") revision, health-gated and
+  canaried in before it's promoted to the active ("green") role, with the
+  currently-bad revision left as the fallback the whole time. ⚠️ Only safe
+  if `v1.4.1`'s database schema is compatible with what's currently
+  migrated — i.e. the bad release didn't itself introduce a migration that
+  later code depends on. If it did, you need a forward-fixing migration
+  instead of a rollback; see the "migrate first, deploy second" rule in
+  `README.md`'s CI/CD section.
 
 - **Direct, no pipeline**: use `aca-blue-green.sh` yourself, e.g. if you
   want to jump back further than one version without waiting on `ci`/
@@ -1122,12 +1158,12 @@ preference:
   bash .github/scripts/aca-blue-green.sh rollout frontend rg-snipeit-lite-prod \
     <you>/snipeit-lite-frontend:v1.4.1 "10,25,50,75,100" 20 true
   ```
-  Each command prints the old/new revision names it used as it goes; once
-  you're satisfied the rolled-back version is good, spin down the slot it
-  replaced:
+  Each command prints the active/incoming revision names it used as it
+  goes; once you're satisfied the rolled-back version is good, spin down
+  the revision it replaced:
   ```bash
-  bash .github/scripts/aca-blue-green.sh finalize backend rg-snipeit-lite-prod <old-revision-name>
-  bash .github/scripts/aca-blue-green.sh finalize frontend rg-snipeit-lite-prod <old-revision-name>
+  bash .github/scripts/aca-blue-green.sh finalize backend rg-snipeit-lite-prod <active-revision-name>
+  bash .github/scripts/aca-blue-green.sh finalize frontend rg-snipeit-lite-prod <active-revision-name>
   ```
   ⚠️ A plain `az containerapp update --image ...` with no revision-suffix
   or traffic handling still WORKS to create a new revision, but since
@@ -1135,6 +1171,9 @@ preference:
   pinned to explicit revision names (not `latestRevision: true` — see
   `infra/main.bicep`'s `ingress.traffic` comment), that new revision comes
   up at **0% traffic** and nothing will actually route to it until you also
+  run `az containerapp ingress traffic set` yourself — use
+  `aca-blue-green.sh rollout` above instead of reproducing that by hand.
+
   run `az containerapp ingress traffic set` yourself — use
   `aca-blue-green.sh rollout` above instead of reproducing that by hand.
 
