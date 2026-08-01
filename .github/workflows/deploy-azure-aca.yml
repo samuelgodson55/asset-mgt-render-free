@@ -529,16 +529,21 @@ jobs:
           echo "Currently-live before this deploy: backend=$PREV_BACKEND frontend=$PREV_FRONTEND"
 
       # Live rollout dashboard -- the ACA-path equivalent of the VM path's
-      # /_deploy/ page (see docker-compose.vm.yml/blue-green-deploy.sh),
-      # served by `frontend`'s nginx from the `deploy-status` Azure Files
-      # share (infra/main.bicep) at https://<domain>/_deploy/. Every
-      # `az storage account list` here assumes exactly one storage account
-      # per resource group -- true given main.bicep only ever declares the
-      # one (`storage`) -- rather than trying to reproduce Bicep's own
-      # name-generation formula in bash. Best-effort throughout: see
-      # .github/scripts/aca-deploy-status.sh's own top-of-file comment --
-      # nothing here can fail this job; a storage/dashboard hiccup only
-      # ever produces a warning.
+      # /_deploy/ page (see docker-compose.vm.yml/blue-green-deploy.sh).
+      # `frontend`'s nginx proxies status.json/checks.log LIVE, per-request,
+      # from the `deploy-status` Blob container (infra/main.bicep) at
+      # https://<domain>/_deploy/ -- see nginx/default.conf.template's own
+      # /_deploy/ comment (this used to be an Azure Files mount; ACA
+      # rejects the mount option that approach needed, and doesn't support
+      # mounting Blob Storage as a volume at all -- see
+      # infra/main.bicep's `deployStatusContainer` comment for the full
+      # history). Every `az storage account list` here assumes exactly one
+      # storage account per resource group -- true given main.bicep only
+      # ever declares the one (`storage`) -- rather than trying to
+      # reproduce Bicep's own name-generation formula in bash. Best-effort
+      # throughout: see .github/scripts/aca-deploy-status.sh's own
+      # top-of-file comment -- nothing here can fail this job; a
+      # storage/dashboard hiccup only ever produces a warning.
       - name: Write ACA deploy status - init
         env:
           DEPLOY_STATUS_USER: ${{ secrets.DEPLOY_STATUS_USER }}
@@ -546,7 +551,7 @@ jobs:
         run: |
           STORAGE_ACCOUNT=$(az storage account list --resource-group "$RESOURCE_GROUP" --query "[0].name" -o tsv)
           if [ -z "$STORAGE_ACCOUNT" ]; then
-            echo "::warning::No storage account found in $RESOURCE_GROUP -- skipping deploy-status dashboard for this run (the rollout itself is unaffected). Re-run infra-deploy.yml if this environment predates the deploy-status share."
+            echo "::warning::No storage account found in $RESOURCE_GROUP -- skipping deploy-status dashboard for this run (the rollout itself is unaffected). Re-run infra-deploy.yml if this environment predates the deploy-status container."
           else
             echo "storage_account=$STORAGE_ACCOUNT" >> "$GITHUB_ENV"
             bash .github/scripts/aca-deploy-status.sh init "$STORAGE_ACCOUNT" "$RUNNER_TEMP/aca-deploy-status"

@@ -1039,12 +1039,14 @@ any direction:
   the Actions tab alone is enough if you're not at a terminal.
 - **The `/_deploy/` dashboard** — the ACA-path equivalent of the VM path's
   Caddy-served dashboard (see `DEPLOYMENT_VM.md`'s "Monitoring a
-  rollout"), served by `frontend`'s nginx (`nginx/default.conf.template`'s
-  `/_deploy/` location) straight out of the `deploy-status` Azure Files
-  share (`infra/main.bicep`'s `deployStatusShare`/`deployStatusStorage`),
-  which only `.github/scripts/aca-deploy-status.sh` (called from
-  `deploy-azure-aca.yml` at every phase transition) ever writes to —
-  `frontend`'s mount of it is read-only. Reachable at
+  rollout"). Its shell ships baked into the `frontend` image;
+  `frontend`'s nginx (`nginx/default.conf.template`'s `/_deploy/`
+  location) proxies `status.json`/`checks.log` **live**, per-request,
+  straight through to the `deploy-status` Blob container
+  (`infra/main.bicep`'s `deployStatusContainer`), which only
+  `.github/scripts/aca-deploy-status.sh` (called from
+  `deploy-azure-aca.yml` at every phase transition) ever writes to — the
+  SAS token nginx reads it with is read-only. Reachable at
   `https://<domain>/_deploy/`, gated by HTTP Basic Auth (nginx's
   `auth_basic`, a different hash format than the VM path's Caddy —
   nginx needs an `$apr1$` hash, not bcrypt). **Set your own credentials

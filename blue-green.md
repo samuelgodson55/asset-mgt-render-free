@@ -28,7 +28,7 @@ summarizes.
 | Rollout driver | `.github/scripts/aca-blue-green.sh` (runs on the GitHub-hosted runner, talks to Azure via `az`) | `scripts/blue-green-deploy.sh` (runs **on the VM itself**, invoked over SSH) |
 | Traffic steps | 10% → 25% → 50% → 75% → 100% (production) / straight to 100% (staging, scale-to-zero) | 10% → 25% → 50% → 75% → 100%, then a same-image handoff back to green (see below) |
 | Rollback | Instant traffic-weight flip back to the still-active green revision | Instant Caddy reweight back to the still-active green slot |
-| Live status (deployment's own view) | `bash .github/scripts/aca-blue-green.sh status <app> <rg> --watch`, or `https://<domain>/_deploy/` (dashboard, served by `frontend`'s nginx from Azure Files) | `https://<domain>/_deploy/` (dashboard, served by Caddy from local disk) |
+| Live status (deployment's own view) | `bash .github/scripts/aca-blue-green.sh status <app> <rg> --watch`, or `https://<domain>/_deploy/` (dashboard shell baked into `frontend`'s image, data proxied live from Blob Storage) | `https://<domain>/_deploy/` (dashboard, served by Caddy from local disk) |
 | Zero-downtime evidence (client's-eye view) | `scripts/poll-live-endpoint.sh` against the public frontend FQDN, backgrounded on the runner for the whole rollout | `scripts/poll-live-endpoint.sh` against `https://<domain>/`, backgrounded on the runner for the whole rollout |
 
 ---
@@ -129,19 +129,22 @@ Actions access needed.
 https://<domain>/_deploy/
 ```
 
-A small dashboard (HTTP Basic Auth-gated, not linked from the app),
-served by `frontend`'s nginx straight out of the `deploy-status` Azure
-Files share (`infra/main.bicep`'s `deployStatusShare`/
-`deployStatusStorage`, mounted **read-only** into `frontend` — nginx never
-writes it, only `deploy-azure-aca.yml` does). It polls
-`/_deploy/status.json` (both apps' active/incoming revision names and live
-traffic split) and `/_deploy/checks.log` (every individual gate
-`aca-blue-green.sh` ran, pass or fail), both rewritten by
-`.github/scripts/aca-deploy-status.sh` at every phase transition and gate
-— the same `write`/`check` shape `scripts/blue-green-deploy.sh` uses
-locally on the VM, just uploaded to Azure Files (`az storage file upload`,
-using the run's own OIDC login — no extra secret for that part) instead of
-written to local disk.
+A small dashboard (HTTP Basic Auth-gated, not linked from the app). Its
+shell (`scripts/deploy-status-aca/index.html`) ships baked into the
+`frontend` image; `status.json`/`checks.log` are proxied **live**,
+per-request, straight through to the `deploy-status` Blob container
+(`infra/main.bicep`'s `deployStatusContainer`) — no mount, no cache
+anywhere in the path (see `nginx/default.conf.template`'s own `/_deploy/`
+comment for why this isn't an Azure Files mount: ACA rejects the mount
+option that approach needed, and doesn't support mounting Blob Storage as
+a volume at all). It polls `/_deploy/status.json` (both apps'
+active/incoming revision names and live traffic split) and
+`/_deploy/checks.log` (every individual gate `aca-blue-green.sh` ran, pass
+or fail), both rewritten by `.github/scripts/aca-deploy-status.sh` at
+every phase transition and gate — the same `write`/`check` shape
+`scripts/blue-green-deploy.sh` uses locally on the VM, just uploaded to
+Blob Storage (`az storage blob upload`, using the run's own OIDC login —
+no extra secret for that part) instead of written to local disk.
 
 Credentials come from two GitHub Environment secrets you need to set once
 per environment (`staging`/`production`), consumed by the `deploy` job's
@@ -158,9 +161,11 @@ per environment (`staging`/`production`), consumed by the `deploy` job's
   ```
 
 If either secret is unset, the dashboard's `.htpasswd` is simply never
-uploaded and `/_deploy/` 500s rather than serving unauthenticated (see
-`aca-deploy-status.sh`'s own warning for this case) — the deploy itself is
-completely unaffected either way; this page is purely observational.
+uploaded, so `nginx/docker-entrypoint.d/25-fetch-deploy-status-htpasswd.sh`
+fetches nothing at container boot and `/_deploy/` 401s on every request
+rather than serving unauthenticated (see `aca-deploy-status.sh`'s own
+warning for this case) — the deploy itself is completely unaffected either
+way; this page is purely observational.
 
 This is the **deployment's own view** — proof each revision's readiness
 probe passed, and proof of the one end-to-end smoke test once both apps

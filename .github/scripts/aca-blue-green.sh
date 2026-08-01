@@ -310,6 +310,12 @@ cmd_rollout() {
   for step in "${STEPS[@]}"; do
     local active_weight=$((100 - step))
     echo "  -> ${incoming_rev}=${step}% / ${active_rev}=${active_weight}%"
+    # Deliberately only THIS app's key -- aca-deploy-status.sh's cmd_write
+    # merges "apps" into whatever the previous status.json already had
+    # (per-app, per-field) instead of overwriting the object wholesale, so
+    # this can't blank out the OTHER app's card on the dashboard while this
+    # loop runs. See that script's own cmd_write comment for the fix
+    # history if this ever needs to change.
     [ -x "$status_script" ] && "$status_script" write "rolling_out_${app}" \
       "\"apps\": {\"$app\": {\"active_revision\": \"$active_rev\", \"incoming_revision\": \"$incoming_rev\", \"traffic_to_incoming_pct\": $step}}" \
       2>/dev/null || true

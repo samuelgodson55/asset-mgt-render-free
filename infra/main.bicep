@@ -501,20 +501,87 @@ resource exportShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023
   properties: { shareQuota: 10 }
 }
 
-// Live blue-green rollout status (status.json/checks.log/the small
-// dashboard HTML/its .htpasswd) -- the ACA equivalent of the VM path's
-// /mnt/docker-data/volumes/deploy_status directory. Small quota: this is
-// a handful of tiny text files, not app data. Written to by
-// .github/workflows/deploy-azure-aca.yml (via `az storage file upload`,
-// using the run's own OIDC login -- see that workflow's own comments)
-// and mounted READ-ONLY into `frontend` below, which serves it at
-// /_deploy/ -- see nginx/default.conf.template's own comment and
-// blue-green.md's "Monitoring" section for the full mechanics.
-resource deployStatusShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023-05-01' = {
-  parent: fileServices
-  name: 'deploy-status'
-  properties: { shareQuota: 1 }
+// Live blue-green rollout status (status.json/checks.log/.htpasswd) --
+// the ACA equivalent of the VM path's /mnt/docker-data/volumes/deploy_status
+// directory. Written to by .github/workflows/deploy-azure-aca.yml (via `az
+// storage blob upload`, using the run's own OIDC login -- see that
+// workflow's own comments) and read LIVE, per-request, by `frontend`'s
+// nginx below (proxy_pass, not a mount -- see nginx/default.conf.template's
+// own /_deploy/ comment and blue-green.md's "Monitoring" section for the
+// full mechanics).
+//
+// BUG FIX: this used to be an `AzureFile` share (`deployStatusShare`)
+// mounted read-only into `frontend`, with `mountOptions: 'actimeo=1'` to
+// keep ACA's default 30s CIFS attribute cache from hiding writes made by
+// the GitHub Actions runner (a totally different client than the one doing
+// the reading -- REST vs SMB gives no cross-protocol cache coherency
+// guarantee). ACA rejects that mount option outright --
+// ContainerAppVolumeMountOptionsNotSupported: "MountOptions 'actimeo' for
+// volume 'deploy-status' are not supported by azure file share" -- and ACA
+// doesn't support mounting Blob Storage as a volume AT ALL (see
+// https://learn.microsoft.com/azure/container-apps/storage-mounts: "Azure
+// Container Apps doesn't support mounting file shares from Azure NetApp
+// Files or Azure Blob Storage"), so this moved off volume mounts entirely.
+// nginx now proxy_pass'es straight through to this container on every
+// request instead -- zero caching layer anywhere in the path, which
+// actually solves the original staleness problem outright rather than
+// just shrinking its window.
+resource blobServices 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' = {
+  parent: storage
+  name: 'default'
 }
+
+resource deployStatusContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
+  parent: blobServices
+  name: 'deploy-status'
+  properties: {
+    // Never publicly readable -- `storage` above already sets
+    // `allowBlobPublicAccess: false` at the account level (which would
+    // reject anything other than 'None' here anyway); the ONLY reads
+    // allowed are via the scoped, expiring SAS token below, used
+    // server-side by nginx's proxy_pass, never exposed to a browser.
+    publicAccess: 'None'
+  }
+}
+
+// `deployStatusSas` -- a read-only (`rl`), HTTPS-only, Blob-service-scoped
+// account SAS token that `frontend`'s nginx appends server-side to every
+// proxy_pass request against `deployStatusContainer` above (see
+// nginx/default.conf.template's own /_deploy/ comment). Generated here with
+// Bicep's built-in `listAccountSas` -- the same
+// Microsoft.Storage/storageAccounts/listKeys/action permission this
+// deployment's identity already needs for `storage.listKeys()` just below
+// (backupStorage/exportStorage) covers this too, so no extra manual step,
+// secret, or CI credential has to be minted outside this template.
+//
+// `deployTimestamp` exists ONLY so `dateTimeAdd` below has a base to add
+// 10 years to -- `utcNow()` can only be used as a param's default value,
+// never inline in a variable, so it has to be threaded through a
+// parameter first. Don't set it manually; every deployment run picks up
+// "now" automatically.
+//
+// Expiry is deliberately far out: this token is NEVER sent to or visible
+// from a browser (only used on the nginx <-> Blob Storage hop), so unlike
+// a browser-exposed token there's no security upside to a short rotation
+// window here -- and re-running this deployment before it expires mints a
+// fresh one with a new 10-year window anyway.
+param deployTimestamp string = utcNow()
+
+var deployStatusSasExpiry = dateTimeAdd(deployTimestamp, 'P10Y')
+
+var deployStatusSasProperties = {
+  signedServices: 'b'
+  signedResourceTypes: 'co'
+  signedPermission: 'rl'
+  signedExpiry: deployStatusSasExpiry
+  signedProtocol: 'https'
+}
+
+// `listAccountSas`'s `accountSasToken` comes back WITHOUT a leading '?' --
+// prepending it here once means every consumer (just the `frontend`
+// container's env below, today) can append it directly after a path with
+// no extra string-building of its own.
+var deployStatusSas = '?${storage.listAccountSas('2023-05-01', deployStatusSasProperties).accountSasToken}'
 
 // Single subnet, single NSG: `frontend`/`backend`/`redis`/`migrate` share
 // one Container Apps Environment (`postgresServer` is a standalone managed
@@ -640,23 +707,6 @@ resource exportStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' =
       accountKey: storage.listKeys().keys[0].value
       shareName: exportShare.name
       accessMode: 'ReadWrite'
-    }
-  }
-}
-
-// ReadOnly -- only .github/workflows/deploy-azure-aca.yml (over the
-// Azure Files REST API, via `az storage file upload`) ever writes here;
-// `frontend` (below) only ever reads it back out to serve /_deploy/. See
-// deployStatusShare's own comment above.
-resource deployStatusStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' = {
-  parent: env
-  name: 'deploy-status'
-  properties: {
-    azureFile: {
-      accountName: storage.name
-      accountKey: storage.listKeys().keys[0].value
-      shareName: deployStatusShare.name
-      accessMode: 'ReadOnly'
     }
   }
 }
@@ -1103,9 +1153,11 @@ resource frontendApp 'Microsoft.App/containerApps@2024-03-01' = {
       // found" on this app specifically -- `backendApp`/`migrateJob` never
       // hit this because they already pass the full `sharedSecrets` (which
       // conditionally includes 'dockerhub-token') here.
-      secrets: usePrivateDockerHubRepo ? [
+      secrets: concat(usePrivateDockerHubRepo ? [
         { name: 'dockerhub-token', value: dockerHubToken }
-      ] : []
+      ] : [], [
+        { name: 'deploy-status-sas', value: deployStatusSas }
+      ])
       ingress: {
         external: true
         targetPort: 80
@@ -1159,20 +1211,18 @@ resource frontendApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'ENABLE_API_DOCS', value: string(enableApiDocs) } // must match backend's own value -- see nginx/default.conf.template's /docs passthrough gating
             // RESOLVER_IP deliberately NOT set -- nginx/docker-entrypoint.d/15-detect-resolver-ip.sh
             // reads it from Container Apps' own /etc/resolv.conf at boot.
+            // Lets nginx proxy_pass /_deploy/status.json + /_deploy/checks.log
+            // straight through to `deployStatusContainer` on Blob Storage,
+            // live, per-request -- see that resource's own comment (above,
+            // near `storage`) for why this replaced an Azure Files mount, and
+            // nginx/default.conf.template's /_deploy/ comment for how these
+            // two are actually used.
+            { name: 'DEPLOY_STATUS_ACCOUNT', value: storage.name }
+            { name: 'DEPLOY_STATUS_SAS', secretRef: 'deploy-status-sas' }
           ]
           probes: [
             { type: 'Liveness', httpGet: { path: '/', port: 80 }, initialDelaySeconds: 5, periodSeconds: 30 }
             { type: 'Readiness', httpGet: { path: '/', port: 80 }, initialDelaySeconds: 5, periodSeconds: 10 }
-          ]
-          // Read-only mount of the live blue-green rollout status --
-          // nginx serves it at /_deploy/ (see nginx/default.conf.template's
-          // own comment). Written to over the Azure Files REST API by
-          // .github/workflows/deploy-azure-aca.yml, never by this
-          // container itself -- deployStatusStorage above is `accessMode:
-          // 'ReadOnly'`, so a compromised/buggy frontend process can't
-          // tamper with its own rollout history.
-          volumeMounts: [
-            { volumeName: 'deploy-status', mountPath: '/mnt/deploy-status' }
           ]
         }
       ]
@@ -1186,45 +1236,10 @@ resource frontendApp 'Microsoft.App/containerApps@2024-03-01' = {
           }
         ]
       }
-      volumes: [
-        // BUG FIX: this used to be a plain AzureFile mount with no
-        // `mountOptions` -- Azure Container Apps' underlying CIFS client
-        // defaults to `actimeo=30` (a 30s attribute/data cache), completely
-        // independent of anything nginx itself does. That's fine for a
-        // volume only ever written by the SAME client that mounts it, but
-        // `deploy-status` is written from a totally different client (the
-        // GitHub Actions runner, over the Azure Files REST API via `az
-        // storage file upload` -- see aca-deploy-status.sh) than the one
-        // reading it (this container's SMB mount) -- REST and SMB give no
-        // cross-protocol consistency guarantee at all, and a 30s cache on
-        // top of that meant a write could sit invisible to nginx for up to
-        // 30s, or -- worse -- perpetually, since production's canary steps
-        // are only `step_wait=20s` apart (deploy-azure-aca.yml): each new
-        // write could arrive before the previous one ever became visible,
-        // leaving the /_deploy/ dashboard showing a stale snapshot (a
-        // frozen progress bar, an empty checks log) for the ENTIRE
-        // rollout. `actimeo=1` keeps a cache (still cheap: this is a
-        // handful of tiny text files polled every 3s by the dashboard's
-        // own JS, not a hot path worth zero caching) but short enough that
-        // nginx's own no-store responses actually reflect what's really on
-        // the share within about a second, not up to half a minute+. See
-        // https://learn.microsoft.com/azure/container-apps/storage-mounts
-        // ("Use mountOptions settings in Azure Files") for the full option
-        // list -- only `backup-data`/`export-data` below are exempt from
-        // this, since those are read-write and only ever touched by the
-        // app itself, never raced by an out-of-band writer.
-        { name: 'deploy-status', storageType: 'AzureFile', storageName: 'deploy-status', mountOptions: 'actimeo=1' }
-      ]
     }
   }
-  // The `deploy-status` volume above has the same missing-implicit-
-  // dependency issue backendApp's own comment describes for
-  // backupStorage/exportStorage -- deployStatusStorage is referenced by
-  // plain string, so Bicep won't otherwise wait for it before creating
-  // `frontend`.
   dependsOn: [
     backendApp
-    deployStatusStorage
   ]
 }
 

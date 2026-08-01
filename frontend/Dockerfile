@@ -136,6 +136,25 @@ COPY nginx/default.conf.template /etc/nginx/templates/default.conf.template
 # source line that confirms this.
 COPY --chmod=755 nginx/docker-entrypoint.d/15-detect-resolver-ip.envsh /docker-entrypoint.d/15-detect-resolver-ip.envsh
 
+# Fetches the /_deploy/ dashboard's .htpasswd from Blob Storage into a
+# local file at boot -- auth_basic_user_file (nginx/default.conf.template's
+# own /_deploy/ location) can't read it over HTTP directly. Plain
+# executable ".sh" (exec'd as a child process, not sourced -- no env var
+# needs to survive into a later hook script here, unlike the ".envsh"
+# above) -- see the script's own header comment for the full reasoning.
+COPY --chmod=755 nginx/docker-entrypoint.d/25-fetch-deploy-status-htpasswd.sh /docker-entrypoint.d/25-fetch-deploy-status-htpasswd.sh
+
+# The /_deploy/ dashboard's own shell (status.json/checks.log are proxied
+# LIVE to Blob Storage at request time instead -- see
+# nginx/default.conf.template's own /_deploy/ comment for why only this
+# static shell, not the data, is baked into the image). Deliberately
+# separate from the `frontend-build` stage's output below -- this file
+# isn't part of the app's own frontend/ tree and doesn't go through
+# build-frontend/build.js's minification/obfuscation pipeline at all;
+# nginx/default.conf.template's `alias` for `location = /_deploy/` points
+# straight at this exact path.
+COPY scripts/deploy-status-aca/index.html /usr/share/nginx/deploy-status/index.html
+
 # The static site: index.html/admin.html/staff.html/manager.html/
 # customer.html and js/*. CSS/images pass through the frontend-build stage
 # untouched; HTML has been minified (development/production) and js/* has
@@ -182,6 +201,15 @@ ENV BACKEND_PORT=8000
 # render.yaml and README.md's "Deploying Across Environments" section,
 # which both already do this for you.
 ENV ENABLE_API_DOCS=true
+
+# DEPLOY_STATUS_ACCOUNT / DEPLOY_STATUS_SAS deliberately have NO default
+# here (unlike BACKEND_HOST/BACKEND_PORT above) -- local Docker Compose has
+# no Blob Storage at all, and both
+# nginx/docker-entrypoint.d/25-fetch-deploy-status-htpasswd.sh and
+# nginx/default.conf.template's /_deploy/ location already handle them
+# being unset gracefully (the dashboard shell still loads; every Basic Auth
+# attempt just fails closed). infra/main.bicep's `frontendApp` sets both
+# for real in Azure -- see that resource's own env comment.
 
 EXPOSE 80
 

@@ -20,6 +20,8 @@
 #   BACKEND_HOST   | backend (Compose service name)    | your backend service's hostname
 #   BACKEND_PORT   | 8000                               | whatever port that service listens on
 #   RESOLVER_IP    | 127.0.0.11 (Docker's embedded DNS) | your platform's internal DNS IP
+#   DEPLOY_STATUS_ACCOUNT | unset (no /_deploy/ on Compose) | Blob Storage account name (infra/main.bicep's `storage`)
+#   DEPLOY_STATUS_SAS     | unset (no /_deploy/ on Compose) | read-only SAS query string, incl. leading "?" (infra/main.bicep's `deployStatusSas`)
 #
 # See frontend/Dockerfile for the default values baked into the image, and
 # README.md for how to override them per environment.
@@ -341,104 +343,161 @@ server {
 
     # ---- live blue-green rollout status (ACA equivalent of the VM path's
     # Caddy-served /_deploy/ dashboard) --------------------------------------
-    # Serves directly out of the `deploy-status` Azure Files share
-    # (infra/main.bicep's deployStatusShare/deployStatusStorage), mounted
-    # READ-ONLY at /mnt/deploy-status -- nginx never writes here, only
-    # .github/workflows/deploy-azure-aca.yml does (over the Azure Files
-    # REST API, via `az storage file upload`, at every phase transition of
-    # a rollout -- see that workflow's own "Write ACA deploy status"
-    # steps and blue-green.md's "Monitoring" section). `alias` (not
-    # `root`) so a request for /_deploy/status.json maps to
-    # /mnt/deploy-status/status.json, not /mnt/deploy-status/_deploy/status.json.
+    # status.json/checks.log are proxied LIVE, per-request, straight through
+    # to the `deploy-status` Blob container (infra/main.bicep's
+    # `deployStatusContainer`) -- no mount, no local copy, no cache anywhere
+    # in the path, which is what actually solves the staleness problem this
+    # dashboard used to fight via an Azure Files `mountOptions` tweak (see
+    # infra/main.bicep's own comment: ACA rejects that `actimeo` option
+    # outright, and doesn't support mounting Blob Storage as a volume in
+    # the first place -- proxying instead of mounting sidesteps both).
+    # Written to by .github/workflows/deploy-azure-aca.yml (over the Blob
+    # REST API, via `az storage blob upload`, at every phase transition of
+    # a rollout -- see that workflow's own "Write ACA deploy status" steps,
+    # aca-deploy-status.sh, and blue-green.md's "Monitoring" section).
+    #
+    # AUTH TO BLOB STORAGE: `${DEPLOY_STATUS_SAS}` is a read-only (`rl`),
+    # HTTPS-only, Blob-service-scoped account SAS token generated inside
+    # infra/main.bicep itself (`deployStatusSas`) and injected as a
+    # Container Apps secret. It's appended to the upstream URL entirely
+    # server-side, in the `proxy_pass` below -- the browser never sees it,
+    # only this container's own outbound request to Blob Storage does.
+    #
+    # index.html (the dashboard shell) is NOT proxied to Blob Storage -- it
+    # ships baked into this image instead (frontend/Dockerfile COPYs
+    # scripts/deploy-status-aca/index.html to
+    # /usr/share/nginx/deploy-status/index.html), since it only changes
+    # with a code release, not per-deploy, and serving it locally means the
+    # dashboard's shell still loads (its own client-side fetch() calls
+    # simply failing) even if Blob Storage is ever briefly unreachable.
     #
     # HTTP Basic Auth, same purpose as the VM path's Caddy-level auth
     # (DEPLOY_STATUS_USER/DEPLOY_STATUS_PASSWORD_HASH there) but a
     # DIFFERENT hash format: Caddy natively supports bcrypt
     # ($2a$/$2b$/$2y$); nginx's auth_basic_user_file only supports
     # {PLAIN}, {SSHA}, and $apr1$ (all implemented internally in
-    # ngx_http_auth_basic_module, so this works the same on this image's
-    # Alpine/musl base as it would on glibc -- unlike raw crypt()-based
-    # formats, which nginx would otherwise have to hand off to the OS).
-    # The .htpasswd file itself is just another file on the same
-    # read-only share, uploaded alongside status.json/checks.log/this
-    # dashboard's own index.html by deploy-azure-aca.yml, generated from
-    # DEPLOY_STATUS_USER/DEPLOY_STATUS_PASSWORD_APR1_HASH (that workflow's
-    # own comment shows the exact `openssl passwd -apr1` command to
-    # generate the hash).
-    # Bare `/_deploy` (no trailing slash) doesn't match the `alias`-based
-    # location below at all -- nginx would otherwise fall through to the
-    # SPA catch-all further down and 404. Redirect it explicitly, same as
-    # the VM path's Caddyfile does for its own `/_deploy` bare path.
+    # ngx_http_auth_basic_module). auth_basic_user_file still needs a real
+    # LOCAL file -- it can't read over HTTP -- so .htpasswd is fetched
+    # ONCE, at container boot, by
+    # nginx/docker-entrypoint.d/25-fetch-deploy-status-htpasswd.sh into
+    # /tmp/deploy-status/.htpasswd (see that script for the full mechanics,
+    # including its fail-closed behavior if the fetch fails).
+    #
+    # Bare `/_deploy` (no trailing slash) doesn't match either location
+    # below -- nginx would otherwise fall through to the SPA catch-all
+    # further down and 404. Redirect it explicitly, same as the VM path's
+    # Caddyfile does for its own `/_deploy` bare path.
     location = /_deploy {
         return 308 /_deploy/;
     }
 
     # Safety net for "/_deploy/index" specifically (no trailing slash, no
-    # .html). This exact path is what browsers autocomplete from history
-    # saved BEFORE the try_files BUG FIX below existed -- back when the old
-    # `index index.html;` directive really did 301 every "/_deploy/"
-    # request to "/_deploy/index" and then 404 (see that comment). The
-    # server-side bug is fixed, but a browser's address-bar suggestion
-    # keeps offering the now-dead URL from its history, and there's no
-    # real file at that path for try_files below to find. Redirect it
-    # rather than 404 so a stale suggestion (or an old bookmark/link) still
-    # lands on the working dashboard instead of looking broken again.
+    # .html) -- what a browser's address bar autocompletes from history
+    # saved before this dashboard's very first bug fix, back when a
+    # since-removed `index index.html;` directive really did produce that
+    # URL and then 404 on it (see CHANGELOG.md). There's no real file at
+    # that path, so redirect rather than 404 so a stale suggestion still
+    # lands on the working dashboard.
     location = /_deploy/index {
         return 308 /_deploy/;
     }
 
-    location /_deploy/ {
-        alias /mnt/deploy-status/;
-
-        # BUG FIX: this used to be `index index.html;`. With `alias`, nginx
-        # serves an `index`-directive match via an INTERNAL URI rewrite from
-        # "/_deploy/" to "/_deploy/index.html" -- which re-enters location
-        # matching (the exact same gotcha the site's `location /` block
-        # above already dodges, and explains in its own comment). This
-        # config's global "clean URLs" regex, `location ~ ^/(.+)\.html$`,
-        # then catches that rewritten request and 301s it to "/_deploy/index"
-        # (no ".html") -- which isn't a real file, so THAT then 404s. Net
-        # effect: every request for "/_deploy/" 404'd, even with the share
-        # fully populated and .htpasswd correct, because nginx never actually
-        # got as far as reading index.html off disk.
-        #
-        # `try_files` instead resolves "index.html" as a plain filesystem
-        # lookup relative to this location's `alias`, exactly like `location
-        # /`'s own `$uri/index.html` fallback -- no URI rewrite, so it never
-        # re-triggers location matching / the .html-stripping regex at all.
-        try_files $uri $uri/index.html =404;
+    # Exact match ("=") for the directory URL itself -- serves the LOCAL,
+    # baked-in dashboard shell directly. Deliberately NOT using nginx's
+    # `index` directive here: `index` resolves via an INTERNAL URI rewrite
+    # from "/_deploy/" to "/_deploy/index.html", which re-enters location
+    # matching and lands on this config's global "clean URLs" regex
+    # further down (`location ~ ^/(.+)\.html$`), which 301s it to
+    # "/_deploy/index" -- not a real file/location, so THAT then 404s. Net
+    # effect: every request for "/_deploy/" 404'd, even with everything
+    # else configured correctly, because nginx never got as far as reading
+    # index.html at all. This exact-match block bypasses that failure mode
+    # completely rather than working around it: it names the single file
+    # to serve directly (`alias` pointed straight at index.html, not a
+    # directory), so there's no rewrite of any kind to re-trigger location
+    # matching in the first place.
+    location = /_deploy/ {
+        alias /usr/share/nginx/deploy-status/index.html;
 
         auth_basic "Deployment status";
-        auth_basic_user_file /mnt/deploy-status/.htpasswd;
-
-        # Deny direct access to the htpasswd file itself (and any other
-        # dotfile that might end up on the share) -- it must be READABLE
-        # by nginx for auth_basic_user_file above to work, but it should
-        # never be fetchable as a plain response body over this same
-        # location.
-        location ~ /\. {
-            deny all;
-        }
+        auth_basic_user_file /tmp/deploy-status/.htpasswd;
 
         # nginx GOTCHA (same one the /docs location above already works
-        # around -- see its own comment): `add_header` does NOT merge
-        # with headers set in an enclosing block once a location declares
-        # its own, so every server-level baseline header has to be
-        # re-declared here too. The CSP below is deliberately looser
+        # around -- see its own comment): `add_header` does NOT merge with
+        # headers set in an enclosing block once a location declares its
+        # own, so every server-level baseline header has to be re-declared
+        # here too. The CSP below is deliberately looser
         # (script-src/style-src 'unsafe-inline') than the app's own,
         # scoped to ONLY this one internal, Basic-Auth-gated ops
         # dashboard -- its self-contained index.html has its own inline
-        # <style>/<script> (same single-file shape as the VM path's
-        # scripts/deploy-status/index.html) rather than pulling in a
-        # build step just for this small status page.
+        # <style>/<script> rather than pulling in a build step for this
+        # small status page.
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'; object-src 'none'" always;
+        add_header Cache-Control "no-store" always;
+    }
+
+    # Everything ELSE under /_deploy/ -- status.json, checks.log, and any
+    # future file this dashboard's JS ever fetches() -- proxies straight
+    # through to Blob Storage instead of the local filesystem. A regex
+    # location (evaluated strictly after the exact "=" match above, per
+    # nginx's own matching order) so it can capture the remainder of the
+    # URI after "/_deploy/" to rebuild the Blob path with. Built by hand
+    # with `set`/string concatenation rather than relying on proxy_pass's
+    # usual "replace the matched location prefix" auto-rewrite, because
+    # that auto-rewrite only kicks in when the upstream host is a literal
+    # -- ours is a variable (the storage account name), the exact same
+    # reason the /api/ location above builds its own upstream URL with
+    # `$request_uri` instead of leaning on that rewrite -- see that
+    # location's own comment.
+    location ~ ^/_deploy/(?<deploy_status_path>.+)$ {
+        auth_basic "Deployment status";
+        auth_basic_user_file /tmp/deploy-status/.htpasswd;
+
         add_header X-Content-Type-Options "nosniff" always;
         add_header X-Frame-Options "DENY" always;
         add_header Referrer-Policy "strict-origin-when-cross-origin" always;
         add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'; object-src 'none'" always;
 
-        # Rollout state changes by the minute during a deploy -- never
-        # let a browser or intermediate cache serve a stale status.json.
+        # Rollout state changes by the minute during a deploy -- never let
+        # a browser or intermediate cache serve a stale status.json. This
+        # is now a genuinely live, uncached read of Blob Storage on every
+        # single request, not just a short cache window, so this header is
+        # belt-and-suspenders rather than load-bearing the way it used to be.
         add_header Cache-Control "no-store" always;
+
+        # .htpasswd must stay readable by 25-fetch-deploy-status-htpasswd.sh's
+        # own `wget` at container boot (see that script), but never
+        # through this proxied, browser-facing path.
+        if ($deploy_status_path = ".htpasswd") {
+            return 404;
+        }
+
+        set $deploy_status_upstream ${DEPLOY_STATUS_ACCOUNT}.blob.core.windows.net;
+        proxy_pass https://$deploy_status_upstream/deploy-status/$deploy_status_path${DEPLOY_STATUS_SAS};
+        proxy_http_version 1.1;
+        proxy_set_header Host $deploy_status_upstream;
+        # Required whenever proxy_pass's target host comes from a variable
+        # AND the upstream is HTTPS -- without it nginx doesn't send SNI on
+        # the upstream TLS handshake at all, which Blob Storage's
+        # multi-tenant HTTPS endpoint needs to present the right
+        # certificate for this account's hostname.
+        proxy_ssl_server_name on;
+
+        proxy_connect_timeout 5s;
+        proxy_send_timeout 10s;
+        proxy_read_timeout 10s;
+
+        # Don't let Blob Storage's own response headers (ETag, Last-Modified,
+        # x-ms-*) leak storage-layer implementation details to the browser
+        # -- this location's own headers above are everything the
+        # dashboard's JS actually reads.
+        proxy_hide_header ETag;
+        proxy_hide_header Last-Modified;
+        proxy_hide_header x-ms-request-id;
+        proxy_hide_header x-ms-version;
     }
 
     # ---- clean URLs ---------------------------------------------------------
