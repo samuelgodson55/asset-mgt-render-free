@@ -98,6 +98,7 @@
   .check-line .dot { width: 8px; height: 8px; border-radius: 999px; flex: none; }
   .dot.pass { background: var(--ok); }
   .dot.fail { background: var(--fail); }
+  .dot.pending { background: var(--warn); }
   .check-line .name { color: var(--text); }
   .check-line .detail { color: var(--muted); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .check-line .ts { color: var(--muted); font-size: .7rem; }
@@ -177,6 +178,7 @@ async function poll() {
 function badgeClassFor(phase) {
   if (phase === 'done') return 'ok';
   if (phase === 'failed' || phase === 'rolled_back') return 'fail';
+  if (phase === 'cancelled') return 'idle';
   if (!phase || phase === 'idle') return 'idle';
   return 'warn';
 }
@@ -185,7 +187,8 @@ function renderStatus(s) {
   document.getElementById('phase').textContent = (s.phase || '—').replace(/_/g, ' ');
   const badge = document.getElementById('phase-badge');
   badge.className = 'badge ' + badgeClassFor(s.phase);
-  badge.textContent = badgeClassFor(s.phase) === 'ok' ? 'HEALTHY'
+  badge.textContent = s.phase === 'cancelled' ? 'CANCELLED'
+                     : badgeClassFor(s.phase) === 'ok' ? 'HEALTHY'
                      : badgeClassFor(s.phase) === 'fail' ? 'FAILED'
                      : badgeClassFor(s.phase) === 'idle' ? 'IDLE' : 'IN PROGRESS';
 
@@ -222,7 +225,7 @@ function renderChecks(text) {
 
   container.innerHTML = parsed.map(c => `
     <div class="check-line">
-      <span class="dot ${c.status === 'pass' ? 'pass' : 'fail'}"></span>
+      <span class="dot ${c.status === 'pass' ? 'pass' : c.status === 'pending' ? 'pending' : 'fail'}"></span>
       <span class="name">${escapeHtml(c.check || '')}</span>
       <span class="detail">${escapeHtml(c.detail || '')}</span>
       <span class="ts">${escapeHtml(c.ts || '')}</span>

@@ -151,8 +151,16 @@ cmd_check() {
   [ "$#" -eq 3 ] || usage
   local check="$1" status="$2" detail="$3"
   _load_stash
-  local py_status="pass"
-  [ "$status" = "pass" ] || py_status="fail"
+  # "pass"/"fail" are verdicts; "pending" (aca-blue-green.sh's
+  # wait_for_revision_healthy heartbeat, written once per poll while a
+  # health wait is still in progress) is neither -- it's proof the wait
+  # loop is still alive, not a result. Anything else unrecognized still
+  # collapses to "fail" rather than being silently dropped, same as
+  # before this "pending" state existed.
+  local py_status="fail"
+  case "$status" in
+    pass|pending) py_status="$status" ;;
+  esac
   # Minimal manual JSON-line construction (no jq dependency, matching
   # scripts/health-check.sh's own approach on the VM path) -- $detail is
   # expected to be a short, log-safe string; quotes inside it are escaped

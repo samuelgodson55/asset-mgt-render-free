@@ -109,13 +109,35 @@ GH_OUT="${GITHUB_OUTPUT:-/dev/null}"
 # "<app>--<suffix>" naming convention themselves.
 
 wait_for_revision_healthy() {
-  # $1 app  $2 rg  $3 revision  $4 max_tries (10s apiece)
+  # $1 app  $2 rg  $3 revision  $4 max_tries (10s apiece)  $5 status_script
+  # (optional)  $6 check-name prefix (optional, defaults to "$app-waiting")
+  #
+  # BUG FIX: this used to be silent on the dashboard for its entire
+  # duration -- up to 400s at gate 1, up to 60s per gate-3 step -- because
+  # nothing in here ever touched aca-deploy-status.sh, only `echo`'d to the
+  # GitHub Actions run log. From the dashboard's point of view that looked
+  # exactly like "the status bar does nothing," even during a completely
+  # normal, still-in-progress wait: the health check log stayed on
+  # whichever gate's pass/fail line was written last (or empty, if this is
+  # the very first wait of the whole run) with no sign anything was still
+  # happening in between. $5/$6 are optional so this function stays fully
+  # usable standalone (a laptop, `az login`, no dashboard wiring) with zero
+  # behavior change -- a missing/non-executable status_script just skips
+  # the heartbeat.
   local app="$1" rg="$2" rev="$3" max_tries="$4"
+  local status_script="${5:-}" check_prefix="${6:-${1}-waiting}"
   local i state
   for i in $(seq 1 "$max_tries"); do
     state=$(az containerapp revision show --name "$app" --resource-group "$rg" \
               --revision "$rev" --query "properties.healthState" -o tsv 2>/dev/null)
     echo "  [$i/$max_tries] $rev health: ${state:-<not found yet>}"
+    # "pending" (not pass/fail) -- this isn't a verdict yet, just proof the
+    # wait loop is still alive and what it's seeing each poll. See
+    # aca-deploy-status.sh's `check` subcommand and
+    # scripts/deploy-status-aca/index.html's `.dot.pending` for how the
+    # dashboard renders this distinctly from an actual pass/fail.
+    [ -x "$status_script" ] && "$status_script" check "$check_prefix" "pending" \
+      "[$i/$max_tries] $rev health: ${state:-checking...}" 2>/dev/null || true
     if [ "$state" = "Healthy" ]; then return 0; fi
     if [ "$state" = "Unhealthy" ]; then
       # Fail fast on a definitive Unhealthy rather than burning the whole
@@ -196,7 +218,8 @@ cmd_rollout() {
     local first_rev
     first_rev=$(az containerapp revision list --name "$app" --resource-group "$rg" \
                   --query "[?properties.active] | [0].name" -o tsv)
-    wait_for_revision_healthy "$app" "$rg" "$first_rev" 40 || return 1
+    wait_for_revision_healthy "$app" "$rg" "$first_rev" 40 \
+      "$status_script" "${app}-first-deploy" || return 1
     { echo "active_revision="; echo "incoming_revision=$first_rev"; echo "skipped=true"; } >> "$GH_OUT"
     return 0
   fi
@@ -240,7 +263,8 @@ cmd_rollout() {
   # production traffic reaches this revision while this runs -- it's
   # still pinned at 0%.
   echo "Gate 1/3 -- waiting for the incoming revision's own readiness probe..."
-  if ! wait_for_revision_healthy "$app" "$rg" "$incoming_rev" 40; then
+  if ! wait_for_revision_healthy "$app" "$rg" "$incoming_rev" 40 \
+       "$status_script" "${app}-gate1-waiting"; then
     echo "Incoming revision failed its own health checks before receiving any traffic -- rolling back."
     record_check "gate1-readiness" "fail" "$incoming_rev did not become Healthy"
     az containerapp revision deactivate --name "$app" --resource-group "$rg" --revision "$incoming_rev" >/dev/null 2>&1
@@ -292,7 +316,8 @@ cmd_rollout() {
     az containerapp ingress traffic set --name "$app" --resource-group "$rg" \
       --revision-weight "${active_rev}=${active_weight}" "${incoming_rev}=${step}" >/dev/null || return 1
     sleep "$step_wait"
-    if ! wait_for_revision_healthy "$app" "$rg" "$incoming_rev" 6; then
+    if ! wait_for_revision_healthy "$app" "$rg" "$incoming_rev" 6 \
+         "$status_script" "${app}-gate3-waiting-${step}pct"; then
       echo "Incoming revision degraded at ${step}% traffic -- rolling back."
       record_check "gate3-traffic-${step}pct" "fail" "$incoming_rev degraded at ${step}% traffic"
       az containerapp ingress traffic set --name "$app" --resource-group "$rg" \

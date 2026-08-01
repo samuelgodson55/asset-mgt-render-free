@@ -696,7 +696,7 @@ jobs:
       # Re-authenticating here mints a fresh token right before it's used
       # by this step and the rollback/log-dump steps that follow it.
       - name: Re-authenticate (previous login may have expired during the steps above)
-        if: failure() && (steps.backend_rollout.outcome == 'failure' || steps.frontend_rollout.outcome == 'failure' || steps.smoke.outcome == 'failure')
+        if: always() && job.status != 'success'
         uses: azure/login@v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -744,10 +744,30 @@ jobs:
       # failing) as well as the smoke-test rollback steps just above --
       # with one final write so the dashboard doesn't get stuck showing
       # "smoke testing"/"rolling out" forever after a failed run.
-      - name: Write ACA deploy status - failed
-        if: failure() && (steps.backend_rollout.outcome == 'failure' || steps.frontend_rollout.outcome == 'failure' || steps.smoke.outcome == 'failure')
+      #
+      # BUG FIX: this used to be gated on `failure() && (...outcome ==
+      # 'failure')`, which is FALSE for a run that was CANCELLED (a
+      # manual cancel from the Actions tab, or GitHub's own job-timeout
+      # cancellation) rather than one where a step actually reported
+      # failure -- `failure()` only reflects the latter. That left
+      # /_deploy/ frozen forever on whatever phase happened to be written
+      # last (commonly "rolling_out_backend" from seconds into the run,
+      # with an empty checks log, since a cancelled run never gets as far
+      # as its first health-check pass/fail either) -- indistinguishable
+      # from a genuinely still-in-progress deploy, because nothing ever
+      # told the dashboard the run was over. `job.status` (GitHub's own
+      # running tally of this job's outcome, readable mid-job -- see
+      # https://docs.github.com/actions/learn-github-actions/contexts#job-context)
+      # is "success", "failure", or "cancelled" -- catching "not success"
+      # covers both in one place, regardless of which specific step was
+      # the one that failed or got interrupted.
+      - name: Write ACA deploy status - failed or cancelled
+        if: always() && job.status != 'success'
         run: |
-          [ -n "${storage_account:-}" ] && bash .github/scripts/aca-deploy-status.sh write "failed" || true
+          PHASE="failed"
+          [ "${{ job.status }}" = "cancelled" ] && PHASE="cancelled"
+          [ -n "${storage_account:-}" ] && bash .github/scripts/aca-deploy-status.sh write "$PHASE" \
+            "\"note\": \"deploy job ended with status: ${{ job.status }}\"" 2>/dev/null || true
 
       - name: Dump backend/frontend logs (on rollout or smoke test failure)
         if: failure() && (steps.backend_rollout.outcome == 'failure' || steps.frontend_rollout.outcome == 'failure' || steps.smoke.outcome == 'failure')
