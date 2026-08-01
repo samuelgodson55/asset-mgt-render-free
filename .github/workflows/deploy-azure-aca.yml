@@ -28,11 +28,14 @@
 #   B. TAG RELEASE (workflow_call, production only): `git tag vX.Y.Z && git
 #      push origin vX.Y.Z` runs release.yml, which builds + Trivy-scans +
 #      pushes both images tagged with that VERSION and then calls THIS
-#      workflow (`uses: ./.github/workflows/deploy-azure-aca.yml`) with that
-#      already-built `image_tag`. There is no `environment` input on this
-#      path -- a git-tag release always means production; see
-#      `$ENVIRONMENT` below. `ci`/`build-push` both skip themselves out here
-#      exactly as before, since release.yml already ran an equivalent gate.
+#      workflow (`uses: ./.github/workflows/deploy-azure-aca.yml`, from
+#      release.yml's `deploy-aca` job) with that already-built `image_tag`.
+#      There is no `environment` input on this path -- a git-tag release
+#      always means production; see `$ENVIRONMENT` below. `ci`/`build-push`
+#      both skip themselves out here exactly as before, since release.yml
+#      already ran an equivalent gate. Runs in parallel with
+#      deploy-azure-vm.yml's own workflow_call job on the same tag push --
+#      a version tag now deploys to both targets every release.
 #
 # WHAT DIFFERS BETWEEN staging AND production (everything else is identical,
 # driven off the same `$ENVIRONMENT`/`$RESOURCE_GROUP`/`$BACKEND_IMAGE`/
@@ -132,22 +135,24 @@ env:
   # computed by the `resolve-target` job below from each target's own
   # `ENVIRONMENT` Actions variable (see that job's own comment for why).
   #
-  # BUG FIX (latent -- this workflow_call entry point isn't wired up to
-  # anything yet, per this file's own top-of-file comment, so this never
-  # actually misfired in production, but it's the exact same bug
-  # deploy-azure-vm.yml had live: github.event_name inside a CALLED
-  # reusable workflow is always the CALLER's original triggering event,
-  # never 'workflow_call' -- per GitHub's own docs, "the github context is
-  # always associated with the caller workflow". `(github.event_name ==
-  # 'workflow_call') && 'production' || inputs.environment` would
-  # therefore always fall through to inputs.environment, which is empty
-  # on an actual workflow_call (that trigger never declares an
-  # `environment` input), binding every `environment:`-scoped job below
-  # to Environment '' instead of 'production' and hiding every secret
-  # scoped to the real 'production' Environment. Fixed the same way: read
-  # inputs.environment directly (empty on workflow_call, always a real
-  # value on workflow_dispatch since that input is required with a
-  # default), falling back to 'production'.
+  # BUG FIX: github.event_name inside a CALLED reusable workflow is always
+  # the CALLER's original triggering event, never 'workflow_call' -- per
+  # GitHub's own docs, "the github context is always associated with the
+  # caller workflow". `(github.event_name == 'workflow_call') &&
+  # 'production' || inputs.environment` would therefore always fall
+  # through to inputs.environment, which is empty on an actual
+  # workflow_call (that trigger never declares an `environment` input),
+  # binding every `environment:`-scoped job below to Environment '' instead
+  # of 'production' and hiding every secret scoped to the real 'production'
+  # Environment -- exactly the "Missing/empty secret(s) for GitHub
+  # Environment ''" failure this repo already hit live on the VM path (see
+  # deploy-azure-vm.yml's identical fix). Caught here before this
+  # workflow_call entry point was ever actually wired up to a tag push
+  # (release.yml's new `deploy-aca` job), so this never misfired in
+  # production -- but it would have the first time a tag release ran.
+  # Fixed the same way: read inputs.environment directly (empty on
+  # workflow_call, always a real value on workflow_dispatch since that
+  # input is required with a default), falling back to 'production'.
   ENVIRONMENT: ${{ inputs.environment || 'production' }}
   RESOURCE_GROUP: ${{ (inputs.environment || 'production') == 'production' && secrets.PROD_RESOURCE_GROUP || secrets.STAGING_RESOURCE_GROUP }}
   # workflow_call (release.yml) always supplies a real image_tag. On

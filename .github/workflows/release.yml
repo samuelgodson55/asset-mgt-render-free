@@ -4,14 +4,14 @@
 # v1.x.x` (annotated or lightweight, either works -- `--sort=-creatordate`
 # downstream in DEPLOYMENT_VM.md's rollback runbook relies on tag creation
 # date, which both kinds have). Pushing a tag matching `v*.*.*` is now the
-# ONLY path to a production deploy, and this file is the ONLY thing that
-# tag triggers -- `deploy-azure-vm.yml` no longer has its own `push`
-# trigger of its own; it's a reusable workflow THIS one calls at the end,
-# same as it always called `ci.yml`/`build-push-images.yml`. The ACA path
-# (`deploy-azure-aca.yml`) is unaffected and fully usable, but only via its
-# own `workflow_dispatch` entry point now -- a version tag maps to exactly
-# one deploy target, so there's no more ambiguity about what "cutting a
-# release" actually does.
+# ONLY path to a production deploy, and this file is the ONLY thing that tag
+# triggers -- neither `deploy-azure-vm.yml` nor `deploy-azure-aca.yml` has
+# its own `push` trigger anymore; both are reusable workflows THIS one calls
+# at the end (in parallel with each other), same as it always called
+# `ci.yml`/`build-push-images.yml`. A version tag now deploys to BOTH
+# targets every time -- there's no picking one deploy target over the other
+# via a tag push; each target is still also fully usable on its own via its
+# own `workflow_dispatch` entry point, independent of a tag push.
 #
 # What happens on `git push origin vX.Y.Z`:
 #   1. `ci`          -- re-runs the same fast gate as every push (lint, tests,
@@ -35,10 +35,18 @@
 #                       always prod) with `image_tag: vX.Y.Z` to actually
 #                       roll the already-built images out to the VM over
 #                       SSH (migrate -> blue-green rollout -> smoke test ->
-#                       auto-rollback). Runs in parallel with `changelog`,
-#                       not after it -- a docs PR waiting on human review
-#                       shouldn't hold up shipping an already-built,
-#                       already Trivy-scanned release.
+#                       auto-rollback).
+#   5. `deploy-aca`  -- calls deploy-azure-aca.yml (workflow_call entry
+#                       point, always production) with the same
+#                       `image_tag: vX.Y.Z`, rolling the same already-built
+#                       images out to Azure Container Apps (migrate ->
+#                       blue-green canary ramp -> smoke test ->
+#                       auto-rollback). Runs in parallel with `deploy`
+#                       (both only depend on `build-push`) and with
+#                       `changelog` -- a docs PR waiting on human review, or
+#                       one deploy target taking longer than the other,
+#                       shouldn't hold up shipping an already-built, already
+#                       Trivy-scanned release to either target.
 #
 # `changelog` opens a PR rather than committing straight to `main` because
 # this repo's `main` only ever changes via reviewed pull request (feature
@@ -213,11 +221,43 @@ jobs:
       actions: read
     # deploy-azure-vm.yml's workflow_call entry point always targets
     # prod -- there's no `environment` input on this path (that choice
-    # only exists on its workflow_dispatch entry point). This is currently
-    # the ONLY deploy target a version tag triggers -- the ACA path
-    # (deploy-azure-aca.yml) is still fully usable, just via its own
-    # workflow_dispatch run instead of this trigger.
+    # only exists on its workflow_dispatch entry point). See `deploy-aca`
+    # below for the other deploy target this same tag triggers, in
+    # parallel.
     uses: ./.github/workflows/deploy-azure-vm.yml
+    with:
+      image_tag: ${{ github.ref_name }}
+    secrets: inherit
+
+  deploy-aca:
+    name: Deploy this version to Azure Container Apps (Production)
+    needs: [build-push] # same reasoning as `deploy` above -- not `changelog`, and independent of the VM deploy so a slow/stuck VM rollout can't hold this one back either (both jobs only share `build-push`, so they run in parallel)
+    permissions:
+      contents: read
+      id-token: write # OIDC federated Azure login -- deploy-azure-aca.yml calls `azure/login`, unlike the VM path (SSH + Cloudflare Access, plain secrets, no OIDC)
+      # `actions: read` is only actually USED by deploy-azure-aca.yml's
+      # `verify-ci` job, which is gated with
+      # `if: github.event_name == 'workflow_dispatch' && ...` and never
+      # runs on this workflow_call (tag-release) path -- same situation
+      # as the `deploy` job's identical `actions: read` above. GitHub
+      # still statically validates a called reusable workflow's
+      # permission requests against the UNION of every `permissions:`
+      # block declared anywhere in it (top-level AND every job's own,
+      # regardless of whether that job's `if:` would let it run), so
+      # without this line the whole call is rejected at trigger time
+      # with "Error calling workflow ... requesting 'actions: read', but
+      # is only allowed ...", even though nothing in this run's actual
+      # execution path needs it.
+      actions: read
+    # deploy-azure-aca.yml's workflow_call entry point always targets
+    # production -- there's no `environment` input on this path (that
+    # choice only exists on its workflow_dispatch entry point), same
+    # shape as deploy-azure-vm.yml's equivalent entry point above. A
+    # version tag now deploys to BOTH targets: the VM (`deploy`, above)
+    # and Azure Container Apps (this job) -- each is still also fully
+    # usable on its own via its own workflow_dispatch run, independent of
+    # a tag push.
+    uses: ./.github/workflows/deploy-azure-aca.yml
     with:
       image_tag: ${{ github.ref_name }}
     secrets: inherit

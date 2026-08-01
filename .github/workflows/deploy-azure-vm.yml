@@ -17,13 +17,11 @@
 #   A. TAG RELEASE (workflow_call, prod only): `git tag vX.Y.Z && git push
 #      origin vX.Y.Z` runs release.yml, which builds + Trivy-scans + pushes
 #      both images tagged with that VERSION and then calls THIS workflow
-#      (`uses: ./.github/workflows/deploy-azure-vm.yml`) with that
-#      already-built `image_tag`. This is the ONLY deploy target release.yml
-#      currently calls -- the ACA path (deploy-azure-aca.yml) still exists
-#      and is fully usable, but only via its own `workflow_dispatch` entry
-#      point, so there is exactly one thing "cut a tagged release" means in
-#      this repo right now, instead of two independent pipelines quietly
-#      firing off the same tag push. `ci`/`build-push` below both skip
+#      (`uses: ./.github/workflows/deploy-azure-vm.yml`, from release.yml's
+#      `deploy` job) with that already-built `image_tag`. release.yml also
+#      calls deploy-azure-aca.yml (its `deploy-aca` job) on the exact same
+#      tag push, in parallel -- a version tag now deploys to both targets
+#      every release, not just this one. `ci`/`build-push` below both skip
 #      themselves out on this path, since release.yml already ran an
 #      equivalent gate -- same pattern as deploy-azure-aca.yml's own
 #      workflow_call entry point.
