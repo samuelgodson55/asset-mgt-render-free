@@ -375,7 +375,24 @@ server {
 
     location /_deploy/ {
         alias /mnt/deploy-status/;
-        index index.html;
+
+        # BUG FIX: this used to be `index index.html;`. With `alias`, nginx
+        # serves an `index`-directive match via an INTERNAL URI rewrite from
+        # "/_deploy/" to "/_deploy/index.html" -- which re-enters location
+        # matching (the exact same gotcha the site's `location /` block
+        # above already dodges, and explains in its own comment). This
+        # config's global "clean URLs" regex, `location ~ ^/(.+)\.html$`,
+        # then catches that rewritten request and 301s it to "/_deploy/index"
+        # (no ".html") -- which isn't a real file, so THAT then 404s. Net
+        # effect: every request for "/_deploy/" 404'd, even with the share
+        # fully populated and .htpasswd correct, because nginx never actually
+        # got as far as reading index.html off disk.
+        #
+        # `try_files` instead resolves "index.html" as a plain filesystem
+        # lookup relative to this location's `alias`, exactly like `location
+        # /`'s own `$uri/index.html` fallback -- no URI rewrite, so it never
+        # re-triggers location matching / the .html-stripping regex at all.
+        try_files $uri $uri/index.html =404;
 
         auth_basic "Deployment status";
         auth_basic_user_file /mnt/deploy-status/.htpasswd;
