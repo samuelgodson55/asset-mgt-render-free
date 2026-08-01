@@ -112,7 +112,7 @@ concurrency:
   # always production. A workflow_dispatch run always carries a concrete
   # "staging" or "production" in inputs.environment now that the dropdown
   # has no "from-variable" sentinel to resolve.
-  group: deploy-aca-${{ (github.event_name == 'workflow_call') && 'production' || inputs.environment }}
+  group: deploy-aca-${{ inputs.environment || 'production' }}
   cancel-in-progress: false # never cancel a deploy mid-flight -- let it finish or fail cleanly
 
 permissions:
@@ -131,8 +131,25 @@ env:
   # Hub image repo gets pulled. Both of those are BUILD_ENV/image_suffix,
   # computed by the `resolve-target` job below from each target's own
   # `ENVIRONMENT` Actions variable (see that job's own comment for why).
-  ENVIRONMENT: ${{ (github.event_name == 'workflow_call') && 'production' || inputs.environment }}
-  RESOURCE_GROUP: ${{ ((github.event_name == 'workflow_call') && 'production' || inputs.environment) == 'production' && secrets.PROD_RESOURCE_GROUP || secrets.STAGING_RESOURCE_GROUP }}
+  #
+  # BUG FIX (latent -- this workflow_call entry point isn't wired up to
+  # anything yet, per this file's own top-of-file comment, so this never
+  # actually misfired in production, but it's the exact same bug
+  # deploy-azure-vm.yml had live: github.event_name inside a CALLED
+  # reusable workflow is always the CALLER's original triggering event,
+  # never 'workflow_call' -- per GitHub's own docs, "the github context is
+  # always associated with the caller workflow". `(github.event_name ==
+  # 'workflow_call') && 'production' || inputs.environment` would
+  # therefore always fall through to inputs.environment, which is empty
+  # on an actual workflow_call (that trigger never declares an
+  # `environment` input), binding every `environment:`-scoped job below
+  # to Environment '' instead of 'production' and hiding every secret
+  # scoped to the real 'production' Environment. Fixed the same way: read
+  # inputs.environment directly (empty on workflow_call, always a real
+  # value on workflow_dispatch since that input is required with a
+  # default), falling back to 'production'.
+  ENVIRONMENT: ${{ inputs.environment || 'production' }}
+  RESOURCE_GROUP: ${{ (inputs.environment || 'production') == 'production' && secrets.PROD_RESOURCE_GROUP || secrets.STAGING_RESOURCE_GROUP }}
   # workflow_call (release.yml) always supplies a real image_tag. On
   # workflow_dispatch, a blank image_tag means "build fresh" -- fall back to
   # the commit SHA of whatever ref this run was dispatched against, so
@@ -171,7 +188,7 @@ jobs:
     # "production" now gates approval up to three times in one run (here,
     # then again on `migrate` and `deploy`) -- accepted trade-off for
     # reading that environment's own variable correctly.
-    environment: ${{ (github.event_name == 'workflow_call') && 'production' || inputs.environment }}
+    environment: ${{ inputs.environment || 'production' }}
     outputs:
       build_env: ${{ steps.resolve.outputs.build_env }}
       # BUG FIX -- this used to be computed purely from the workflow_dispatch
@@ -312,7 +329,7 @@ jobs:
       # BUILD_ENV (a frontend minification setting) -- the two happen to
       # usually agree but are conceptually independent, see this file's
       # top-of-file "WHAT DIFFERS" comment.
-      trivy_blocking: ${{ ((github.event_name == 'workflow_call') && 'production' || inputs.environment) == 'production' }}
+      trivy_blocking: ${{ (inputs.environment || 'production') == 'production' }}
     secrets: inherit
 
   migrate:
@@ -363,7 +380,7 @@ jobs:
     # graph at all, since the whole workflow file fails validation before
     # any job runs. See deploy-azure-vm.yml's `environment:` line for the
     # same pattern (it uses `inputs.environment`, never `env.*`).
-    environment: ${{ (github.event_name == 'workflow_call') && 'production' || inputs.environment }}
+    environment: ${{ inputs.environment || 'production' }}
     # BACKEND_IMAGE now built from resolve-target's `image_suffix` output
     # (this GitHub Environment's own `ENVIRONMENT` variable), not from
     # `inputs.environment` -- see that job's output comment. Job-level
@@ -474,7 +491,7 @@ jobs:
     runs-on: ubuntu-latest
     # See `migrate`'s `environment:` line above for why this recomputes the
     # ternary instead of referencing `env.ENVIRONMENT`.
-    environment: ${{ (github.event_name == 'workflow_call') && 'production' || inputs.environment }}
+    environment: ${{ inputs.environment || 'production' }}
     # See `migrate`'s matching `env:` comment -- same reasoning, both
     # images needed here for the backend/frontend rollout steps below.
     env:

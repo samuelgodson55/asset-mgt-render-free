@@ -104,14 +104,44 @@ concurrency:
   # a workflow_dispatch run always carries a concrete "vm-staging" or
   # "prod" in inputs.environment now that the dropdown has no
   # "from-variable" sentinel to resolve.
-  group: deploy-vm-${{ (github.event_name == 'workflow_call') && 'prod' || inputs.environment }}
+  group: deploy-vm-${{ inputs.environment || 'prod' }}
   cancel-in-progress: false
 
 env:
   # A tagged release (workflow_call, from release.yml) always targets prod,
   # exactly like release.yml's equivalent call does for the Container Apps
   # path -- there's no such thing as a "staging" named release.
-  IS_VERSION_TAG: ${{ github.event_name == 'workflow_call' }}
+  # BUG FIX: `github.event_name` inside a CALLED reusable workflow is NOT
+  # 'workflow_call' -- per GitHub's own docs, "When a reusable workflow is
+  # triggered by a caller workflow, the github context is always
+  # associated with the caller workflow", so this reflects release.yml's
+  # own triggering event ('push', from the tag push) the entire time this
+  # file runs on that path. `(github.event_name == 'workflow_call') &&
+  # 'prod' || inputs.environment` therefore ALWAYS fell through to
+  # `inputs.environment` below, even on a tag release -- and this
+  # workflow's `workflow_call:` trigger (above) never declares an
+  # `environment` input at all, so `inputs.environment` silently resolved
+  # to an empty string on that path instead of erroring. That empty
+  # string then became this job's/`deploy`'s `environment:` value, which
+  # doesn't match the "prod" GitHub Environment, so none of that
+  # Environment's secrets (VM_HOST, VM_SSH_USER, VM_SSH_PRIVATE_KEY,
+  # CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET) were ever visible to the
+  # run -- exactly the "Missing/empty secret(s) for GitHub Environment
+  # ''" failure in `deploy`'s "Validate required deploy secrets" step,
+  # even though those secrets are correctly set under Settings >
+  # Environments > prod.
+  #
+  # Fixed by reading `inputs.environment` directly instead of gating on
+  # `github.event_name`: `workflow_dispatch`'s `environment` input is
+  # `required: true` with a `default: prod`, so it is ALWAYS a truthy
+  # "vm-staging" or "prod" on that path -- while `workflow_call` never
+  # defines that input in the first place, so `inputs.environment` is
+  # reliably empty/falsy on a tag release, correctly falling back to
+  # 'prod'. This is the same pattern this file's own IMAGE_TAG/VERSION
+  # just above already rely on (`inputs.image_tag != '' && ... ||
+  # ...`) -- referencing an input a given trigger never declared just
+  # evaluates empty, it doesn't error.
+  IS_VERSION_TAG: ${{ inputs.environment == '' }}
   # WHICH TARGET this run deploys to. A tagged release is always "prod";
   # a workflow_dispatch run always carries a concrete "vm-staging" or
   # "prod" in inputs.environment (the dropdown has no "from-variable"
@@ -121,7 +151,7 @@ env:
   # frontend build mode or which Docker Hub image repo gets pulled. Both
   # of those are BUILD_ENV/image_suffix, computed by the `resolve-target`
   # job below from each target's own `ENVIRONMENT` Actions variable.
-  ENVIRONMENT: ${{ (github.event_name == 'workflow_call') && 'prod' || inputs.environment }}
+  ENVIRONMENT: ${{ inputs.environment || 'prod' }}
   # IMAGE_TAG is the literal Docker tag pulled/deployed. VERSION is the
   # human-facing release name recorded on the VM and in this run's
   # summary (see the "Write release marker" step below). Both now derive
@@ -169,7 +199,14 @@ jobs:
     # gates approval twice in one run (here, then again on `deploy`) --
     # accepted trade-off for reading that environment's own variable
     # correctly.
-    environment: ${{ (github.event_name == 'workflow_call') && 'prod' || inputs.environment }}
+    #
+    # BUG FIX: see the top-of-file ENVIRONMENT comment -- github.event_name
+    # is never 'workflow_call' inside a called reusable workflow, so this
+    # used to always fall through to inputs.environment, which is silently
+    # empty on the workflow_call (tag-release) path. Reading
+    # inputs.environment directly (falling back to 'prod') is correct on
+    # both paths.
+    environment: ${{ inputs.environment || 'prod' }}
     outputs:
       build_env: ${{ steps.resolve.outputs.build_env }}
       # BUG FIX -- see this file's top-of-file BACKEND_IMAGE/FRONTEND_IMAGE
@@ -354,7 +391,17 @@ jobs:
     # referencing env.ENVIRONMENT here parses but is invalid at trigger
     # time and produces "Unrecognized named-value: 'env'". Inlined the
     # same expression the top-of-file `env.ENVIRONMENT` is computed from.
-    environment: ${{ (github.event_name == 'workflow_call') && 'prod' || inputs.environment }}
+    #
+    # BUG FIX: see the top-of-file ENVIRONMENT comment. This is the exact
+    # field responsible for the "Missing/empty secret(s) for GitHub
+    # Environment ''" failure -- github.event_name is never
+    # 'workflow_call' inside a called reusable workflow (it's always the
+    # CALLER's original triggering event, e.g. 'push' for a tag release),
+    # so this always fell through to inputs.environment, which is empty
+    # on the workflow_call path (that trigger never declares an
+    # `environment` input), binding this job to Environment '' instead of
+    # 'prod' and hiding every secret scoped to the real 'prod' Environment.
+    environment: ${{ inputs.environment || 'prod' }}
     env:
       # What the backend/worker/beat containers actually read as their own
       # ENVIRONMENT env var (see backend/config.py's apply_environment_defaults).
