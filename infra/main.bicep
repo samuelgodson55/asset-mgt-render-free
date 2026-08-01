@@ -1187,7 +1187,33 @@ resource frontendApp 'Microsoft.App/containerApps@2024-03-01' = {
         ]
       }
       volumes: [
-        { name: 'deploy-status', storageType: 'AzureFile', storageName: 'deploy-status' }
+        // BUG FIX: this used to be a plain AzureFile mount with no
+        // `mountOptions` -- Azure Container Apps' underlying CIFS client
+        // defaults to `actimeo=30` (a 30s attribute/data cache), completely
+        // independent of anything nginx itself does. That's fine for a
+        // volume only ever written by the SAME client that mounts it, but
+        // `deploy-status` is written from a totally different client (the
+        // GitHub Actions runner, over the Azure Files REST API via `az
+        // storage file upload` -- see aca-deploy-status.sh) than the one
+        // reading it (this container's SMB mount) -- REST and SMB give no
+        // cross-protocol consistency guarantee at all, and a 30s cache on
+        // top of that meant a write could sit invisible to nginx for up to
+        // 30s, or -- worse -- perpetually, since production's canary steps
+        // are only `step_wait=20s` apart (deploy-azure-aca.yml): each new
+        // write could arrive before the previous one ever became visible,
+        // leaving the /_deploy/ dashboard showing a stale snapshot (a
+        // frozen progress bar, an empty checks log) for the ENTIRE
+        // rollout. `actimeo=1` keeps a cache (still cheap: this is a
+        // handful of tiny text files polled every 3s by the dashboard's
+        // own JS, not a hot path worth zero caching) but short enough that
+        // nginx's own no-store responses actually reflect what's really on
+        // the share within about a second, not up to half a minute+. See
+        // https://learn.microsoft.com/azure/container-apps/storage-mounts
+        // ("Use mountOptions settings in Azure Files") for the full option
+        // list -- only `backup-data`/`export-data` below are exempt from
+        // this, since those are read-write and only ever touched by the
+        // app itself, never raced by an out-of-band writer.
+        { name: 'deploy-status', storageType: 'AzureFile', storageName: 'deploy-status', mountOptions: 'actimeo=1' }
       ]
     }
   }
