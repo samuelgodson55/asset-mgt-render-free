@@ -120,18 +120,44 @@ cmd_init() {
   STORAGE_ACCOUNT="$1"
   WORKDIR="$2"
   mkdir -p "$WORKDIR"
-  { echo "STORAGE_ACCOUNT=$STORAGE_ACCOUNT"; echo "WORKDIR=$WORKDIR"; } > "$STASH"
+
+  # BUG FIX: every `az storage blob upload` below used to omit
+  # `--account-key`, which makes the Azure CLI silently re-resolve the
+  # account key itself (an extra `Microsoft.Storage/storageAccounts/
+  # listKeys/action` ARM call) on EVERY single invocation -- and this
+  # script gets called a LOT during one rollout: once per health-poll
+  # heartbeat (up to 40 times at gate 1 alone) and once per canary step,
+  # per app. Each of those hidden listKeys round-trips roughly doubles
+  # that call's latency, and -- since every call here is best-effort
+  # (`|| true`, per this file's own header comment) -- any one of them
+  # timing out or hiccuping just drops that update on the floor with no
+  # visible error, which is exactly what "the progress bar doesn't move /
+  # the health log stays empty during an otherwise-healthy rollout" looks
+  # like from the dashboard. Resolving the key ONCE here and reusing it
+  # explicitly on every subsequent call removes that repeated round-trip
+  # entirely -- this is the closest ACA's remote-Blob-Storage design can
+  # get to the VM path's instant local-disk write (see
+  # scripts/blue-green-deploy.sh's STATUS_JSON/STATUS_LOG, which need no
+  # network call or auth resolution at all).
+  local storage_key
+  storage_key="$(az storage account keys list --account-name "$STORAGE_ACCOUNT" \
+    --query "[0].value" -o tsv 2>/dev/null)" || true
+  if [ -z "$storage_key" ]; then
+    echo "::warning::could not resolve an account key for $STORAGE_ACCOUNT -- falling back to per-call key resolution (slower, more failure-prone). Check this identity has Microsoft.Storage/storageAccounts/listKeys/action on $STORAGE_ACCOUNT."
+  fi
+  { echo "STORAGE_ACCOUNT=$STORAGE_ACCOUNT"; echo "WORKDIR=$WORKDIR"; echo "STORAGE_KEY=$storage_key"; } > "$STASH"
 
   # Container may already exist from a previous deploy (infra-deploy.yml
   # only creates it once) -- creating it again is a harmless no-op, and
   # this guards a repo that ran deploy-azure-aca.yml before its infra was
   # ever re-applied with the deploy-status container added.
   az storage container create --account-name "$STORAGE_ACCOUNT" --name "$CONTAINER" \
-    --public-access off >/dev/null 2>&1 || true
+    ${storage_key:+--account-key "$storage_key"} --public-access off >/dev/null 2>&1 || true
 
   if [ -n "${DEPLOY_STATUS_USER:-}" ] && [ -n "${DEPLOY_STATUS_PASSWORD_APR1_HASH:-}" ]; then
     echo "${DEPLOY_STATUS_USER}:${DEPLOY_STATUS_PASSWORD_APR1_HASH}" > "$WORKDIR/.htpasswd"
     az storage blob upload --account-name "$STORAGE_ACCOUNT" --container-name "$CONTAINER" \
+      ${storage_key:+--account-key "$storage_key"} \
       --file "$WORKDIR/.htpasswd" --name ".htpasswd" --content-type "text/plain" \
       --overwrite >/dev/null 2>&1 \
       || echo "::warning::failed to upload .htpasswd for the deploy-status dashboard (non-fatal)"
@@ -203,6 +229,7 @@ JSON
   fi
 
   az storage blob upload --account-name "$STORAGE_ACCOUNT" --container-name "$CONTAINER" \
+    ${STORAGE_KEY:+--account-key "$STORAGE_KEY"} \
     --file "$WORKDIR/status.json" --name "status.json" --content-type "application/json" \
     --overwrite >/dev/null 2>&1 \
     || echo "::warning::failed to upload status.json (phase=$phase) -- dashboard will show stale state until the next successful write"
@@ -230,6 +257,7 @@ cmd_check() {
   printf '{"check": "%s", "status": "%s", "detail": "%s", "ts": "%s"}\n' \
     "$check" "$py_status" "$escaped_detail" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$WORKDIR/checks.log"
   az storage blob upload --account-name "$STORAGE_ACCOUNT" --container-name "$CONTAINER" \
+    ${STORAGE_KEY:+--account-key "$STORAGE_KEY"} \
     --file "$WORKDIR/checks.log" --name "checks.log" --content-type "text/plain" \
     --overwrite >/dev/null 2>&1 \
     || echo "::warning::failed to upload checks.log entry ($check=$status) -- dashboard will be missing this line until the next successful upload"
