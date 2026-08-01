@@ -181,6 +181,20 @@ services:
       # (see backend/config.py's SITE_NAME docstring). Change this to
       # rebrand every future PDF export at once.
       SITE_NAME: ${SITE_NAME:-Snipe-IT Lite}
+      # IANA timezone used to render CSV/PDF export timestamps and the
+      # scheduled-backup filename (see backend/config.py's DISPLAY_TIMEZONE
+      # docstring) + ISO 4217 currency code shown/exported everywhere a
+      # price appears (see CURRENCY_CODE docstring). BUG FIX: both were
+      # already real, wired-through settings on the VM path (infra-vm's
+      # display_timezone/currency_code Terraform variables ->
+      # cloud-init.yaml -> the VM's .env) and the ACA path (infra/
+      # main.bicep's sharedEnv) the whole time, but neither compose file
+      # ever actually read them here -- an operator setting either one
+      # via terraform.tfvars/bicep params had it silently ignored, always
+      # falling back to config.py's "Africa/Lagos"/"NGN" defaults. Caught
+      # by scripts/check-bicep-compose-drift.py.
+      DISPLAY_TIMEZONE: ${DISPLAY_TIMEZONE:-Africa/Lagos}
+      CURRENCY_CODE: ${CURRENCY_CODE:-NGN}
       # Operations & Observability requirement #1: gate the startup
       # init_db()/seed_db() calls instead of always running them. Leave
       # both "true" for local docker-compose demo use; set both "false" in
@@ -366,6 +380,15 @@ services:
       DATABASE_URL: ${DATABASE_URL:-postgresql://admin:supersecret@db:5432/asset_db}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       EXPORT_RESULT_DIR: ${EXPORT_RESULT_DIR:-/app/export_results}
+      # `worker` is what actually generates CSV/PDF exports
+      # (backend/services/export_service.py), which reads both of these
+      # directly -- DISPLAY_TIMEZONE at import time (module-level
+      # `DISPLAY_TZ = ZoneInfo(settings.DISPLAY_TIMEZONE)`) and
+      # CURRENCY_CODE per-export for currency formatting. See the
+      # `backend` service's own DISPLAY_TIMEZONE/CURRENCY_CODE comment
+      # above for the "why these exist at all" story.
+      DISPLAY_TIMEZONE: ${DISPLAY_TIMEZONE:-Africa/Lagos}
+      CURRENCY_CODE: ${CURRENCY_CODE:-NGN}
       # The worker never issues/verifies JWTs itself (export jobs are
       # enqueued with an already-validated user's role/email baked in --
       # see api/audit.py), but Settings() still requires a JWT_SECRET_KEY

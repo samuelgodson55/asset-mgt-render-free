@@ -321,16 +321,16 @@ jobs:
           GITLEAKS_ARGS: "detect --no-git -v"
 
   compose-drift-check:
-    name: docker-compose.yml / docker-compose.vm.yml drift check
+    name: docker-compose.yml / docker-compose.vm.yml / main.bicep drift check
     runs-on: ubuntu-latest
-    # No `needs:`/path filter -- this only reads two YAML files with the
-    # stdlib, takes well under a second, and both files can be edited
-    # independently of anything `changes` tracks, so there's no meaningful
-    # cost to just always running it.
+    # No `needs:`/path filter -- this only reads a couple of text files
+    # with the stdlib, takes well under a second, and every file it reads
+    # can be edited independently of anything `changes` tracks, so there's
+    # no meaningful cost to just always running it.
     steps:
       - uses: actions/checkout@v7
 
-      - name: Check for backend/worker/beat/frontend env var drift
+      - name: Check for backend/worker/beat/frontend env var drift (compose vs compose)
         # See scripts/check-compose-drift.py's own module docstring for the
         # full story -- this is the guard against exactly the bug class
         # this repo shipped once already (BACKUP_GDRIVE_CREDENTIALS_JSON
@@ -338,6 +338,16 @@ jobs:
         # docker-compose.vm.yml, so Mode 2 backups only ever worked in
         # local dev).
         run: python3 scripts/check-compose-drift.py
+
+      - name: Check for backend/frontend env var drift (compose vs infra/main.bicep)
+        # scripts/check-bicep-compose-drift.py's own module docstring has
+        # the full story -- this is the same guard, extended to the third
+        # deploy path (Azure Container Apps via infra/main.bicep), which
+        # the compose-vs-compose check above doesn't cover. Written after
+        # finding that exact bug class recurring there too: DISPLAY_TIMEZONE
+        # /CURRENCY_CODE were real, terraform/bicep-wired settings neither
+        # compose file ever actually read.
+        run: python3 scripts/check-bicep-compose-drift.py
 
   nginx-config:
     name: nginx config validation (clean URLs)

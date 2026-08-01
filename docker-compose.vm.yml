@@ -247,6 +247,20 @@ services:
       JWT_EXPIRY_HOURS: ${JWT_EXPIRY_HOURS:-12}
       CORS_ORIGINS: ${CORS_ORIGINS:-https://${DOMAIN}}
       SITE_NAME: ${SITE_NAME:-Snipe-IT Lite}
+      # IANA timezone used to render CSV/PDF export timestamps and the
+      # scheduled-backup filename (see backend/config.py's DISPLAY_TIMEZONE
+      # docstring) + ISO 4217 currency code shown/exported everywhere a
+      # price appears (see CURRENCY_CODE docstring). BUG FIX: both were
+      # already real, wired-through settings on this VM path
+      # (infra-vm's display_timezone/currency_code Terraform variables ->
+      # cloud-init.yaml -> this VM's .env) and the ACA path (infra/
+      # main.bicep's sharedEnv) the whole time, but this file never
+      # actually read them here -- an operator setting either one via
+      # terraform.tfvars had it silently ignored, always falling back to
+      # config.py's "Africa/Lagos"/"NGN" defaults. Caught by
+      # scripts/check-bicep-compose-drift.py.
+      DISPLAY_TIMEZONE: ${DISPLAY_TIMEZONE:-Africa/Lagos}
+      CURRENCY_CODE: ${CURRENCY_CODE:-NGN}
       LEAN_MODE: "false"
       # Explicit, not left to LEAN_MODE's default: this VM is a real,
       # persistent-data deployment (prod OR vm-staging -- both use real
@@ -397,6 +411,20 @@ services:
       JWT_EXPIRY_HOURS: ${JWT_EXPIRY_HOURS:-12}
       CORS_ORIGINS: ${CORS_ORIGINS:-https://${DOMAIN}}
       SITE_NAME: ${SITE_NAME:-Snipe-IT Lite}
+      # IANA timezone used to render CSV/PDF export timestamps and the
+      # scheduled-backup filename (see backend/config.py's DISPLAY_TIMEZONE
+      # docstring) + ISO 4217 currency code shown/exported everywhere a
+      # price appears (see CURRENCY_CODE docstring). BUG FIX: both were
+      # already real, wired-through settings on this VM path
+      # (infra-vm's display_timezone/currency_code Terraform variables ->
+      # cloud-init.yaml -> this VM's .env) and the ACA path (infra/
+      # main.bicep's sharedEnv) the whole time, but this file never
+      # actually read them here -- an operator setting either one via
+      # terraform.tfvars had it silently ignored, always falling back to
+      # config.py's "Africa/Lagos"/"NGN" defaults. Caught by
+      # scripts/check-bicep-compose-drift.py.
+      DISPLAY_TIMEZONE: ${DISPLAY_TIMEZONE:-Africa/Lagos}
+      CURRENCY_CODE: ${CURRENCY_CODE:-NGN}
       LEAN_MODE: "false"
       # Explicit, not left to LEAN_MODE's default: this VM is a real,
       # persistent-data deployment (prod OR vm-staging -- both use real
@@ -532,6 +560,15 @@ services:
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
       REDIS_URL: redis://redis:6379/0
       EXPORT_RESULT_DIR: /app/export_results
+      # `worker` is what actually generates CSV/PDF exports
+      # (backend/services/export_service.py), which reads both of these
+      # directly -- DISPLAY_TIMEZONE at import time (module-level
+      # `DISPLAY_TZ = ZoneInfo(settings.DISPLAY_TIMEZONE)`) and
+      # CURRENCY_CODE per-export for currency formatting. See the
+      # `backend-blue`/`backend-green` services' own DISPLAY_TIMEZONE/
+      # CURRENCY_CODE comment above for the "why these exist at all" story.
+      DISPLAY_TIMEZONE: ${DISPLAY_TIMEZONE:-Africa/Lagos}
+      CURRENCY_CODE: ${CURRENCY_CODE:-NGN}
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_FORMAT: json

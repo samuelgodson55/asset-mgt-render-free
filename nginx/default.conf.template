@@ -411,13 +411,28 @@ server {
     # "/_deploy/index" -- not a real file/location, so THAT then 404s. Net
     # effect: every request for "/_deploy/" 404'd, even with everything
     # else configured correctly, because nginx never got as far as reading
-    # index.html at all. This exact-match block bypasses that failure mode
-    # completely rather than working around it: it names the single file
-    # to serve directly (`alias` pointed straight at index.html, not a
-    # directory), so there's no rewrite of any kind to re-trigger location
-    # matching in the first place.
+    # index.html at all.
+    #
+    # BUG FIX: this block used to point `alias` directly at index.html
+    # (`alias /usr/share/nginx/deploy-status/index.html;`) on the theory
+    # that naming the file directly, instead of a directory, would avoid
+    # the `index`-directive rewrite loop above entirely. It does avoid
+    # THAT specific loop, but not a second, unrelated nginx behavior:
+    # ngx_http_index_module fires for ANY request URI ending in "/"
+    # regardless of what `alias`/`root` resolve to -- it unconditionally
+    # appends the default index filename to the resolved path. Since
+    # `alias` here already ends in "index.html", that produced
+    # "/usr/share/nginx/deploy-status/index.htmlindex.html" (sic --
+    # literally concatenated, no separator) and nginx logged `"...
+    # index.htmlindex.html" is not a directory` and returned 500 on
+    # every single request, 401 vs. wrong-password never even entering
+    # into it. `try_files` sidesteps this cleanly: it resolves and serves
+    # a specific file itself, in its own phase, before the index module
+    # ever gets a chance to run -- no `alias`-to-a-file trick needed, and
+    # no dependency on the request URI's trailing slash at all.
     location = /_deploy/ {
-        alias /usr/share/nginx/deploy-status/index.html;
+        root /usr/share/nginx/deploy-status;
+        try_files /index.html =404;
 
         auth_basic "Deployment status";
         auth_basic_user_file /tmp/deploy-status/.htpasswd;
@@ -438,6 +453,7 @@ server {
         add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'; object-src 'none'" always;
         add_header Cache-Control "no-store" always;
     }
+
 
     # Everything ELSE under /_deploy/ -- status.json, checks.log, and any
     # future file this dashboard's JS ever fetches() -- proxies straight
