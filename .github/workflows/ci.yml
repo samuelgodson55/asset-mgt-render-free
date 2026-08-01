@@ -458,13 +458,19 @@ jobs:
           echo "OK: RESOLVER_IP substituted, nginx started cleanly."
 
       - name: Trivy scan -- backend
-        # Pinned to the commit SHA behind the verified-safe v0.35.0 release,
-        # not a mutable tag: aquasecurity/trivy-action had 76 of 77 version
-        # tags (including 0.24.0/v0.24.0) force-pushed to credential-stealing
-        # malware in a March 2026 supply-chain compromise (CVE-2026-33634).
-        # v0.35.0 predates the compromise and is protected by GitHub's
-        # immutable-releases feature. See
-        # https://github.com/advisories/GHSA-69fq-xp46-6x23
+        # Pinned to a commit SHA, not a mutable tag: aquasecurity/trivy-action
+        # had 76 of 77 version tags (including 0.24.0/v0.24.0) force-pushed to
+        # credential-stealing malware in a March 2026 supply-chain compromise
+        # (CVE-2026-33634, https://github.com/advisories/GHSA-69fq-xp46-6x23).
+        # v0.35.0 was the immediate post-incident safe pin; this is now
+        # v0.36.0 (released 2026-04-22, well after the compromise, commit
+        # GPG-signed by an Aqua maintainer) -- moved up specifically because
+        # v0.35.0 still shipped an old actions/cache pin that only supports
+        # Node.js 20, which GitHub started warning about deprecating
+        # (https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/).
+        # v0.36.0 bumped its internal actions/cache to v5, which supports
+        # Node.js 24 and clears that warning. Still SHA-pinned, same as
+        # before -- only the underlying commit changed.
         #
         # exit-code now blocks on CRITICAL (was report-only for everything)
         # -- see release.yml's Trivy step for why: a floating/retired base
@@ -477,7 +483,7 @@ jobs:
         # skips CVEs with no available patch yet -- those can't be
         # resolved by bumping anything, so failing on them would just
         # block releases indefinitely with no actionable fix.
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: snipeit-backend:ci
           severity: 'CRITICAL'
@@ -488,7 +494,7 @@ jobs:
       - name: Trivy scan -- backend (HIGH, report-only)
         # Separate non-blocking step so HIGH findings still show up in
         # logs without failing CI -- see the comment above.
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: snipeit-backend:ci
           severity: 'HIGH'
@@ -498,7 +504,7 @@ jobs:
       - name: Trivy scan -- frontend
         # See the backend Trivy step above for why this is pinned to a SHA,
         # and why CRITICAL now blocks here instead of only at release time.
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: snipeit-frontend:ci
           severity: 'CRITICAL'
@@ -507,7 +513,7 @@ jobs:
           format: 'table'
 
       - name: Trivy scan -- frontend (HIGH, report-only)
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: snipeit-frontend:ci
           severity: 'HIGH'
