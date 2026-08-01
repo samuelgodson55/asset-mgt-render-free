@@ -15,6 +15,13 @@ above the marker are yours to keep.
 
 <!-- release-notes-insertion-point -->
 
+## [v1.0.2] - 2026-08-01
+- ACA deploy page issue #2 (542ed02)
+- deploy page issue #1 (3076cdb)
+- live ACA deploy site (72a852f)
+- live deploy dashboard for ACA included (4636e3f)
+- docs(changelog): v1.0.1 (a31a58d)
+
 ## [v1.0.1] - 2026-08-01
 - fixed site branding & Notifications
 - updated ci
