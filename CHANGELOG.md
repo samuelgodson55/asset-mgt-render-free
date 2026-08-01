@@ -15,6 +15,9 @@ above the marker are yours to keep.
 
 <!-- release-notes-insertion-point -->
 
+## [v1.0.1] - 2026-08-01
+- VM worflow issue #1 (cd1906d)
+
 ## [v1.0.1] - 2026-07-28
 - infra fix (a927219)
 - VM not provisioned well fix (2660753)
