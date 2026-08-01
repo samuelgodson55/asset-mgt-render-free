@@ -58,6 +58,17 @@ export BACKEND_HOST=backend
 export BACKEND_PORT=8000
 export RESOLVER_IP=127.0.0.11
 export ENABLE_API_DOCS=false
+# Mirrors frontend/Dockerfile's own ENV defaults for these two -- see that
+# Dockerfile's comment for the full history. Empty, not absent: envsubst's
+# restricted substitution (below) only touches variable names that are
+# actually IN the environment, so leaving these two out of this `export`
+# list would leave "${DEPLOY_STATUS_ACCOUNT}"/"${DEPLOY_STATUS_SAS}" as
+# literal text in the rendered config, which nginx's own parser then
+# rejects as a reference to a `set` that never happened -- exactly the
+# `nginx -t` failure ("unknown \"deploy_status_account\" variable") this
+# script exists to catch before it reaches a real VM/local/Render boot.
+export DEPLOY_STATUS_ACCOUNT=""
+export DEPLOY_STATUS_SAS=""
 defined_envs="$(printf '${%s} ' $(env | cut -d= -f1))"
 envsubst "$defined_envs" < "$TEMPLATE" > "$WORKDIR/default.conf"
 

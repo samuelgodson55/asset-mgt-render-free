@@ -20,8 +20,8 @@
 #   BACKEND_HOST   | backend (Compose service name)    | your backend service's hostname
 #   BACKEND_PORT   | 8000                               | whatever port that service listens on
 #   RESOLVER_IP    | 127.0.0.11 (Docker's embedded DNS) | your platform's internal DNS IP
-#   DEPLOY_STATUS_ACCOUNT | unset (no /_deploy/ on Compose) | Blob Storage account name (infra/main.bicep's `storage`)
-#   DEPLOY_STATUS_SAS     | unset (no /_deploy/ on Compose) | read-only SAS query string, incl. leading "?" (infra/main.bicep's `deployStatusSas`)
+#   DEPLOY_STATUS_ACCOUNT | "" (default, see frontend/Dockerfile -- empty, not unset: see that ENV's own comment for why) | Blob Storage account name (infra/main.bicep's `storage`)
+#   DEPLOY_STATUS_SAS     | "" (default, see frontend/Dockerfile -- empty, not unset: see that ENV's own comment for why) | read-only SAS query string, incl. leading "?" (infra/main.bicep's `deployStatusSas`)
 #
 # See frontend/Dockerfile for the default values baked into the image, and
 # README.md for how to override them per environment.

@@ -202,14 +202,36 @@ ENV BACKEND_PORT=8000
 # which both already do this for you.
 ENV ENABLE_API_DOCS=true
 
-# DEPLOY_STATUS_ACCOUNT / DEPLOY_STATUS_SAS deliberately have NO default
-# here (unlike BACKEND_HOST/BACKEND_PORT above) -- local Docker Compose has
-# no Blob Storage at all, and both
-# nginx/docker-entrypoint.d/25-fetch-deploy-status-htpasswd.sh and
-# nginx/default.conf.template's /_deploy/ location already handle them
-# being unset gracefully (the dashboard shell still loads; every Basic Auth
-# attempt just fails closed). infra/main.bicep's `frontendApp` sets both
-# for real in Azure -- see that resource's own env comment.
+# DEPLOY_STATUS_ACCOUNT / DEPLOY_STATUS_SAS default to an EMPTY STRING here
+# -- NOT "no default" as before. Local Docker Compose, the VM path, and
+# Render genuinely have no Blob Storage and never set these; the sole
+# purpose of this ENV is to make sure the two names are still PRESENT in
+# the container's environment even then.
+#
+# BUG FIX: leaving them fully unset broke `nginx -t` (and therefore the
+# container's boot) on every one of those platforms, not just "degraded
+# gracefully" as originally intended. The official nginx image's own
+# docker-entrypoint.d/20-envsubst-on-templates.sh restricts envsubst to
+# ONLY the variable names actually present in the environment -- so when a
+# var is genuinely absent (not just empty), envsubst leaves the literal
+# "${DEPLOY_STATUS_ACCOUNT}"/"${DEPLOY_STATUS_SAS}" text sitting in the
+# rendered nginx/default.conf.template's `set`/`proxy_pass` lines. nginx's
+# OWN config parser then reads that literal "${...}" as a reference to an
+# nginx variable that was never `set` anywhere -- "unknown
+# \"deploy_status_account\" variable" -- a hard `nginx -t` failure, not a
+# runtime 401. Giving both an explicit empty-string default here makes
+# them show up in `env`, which is all envsubst's restricted whitelist
+# needs to substitute them -- with an empty string, same as before this
+# fix wherever they're genuinely unused. nginx/test-config.sh mirrors this
+# same default so the CI check that caught this can't regress silently.
+# The REST of the original reasoning is unchanged: with an empty account
+# name, the /_deploy/ dashboard shell still loads (frontend/Dockerfile's
+# own baked-in index.html) and every fetch()/Basic-Auth attempt against it
+# still fails closed -- nothing here grants real Blob Storage access.
+# infra/main.bicep's `frontendApp` overrides both to their real values in
+# Azure -- see that resource's own env comment.
+ENV DEPLOY_STATUS_ACCOUNT=""
+ENV DEPLOY_STATUS_SAS=""
 
 EXPOSE 80
 
