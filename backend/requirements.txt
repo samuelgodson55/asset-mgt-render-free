@@ -11,7 +11,7 @@ pydantic-settings==2.4.0
 alembic==1.13.2
 reportlab==4.2.5
 celery==5.4.0
-redis==5.0.8
+redis==8.0.1
 # Was already pulled in transitively (google-api-python-client, the OTLP
 # HTTP exporter below, ...) but never listed explicitly -- now a DIRECT
 # dependency too: services/notification_service.py's Brevo/Resend
