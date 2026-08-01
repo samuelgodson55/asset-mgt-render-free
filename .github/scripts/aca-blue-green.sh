@@ -12,33 +12,39 @@
 # there's only ever one revision, so a bad new replica still shares fate
 # with (and can still take real traffic alongside) the old ones while it's
 # being health-checked. Multiple revision mode gives us two fully independent
-# revisions (old = "blue", new = "green") that can run side by side, with
-# traffic weight decoupled from "which one is newest" -- which is what makes
-# a genuine 0% -> 100% cutover, gradual traffic shift, and an instant
-# traffic-only rollback (no redeploy needed) possible at all.
+# revisions (the currently-live one = "green", the incoming one being
+# validated = "blue" -- fixed roles, never swapped; see this repo's
+# blue-green.md) that can run side by side, with traffic weight decoupled
+# from "which one is newest" -- which is what makes a genuine 0% -> 100%
+# cutover, gradual traffic shift, and an instant traffic-only rollback (no
+# redeploy needed) possible at all.
 #
 # THE FOUR SUBCOMMANDS
-#   rollout   Create the new ("green") revision at 0% traffic, wait for
+#   rollout   Create the new ("blue") revision at 0% traffic, wait for
 #             Container Apps' OWN readiness probe (backend: /readyz on
 #             :8000, frontend: / on :80 -- see infra/main.bicep's `probes`
 #             blocks) to report the new revision Healthy, optionally smoke
 #             test it directly on its own per-revision FQDN (only possible
 #             for `frontend` -- see --public below), then walk traffic
 #             across it in the requested steps, re-checking health after
-#             each step. Never deactivates the old ("blue") revision --
-#             that's a separate, deliberate step (see `finalize`).
-#   finalize  Deactivate the old revision now that the new one is fully
-#             live and proven under real traffic -- "spin down the other
-#             slot." Call this ONLY after every app being deployed this run
-#             (backend AND frontend) has finished its rollout AND the
-#             end-to-end smoke test in deploy-azure-aca.yml has passed --
-#             see that workflow for why the two apps' cutovers are gated
-#             together rather than each finalizing independently.
-#   rollback  Flip traffic back to the old revision at 100% and deactivate
-#             the bad new one. Since the old revision was never scaled down
-#             or stopped, this is a weight change, not a redeploy -- the
-#             fastest possible recovery, and the reason this whole design
-#             exists.
+#             each step. Never deactivates the currently-live ("green")
+#             revision -- that's a separate, deliberate step (see
+#             `finalize`).
+#   finalize  Deactivate the old (former-"green") revision now that the
+#             new one is fully live and proven under real traffic -- "spin
+#             down the other slot." Call this ONLY after every app being
+#             deployed this run (backend AND frontend) has finished its
+#             rollout AND the end-to-end smoke test in
+#             deploy-azure-aca.yml has passed -- see that workflow for why
+#             the two apps' cutovers are gated together rather than each
+#             finalizing independently. Once this returns, the revision
+#             that was "blue" during the rollout is now simply the app's
+#             one live revision -- "green" for the NEXT deploy's purposes.
+#   rollback  Flip traffic back to the active revision at 100% and
+#             deactivate the bad incoming one. Since the active revision
+#             was never scaled down or stopped, this is a weight change,
+#             not a redeploy -- the fastest possible recovery, and the
+#             reason this whole design exists.
 #   status    Read-only. Prints each revision's health, replica count, and
 #             live traffic weight for one app. This is "the way to monitor
 #             the checks" -- run it during a deploy (pass --watch to poll
@@ -60,8 +66,8 @@ usage() {
   cat <<EOF
 Usage:
   $SCRIPT_NAME rollout  <app> <resource-group> <image> <canary-steps-csv> <step-wait-seconds> <public:true|false>
-  $SCRIPT_NAME finalize <app> <resource-group> <old-revision>
-  $SCRIPT_NAME rollback <app> <resource-group> <old-revision> <new-revision>
+  $SCRIPT_NAME finalize <app> <resource-group> <active-revision>
+  $SCRIPT_NAME rollback <app> <resource-group> <active-revision> <incoming-revision>
   $SCRIPT_NAME status   <app> <resource-group> [--watch]
 
   app                 Container App name, e.g. "backend" or "frontend"
@@ -159,27 +165,43 @@ cmd_rollout() {
   [ "$#" -eq 6 ] || usage
   local app="$1" rg="$2" image="$3" steps_csv="$4" step_wait="$5" public="$6"
 
-  local old_rev
-  old_rev=$(az containerapp revision list --name "$app" --resource-group "$rg" \
+  # Best-effort dashboard instrumentation -- a no-op unless
+  # deploy-azure-aca.yml already called `aca-deploy-status.sh init` earlier
+  # in this same job (see that script's own $STASH mechanism). Wrapped so
+  # this script stays fully usable standalone (a laptop, `az login`, no
+  # deploy-status wiring at all) with zero behavior change -- a missing
+  # status script or an upload hiccup only ever produces a warning here,
+  # never fails the actual rollout.
+  local status_script="$(dirname "$0")/aca-deploy-status.sh"
+  record_check() {
+    # record_check <check-name-suffix> <pass|fail> <detail>
+    [ -x "$status_script" ] || return 0
+    "$status_script" check "${app}-$1" "$2" "$3" 2>/dev/null || true
+  }
+
+  local active_rev
+  active_rev=$(az containerapp revision list --name "$app" --resource-group "$rg" \
               --query "[?properties.active] | [0].name" -o tsv 2>/dev/null)
 
-  if [ -z "$old_rev" ]; then
-    # Brand-new app, nothing live yet -- there is no "blue" slot to protect,
-    # so there's nothing to blue-green against. Deploy plainly; this first
-    # revision picks up the app's default traffic rule (100% to whichever
-    # revision is newest -- see infra/main.bicep's `ingress.traffic`) with
-    # nothing else to compete with it.
+  if [ -z "$active_rev" ]; then
+    # Brand-new app, nothing live yet -- there is no "green" slot to
+    # protect, so there's nothing to blue-green against. Deploy plainly;
+    # this first revision picks up the app's default traffic rule (100%
+    # to whichever revision is newest -- see infra/main.bicep's
+    # `ingress.traffic`) with nothing else to compete with it. It becomes
+    # "green" (the active role) from this point on, for the NEXT deploy's
+    # purposes.
     echo "No active revision found for '$app' -- first-ever deploy, skipping blue-green."
     az containerapp update --name "$app" --resource-group "$rg" --image "$image" || return 1
     local first_rev
     first_rev=$(az containerapp revision list --name "$app" --resource-group "$rg" \
                   --query "[?properties.active] | [0].name" -o tsv)
     wait_for_revision_healthy "$app" "$rg" "$first_rev" 40 || return 1
-    { echo "old_revision="; echo "new_revision=$first_rev"; echo "skipped=true"; } >> "$GH_OUT"
+    { echo "active_revision="; echo "incoming_revision=$first_rev"; echo "skipped=true"; } >> "$GH_OUT"
     return 0
   fi
 
-  echo "Current live revision ('blue'): $old_rev"
+  echo "Current live revision ('green'): $active_rev"
 
   # Pin traffic explicitly to the current revision at 100%. Idempotent --
   # harmless to re-run even if it's already pinned from a previous deploy.
@@ -188,41 +210,44 @@ cmd_rollout() {
   # `latestRevision: true` rule) -- with an explicit weight set instead, a
   # newly-created revision defaults to 0% until we say otherwise below.
   az containerapp ingress traffic set --name "$app" --resource-group "$rg" \
-    --revision-weight "${old_rev}=100" >/dev/null || return 1
+    --revision-weight "${active_rev}=100" >/dev/null || return 1
 
   # Unique per workflow run (and per retry attempt of that run), so
   # re-running a deploy -- including redeploying the exact same image tag
   # for a rollback -- never collides with a previous revision's suffix.
   local suffix="bg${GITHUB_RUN_ID:-$(date +%s)}-${GITHUB_RUN_ATTEMPT:-1}"
 
-  echo "Creating new ('green') revision from $image, suffix '$suffix', at 0% traffic..."
+  echo "Creating incoming ('blue') revision from $image, suffix '$suffix', at 0% traffic..."
   az containerapp update --name "$app" --resource-group "$rg" \
     --image "$image" --revision-suffix "$suffix" >/dev/null || return 1
 
-  local new_rev
-  new_rev=$(az containerapp revision list --name "$app" --resource-group "$rg" \
+  local incoming_rev
+  incoming_rev=$(az containerapp revision list --name "$app" --resource-group "$rg" \
               --query "sort_by([?properties.active], &properties.createdTime)[-1].name" -o tsv)
-  if [ -z "$new_rev" ] || [ "$new_rev" = "$old_rev" ]; then
+  if [ -z "$incoming_rev" ] || [ "$incoming_rev" = "$active_rev" ]; then
     echo "Could not resolve the newly-created revision's name -- aborting before touching traffic."
     return 1
   fi
-  echo "New revision: $new_rev"
+  echo "Incoming revision: $incoming_rev"
 
   # GATE 1 -- the platform-level check: Container Apps' own readiness probe
   # (backend: GET /readyz:8000, frontend: GET /:80 -- infra/main.bicep's
-  # `probes`) polling the new replica directly, the SAME check CI already
-  # runs against the built image, run again here against the actual
-  # deployed replica as it comes up -- catches anything environment- or
-  # runtime-specific that a CI-time check couldn't (missing env var, DB
-  # unreachable from this network, etc.). Zero production traffic reaches
-  # this revision while this runs -- it's still pinned at 0%.
-  echo "Gate 1/3 -- waiting for the new revision's own readiness probe..."
-  if ! wait_for_revision_healthy "$app" "$rg" "$new_rev" 40; then
-    echo "New revision failed its own health checks before receiving any traffic -- rolling back."
-    az containerapp revision deactivate --name "$app" --resource-group "$rg" --revision "$new_rev" >/dev/null 2>&1
-    { echo "old_revision=$old_rev"; echo "new_revision=$new_rev"; echo "skipped=false"; } >> "$GH_OUT"
+  # `probes`) polling the incoming replica directly, the SAME check CI
+  # already runs against the built image, run again here against the
+  # actual deployed replica as it comes up -- catches anything
+  # environment- or runtime-specific that a CI-time check couldn't
+  # (missing env var, DB unreachable from this network, etc.). Zero
+  # production traffic reaches this revision while this runs -- it's
+  # still pinned at 0%.
+  echo "Gate 1/3 -- waiting for the incoming revision's own readiness probe..."
+  if ! wait_for_revision_healthy "$app" "$rg" "$incoming_rev" 40; then
+    echo "Incoming revision failed its own health checks before receiving any traffic -- rolling back."
+    record_check "gate1-readiness" "fail" "$incoming_rev did not become Healthy"
+    az containerapp revision deactivate --name "$app" --resource-group "$rg" --revision "$incoming_rev" >/dev/null 2>&1
+    { echo "active_revision=$active_rev"; echo "incoming_revision=$incoming_rev"; echo "skipped=false"; } >> "$GH_OUT"
     return 1
   fi
+  record_check "gate1-readiness" "pass" "$incoming_rev healthy at 0% traffic"
 
   # GATE 2 -- for the one app with external ingress (`frontend`), a real
   # HTTP smoke test against THIS revision's own dedicated FQDN
@@ -233,17 +258,19 @@ cmd_rollout() {
   # this file's --public description above); gate 1 plus the traffic-shift
   # checks below are what cover it.
   if [ "$public" = "true" ]; then
-    local new_fqdn
-    new_fqdn=$(az containerapp revision show --name "$app" --resource-group "$rg" \
-                 --revision "$new_rev" --query "properties.fqdn" -o tsv)
-    echo "Gate 2/3 -- direct smoke test against the new revision's own slot (https://$new_fqdn)..."
-    if ! curl_check "https://$new_fqdn/" "new revision /" \
-       || ! curl_check "https://$new_fqdn/api/auth/me" "new revision /api/auth/me (through backend proxy)"; then
-      echo "New revision failed a direct smoke test on its own slot -- rolling back."
-      az containerapp revision deactivate --name "$app" --resource-group "$rg" --revision "$new_rev" >/dev/null 2>&1
-      { echo "old_revision=$old_rev"; echo "new_revision=$new_rev"; echo "skipped=false"; } >> "$GH_OUT"
+    local incoming_fqdn
+    incoming_fqdn=$(az containerapp revision show --name "$app" --resource-group "$rg" \
+                 --revision "$incoming_rev" --query "properties.fqdn" -o tsv)
+    echo "Gate 2/3 -- direct smoke test against the incoming revision's own slot (https://$incoming_fqdn)..."
+    if ! curl_check "https://$incoming_fqdn/" "incoming revision /" \
+       || ! curl_check "https://$incoming_fqdn/api/auth/me" "incoming revision /api/auth/me (through backend proxy)"; then
+      echo "Incoming revision failed a direct smoke test on its own slot -- rolling back."
+      record_check "gate2-direct-smoke-test" "fail" "https://$incoming_fqdn/ or /api/auth/me did not return 200/401"
+      az containerapp revision deactivate --name "$app" --resource-group "$rg" --revision "$incoming_rev" >/dev/null 2>&1
+      { echo "active_revision=$active_rev"; echo "incoming_revision=$incoming_rev"; echo "skipped=false"; } >> "$GH_OUT"
       return 1
     fi
+    record_check "gate2-direct-smoke-test" "pass" "https://$incoming_fqdn/ and /api/auth/me both returned 200/401"
   else
     echo "Gate 2/3 -- skipped (internal-only ingress; covered by gate 1 and the traffic-shift checks below)."
   fi
@@ -257,48 +284,53 @@ cmd_rollout() {
   local step
   IFS=',' read -ra STEPS <<< "$steps_csv"
   for step in "${STEPS[@]}"; do
-    local old_weight=$((100 - step))
-    echo "  -> ${new_rev}=${step}% / ${old_rev}=${old_weight}%"
+    local active_weight=$((100 - step))
+    echo "  -> ${incoming_rev}=${step}% / ${active_rev}=${active_weight}%"
+    [ -x "$status_script" ] && "$status_script" write "rolling_out_${app}" \
+      "\"apps\": {\"$app\": {\"active_revision\": \"$active_rev\", \"incoming_revision\": \"$incoming_rev\", \"traffic_to_incoming_pct\": $step}}" \
+      2>/dev/null || true
     az containerapp ingress traffic set --name "$app" --resource-group "$rg" \
-      --revision-weight "${old_rev}=${old_weight}" "${new_rev}=${step}" >/dev/null || return 1
+      --revision-weight "${active_rev}=${active_weight}" "${incoming_rev}=${step}" >/dev/null || return 1
     sleep "$step_wait"
-    if ! wait_for_revision_healthy "$app" "$rg" "$new_rev" 6; then
-      echo "New revision degraded at ${step}% traffic -- rolling back."
+    if ! wait_for_revision_healthy "$app" "$rg" "$incoming_rev" 6; then
+      echo "Incoming revision degraded at ${step}% traffic -- rolling back."
+      record_check "gate3-traffic-${step}pct" "fail" "$incoming_rev degraded at ${step}% traffic"
       az containerapp ingress traffic set --name "$app" --resource-group "$rg" \
-        --revision-weight "${old_rev}=100" "${new_rev}=0" >/dev/null 2>&1
-      az containerapp revision deactivate --name "$app" --resource-group "$rg" --revision "$new_rev" >/dev/null 2>&1
-      { echo "old_revision=$old_rev"; echo "new_revision=$new_rev"; echo "skipped=false"; } >> "$GH_OUT"
+        --revision-weight "${active_rev}=100" "${incoming_rev}=0" >/dev/null 2>&1
+      az containerapp revision deactivate --name "$app" --resource-group "$rg" --revision "$incoming_rev" >/dev/null 2>&1
+      { echo "active_revision=$active_rev"; echo "incoming_revision=$incoming_rev"; echo "skipped=false"; } >> "$GH_OUT"
       return 1
     fi
+    record_check "gate3-traffic-${step}pct" "pass" "$incoming_rev healthy at ${step}% traffic"
   done
 
-  echo "$app is fully migrated to $new_rev (100% traffic). $old_rev is left ACTIVE but at 0% traffic -- call 'finalize' once every app in this deploy has reached this point and the end-to-end smoke test has passed."
-  { echo "old_revision=$old_rev"; echo "new_revision=$new_rev"; echo "skipped=false"; } >> "$GH_OUT"
+  echo "$app is fully migrated to $incoming_rev (100% traffic). $active_rev is left ACTIVE but at 0% traffic -- call 'finalize' once every app in this deploy has reached this point and the end-to-end smoke test has passed. Once finalized, $incoming_rev becomes 'green' (the active role) for the next deploy."
+  { echo "active_revision=$active_rev"; echo "incoming_revision=$incoming_rev"; echo "skipped=false"; } >> "$GH_OUT"
   return 0
 }
 
 cmd_finalize() {
   [ "$#" -eq 3 ] || usage
-  local app="$1" rg="$2" old_rev="$3"
-  if [ -z "$old_rev" ]; then
+  local app="$1" rg="$2" active_rev="$3"
+  if [ -z "$active_rev" ]; then
     echo "No previous revision to spin down for '$app' (first-ever deploy) -- nothing to do."
     return 0
   fi
-  echo "Spinning down the old slot: deactivating $old_rev (already at 0% traffic)."
-  az containerapp revision deactivate --name "$app" --resource-group "$rg" --revision "$old_rev"
+  echo "Spinning down the old (formerly 'green') slot: deactivating $active_rev (already at 0% traffic)."
+  az containerapp revision deactivate --name "$app" --resource-group "$rg" --revision "$active_rev"
 }
 
 cmd_rollback() {
   [ "$#" -eq 4 ] || usage
-  local app="$1" rg="$2" old_rev="$3" new_rev="$4"
-  if [ -z "$old_rev" ] || [ -z "$new_rev" ]; then
-    echo "Missing old/new revision name for '$app' -- nothing safe to do automatically. Check 'status' and fix traffic weights by hand."
+  local app="$1" rg="$2" active_rev="$3" incoming_rev="$4"
+  if [ -z "$active_rev" ] || [ -z "$incoming_rev" ]; then
+    echo "Missing active/incoming revision name for '$app' -- nothing safe to do automatically. Check 'status' and fix traffic weights by hand."
     return 1
   fi
-  echo "Rolling back '$app': ${old_rev}=100% / ${new_rev}=0%, then deactivating $new_rev."
+  echo "Rolling back '$app': ${active_rev}=100% / ${incoming_rev}=0%, then deactivating $incoming_rev."
   az containerapp ingress traffic set --name "$app" --resource-group "$rg" \
-    --revision-weight "${old_rev}=100" "${new_rev}=0" || return 1
-  az containerapp revision deactivate --name "$app" --resource-group "$rg" --revision "$new_rev" || true
+    --revision-weight "${active_rev}=100" "${incoming_rev}=0" || return 1
+  az containerapp revision deactivate --name "$app" --resource-group "$rg" --revision "$incoming_rev" || true
 }
 
 cmd_status() {

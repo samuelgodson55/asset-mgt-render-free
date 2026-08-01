@@ -76,15 +76,22 @@ write_files:
 
       # Zero-downtime blue-green deploys (see docker-compose.vm.yml's own
       # "ZERO-DOWNTIME BLUE-GREEN DEPLOYMENTS" header comment,
-      # scripts/blue-green-deploy.sh, and DEPLOYMENT_VM.md). ACTIVE_SLOT is
-      # informational/human-readable; COMPOSE_PROFILES is what actually
-      # tells `docker compose up -d` (systemd's snipeit.service, and any
-      # reboot) which slot's backend/frontend pair to start -- the two are
-      # kept in lockstep by scripts/blue-green-deploy.sh on every rollout,
-      # never hand-edited independently. "blue" is this VM's first-ever
-      # active slot purely by convention -- nothing is special about it.
-      ACTIVE_SLOT=blue
-      COMPOSE_PROFILES=blue
+      # scripts/blue-green-deploy.sh, and DEPLOYMENT_VM.md). Roles are
+      # FIXED, not alternating: green is always the active/production
+      # slot, blue is always the incoming candidate a rollout deploys
+      # into before promoting green onto the same image -- see
+      # blue-green-deploy.sh's own top-of-file comment for the full
+      # mechanics. COMPOSE_PROFILES is what actually tells `docker
+      # compose up -d` (systemd's snipeit.service, and any reboot) which
+      # slot's backend/frontend pair to start; since the active role
+      # never changes anymore, this is set ONCE here and never touched
+      # again by any later rollout (older versions of
+      # blue-green-deploy.sh used to flip both of these at the end of
+      # every deploy -- that's no longer necessary or done). ACTIVE_SLOT
+      # is kept alongside it purely as a human-readable label for anyone
+      # reading .env by hand; nothing reads it programmatically anymore.
+      ACTIVE_SLOT=green
+      COMPOSE_PROFILES=green
 
       # HTTP Basic Auth for the /_deploy/ live rollout-status dashboard
       # (see Caddyfile and DEPLOYMENT_VM.md's "Monitoring a rollout"
@@ -258,11 +265,12 @@ write_files:
   # ---------------------------------------------------------------------
   # caddy/weights.conf -- the live blue/green traffic split (see
   # Caddyfile and docker-compose.vm.yml's own comments). Seeded here at
-  # "100 0" (100% blue, matching ACTIVE_SLOT=blue above) for a brand-new
-  # VM; scripts/blue-green-deploy.sh rewrites this file in place on every
-  # future rollout -- this initial write is NOT re-applied on redeploys
-  # (see this file's top comment), so a VM mid-rollout is never yanked
-  # back to 100/0 by anything other than that script's own rollback path.
+  # "0 100" (100% green, matching ACTIVE_SLOT=green above -- green is the
+  # fixed active role) for a brand-new VM; scripts/blue-green-deploy.sh
+  # rewrites this file in place on every future rollout -- this initial
+  # write is NOT re-applied on redeploys (see this file's top comment),
+  # so a VM mid-rollout is never yanked back to 0/100 by anything other
+  # than that script's own rollback path.
   # ---------------------------------------------------------------------
   - path: /opt/snipeit/caddy/weights.conf
     permissions: "0644"
@@ -497,22 +505,26 @@ runcmd:
 
   # -----------------------------------------------------------------------
   # 6. Run the initial DB schema migration + seed the root admin account,
-  #    against `backend-blue` -- ACTIVE_SLOT=blue/COMPOSE_PROFILES=blue
-  #    above make blue this VM's first-ever active slot, so that's the
-  #    service that's actually running after step 5. Retries for a couple
-  #    of minutes since backend-blue's image itself may still be
+  #    against `backend-green` -- ACTIVE_SLOT=green/COMPOSE_PROFILES=green
+  #    above make green this VM's active slot from first boot onward (the
+  #    fixed role -- see docker-compose.vm.yml's own "ZERO-DOWNTIME
+  #    BLUE-GREEN DEPLOYMENTS" comment), so that's the service that's
+  #    actually running after step 5. `backend-blue` never runs at all
+  #    until the first real rollout deploys into it. Retries for a couple
+  #    of minutes since backend-green's image itself may still be
   #    finishing its very first pull from Docker Hub when this line runs.
   #    Safe to re-run any time (Alembic migrations are idempotent) --
   #    every future deploy runs this same style of command itself, via
-  #    scripts/blue-green-deploy.sh (against whichever slot is being
-  #    deployed TO, not necessarily blue) rather than this inline step.
+  #    scripts/blue-green-deploy.sh (always against blue, the incoming
+  #    slot, before promoting green onto the same image) rather than this
+  #    inline step.
   # -----------------------------------------------------------------------
   - |
     cd /opt/snipeit
     for i in $(seq 1 20); do
-      docker compose -f docker-compose.vm.yml run --rm backend-blue alembic upgrade head && break
+      docker compose -f docker-compose.vm.yml run --rm backend-green alembic upgrade head && break
       echo "Migration attempt $i failed, retrying in 10s..."
       sleep 10
     done
 
-final_message: "snipeit-lite VM provisioning complete after $UPTIME seconds. Docker data-root: /mnt/docker-data/docker. App should now be reachable -- see the app_url Terraform output (allow a minute for the `cloudflared` container to establish the Tunnel and for Cloudflare's DNS to propagate). SSH access: this VM has NO open inbound SSH port on its NSG by default -- reach it via the Cloudflare Tunnel instead (see the ssh_hostname/ssh_command Terraform outputs, and DEPLOYMENT_VM.md's 'Set up Cloudflare Tunnel' section for the one-time ~/.ssh/config entry). Root admin credentials: see ROOT_ADMIN_BOOTSTRAP_PASSWORD in /opt/snipeit/.env, or check `docker compose -f /opt/snipeit/docker-compose.vm.yml logs backend-blue` for the auto-generated one if that was left blank. Future deploys go through .github/workflows/deploy-azure-vm.yml -- see DEPLOYMENT_VM.md step 9."
+final_message: "snipeit-lite VM provisioning complete after $UPTIME seconds. Docker data-root: /mnt/docker-data/docker. App should now be reachable -- see the app_url Terraform output (allow a minute for the `cloudflared` container to establish the Tunnel and for Cloudflare's DNS to propagate). SSH access: this VM has NO open inbound SSH port on its NSG by default -- reach it via the Cloudflare Tunnel instead (see the ssh_hostname/ssh_command Terraform outputs, and DEPLOYMENT_VM.md's 'Set up Cloudflare Tunnel' section for the one-time ~/.ssh/config entry). Root admin credentials: see ROOT_ADMIN_BOOTSTRAP_PASSWORD in /opt/snipeit/.env, or check `docker compose -f /opt/snipeit/docker-compose.vm.yml logs backend-green` for the auto-generated one if that was left blank. Future deploys go through .github/workflows/deploy-azure-vm.yml -- see DEPLOYMENT_VM.md step 9."

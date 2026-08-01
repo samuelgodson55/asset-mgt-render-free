@@ -1,7 +1,7 @@
 {
   "phase": "idle",
-  "active_slot": "blue",
-  "new_slot": null,
+  "active_slot": "green",
+  "incoming_slot": null,
   "image_tag": null,
   "started_at": null,
   "updated_at": null

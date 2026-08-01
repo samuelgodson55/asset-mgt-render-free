@@ -28,14 +28,11 @@
 #   B. TAG RELEASE (workflow_call, production only): `git tag vX.Y.Z && git
 #      push origin vX.Y.Z` runs release.yml, which builds + Trivy-scans +
 #      pushes both images tagged with that VERSION and then calls THIS
-#      workflow (`uses: ./.github/workflows/deploy-azure-aca.yml`, from
-#      release.yml's `deploy-aca` job) with that already-built `image_tag`.
-#      There is no `environment` input on this path -- a git-tag release
-#      always means production; see `$ENVIRONMENT` below. `ci`/`build-push`
-#      both skip themselves out here exactly as before, since release.yml
-#      already ran an equivalent gate. Runs in parallel with
-#      deploy-azure-vm.yml's own workflow_call job on the same tag push --
-#      a version tag now deploys to both targets every release.
+#      workflow (`uses: ./.github/workflows/deploy-azure-aca.yml`) with that
+#      already-built `image_tag`. There is no `environment` input on this
+#      path -- a git-tag release always means production; see
+#      `$ENVIRONMENT` below. `ci`/`build-push` both skip themselves out here
+#      exactly as before, since release.yml already ran an equivalent gate.
 #
 # WHAT DIFFERS BETWEEN staging AND production (everything else is identical,
 # driven off the same `$ENVIRONMENT`/`$RESOURCE_GROUP`/`$BACKEND_IMAGE`/
@@ -531,6 +528,30 @@ jobs:
           echo "frontend_image=$PREV_FRONTEND" >> "$GITHUB_OUTPUT"
           echo "Currently-live before this deploy: backend=$PREV_BACKEND frontend=$PREV_FRONTEND"
 
+      # Live rollout dashboard -- the ACA-path equivalent of the VM path's
+      # /_deploy/ page (see docker-compose.vm.yml/blue-green-deploy.sh),
+      # served by `frontend`'s nginx from the `deploy-status` Azure Files
+      # share (infra/main.bicep) at https://<domain>/_deploy/. Every
+      # `az storage account list` here assumes exactly one storage account
+      # per resource group -- true given main.bicep only ever declares the
+      # one (`storage`) -- rather than trying to reproduce Bicep's own
+      # name-generation formula in bash. Best-effort throughout: see
+      # .github/scripts/aca-deploy-status.sh's own top-of-file comment --
+      # nothing here can fail this job; a storage/dashboard hiccup only
+      # ever produces a warning.
+      - name: Write ACA deploy status - init
+        env:
+          DEPLOY_STATUS_USER: ${{ secrets.DEPLOY_STATUS_USER }}
+          DEPLOY_STATUS_PASSWORD_APR1_HASH: ${{ secrets.DEPLOY_STATUS_PASSWORD_APR1_HASH }}
+        run: |
+          STORAGE_ACCOUNT=$(az storage account list --resource-group "$RESOURCE_GROUP" --query "[0].name" -o tsv)
+          if [ -z "$STORAGE_ACCOUNT" ]; then
+            echo "::warning::No storage account found in $RESOURCE_GROUP -- skipping deploy-status dashboard for this run (the rollout itself is unaffected). Re-run infra-deploy.yml if this environment predates the deploy-status share."
+          else
+            echo "storage_account=$STORAGE_ACCOUNT" >> "$GITHUB_ENV"
+            bash .github/scripts/aca-deploy-status.sh init "$STORAGE_ACCOUNT" "$RUNNER_TEMP/aca-deploy-status"
+          fi
+
       # CLIENT'S-EYE EVIDENCE, separate from and running the WHOLE TIME
       # alongside every gate below. `aca-blue-green.sh` (and the "Smoke
       # test" step further down) already prove the platform's own view --
@@ -561,29 +582,36 @@ jobs:
       # BLUE-GREEN ROLLOUT (replaces the old Single-revision-mode "update
       # in place + wait for Healthy" pair of steps). See
       # .github/scripts/aca-blue-green.sh's top-of-file comment for the full
-      # mechanics -- in short, per app: create a new ("green") revision at
-      # 0% traffic → wait for ITS OWN readiness probe (the replica running
-      # its own /readyz+/healthz as it actually receives this push, not
-      # just trusting the CI gate that already ran against the built image)
-      # → (frontend only, since it's the one app with a public FQDN per
-      # revision) a direct smoke test against that revision's own slot →
-      # walk traffic across it in steps, re-checking health at each one.
-      # The old ("blue") revision is left ACTIVE at 0% traffic, not
-      # deactivated yet -- see "Spin down the old slots" below for why that
-      # waits until AFTER the end-to-end smoke test.
+      # mechanics -- in short, per app: create an incoming ("blue")
+      # revision at 0% traffic → wait for ITS OWN readiness probe (the
+      # replica running its own /readyz+/healthz as it actually receives
+      # this push, not just trusting the CI gate that already ran against
+      # the built image) → (frontend only, since it's the one app with a
+      # public FQDN per revision) a direct smoke test against that
+      # revision's own slot → walk traffic across it in steps, re-checking
+      # health at each one. The active ("green") revision is left ACTIVE
+      # at 0% traffic, not deactivated yet -- see "Spin down the old
+      # slots" below for why that waits until AFTER the end-to-end smoke
+      # test. Once finalized, the revision that was "blue" for this
+      # rollout is simply "green" (the active role) for the next one --
+      # see blue-green.md for the fixed-role naming this repo uses
+      # everywhere (both here and on the VM path).
       #
       # Canary steps differ by environment for the same reason the old
       # "production only" readiness wait did: staging runs min replicas 0
       # (scale-to-zero), so there's no standing traffic a gradual shift
-      # protects -- one jump straight to 100% once the new revision is
-      # proven healthy is exactly as safe there and keeps staging deploys
-      # fast. Production walks 10% → 25% → 50% → 75% → 100%, re-verifying
-      # health after each step, since real users are on the other side of
-      # that weight -- same five-step ramp scripts/blue-green-deploy.sh
+      # protects -- one jump straight to 100% once the incoming revision
+      # is proven healthy is exactly as safe there and keeps staging
+      # deploys fast. Production walks 10% → 25% → 50% → 75% → 100%,
+      # re-verifying health after each step, since real users are on the
+      # other side of that weight -- same five-step ramp
+      # scripts/blue-green-deploy.sh
       # uses on the VM path.
       - name: Blue-green rollout - backend
         id: backend_rollout
         run: |
+          [ -n "${storage_account:-}" ] && bash .github/scripts/aca-deploy-status.sh write "rolling_out_backend" \
+            "\"apps\": {\"backend\": {\"traffic_to_incoming_pct\": 0}}" 2>/dev/null || true
           if [ "$ENVIRONMENT" = "production" ]; then
             CANARY_STEPS="10,25,50,75,100"; STEP_WAIT=20
           else
@@ -601,6 +629,8 @@ jobs:
       - name: Blue-green rollout - frontend
         id: frontend_rollout
         run: |
+          [ -n "${storage_account:-}" ] && bash .github/scripts/aca-deploy-status.sh write "rolling_out_frontend" \
+            "\"apps\": {\"backend\": {\"active_revision\": \"${{ steps.backend_rollout.outputs.active_revision }}\", \"incoming_revision\": \"${{ steps.backend_rollout.outputs.incoming_revision }}\", \"traffic_to_incoming_pct\": 100}, \"frontend\": {\"traffic_to_incoming_pct\": 0}}" 2>/dev/null || true
           if [ "$ENVIRONMENT" = "production" ]; then
             CANARY_STEPS="10,25,50,75,100"; STEP_WAIT=20
           else
@@ -621,6 +651,8 @@ jobs:
       - name: Smoke test
         id: smoke
         run: |
+          [ -n "${storage_account:-}" ] && bash .github/scripts/aca-deploy-status.sh write "smoke_testing" \
+            "\"apps\": {\"backend\": {\"active_revision\": \"${{ steps.backend_rollout.outputs.active_revision }}\", \"incoming_revision\": \"${{ steps.backend_rollout.outputs.incoming_revision }}\", \"traffic_to_incoming_pct\": 100}, \"frontend\": {\"active_revision\": \"${{ steps.frontend_rollout.outputs.active_revision }}\", \"incoming_revision\": \"${{ steps.frontend_rollout.outputs.incoming_revision }}\", \"traffic_to_incoming_pct\": 100}}" 2>/dev/null || true
           FQDN=$(az containerapp show --name frontend --resource-group "$RESOURCE_GROUP" \
                    --query "properties.configuration.ingress.fqdn" -o tsv)
           echo "Testing https://$FQDN ($ENVIRONMENT, both apps at 100% on their new revisions)"
@@ -696,16 +728,26 @@ jobs:
       - name: Roll back backend on smoke test failure
         if: ${{ failure() && steps.backend_rollout.outcome == 'success' && steps.smoke.outcome == 'failure' }}
         run: |
-          echo "::warning::Smoke test failed -- flipping backend traffic back to ${{ steps.backend_rollout.outputs.old_revision }}"
+          echo "::warning::Smoke test failed -- flipping backend traffic back to ${{ steps.backend_rollout.outputs.active_revision }}"
           bash .github/scripts/aca-blue-green.sh rollback backend "$RESOURCE_GROUP" \
-            "${{ steps.backend_rollout.outputs.old_revision }}" "${{ steps.backend_rollout.outputs.new_revision }}"
+            "${{ steps.backend_rollout.outputs.active_revision }}" "${{ steps.backend_rollout.outputs.incoming_revision }}"
 
       - name: Roll back frontend on smoke test failure
         if: ${{ failure() && steps.frontend_rollout.outcome == 'success' && steps.smoke.outcome == 'failure' }}
         run: |
-          echo "::warning::Smoke test failed -- flipping frontend traffic back to ${{ steps.frontend_rollout.outputs.old_revision }}"
+          echo "::warning::Smoke test failed -- flipping frontend traffic back to ${{ steps.frontend_rollout.outputs.active_revision }}"
           bash .github/scripts/aca-blue-green.sh rollback frontend "$RESOURCE_GROUP" \
-            "${{ steps.frontend_rollout.outputs.old_revision }}" "${{ steps.frontend_rollout.outputs.new_revision }}"
+            "${{ steps.frontend_rollout.outputs.active_revision }}" "${{ steps.frontend_rollout.outputs.incoming_revision }}"
+
+      # Covers every failure path this job can take -- aca-blue-green.sh's
+      # own internal rollback (backend_rollout/frontend_rollout itself
+      # failing) as well as the smoke-test rollback steps just above --
+      # with one final write so the dashboard doesn't get stuck showing
+      # "smoke testing"/"rolling out" forever after a failed run.
+      - name: Write ACA deploy status - failed
+        if: failure() && (steps.backend_rollout.outcome == 'failure' || steps.frontend_rollout.outcome == 'failure' || steps.smoke.outcome == 'failure')
+        run: |
+          [ -n "${storage_account:-}" ] && bash .github/scripts/aca-deploy-status.sh write "failed" || true
 
       - name: Dump backend/frontend logs (on rollout or smoke test failure)
         if: failure() && (steps.backend_rollout.outcome == 'failure' || steps.frontend_rollout.outcome == 'failure' || steps.smoke.outcome == 'failure')
@@ -767,9 +809,12 @@ jobs:
       - name: Spin down the old slots
         run: |
           bash .github/scripts/aca-blue-green.sh finalize backend "$RESOURCE_GROUP" \
-            "${{ steps.backend_rollout.outputs.old_revision }}"
+            "${{ steps.backend_rollout.outputs.active_revision }}"
           bash .github/scripts/aca-blue-green.sh finalize frontend "$RESOURCE_GROUP" \
-            "${{ steps.frontend_rollout.outputs.old_revision }}"
+            "${{ steps.frontend_rollout.outputs.active_revision }}"
+          [ -n "${storage_account:-}" ] && bash .github/scripts/aca-deploy-status.sh write "done" \
+            "\"apps\": {\"backend\": {\"active_revision\": \"${{ steps.backend_rollout.outputs.incoming_revision }}\", \"incoming_revision\": null, \"traffic_to_incoming_pct\": 0}, \"frontend\": {\"active_revision\": \"${{ steps.frontend_rollout.outputs.incoming_revision }}\", \"incoming_revision\": null, \"traffic_to_incoming_pct\": 0}}" \
+            2>/dev/null || true
 
       # `always()` so this runs and the evidence gets uploaded even if an
       # earlier step failed -- a poll log covering a FAILED rollout (e.g.
@@ -828,10 +873,10 @@ jobs:
             echo ""
             echo "### Blue-green rollout"
             echo ""
-            echo "| App | Old revision (spun down) | New revision (100% live) |"
+            echo "| App | Previous (green, spun down) | Now live (was blue, now green) |"
             echo "|---|---|---|"
-            echo "| backend | \`${{ steps.backend_rollout.outputs.old_revision || 'n/a -- first deploy' }}\` | \`${{ steps.backend_rollout.outputs.new_revision }}\` |"
-            echo "| frontend | \`${{ steps.frontend_rollout.outputs.old_revision || 'n/a -- first deploy' }}\` | \`${{ steps.frontend_rollout.outputs.new_revision }}\` |"
+            echo "| backend | \`${{ steps.backend_rollout.outputs.active_revision || 'n/a -- first deploy' }}\` | \`${{ steps.backend_rollout.outputs.incoming_revision }}\` |"
+            echo "| frontend | \`${{ steps.frontend_rollout.outputs.active_revision || 'n/a -- first deploy' }}\` | \`${{ steps.frontend_rollout.outputs.incoming_revision }}\` |"
             echo ""
             echo "Monitor any revision live: \`bash .github/scripts/aca-blue-green.sh status <app> $RESOURCE_GROUP --watch\`"
           } >> "$GITHUB_STEP_SUMMARY"

@@ -501,6 +501,21 @@ resource exportShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023
   properties: { shareQuota: 10 }
 }
 
+// Live blue-green rollout status (status.json/checks.log/the small
+// dashboard HTML/its .htpasswd) -- the ACA equivalent of the VM path's
+// /mnt/docker-data/volumes/deploy_status directory. Small quota: this is
+// a handful of tiny text files, not app data. Written to by
+// .github/workflows/deploy-azure-aca.yml (via `az storage file upload`,
+// using the run's own OIDC login -- see that workflow's own comments)
+// and mounted READ-ONLY into `frontend` below, which serves it at
+// /_deploy/ -- see nginx/default.conf.template's own comment and
+// blue-green.md's "Monitoring" section for the full mechanics.
+resource deployStatusShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023-05-01' = {
+  parent: fileServices
+  name: 'deploy-status'
+  properties: { shareQuota: 1 }
+}
+
 // Single subnet, single NSG: `frontend`/`backend`/`redis`/`migrate` share
 // one Container Apps Environment (`postgresServer` is a standalone managed
 // resource outside it). An NSG only filters at the subnet boundary, so it
@@ -625,6 +640,23 @@ resource exportStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' =
       accountKey: storage.listKeys().keys[0].value
       shareName: exportShare.name
       accessMode: 'ReadWrite'
+    }
+  }
+}
+
+// ReadOnly -- only .github/workflows/deploy-azure-aca.yml (over the
+// Azure Files REST API, via `az storage file upload`) ever writes here;
+// `frontend` (below) only ever reads it back out to serve /_deploy/. See
+// deployStatusShare's own comment above.
+resource deployStatusStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' = {
+  parent: env
+  name: 'deploy-status'
+  properties: {
+    azureFile: {
+      accountName: storage.name
+      accountKey: storage.listKeys().keys[0].value
+      shareName: deployStatusShare.name
+      accessMode: 'ReadOnly'
     }
   }
 }
@@ -1132,6 +1164,16 @@ resource frontendApp 'Microsoft.App/containerApps@2024-03-01' = {
             { type: 'Liveness', httpGet: { path: '/', port: 80 }, initialDelaySeconds: 5, periodSeconds: 30 }
             { type: 'Readiness', httpGet: { path: '/', port: 80 }, initialDelaySeconds: 5, periodSeconds: 10 }
           ]
+          // Read-only mount of the live blue-green rollout status --
+          // nginx serves it at /_deploy/ (see nginx/default.conf.template's
+          // own comment). Written to over the Azure Files REST API by
+          // .github/workflows/deploy-azure-aca.yml, never by this
+          // container itself -- deployStatusStorage above is `accessMode:
+          // 'ReadOnly'`, so a compromised/buggy frontend process can't
+          // tamper with its own rollout history.
+          volumeMounts: [
+            { volumeName: 'deploy-status', mountPath: '/mnt/deploy-status' }
+          ]
         }
       ]
       scale: {
@@ -1144,10 +1186,19 @@ resource frontendApp 'Microsoft.App/containerApps@2024-03-01' = {
           }
         ]
       }
+      volumes: [
+        { name: 'deploy-status', storageType: 'AzureFile', storageName: 'deploy-status' }
+      ]
     }
   }
+  // The `deploy-status` volume above has the same missing-implicit-
+  // dependency issue backendApp's own comment describes for
+  // backupStorage/exportStorage -- deployStatusStorage is referenced by
+  // plain string, so Bicep won't otherwise wait for it before creating
+  // `frontend`.
   dependsOn: [
     backendApp
+    deployStatusStorage
   ]
 }
 
@@ -1195,6 +1246,7 @@ resource migrateJob 'Microsoft.App/jobs@2024-03-01' = {
 // Outputs -- consumed by the GitHub Actions deploy workflows.
 // ---------------------------------------------------------------------------
 output envName string = env.name
+output storageAccountName string = storage.name
 output frontendFqdn string = frontendApp.properties.configuration.ingress.fqdn
 output frontendAppName string = frontendApp.name
 output backendAppName string = backendApp.name

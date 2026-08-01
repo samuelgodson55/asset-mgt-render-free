@@ -339,6 +339,69 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
+    # ---- live blue-green rollout status (ACA equivalent of the VM path's
+    # Caddy-served /_deploy/ dashboard) --------------------------------------
+    # Serves directly out of the `deploy-status` Azure Files share
+    # (infra/main.bicep's deployStatusShare/deployStatusStorage), mounted
+    # READ-ONLY at /mnt/deploy-status -- nginx never writes here, only
+    # .github/workflows/deploy-azure-aca.yml does (over the Azure Files
+    # REST API, via `az storage file upload`, at every phase transition of
+    # a rollout -- see that workflow's own "Write ACA deploy status"
+    # steps and blue-green.md's "Monitoring" section). `alias` (not
+    # `root`) so a request for /_deploy/status.json maps to
+    # /mnt/deploy-status/status.json, not /mnt/deploy-status/_deploy/status.json.
+    #
+    # HTTP Basic Auth, same purpose as the VM path's Caddy-level auth
+    # (DEPLOY_STATUS_USER/DEPLOY_STATUS_PASSWORD_HASH there) but a
+    # DIFFERENT hash format: Caddy natively supports bcrypt
+    # ($2a$/$2b$/$2y$); nginx's auth_basic_user_file only supports
+    # {PLAIN}, {SSHA}, and $apr1$ (all implemented internally in
+    # ngx_http_auth_basic_module, so this works the same on this image's
+    # Alpine/musl base as it would on glibc -- unlike raw crypt()-based
+    # formats, which nginx would otherwise have to hand off to the OS).
+    # The .htpasswd file itself is just another file on the same
+    # read-only share, uploaded alongside status.json/checks.log/this
+    # dashboard's own index.html by deploy-azure-aca.yml, generated from
+    # DEPLOY_STATUS_USER/DEPLOY_STATUS_PASSWORD_APR1_HASH (that workflow's
+    # own comment shows the exact `openssl passwd -apr1` command to
+    # generate the hash).
+    location /_deploy/ {
+        alias /mnt/deploy-status/;
+        index index.html;
+
+        auth_basic "Deployment status";
+        auth_basic_user_file /mnt/deploy-status/.htpasswd;
+
+        # Deny direct access to the htpasswd file itself (and any other
+        # dotfile that might end up on the share) -- it must be READABLE
+        # by nginx for auth_basic_user_file above to work, but it should
+        # never be fetchable as a plain response body over this same
+        # location.
+        location ~ /\. {
+            deny all;
+        }
+
+        # nginx GOTCHA (same one the /docs location above already works
+        # around -- see its own comment): `add_header` does NOT merge
+        # with headers set in an enclosing block once a location declares
+        # its own, so every server-level baseline header has to be
+        # re-declared here too. The CSP below is deliberately looser
+        # (script-src/style-src 'unsafe-inline') than the app's own,
+        # scoped to ONLY this one internal, Basic-Auth-gated ops
+        # dashboard -- its self-contained index.html has its own inline
+        # <style>/<script> (same single-file shape as the VM path's
+        # scripts/deploy-status/index.html) rather than pulling in a
+        # build step just for this small status page.
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'; object-src 'none'" always;
+
+        # Rollout state changes by the minute during a deploy -- never
+        # let a browser or intermediate cache serve a stale status.json.
+        add_header Cache-Control "no-store" always;
+    }
+
     # ---- clean URLs ---------------------------------------------------------
     # Canonicalize any lingering "/admin.html"-style link (an old bookmark,
     # a search result, a link pasted before this change) onto the clean,

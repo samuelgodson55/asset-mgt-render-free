@@ -5,15 +5,18 @@
 # roles -- db, redis, backend, worker, beat, frontend -- but `backend` and
 # `frontend` (the two roles that actually serve production HTTP traffic) are
 # each split into a BLUE and a GREEN pair (backend-blue/backend-green,
-# frontend-blue/frontend-green) so a deploy can run entirely on the inactive
+# frontend-blue/frontend-green) so a deploy can run entirely on the idle
 # slot -- with zero production traffic and its own health checks -- before
-# `caddy` gradually shifts real traffic onto it. See "ZERO-DOWNTIME
-# BLUE-GREEN DEPLOYMENTS" below and DEPLOYMENT_VM.md's matching section for
-# the full mechanics; scripts/blue-green-deploy.sh is what actually drives a
-# rollout. db/redis/worker/beat stay singleton (a second Postgres/Redis would
-# just be a second copy of the same data; `beat` in particular must never
-# run twice at once -- see its own comment below) -- only the two
-# HTTP-serving roles need two copies to avoid downtime.
+# `caddy` gradually shifts real traffic onto it. FIXED ROLES: blue is
+# ALWAYS the incoming candidate a deploy targets, green is ALWAYS the
+# active/production slot once a rollout finishes -- these never swap. See
+# "ZERO-DOWNTIME BLUE-GREEN DEPLOYMENTS" below and DEPLOYMENT_VM.md's
+# matching section for the full mechanics; scripts/blue-green-deploy.sh is
+# what actually drives a rollout. db/redis/worker/beat stay singleton (a
+# second Postgres/Redis would just be a second copy of the same data;
+# `beat` in particular must never run twice at once -- see its own comment
+# below) -- only the two HTTP-serving roles need two copies to avoid
+# downtime.
 #
 # Differences from docker-compose.yml, beyond the blue/green split above:
 #
@@ -55,43 +58,58 @@
 # -----------------------------------------------------------------------------
 # ZERO-DOWNTIME BLUE-GREEN DEPLOYMENTS -- the short version
 # -----------------------------------------------------------------------------
-# `ACTIVE_SLOT` and `COMPOSE_PROFILES` in /opt/snipeit/.env together decide
-# which slot ("blue" or "green") a plain `docker compose up -d` (systemd's
-# snipeit.service, or a reboot) brings up -- ONLY that slot's backend-*/
-# frontend-* pair starts; the other slot's services are defined but dormant
-# (Compose profile filtering -- see each service's own `profiles:` comment).
+# `ACTIVE_SLOT`/`COMPOSE_PROFILES` in /opt/snipeit/.env are both permanently
+# "green" -- FIXED, not alternating -- so a plain `docker compose up -d`
+# (systemd's snipeit.service, or a reboot) always brings up
+# backend-green/frontend-green; blue's pair is defined but dormant
+# (Compose profile filtering -- see each service's own `profiles:`
+# comment) except during an actual rollout. Set once by
+# infra-vm/cloud-init.yaml on first boot and never touched again by any
+# later deploy (earlier versions of this design flipped both values at
+# the end of every rollout -- that's gone now that the roles don't swap).
 #
 # A real deploy (scripts/blue-green-deploy.sh, invoked by
-# .github/workflows/deploy-azure-vm.yml) does NOT just flip COMPOSE_PROFILES
-# and restart, though -- it:
-#   1. Runs `alembic upgrade head` against the incoming image (shared `db`,
-#      so migrations must stay backward-compatible with the still-running
-#      old slot for the duration of the rollout).
-#   2. Starts ONLY the inactive slot's backend-*/frontend-* pair, by naming
-#      them explicitly (Compose starts an explicitly-named service
-#      regardless of active profile) -- `caddy` is still sending 100% of
-#      traffic to the active slot at this point, so the new slot receives
-#      NO production traffic yet.
-#   3. Runs scripts/health-check.sh --mode internal directly against that
-#      replica (GET /healthz, GET /readyz, a static-asset fetch, and an
+# .github/workflows/deploy-azure-vm.yml) does NOT touch COMPOSE_PROFILES
+# at all -- it:
+#   1. Runs `alembic upgrade head` against the incoming image, through
+#      blue (shared `db`, so migrations must stay backward-compatible
+#      with the still-running green slot for the duration of the
+#      rollout).
+#   2. Starts ONLY blue's backend-*/frontend-* pair, by naming them
+#      explicitly (Compose starts an explicitly-named service regardless
+#      of active profile) -- `caddy` is still sending 100% of traffic to
+#      green at this point, so blue receives NO production traffic yet.
+#   3. Runs scripts/health-check.sh --mode internal directly against blue
+#      (GET /healthz, GET /readyz, a static-asset fetch, and an
 #      /api/auth/me round-trip through its own nginx to its own backend) --
 #      the SAME criteria the post-cutover smoke test (--mode external) in
 #      deploy-azure-vm.yml already holds the live domain to, so the replica
 #      is held to that bar too, not a lesser one, before it ever sees a
 #      real request.
 #   4. Only if every check passes: gradually reweights `caddy`'s
-#      reverse_proxy between frontend-blue/frontend-green (10/25/50/75/100%,
-#      re-checking the replica at each step -- see Caddyfile's
+#      reverse_proxy from green onto blue (10/25/50/75/100%, re-checking
+#      blue at each step -- see Caddyfile's
 #      /etc/caddy/snippets/weights.conf import and
-#      scripts/blue-green-deploy.sh), then spins the old slot down.
-#   5. On ANY failed check at ANY point, traffic is left at (or restored to)
-#      100% on the still-good old slot, and the new slot's containers are
-#      stopped -- the old slot is never touched until the new one has
-#      already proven itself, so a bad deploy never causes an outage.
+#      scripts/blue-green-deploy.sh).
+#   5. PROMOTES: once blue is proven at 100% traffic, brings green up on
+#      the exact same image blue is already running (both share the one
+#      `${IMAGE_TAG}` reference below -- this is a same-code restart, not
+#      a second canary), health-checks it, flips traffic straight back to
+#      100% green, then stops blue -- restoring the "green = active,
+#      blue = idle" invariant for the next deploy.
+#   6. On ANY failed check before step 5, traffic is left at (or restored
+#      to) 100% on green and blue's containers are stopped -- green is
+#      never touched until blue has already proven itself, so a bad
+#      deploy never causes an outage. A failure DURING step 5 itself
+#      (green's promotion) is handled differently -- see
+#      blue-green-deploy.sh's own top-of-file comment for why leaving
+#      blue serving is safer than reverting to a stale green in that one
+#      case.
 #
-# scripts/deploy-status.json (written live during a rollout, watchable at
-# https://<DOMAIN>/_deploy/ -- see Caddyfile and DEPLOYMENT_VM.md's
-# "Monitoring a rollout" section) is how you watch all of this happen.
+# scripts/deploy-status/status.json (written live during a rollout,
+# watchable at https://<DOMAIN>/_deploy/ -- see Caddyfile and
+# DEPLOYMENT_VM.md's "Monitoring a rollout" section) is how you watch all
+# of this happen.
 #
 # Memory budget (Standard_B2s = 4 GiB RAM total, the default vm_size in
 # infra-vm/variables.tf) -- STEADY STATE (only one slot's backend/frontend
@@ -198,14 +216,14 @@ services:
   backend-blue:
     image: ${DOCKERHUB_BACKEND_IMAGE}:${IMAGE_TAG:-latest}
     container_name: snipeit_lite_backend_blue
-    # Only auto-started by a bare `docker compose up -d` when
-    # COMPOSE_PROFILES (.env) is "blue" -- i.e. when blue is the
-    # ACTIVE_SLOT. scripts/blue-green-deploy.sh starts/stops this
-    # service EXPLICITLY BY NAME during a rollout regardless of the
-    # active profile (Compose always honors an explicitly-named
-    # service even if its profile isn't active) -- see that script
-    # and DEPLOYMENT_VM.md's "Zero-Downtime Blue-Green Deployments"
-    # section.
+    # NEVER auto-started by a bare `docker compose up -d` -- COMPOSE_PROFILES
+    # (.env) is permanently "green" (the fixed active role; see this
+    # file's own "ZERO-DOWNTIME BLUE-GREEN DEPLOYMENTS" comment), so
+    # blue's profile is never active on its own. scripts/blue-green-deploy.sh
+    # starts/stops this service EXPLICITLY BY NAME during a rollout
+    # instead (Compose always honors an explicitly-named service even if
+    # its profile isn't active) -- see that script and
+    # DEPLOYMENT_VM.md's "Zero-Downtime Blue-Green Deployments" section.
     profiles: ["blue"]
     restart: unless-stopped
     mem_limit: ${BACKEND_MEM_LIMIT:-768m}
@@ -347,14 +365,15 @@ services:
   backend-green:
     image: ${DOCKERHUB_BACKEND_IMAGE}:${IMAGE_TAG:-latest}
     container_name: snipeit_lite_backend_green
-    # Only auto-started by a bare `docker compose up -d` when
-    # COMPOSE_PROFILES (.env) is "green" -- i.e. when green is the
-    # ACTIVE_SLOT. scripts/blue-green-deploy.sh starts/stops this
-    # service EXPLICITLY BY NAME during a rollout regardless of the
-    # active profile (Compose always honors an explicitly-named
-    # service even if its profile isn't active) -- see that script
-    # and DEPLOYMENT_VM.md's "Zero-Downtime Blue-Green Deployments"
-    # section.
+    # ALWAYS auto-started by a bare `docker compose up -d` -- COMPOSE_PROFILES
+    # (.env) is permanently "green": green is the fixed active role (see
+    # this file's own "ZERO-DOWNTIME BLUE-GREEN DEPLOYMENTS" comment), so
+    # a reboot or systemd restart always brings this back up with no
+    # rollout needing to run first. scripts/blue-green-deploy.sh also
+    # restarts this service EXPLICITLY BY NAME during a rollout's
+    # promotion step, onto whatever image blue just proved itself on --
+    # see that script and DEPLOYMENT_VM.md's "Zero-Downtime Blue-Green
+    # Deployments" section.
     profiles: ["green"]
     restart: unless-stopped
     mem_limit: ${BACKEND_MEM_LIMIT:-768m}

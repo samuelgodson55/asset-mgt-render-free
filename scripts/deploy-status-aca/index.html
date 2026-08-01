@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="robots" content="noindex, nofollow">
-<title>Deploy status — Snipe-IT Lite</title>
+<title>Deploy status (ACA) — Snipe-IT Lite</title>
 <style>
   :root {
     --bg: #0b0f17;
@@ -25,7 +25,7 @@
     color: var(--text);
     padding: 2rem 1.25rem 4rem;
   }
-  .wrap { max-width: 760px; margin: 0 auto; }
+  .wrap { max-width: 860px; margin: 0 auto; }
   h1 { font-size: 1.25rem; font-weight: 600; margin: 0 0 .25rem; }
   .sub { color: var(--muted); font-size: .85rem; margin-bottom: 1.5rem; }
   .card {
@@ -66,27 +66,24 @@
     font-weight: 600;
     margin-top: .15rem;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    /* A full commit SHA / long image tag has no natural break points, so
-       without this it overflows straight into the next grid column
-       instead of wrapping -- min-width:0 above lets the grid cell
-       actually shrink to its track width, and this is what makes the
-       long text wrap onto a second line within that width rather than
-       spilling out of it. */
     overflow-wrap: anywhere;
     word-break: break-all;
   }
+  h2 { font-size: .85rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 .75rem; }
+  h3 { font-size: .8rem; font-weight: 600; color: var(--text); margin: 0 0 .5rem; }
+  .app-card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.1rem; }
+  .apps-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; margin-top: 1rem; }
   .bar-track {
     height: 10px;
     border-radius: 999px;
     background: #1b2436;
     overflow: hidden;
-    margin-top: .5rem;
+    margin-top: .6rem;
     display: flex;
   }
   .bar-old { background: #3a4763; height: 100%; transition: width .4s ease; }
   .bar-new { background: var(--accent); height: 100%; transition: width .4s ease; }
   .bar-caption { display: flex; justify-content: space-between; font-size: .72rem; color: var(--muted); margin-top: .35rem; }
-  h2 { font-size: .85rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 .75rem; }
   .checks { display: flex; flex-direction: column; gap: .4rem; max-height: 340px; overflow-y: auto; }
   .check-line {
     display: flex;
@@ -105,14 +102,13 @@
   .check-line .detail { color: var(--muted); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .check-line .ts { color: var(--muted); font-size: .7rem; }
   .empty { color: var(--muted); font-size: .85rem; padding: .5rem; }
-  .err { color: var(--fail); font-size: .85rem; }
   footer { color: var(--muted); font-size: .75rem; text-align: center; margin-top: 2rem; }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>Snipe-IT Lite — Deployment status</h1>
-  <div class="sub">Auto-refreshes every 3s. Data from <code>/_deploy/status.json</code> and <code>/_deploy/checks.log</code>.</div>
+  <h1>Snipe-IT Lite — Deployment status (Azure Container Apps)</h1>
+  <div class="sub">Auto-refreshes every 3s. Data from <code>/_deploy/status.json</code> and <code>/_deploy/checks.log</code>. Fixed roles: <strong>green</strong> is always the active revision, <strong>blue</strong> is always the incoming one being validated (see blue-green.md).</div>
 
   <div class="card">
     <div class="row">
@@ -120,19 +116,34 @@
       <span class="badge idle" id="phase-badge">—</span>
     </div>
     <div class="grid">
+      <div class="stat"><div class="label">Environment</div><div class="value" id="environment">—</div></div>
       <div class="stat"><div class="label">Image tag</div><div class="value" id="image-tag">—</div></div>
-      <div class="stat"><div class="label">Active (green)</div><div class="value" id="active-slot">—</div></div>
-      <div class="stat"><div class="label">Incoming (blue)</div><div class="value" id="new-slot">—</div></div>
       <div class="stat"><div class="label">Started</div><div class="value" id="started-at">—</div></div>
       <div class="stat"><div class="label">Updated</div><div class="value" id="updated-at">—</div></div>
     </div>
-    <div class="bar-track">
-      <div class="bar-old" id="bar-old" style="width:100%"></div>
-      <div class="bar-new" id="bar-new" style="width:0%"></div>
-    </div>
-    <div class="bar-caption">
-      <span id="bar-caption-old">green (active)</span>
-      <span id="bar-caption-new">blue (incoming)</span>
+  </div>
+
+  <div class="card">
+    <h2>Per-app rollout</h2>
+    <div class="apps-grid">
+      <div class="app-card">
+        <h3>backend</h3>
+        <div class="grid">
+          <div class="stat"><div class="label">Active (green)</div><div class="value" id="backend-active">—</div></div>
+          <div class="stat"><div class="label">Incoming (blue)</div><div class="value" id="backend-incoming">—</div></div>
+        </div>
+        <div class="bar-track"><div class="bar-old" id="backend-bar-old" style="width:100%"></div><div class="bar-new" id="backend-bar-new" style="width:0%"></div></div>
+        <div class="bar-caption"><span id="backend-bar-caption-old">green</span><span id="backend-bar-caption-new">blue</span></div>
+      </div>
+      <div class="app-card">
+        <h3>frontend</h3>
+        <div class="grid">
+          <div class="stat"><div class="label">Active (green)</div><div class="value" id="frontend-active">—</div></div>
+          <div class="stat"><div class="label">Incoming (blue)</div><div class="value" id="frontend-incoming">—</div></div>
+        </div>
+        <div class="bar-track"><div class="bar-old" id="frontend-bar-old" style="width:100%"></div><div class="bar-new" id="frontend-bar-new" style="width:0%"></div></div>
+        <div class="bar-caption"><span id="frontend-bar-caption-old">green</span><span id="frontend-bar-caption-new">blue</span></div>
+      </div>
     </div>
   </div>
 
@@ -141,7 +152,7 @@
     <div class="checks" id="checks"><div class="empty">No checks recorded yet.</div></div>
   </div>
 
-  <footer>scripts/blue-green-deploy.sh · scripts/health-check.sh</footer>
+  <footer>.github/scripts/aca-blue-green.sh · .github/scripts/aca-deploy-status.sh · .github/workflows/deploy-azure-aca.yml</footer>
 </div>
 
 <script>
@@ -152,7 +163,7 @@ async function poll() {
       const s = await statusRes.json();
       renderStatus(s);
     }
-  } catch (e) { /* status.json may not exist yet on a brand-new VM */ }
+  } catch (e) { /* status.json may not exist yet before the first deploy */ }
 
   try {
     const logRes = await fetch('checks.log', { cache: 'no-store' });
@@ -165,7 +176,7 @@ async function poll() {
 
 function badgeClassFor(phase) {
   if (phase === 'done') return 'ok';
-  if (phase === 'failed' || phase === 'promotion_failed') return 'fail';
+  if (phase === 'failed' || phase === 'rolled_back') return 'fail';
   if (!phase || phase === 'idle') return 'idle';
   return 'warn';
 }
@@ -178,23 +189,24 @@ function renderStatus(s) {
                      : badgeClassFor(s.phase) === 'fail' ? 'FAILED'
                      : badgeClassFor(s.phase) === 'idle' ? 'IDLE' : 'IN PROGRESS';
 
+  document.getElementById('environment').textContent = s.environment || '—';
   document.getElementById('image-tag').textContent = s.image_tag || '—';
-  // active_slot is always "green" and incoming_slot is always "blue" now
-  // (fixed roles -- see scripts/blue-green-deploy.sh's own comment) --
-  // still read from the JSON rather than hardcoded here so an older
-  // status.json (e.g. mid-upgrade) degrades gracefully instead of lying.
-  document.getElementById('active-slot').textContent = s.active_slot || '—';
-  document.getElementById('new-slot').textContent = s.incoming_slot || '—';
   document.getElementById('started-at').textContent = s.started_at || '—';
   document.getElementById('updated-at').textContent = s.updated_at || '—';
 
-  const pct = typeof s.traffic_to_incoming_pct === 'number'
-    ? s.traffic_to_incoming_pct
-    : 0;
-  document.getElementById('bar-old').style.width = (100 - pct) + '%';
-  document.getElementById('bar-new').style.width = pct + '%';
-  document.getElementById('bar-caption-old').textContent = `${s.active_slot || 'green'} — ${100 - pct}%`;
-  document.getElementById('bar-caption-new').textContent = `${s.incoming_slot || 'blue'} — ${pct}%`;
+  renderApp('backend', s.apps && s.apps.backend);
+  renderApp('frontend', s.apps && s.apps.frontend);
+}
+
+function renderApp(name, app) {
+  app = app || {};
+  document.getElementById(`${name}-active`).textContent = app.active_revision || '—';
+  document.getElementById(`${name}-incoming`).textContent = app.incoming_revision || '—';
+  const pct = typeof app.traffic_to_incoming_pct === 'number' ? app.traffic_to_incoming_pct : 0;
+  document.getElementById(`${name}-bar-old`).style.width = (100 - pct) + '%';
+  document.getElementById(`${name}-bar-new`).style.width = pct + '%';
+  document.getElementById(`${name}-bar-caption-old`).textContent = `green — ${100 - pct}%`;
+  document.getElementById(`${name}-bar-caption-new`).textContent = `blue — ${pct}%`;
 }
 
 function renderChecks(text) {
