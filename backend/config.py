@@ -95,61 +95,27 @@ class Settings(BaseSettings):
         environment_name = str(data.get("ENVIRONMENT", "development")).strip().lower()
         is_production = environment_name in {"production", "prod"}
 
-        raw_lean_mode = data.get("LEAN_MODE")
-        lean_mode = None
-        if raw_lean_mode is None:
-            lean_mode = is_production
-        else:
-            lean_mode = str(raw_lean_mode).strip().lower() in {"1", "true", "yes", "on"}
-
-        if "LEAN_MODE" not in data:
-            data["LEAN_MODE"] = lean_mode
+        # ENVIRONMENT is the single source of truth for every default below --
+        # there used to be a separate LEAN_MODE override that could diverge
+        # from ENVIRONMENT (see the BUG FIX note this replaced: a VM deploy
+        # set ENVIRONMENT=production but also forced LEAN_MODE="false", which
+        # silently re-enabled AUTO_INIT_DB and raced the deploy workflow's
+        # own "alembic upgrade head" step). LEAN_MODE has been removed
+        # entirely -- every flag below now keys directly off is_production,
+        # so ENVIRONMENT alone always determines the outcome, with no
+        # separate switch that can be left out of sync with it. An explicit
+        # value for any of these flags still always wins (see the
+        # `if "X" not in data` guard on each) -- only the DEFAULT changed.
         if "ENABLE_API_DOCS" not in data:
-            data["ENABLE_API_DOCS"] = False if lean_mode else True
-        # AUTO_INIT_DB/AUTO_SEED_DEMO_DATA are deliberately keyed off
-        # is_production directly, NOT lean_mode like the flags above.
-        #
-        # BUG FIX -- a VM deploy of the password-recovery feature's new
-        # migration (0011_password_reset_tokens) started failing with
-        # "psycopg2.errors.DuplicateTable: relation 'password_reset_tokens'
-        # already exists" during the deploy workflow's explicit "alembic
-        # upgrade head" step. Root cause: docker-compose.vm.yml's backend
-        # service sets ENVIRONMENT=production but ALSO forces
-        # LEAN_MODE="false" (purely to keep full logging/docs -- nothing
-        # to do with schema init). Before this fix, AUTO_INIT_DB's default
-        # was `False if lean_mode else True` -- so that LEAN_MODE
-        # override silently flipped AUTO_INIT_DB back to enabled despite
-        # being production, and this container's own FastAPI startup
-        # event's create_all() raced the deploy workflow's separate,
-        # explicit migration step: whichever ran first created any
-        # brand-new table straight from models.py, and the other then
-        # failed trying to create the same table again. Harmless for
-        # years because create_all() only ever found tables that already
-        # existed -- until 0011 added a genuinely new one.
-        #
-        # A production deployment should NEVER let create_all()/seed_db()
-        # run automatically -- Alembic must be the sole source of schema
-        # truth there (see init_db()'s own docstring in database.py) --
-        # regardless of what LEAN_MODE happens to be set to for unrelated
-        # (logging/API-docs) reasons. Keying the DEFAULT off is_production
-        # directly means every current and future production deployment
-        # (VM, Azure Container Apps, anything else) gets this safe
-        # behavior automatically without each one having to remember to
-        # set these two flags explicitly -- exactly the class of bug that
-        # just happened. A deployment that genuinely wants
-        # AUTO_INIT_DB/AUTO_SEED_DEMO_DATA on in production anyway (e.g.
-        # render.yaml's free-tier demo, which has no separate migrate
-        # step to run) can still do so -- this is only the DEFAULT when
-        # the env var is left unset; an explicit value always wins (see
-        # the `if "AUTO_INIT_DB" not in data` guard below).
+            data["ENABLE_API_DOCS"] = False if is_production else True
         if "AUTO_INIT_DB" not in data:
             data["AUTO_INIT_DB"] = False if is_production else True
         if "AUTO_SEED_DEMO_DATA" not in data:
             data["AUTO_SEED_DEMO_DATA"] = False if is_production else True
         if "ENABLE_AUTO_BACKUP" not in data:
-            data["ENABLE_AUTO_BACKUP"] = False if lean_mode else True
+            data["ENABLE_AUTO_BACKUP"] = False if is_production else True
         if "LOG_LEVEL" not in data:
-            data["LOG_LEVEL"] = "WARNING" if lean_mode else "INFO"
+            data["LOG_LEVEL"] = "WARNING" if is_production else "INFO"
         return data
 
     # --- Environment ----------------------------------------------------
@@ -166,7 +132,6 @@ class Settings(BaseSettings):
     # build-frontend/build.js: local = untouched, development = minified,
     # production = minified + obfuscated.
     ENVIRONMENT: str = "development"
-    LEAN_MODE: bool = False
 
     # --- Database -----------------------------------------------------
     # Full SQLAlchemy connection string. In Docker Compose, "db" is the

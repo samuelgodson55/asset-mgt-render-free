@@ -902,8 +902,9 @@ var appInsightsConnectionString = otelAzureMonitorEnabled ? appInsights.properti
 // BUG FIX: this used to hardcode 'production' unconditionally, so a
 // `environmentName: 'staging'` deploy still ran backend/worker/beat with
 // ENVIRONMENT=production -- every production-only behavior in
-// backend/config.py (LEAN_MODE's default, the JWT secret strength check,
-// secure-cookie/CORS strictness, etc.) silently applied to staging too.
+// backend/config.py (ENABLE_API_DOCS/AUTO_INIT_DB/etc.'s defaults, the JWT
+// secret strength check, secure-cookie/CORS strictness, etc.) silently
+// applied to staging too.
 // Now driven by the same environmentName param that already picks
 // staging vs prod resource names/RG -- "prod" -> "production", "staging"
 // -> "development" (config.py's own vocabulary; see its

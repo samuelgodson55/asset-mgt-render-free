@@ -1382,7 +1382,6 @@ see `.gitignore`) and are read by `backend/config.py` into a single typed
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `ENVIRONMENT` | `development` | `production` enables the startup JWT-secret strength check. |
-| `LEAN_MODE` | `true` if `ENVIRONMENT=production`, else `false` | Rarely set directly — it's a convenience switch that only changes the *defaults* of five other flags below (`ENABLE_API_DOCS`, `AUTO_INIT_DB`, `AUTO_SEED_DEMO_DATA`, `ENABLE_AUTO_BACKUP`, `LOG_LEVEL`) so a plain `ENVIRONMENT=production` alone already lands on sane production values for all five, without listing each one in `.env`. Any of those five still overrides `LEAN_MODE`'s default the moment you set it explicitly — see `config.py`'s `apply_environment_defaults()`. |
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | see `.env.example` | Postgres credentials, shared by the `db` and `backend` services. |
 | `DATABASE_URL` | built from the above | Full SQLAlchemy connection string. |
 | `REDIS_URL` | `redis://redis:6379/0` | Celery broker **and** result backend, shared by `backend` (producer) and `worker` (consumer) — used for async audit-ledger exports and every email notification (see [Due-Date Extensions & Notifications](#due-date-extensions--notifications)). |
@@ -3148,11 +3147,11 @@ A checklist before you deploy this anywhere real:
       one-time-generated root admin password" above), and never create
       the public demo accounts against a real database. **Already the
       default** the moment `ENVIRONMENT=production` is set — `config.py`'s
-      `LEAN_MODE` (see the Environment Variables Reference above)
-      auto-flips this, `ENABLE_API_DOCS`, and `ENABLE_AUTO_BACKUP` to
-      production-safe values for you. Setting these explicitly in `.env`
-      anyway is still recommended (explicit beats implicit for a
-      deployment's actual config), but nothing breaks if you forget.
+      `apply_environment_defaults()` auto-flips this, `ENABLE_API_DOCS`,
+      and `ENABLE_AUTO_BACKUP` to production-safe values for you. Setting
+      these explicitly in `.env` anyway is still recommended (explicit
+      beats implicit for a deployment's actual config), but nothing
+      breaks if you forget.
 - [ ] Set `CORS_ORIGINS` to your real frontend domain(s) only.
 - [ ] Decide on email: leave `NOTIFICATIONS_ENABLED=false` if you don't
       want extension-request/overdue/due-soon-checkout emails yet, or set
@@ -3165,7 +3164,7 @@ A checklist before you deploy this anywhere real:
       emails silently never leave the enqueue step.
 - [ ] Set `ENABLE_API_DOCS=false` for **both** the backend and frontend
       services (same `.env` key drives both locally; `render.yaml` already
-      sets `false` for both services in Render; `LEAN_MODE` — see above —
+      sets `false` for both services in Render; `config.py` — see above —
       also defaults the backend's copy to `false` under
       `ENVIRONMENT=production`, but the frontend/nginx copy has no such
       auto-default, so set it explicitly for both). Confirm it worked by

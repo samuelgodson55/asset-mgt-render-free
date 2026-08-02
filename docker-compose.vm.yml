@@ -261,29 +261,28 @@ services:
       # scripts/check-bicep-compose-drift.py.
       DISPLAY_TIMEZONE: ${DISPLAY_TIMEZONE:-Africa/Lagos}
       CURRENCY_CODE: ${CURRENCY_CODE:-NGN}
-      LEAN_MODE: "false"
-      # Explicit, not left to LEAN_MODE's default: this VM is a real,
-      # persistent-data deployment (prod OR vm-staging -- both use real
-      # Postgres, not a throwaway DB) where Alembic (run as its own
+      # Explicit, not left to config.py's is_production default: this VM is
+      # a real, persistent-data deployment (prod OR vm-staging -- both use
+      # real Postgres, not a throwaway DB) where Alembic (run as its own
       # explicit "alembic upgrade head" step by the deploy workflow -- see
       # .github/workflows/deploy-azure-vm.yml) must be the ONLY thing that
-      # ever creates/alters schema. LEAN_MODE is forced to "false" above
-      # purely to keep this container's logging/docs behavior out of "lean
-      # mode" regardless of what ENVIRONMENT resolves to -- but config.py's
-      # environment-based default for AUTO_INIT_DB/AUTO_SEED_DEMO_DATA is
-      # driven by that same LEAN_MODE value, not by ENVIRONMENT directly,
-      # so leaving them unset here would silently re-enable AUTO_INIT_DB.
-      # That would let this container's own startup race the deploy
-      # workflow's separate "alembic upgrade head" step: whichever ran
-      # first would create any brand-new table (e.g.
-      # password_reset_tokens) straight from models.py, and the other
-      # would then fail with psycopg2.errors.DuplicateTable trying to
-      # create the same table again. Pinning both flags to "false" here
-      # -- exactly as the `worker` service below already does -- removes
-      # the race entirely: only the explicit alembic step ever touches
-      # schema. ENVIRONMENT itself (above) still matters for everything
-      # ELSE config.py gates on it (JWT secret strength checks, secure
-      # cookie flags, CORS strictness, etc.) -- it's read from this VM's
+      # ever creates/alters schema. config.py's apply_environment_defaults()
+      # already keys AUTO_INIT_DB/AUTO_SEED_DEMO_DATA off is_production
+      # directly (ENVIRONMENT is the single source of truth -- there used to
+      # be a separate LEAN_MODE override here, which is how this VM used to
+      # force these two flags off independently of ENVIRONMENT; it's been
+      # removed), so leaving them unset here would already resolve to
+      # "false" given ENVIRONMENT=production/vm-staging above. They're
+      # pinned explicitly anyway -- exactly as the `worker` service below
+      # already does -- so this stays safe even if that default ever
+      # changes, and it documents the reason schema-mutation is intentionally
+      # kept out of this container's own startup: it would otherwise race
+      # the deploy workflow's separate "alembic upgrade head" step, e.g.
+      # both trying to create the same brand-new table (a real
+      # psycopg2.errors.DuplicateTable failure this repo hit once).
+      # ENVIRONMENT itself (above) still matters for everything ELSE
+      # config.py gates on it (JWT secret strength checks, secure cookie
+      # flags, CORS strictness, etc.) -- it's read from this VM's
       # /opt/snipeit/.env, defaulting to "production" (the infrastructure
       # default) if that file doesn't set ENVIRONMENT at all -- e.g. a
       # brand-new VM before deploy-azure-vm.yml has ever run its "Update
@@ -425,29 +424,28 @@ services:
       # scripts/check-bicep-compose-drift.py.
       DISPLAY_TIMEZONE: ${DISPLAY_TIMEZONE:-Africa/Lagos}
       CURRENCY_CODE: ${CURRENCY_CODE:-NGN}
-      LEAN_MODE: "false"
-      # Explicit, not left to LEAN_MODE's default: this VM is a real,
-      # persistent-data deployment (prod OR vm-staging -- both use real
-      # Postgres, not a throwaway DB) where Alembic (run as its own
+      # Explicit, not left to config.py's is_production default: this VM is
+      # a real, persistent-data deployment (prod OR vm-staging -- both use
+      # real Postgres, not a throwaway DB) where Alembic (run as its own
       # explicit "alembic upgrade head" step by the deploy workflow -- see
       # .github/workflows/deploy-azure-vm.yml) must be the ONLY thing that
-      # ever creates/alters schema. LEAN_MODE is forced to "false" above
-      # purely to keep this container's logging/docs behavior out of "lean
-      # mode" regardless of what ENVIRONMENT resolves to -- but config.py's
-      # environment-based default for AUTO_INIT_DB/AUTO_SEED_DEMO_DATA is
-      # driven by that same LEAN_MODE value, not by ENVIRONMENT directly,
-      # so leaving them unset here would silently re-enable AUTO_INIT_DB.
-      # That would let this container's own startup race the deploy
-      # workflow's separate "alembic upgrade head" step: whichever ran
-      # first would create any brand-new table (e.g.
-      # password_reset_tokens) straight from models.py, and the other
-      # would then fail with psycopg2.errors.DuplicateTable trying to
-      # create the same table again. Pinning both flags to "false" here
-      # -- exactly as the `worker` service below already does -- removes
-      # the race entirely: only the explicit alembic step ever touches
-      # schema. ENVIRONMENT itself (above) still matters for everything
-      # ELSE config.py gates on it (JWT secret strength checks, secure
-      # cookie flags, CORS strictness, etc.) -- it's read from this VM's
+      # ever creates/alters schema. config.py's apply_environment_defaults()
+      # already keys AUTO_INIT_DB/AUTO_SEED_DEMO_DATA off is_production
+      # directly (ENVIRONMENT is the single source of truth -- there used to
+      # be a separate LEAN_MODE override here, which is how this VM used to
+      # force these two flags off independently of ENVIRONMENT; it's been
+      # removed), so leaving them unset here would already resolve to
+      # "false" given ENVIRONMENT=production/vm-staging above. They're
+      # pinned explicitly anyway -- exactly as the `worker` service below
+      # already does -- so this stays safe even if that default ever
+      # changes, and it documents the reason schema-mutation is intentionally
+      # kept out of this container's own startup: it would otherwise race
+      # the deploy workflow's separate "alembic upgrade head" step, e.g.
+      # both trying to create the same brand-new table (a real
+      # psycopg2.errors.DuplicateTable failure this repo hit once).
+      # ENVIRONMENT itself (above) still matters for everything ELSE
+      # config.py gates on it (JWT secret strength checks, secure cookie
+      # flags, CORS strictness, etc.) -- it's read from this VM's
       # /opt/snipeit/.env, defaulting to "production" (the infrastructure
       # default) if that file doesn't set ENVIRONMENT at all -- e.g. a
       # brand-new VM before deploy-azure-vm.yml has ever run its "Update

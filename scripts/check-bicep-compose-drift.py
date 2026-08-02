@@ -99,13 +99,6 @@ ALLOWED_ONLY_IN_COMPOSE = {
         # instead), so it's left to start.sh's own UVICORN_WORKERS
         # default rather than exposed as a setting on this path.
         "UVICORN_WORKERS",
-        # Operations & Observability requirement #1's gate for the
-        # startup init_db()/seed_db() calls -- main.bicep hardcodes the
-        # equivalent AUTO_INIT_DB/AUTO_SEED_DEMO_DATA='false' directly in
-        # `sharedEnv` instead of going through LEAN_MODE (see that
-        # resource's own AUTO_INIT_DB/AUTO_SEED_DEMO_DATA comment), the
-        # same way docker-compose.vm.yml does.
-        "LEAN_MODE",
         # Debug-only "print every span to stdout too" knob (see
         # backend/telemetry.py) -- off by default everywhere, and not
         # worth a bicep param since Application Insights (this path's

@@ -195,18 +195,13 @@ services:
       # by scripts/check-bicep-compose-drift.py.
       DISPLAY_TIMEZONE: ${DISPLAY_TIMEZONE:-Africa/Lagos}
       CURRENCY_CODE: ${CURRENCY_CODE:-NGN}
-      # Operations & Observability requirement #1: gate the startup
-      # init_db()/seed_db() calls instead of always running them. Leave
-      # both "true" for local docker-compose demo use; set both "false" in
-      # a real production .env and run `alembic upgrade head` separately.
-      LEAN_MODE: ${LEAN_MODE:-}
       # Operations & Observability requirement #2: structured logging.
       LOG_FORMAT: ${LOG_FORMAT:-json}
       # BUG FIX: this was present on `worker`/`beat` below and on every
       # service in docker-compose.vm.yml, but missing here -- backend fell
       # back to config.py's own LOG_LEVEL default (INFO, or WARNING under
-      # LEAN_MODE) instead of actually honoring a LOG_LEVEL set in your
-      # .env, unlike every other service. Caught by
+      # ENVIRONMENT=production) instead of actually honoring a LOG_LEVEL set
+      # in your .env, unlike every other service. Caught by
       # scripts/check-compose-drift.py.
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # Operations & Observability requirement #4: distributed tracing
