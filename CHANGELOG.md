@@ -15,6 +15,16 @@ above the marker are yours to keep.
 
 <!-- release-notes-insertion-point -->
 
+## [v1.0.3] - 2026-08-01
+- ACA Deploy Dash (72e41f5)
+- ACA deploy page debugging (7ceb361)
+- check ACA/VM drift #2 (eedd60a)
+- fix ACA-VM drift from recent change (d6b8684)
+- ACA delpoy status issue #3 (7d26f43)
+- ACA deploy status #2 (a0c2c73)
+- ACA deploy status #1 (06e4600)
+- docs(changelog): v1.0.2 (dba535f)
+
 ## [v1.0.2] - 2026-08-01
 - ACA deploy page issue #2 (542ed02)
 - deploy page issue #1 (3076cdb)
