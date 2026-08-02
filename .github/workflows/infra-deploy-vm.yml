@@ -19,18 +19,18 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        description: 'Which environment to target -- selects both the GitHub Environment secrets are read from AND infra-vm/variables.tf''s environment_name. Deliberately named "vm-staging", not "staging" -- the Container Apps path (infra-deploy.yml) already owns a GitHub Environment literally called "staging", and reusing that name here would mean both paths fight over the same AZURE_CLIENT_ID/AZURE_TENANT_ID/AZURE_SUBSCRIPTION_ID (and POSTGRES_PASSWORD, JWT_SECRET_KEY, etc.) secret values -- see DEPLOYMENT_VM.md''s "Using both deployment targets" section.'
+        description: 'Which environment to target -- Deliberately named "vm-staging", not "staging" -- the Container Apps path already owns a GitHub Environment literally called "staging"'
         required: true
         type: choice
         options: [vm-staging, prod]
       action:
-        description: 'Terraform action to run. "import" reconciles a resource that already exists in Azure but is missing from state -- see import_resources below and DEPLOYMENT_VM.md''s "Already exists" troubleshooting section.'
+        description: 'Terraform action to run. "import" reconciles a resource that already exists in Azure but is missing from state.'
         required: true
         type: choice
         options: [plan, apply, destroy, import]
         default: plan
       replace_target:
-        description: 'Optional: force-replace ONE resource instead of a normal plan/apply -- e.g. azurerm_linux_virtual_machine.this to rebuild just the VM (data disk, NIC, public IP, and all Cloudflare resources are untouched). Leave blank for a normal run. See DEPLOYMENT_VM.md''s "Rebuilding just the VM" section.'
+        description: 'Optional: force-replace ONE resource instead of a normal plan/apply -- e.g. azurerm_linux_virtual_machine.this to rebuild just the VM (data disk, NIC, public IP, and all Cloudflare resources are untouched). Leave blank for a normal run.'
         required: false
         type: string
         default: ''
