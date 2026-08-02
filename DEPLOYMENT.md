@@ -1062,7 +1062,12 @@ any direction:
   automatically via its "Write ACA deploy status - init" step. If no
   storage account is found in the target resource group yet (a fresh
   environment that hasn't run `infra-deploy.yml`), that step warns and
-  skips the dashboard for that run rather than failing the rollout.
+  skips the dashboard for that run rather than failing the rollout. If the
+  top card updates normally but the "Health Check Log" panel never gets
+  any entries, see the Troubleshooting section's
+  `.github/scripts/aca-deploy-status.sh` exec-bit entry below — that one
+  script's file permissions, not storage or auth, are the most common
+  cause. You need to make it an executable script to see the health log progress
 
 ### Rollback
 
@@ -1439,3 +1444,49 @@ caution applies to `REDIS_PASSWORD`.
   which requires the same two parameters anyway (remember: Docker Hub's
   free plan only includes ONE private repo, so making both `backend` and
   `frontend` private needs a paid plan).
+- **`/_deploy/` dashboard's top status card updates fine (phase, image
+  tag, traffic split) but "Health Check Log" stays permanently empty
+  ("No checks recorded yet"), even on a rollout that otherwise finalizes
+  as `Done`/`HEALTHY`** — almost always a missing execute bit on
+  `.github/scripts/aca-deploy-status.sh` in the checked-out repo, not a
+  storage or auth problem. The two write paths are wired differently:
+  - Every top-card write (`init`/`write "rolling_out_backend"`/
+    `write "done"`/etc.) is called from `deploy-azure-aca.yml` as
+    `bash .github/scripts/aca-deploy-status.sh ...` — explicit `bash`,
+    so it runs regardless of the file's permission bits. This is why the
+    card itself can look completely healthy while the log is empty.
+  - Every per-check log line (`backend-gate1-waiting`,
+    `backend-readyz:green`, `backend-first-deploy`, etc.) instead comes
+    from `.github/scripts/aca-blue-green.sh` invoking the SAME script
+    directly as a command — `"$status_script" check ...` — gated behind
+    `[ -x "$status_script" ]`. If that bit isn't set, the guard fails on
+    every single call, and because this whole mechanism is deliberately
+    best-effort (nothing here is allowed to fail an otherwise-healthy
+    deploy), it fails silently: no warning in the Actions log, no error
+    on the dashboard, just an empty log.
+
+  Confirm with:
+  ```bash
+  git ls-files -s .github/scripts/aca-deploy-status.sh
+  ```
+  `100644` = not executable (the bug); `100755` = executable (fine). Fix
+  it once, from any clone, without touching the file's content:
+  ```bash
+  git update-index --chmod=+x .github/scripts/aca-deploy-status.sh
+  git commit -m "fix: restore exec bit on aca-deploy-status.sh"
+  git push
+  ```
+  Takes effect on the NEXT `deploy-azure-aca.yml` run — `checks.log` is
+  reset fresh by `init` at the start of every rollout, so an already-empty
+  log from a past run stays empty; it won't retroactively backfill.
+
+  This is ACA-specific — the VM path's equivalent
+  (`scripts/blue-green-deploy.sh`) writes `status.json`/`checks.log`
+  straight to local disk itself rather than shelling out to a second
+  script, so it has no execute-bit dependency to lose in the first place.
+  Worth a quick `git ls-files -s .github/scripts/*.sh` sanity check after
+  any operation that can silently drop file modes — a fresh clone on a
+  platform/tool that doesn't preserve them, a squash-merge, or hand-editing
+  a file through a web UI — since the same class of bug can in principle
+  affect any script one of these workflows invokes directly rather than
+  via `bash <path>`.
