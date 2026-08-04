@@ -57,7 +57,7 @@ export function quotationStatusBadge(status) {
 // on every page load, including the unauthenticated login page (see
 // main.js's DOMContentLoaded handler), so the navbar/login brand and
 // <title> always reflect the live settings.SITE_NAME deployment value
-// instead of the hardcoded "Snipe-IT Lite" default baked into the HTML.
+// instead of the generic "Asset Registry" default baked into the HTML.
 // -----------------------------------------------------------------------------
 export async function loadPublicConfig() {
   try {

@@ -195,13 +195,13 @@ function showRecoveryCodesScreen(codes, redirectRole) {
 function downloadRecoveryCodes() {
   if (!pendingRecoveryCodes) return;
   const text = [
-    'Snipe-IT Lite -- 2FA recovery codes',
+    'Asset Registry -- 2FA recovery codes',
     'Each code works ONCE. Store this file somewhere safe (a password manager, not your Downloads folder long-term).',
     '',
     ...pendingRecoveryCodes,
     '',
   ].join('\n');
-  downloadTextFile('snipeit-lite-recovery-codes.txt', text);
+  downloadTextFile('asset-registry-recovery-codes.txt', text);
 }
 
 function continuePastRecoveryCodes() {

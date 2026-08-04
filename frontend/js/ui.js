@@ -669,12 +669,15 @@ let _titleSuffixCaptured = false;
 // deployment's name is shown on screen: the navbar/login brand (the
 // `#siteBrandName` element present in index.html/admin.html/manager.html/
 // staff.html/customer.html) and the browser tab's <title>. Keeps the
-// two-tone "Word <muted>Word</muted>" styling the hardcoded "Snipe-IT
-// Lite" brand used by splitting on the LAST space in the configured name
-// (e.g. "Acme Corp" -> bold "Acme" + muted "Corp"); a single-word name
-// just renders as one bold word, no muted half. A missing/empty
-// site_name is a no-op -- whatever's already in the markup (the
-// "Snipe-IT Lite" default) stays put rather than being blanked out.
+// two-tone "Word <muted>Word</muted>" styling the hardcoded "Asset
+// Registry" brand used by splitting on the LAST space in the configured
+// name (e.g. "Acme Corp" -> bold "Acme" + muted "Corp"); a single-word
+// name just renders as one bold word, no muted half. A missing/empty
+// site_name is a no-op -- whatever's already in the markup (the generic
+// "Asset Registry" default, deliberately not any specific product's
+// name) stays put rather than being blanked out, so a slow /config/public
+// round trip never flashes the wrong company's name at anyone -- only a
+// neutral placeholder until the real one loads.
 export function applySiteName(siteName) {
   if (!siteName) return;
   const trimmed = String(siteName).trim();

@@ -3,11 +3,12 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<link rel="icon" type="image/svg+xml" href="assets/favicon.svg" />
 <!-- Applies the saved (or OS-preferred) dark/light theme to <html> BEFORE
      first paint -- see js/theme-init.js for why this has to be external
      and synchronous instead of a module script. -->
 <script src="js/theme-init.js"></script>
-<title>Snipe-IT Lite — My Assets</title>
+<title>Asset Registry — My Assets</title>
 
 <!-- =====================================================================
      SYNCHRONOUS AUTH GUARD -- runs before the rest of the page is parsed.
@@ -40,7 +41,7 @@
           <svg class="h-5 w-5 text-blue-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M3 9h18"/><path d="M8 4v5"/></svg>
         </div>
         <div class="leading-tight">
-          <p id="siteBrandName" class="text-[15px] font-bold tracking-tight text-slate-50">Snipe-IT <span class="font-medium text-slate-400">Lite</span></p>
+          <p id="siteBrandName" class="text-[15px] font-bold tracking-tight text-slate-50">Asset <span class="font-medium text-slate-400">Registry</span></p>
           <p class="hidden text-[11px] text-slate-500 tag-mono sm:block">asset-registry.internal.corp</p>
         </div>
       </div>
@@ -133,10 +134,14 @@
         </span>
 
         <button type="button" id="navProfileBtn" data-action="open-profile" title="View profile &amp; change password" class="flex items-center gap-2.5 border-l border-border pl-2 transition hover:opacity-80 sm:pl-4">
-          <div id="navUserInitials" class="h-8 w-8 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-xs font-bold text-white">TO</div>
+          <!-- No hardcoded name/initials/role here -- shows "—" until
+               main.js's getSession() populates it from the real logged-in
+               user, so a slow connection never flashes a stranger's name
+               at whoever's looking at the screen. -->
+          <div id="navUserInitials" class="h-8 w-8 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-xs font-bold text-white">—</div>
           <div class="hidden text-right leading-tight md:block">
-            <p id="navUserName" class="text-[13px] font-semibold text-slate-100">T. Okafor</p>
-            <p id="myProfileRole" class="text-[11px] text-slate-500">Senior Engineer</p>
+            <p id="navUserName" class="text-[13px] font-semibold text-slate-100">—</p>
+            <p id="myProfileRole" class="text-[11px] text-slate-500">—</p>
           </div>
         </button>
 

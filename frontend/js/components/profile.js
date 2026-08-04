@@ -279,13 +279,13 @@ export async function submitRegenerateRecoveryCodesForm(event) {
 export function downloadRegeneratedRecoveryCodes() {
   if (!pendingRegeneratedCodes) return;
   const text = [
-    'Snipe-IT Lite -- 2FA recovery codes',
+    'Asset Registry -- 2FA recovery codes',
     'Each code works ONCE. Store this file somewhere safe (a password manager, not your Downloads folder long-term).',
     '',
     ...pendingRegeneratedCodes,
     '',
   ].join('\n');
-  downloadTextFile('snipeit-lite-recovery-codes.txt', text);
+  downloadTextFile('asset-registry-recovery-codes.txt', text);
 }
 
 export function closeRecoveryCodesResultModal() {
