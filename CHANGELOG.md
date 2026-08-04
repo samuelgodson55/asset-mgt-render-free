@@ -15,6 +15,9 @@ above the marker are yours to keep.
 
 <!-- release-notes-insertion-point -->
 
+## [v1.0.5] - 2026-08-04
+- branding (26e143b)
+
 ## [v1.0.3] - 2026-08-01
 - ACA Deploy Dash (72e41f5)
 - ACA deploy page debugging (7ceb361)
