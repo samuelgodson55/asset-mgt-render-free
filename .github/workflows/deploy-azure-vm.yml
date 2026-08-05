@@ -738,7 +738,7 @@ jobs:
 
       - name: Upload live-endpoint poll evidence
         if: always() && steps.poll_start.outcome == 'success'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: zero-downtime-poll-evidence-vm-${{ github.run_id }}
           path: evidence/
