@@ -481,6 +481,40 @@ const CHANGE_ACTIONS = {
   'toggle-select-all-fulfillment': (el) => toggleSelectAllFulfillment(el),
 };
 
+// -----------------------------------------------------------------------------
+// FORM SUBMIT GUARD
+// -----------------------------------------------------------------------------
+// Same "don't let a slow/flaky connection invite multi-click" problem as
+// the delegated click-action guard above (see wireDelegatedEvents()), but
+// for the app's actual <form> submissions -- Request Extension, Extend,
+// Deny Request, Save Changes, Create User, Change Password, CSV Import,
+// etc. None of these forms' submit handlers (the `submitXForm(event)`
+// functions imported at the top of this file) disabled their own submit
+// button, so on a slow connection the button just sat there looking
+// clickable while the request was still in flight, and a second (or
+// third) tap fired the same request again.
+//
+// Wraps a form's submit handler so its `[type="submit"]` button is
+// disabled the instant the form is submitted and re-enabled the moment
+// the handler's promise settles, success or failure -- the exact same
+// disable-for-the-duration pattern components/exports.js's
+// downloadExport() already uses for every export button. Drop-in
+// replacement for `form.addEventListener('submit', handler)`: same two
+// arguments, same call sites below, just routed through this guard
+// instead of straight to addEventListener.
+function wireSubmitGuard(form, handler) {
+  if (!form) return;
+  form.addEventListener('submit', async (event) => {
+    const submitBtn = form.querySelector('[type="submit"]');
+    if (submitBtn) submitBtn.disabled = true;
+    try {
+      await handler(event);
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
+    }
+  });
+}
+
 function wireDelegatedEvents() {
   document.body.addEventListener('click', (event) => {
     const el = event.target.closest('[data-action]');
@@ -495,7 +529,42 @@ function wireDelegatedEvents() {
     if (el.dataset.action !== 'open-row-details' && el.closest('#rowDetailsBody')) {
       closeModal('rowDetailsModal');
     }
-    action(el);
+
+    // MULTI-CLICK / SLOW-CONNECTION GUARD: a handful of these handlers
+    // (export*, createBackupNow, submitMyQuotation, submitCreateQuote)
+    // already disable `el` themselves for the duration of their request --
+    // see components/exports.js's module docstring for that pattern. Most
+    // of the OTHER data-action handlers wired above (Process Return,
+    // Approve/Deny Extension, Restore/Purge/Delete, Save Capacity/Name/
+    // Category/Price, Approve Quote, etc.) never did, which meant a slow
+    // or flaky connection left the button looking unresponsive right up
+    // until the request finally settled -- inviting exactly the
+    // "click it again, and again" behavior that then fires the same
+    // request multiple times.
+    //
+    // Rather than repeat the disable/re-enable dance inside every one of
+    // those handlers individually, apply it once, generically, right
+    // here: if the handler we're about to call is `async` (or otherwise
+    // returns a Promise) and `el` is a real button, disable it the moment
+    // it's clicked and re-enable it the moment that promise settles,
+    // success or failure. Handlers that already manage their own
+    // disabled/label state (the ones listed above) just get this as a
+    // harmless no-op second layer -- their own `finally` block runs
+    // first and already leaves the button re-enabled before this outer
+    // `.finally()` ever fires. Handlers that return a plain (non-Promise)
+    // value -- e.g. ones that only open a modal -- are untouched.
+    const result = action(el);
+    if (
+      result &&
+      typeof result.then === 'function' &&
+      (el.tagName === 'BUTTON' || el.tagName === 'INPUT') &&
+      !el.disabled
+    ) {
+      el.disabled = true;
+      result.finally(() => {
+        el.disabled = false;
+      });
+    }
   });
 
   document.body.addEventListener('change', (event) => {
@@ -716,7 +785,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // handler and the 'cancel-mfa' click action both use.
   const loginForm = document.getElementById('login-form');
   if (loginForm) {
-    loginForm.addEventListener('submit', async (e) => {
+    wireSubmitGuard(loginForm, async (e) => {
       e.preventDefault();
       // Data Quality & Usability requirement #6: this single field now
       // accepts EITHER an email address OR a username -- see auth.js's
@@ -751,7 +820,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const mfaVerifyForm = document.getElementById('mfa-verify-form');
   if (mfaVerifyForm) {
-    mfaVerifyForm.addEventListener('submit', async (e) => {
+    wireSubmitGuard(mfaVerifyForm, async (e) => {
       e.preventDefault();
       const code = document.getElementById('mfa-verify-code').value;
       try {
@@ -783,7 +852,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const mfaSetupForm = document.getElementById('mfa-setup-form');
   if (mfaSetupForm) {
-    mfaSetupForm.addEventListener('submit', async (e) => {
+    wireSubmitGuard(mfaSetupForm, async (e) => {
       e.preventDefault();
       const code = document.getElementById('mfa-setup-code').value;
       try {
@@ -813,7 +882,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // always succeeds from the caller's point of view.
   const forgotPasswordForm = document.getElementById('forgot-password-form');
   if (forgotPasswordForm) {
-    forgotPasswordForm.addEventListener('submit', async (e) => {
+    wireSubmitGuard(forgotPasswordForm, async (e) => {
       e.preventDefault();
       const identifier = document.getElementById('forgot-password-identifier').value;
       const msgEl = document.getElementById('forgot-password-message');
@@ -853,7 +922,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // names here even though their DOM ids don't collide.
   const forgotPasswordResetForm = document.getElementById('reset-password-form');
   if (forgotPasswordResetForm) {
-    forgotPasswordResetForm.addEventListener('submit', async (e) => {
+    wireSubmitGuard(forgotPasswordResetForm, async (e) => {
       e.preventDefault();
       const newPassword = document.getElementById('reset-password-new').value;
       const confirmPassword = document.getElementById('reset-password-confirm').value;
@@ -892,10 +961,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // --- Dashboard forms (only present on admin.html / manager.html) ---
   const createPoolForm = document.getElementById('createPoolForm');
-  if (createPoolForm) createPoolForm.addEventListener('submit', submitCreatePoolForm);
+  if (createPoolForm) wireSubmitGuard(createPoolForm, submitCreatePoolForm);
 
   const csvImportForm = document.getElementById('csvImportForm');
-  if (csvImportForm) csvImportForm.addEventListener('submit', submitCsvImportForm);
+  if (csvImportForm) wireSubmitGuard(csvImportForm, submitCsvImportForm);
 
   // The CSV file input auto-submits its form the moment a file is chosen,
   // rather than requiring a separate "Upload" click.
@@ -906,56 +975,56 @@ document.addEventListener('DOMContentLoaded', () => {
   wireCsvDragAndDrop(csvFileInput, csvImportForm);
 
   const createUserForm = document.getElementById('createUserForm');
-  if (createUserForm) createUserForm.addEventListener('submit', submitCreateUserForm);
+  if (createUserForm) wireSubmitGuard(createUserForm, submitCreateUserForm);
 
   const changePasswordForm = document.getElementById('changePasswordForm');
-  if (changePasswordForm) changePasswordForm.addEventListener('submit', submitChangePasswordForm);
+  if (changePasswordForm) wireSubmitGuard(changePasswordForm, submitChangePasswordForm);
   const updateIdentityForm = document.getElementById('updateIdentityForm');
-  if (updateIdentityForm) updateIdentityForm.addEventListener('submit', submitUpdateIdentityForm);
+  if (updateIdentityForm) wireSubmitGuard(updateIdentityForm, submitUpdateIdentityForm);
 
   const regenerateRecoveryCodesForm = document.getElementById('regenerateRecoveryCodesForm');
-  if (regenerateRecoveryCodesForm) regenerateRecoveryCodesForm.addEventListener('submit', submitRegenerateRecoveryCodesForm);
+  if (regenerateRecoveryCodesForm) wireSubmitGuard(regenerateRecoveryCodesForm, submitRegenerateRecoveryCodesForm);
 
   const resetPasswordForm = document.getElementById('resetPasswordForm');
-  if (resetPasswordForm) resetPasswordForm.addEventListener('submit', submitResetPasswordForm);
+  if (resetPasswordForm) wireSubmitGuard(resetPasswordForm, submitResetPasswordForm);
 
   const editUserForm = document.getElementById('editUserForm');
-  if (editUserForm) editUserForm.addEventListener('submit', submitEditUserForm);
+  if (editUserForm) wireSubmitGuard(editUserForm, submitEditUserForm);
   const revokeUserForm = document.getElementById('revokeUserForm');
-  if (revokeUserForm) revokeUserForm.addEventListener('submit', submitRevokeUserForm);
+  if (revokeUserForm) wireSubmitGuard(revokeUserForm, submitRevokeUserForm);
 
   const editOutsiderForm = document.getElementById('editOutsiderForm');
-  if (editOutsiderForm) editOutsiderForm.addEventListener('submit', submitEditOutsiderForm);
+  if (editOutsiderForm) wireSubmitGuard(editOutsiderForm, submitEditOutsiderForm);
   const convertOutsiderForm = document.getElementById('convertOutsiderForm');
-  if (convertOutsiderForm) convertOutsiderForm.addEventListener('submit', submitConvertOutsiderForm);
+  if (convertOutsiderForm) wireSubmitGuard(convertOutsiderForm, submitConvertOutsiderForm);
 
   const dispatchForm = document.getElementById('dispatchForm');
-  if (dispatchForm) dispatchForm.addEventListener('submit', submitDispatchForm);
+  if (dispatchForm) wireSubmitGuard(dispatchForm, submitDispatchForm);
 
   const exceptionForm = document.getElementById('exceptionForm');
-  if (exceptionForm) exceptionForm.addEventListener('submit', submitExceptionForm);
+  if (exceptionForm) wireSubmitGuard(exceptionForm, submitExceptionForm);
 
   const extensionRequestForm = document.getElementById('extensionRequestForm');
-  if (extensionRequestForm) extensionRequestForm.addEventListener('submit', submitExtensionRequestForm);
+  if (extensionRequestForm) wireSubmitGuard(extensionRequestForm, submitExtensionRequestForm);
 
   const directExtendForm = document.getElementById('directExtendForm');
-  if (directExtendForm) directExtendForm.addEventListener('submit', submitDirectExtendForm);
+  if (directExtendForm) wireSubmitGuard(directExtendForm, submitDirectExtendForm);
 
   const bulkExtendForm = document.getElementById('bulkExtendForm');
-  if (bulkExtendForm) bulkExtendForm.addEventListener('submit', submitBulkExtendForm);
+  if (bulkExtendForm) wireSubmitGuard(bulkExtendForm, submitBulkExtendForm);
 
   const denyReasonForm = document.getElementById('denyReasonForm');
-  if (denyReasonForm) denyReasonForm.addEventListener('submit', submitDenyReasonForm);
+  if (denyReasonForm) wireSubmitGuard(denyReasonForm, submitDenyReasonForm);
 
   const vatSettingsForm = document.getElementById('vatSettingsForm');
   if (vatSettingsForm) {
-    vatSettingsForm.addEventListener('submit', submitVatSettingsForm);
+    wireSubmitGuard(vatSettingsForm, submitVatSettingsForm);
     loadVatSetting();
   }
 
   const digestRecipientAddForm = document.getElementById('digestRecipientAddForm');
   if (digestRecipientAddForm) {
-    digestRecipientAddForm.addEventListener('submit', submitDigestRecipientAddForm);
+    wireSubmitGuard(digestRecipientAddForm, submitDigestRecipientAddForm);
     loadDigestRecipients();
   }
 
