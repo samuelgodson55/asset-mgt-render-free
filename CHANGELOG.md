@@ -15,6 +15,20 @@ above the marker are yours to keep.
 
 <!-- release-notes-insertion-point -->
 
+## [v1.0.6] - 2026-08-05
+- fix:multi requests fixed again low network (94cec8b)
+- docs(changelog): v1.0.5 (7300830)
+- docs(changelog): v1.0.4 (5787ffa)
+- Bump actions/upload-artifact from 4 to 7 (43cc729)
+- Bump actions/setup-python from 6 to 7 (5123bb0)
+- Bump alembic from 1.13.2 to 1.18.5 in /backend (865d08f)
+- Bump hashicorp/setup-terraform from 3 to 4 (8d5d7f2)
+- Bump redis from 5.0.8 to 8.0.1 in /backend (47c0c2b)
+- Bump node from 22-alpine to 25-alpine in /frontend (93a6695)
+- Bump celery-redbeat from 2.4.1 to 2.4.2 in /backend (3dc2993)
+- Bump javascript-obfuscator from 4.2.2 to 5.5.0 in /build-frontend (64f7223)
+- Bump pyjwt from 2.9.0 to 2.13.0 in /backend (a617440)
+
 ## [v1.0.5] - 2026-08-04
 - branding (26e143b)
 ## [v1.0.4] - 2026-08-03
