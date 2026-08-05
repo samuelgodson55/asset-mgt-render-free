@@ -15,6 +15,16 @@ above the marker are yours to keep.
 
 <!-- release-notes-insertion-point -->
 
+## [v1.0.5] - 2026-08-04
+- branding (26e143b)
+## [v1.0.4] - 2026-08-03
+- Frontend labels (2fe3fd0)
+- removing unnecessary comments (7059b73)
+- doc update (41302c6)
+- fix: restore exec bit on aca-deploy-status.sh (8ea438e)
+- remove redundant lean mode (89850bc)
+- docs(changelog): v1.0.3 (523c0ec)
+
 ## [v1.0.3] - 2026-08-01
 - ACA Deploy Dash (72e41f5)
 - ACA deploy page debugging (7ceb361)
