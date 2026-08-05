@@ -15,6 +15,8 @@ above the marker are yours to keep.
 
 <!-- release-notes-insertion-point -->
 
+## [v1.0.5] - 2026-08-04
+- branding (26e143b)
 ## [v1.0.4] - 2026-08-03
 - Frontend labels (2fe3fd0)
 - removing unnecessary comments (7059b73)
