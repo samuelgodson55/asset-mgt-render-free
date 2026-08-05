@@ -139,6 +139,53 @@ class Settings(BaseSettings):
     # lets them reach each other by service name.
     DATABASE_URL: str = "postgresql://admin:supersecret@db:5432/asset_db"
 
+    # BUG FIX ("Audit Logs page fails on repeated refresh, but recovers if
+    # you stop hammering it for a bit"): database.py's engine was created
+    # with SQLAlchemy's un-bounded defaults -- `pool_size=5` PLUS
+    # `max_overflow=10`, i.e. up to 15 live connections per process that
+    # imports database.py. That's fine against local Docker Compose
+    # Postgres, but it doesn't account for how many SEPARATE processes can
+    # all import database.py at once in production:
+    #   - infra/main.bicep's backend Container App can scale out to
+    #     `backendMaxReplicas` (currently 3) replicas.
+    #   - `start.sh` also launches an embedded Celery worker
+    #     (RUN_EMBEDDED_WORKER=true, see that file) as a second, separate
+    #     OS process INSIDE every one of those replicas -- and that
+    #     process imports database.py too, building its own independent
+    #     15-connection pool.
+    #   That's up to 3 replicas x 2 processes x 15 = 90 possible
+    #   connections, all fighting over whatever the managed Postgres
+    #   allows -- and infra/main.bicep's `postgresSkuName` default,
+    #   Standard_B1ms (the smallest Burstable tier, 2GiB RAM), only grants
+    #   ~50 total connections, a handful of which Postgres itself reserves
+    #   for SUPERUSER-only use (hence the
+    #   `psycopg2.OperationalError: ... remaining connection slots are
+    #   reserved for roles with the SUPERUSER attribute` this throws once
+    #   the non-reserved slots run out). A single request usually finds a
+    #   free slot (hence "refreshing once looks fine"), but a burst of
+    #   concurrent requests/tasks across replicas exhausts them, and it
+    #   only "normalizes" again once enough pooled connections have sat
+    #   idle for `DB_POOL_RECYCLE_SECONDS` (database.py) and gotten
+    #   recycled.
+    #
+    # Fix: cap how many connections EACH process is allowed to open, sized
+    # so that (replicas x processes-per-replica x per-engine cap) stays
+    # comfortably under the smallest supported Postgres tier's real
+    # budget, with configurable env vars so a deployment on a bigger
+    # `postgresSkuName` (see infra/main.bicep) can raise them instead of
+    # silently inheriting SQLAlchemy's much larger defaults again.
+    # Budget check at the defaults below: 3 replicas x 2 processes x
+    # (DB_POOL_SIZE + DB_MAX_OVERFLOW = 3 + 3 = 6) = 36, comfortably under
+    # a Standard_B1ms server's ~50 total / ~47 non-superuser connections,
+    # with headroom for `alembic upgrade head`, one-off `scripts/`
+    # invocations, and manual `psql` sessions.
+    DB_POOL_SIZE: int = 3
+    DB_MAX_OVERFLOW: int = 3
+    # Fail fast with a clear "pool exhausted" error instead of a request
+    # hanging indefinitely when every pooled/overflow connection above is
+    # already checked out.
+    DB_POOL_TIMEOUT_SECONDS: int = 10
+
     # --- Async export workers (Celery + Redis) -----------------------------
     # CSV/PDF ledger exports used to be generated synchronously, inline in
     # the request/response cycle -- fine for a small date range, but a

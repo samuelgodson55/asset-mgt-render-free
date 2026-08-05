@@ -73,11 +73,35 @@ DATABASE_URL = settings.DATABASE_URL
 #                           instead of hanging when the DB is genuinely
 #                           unreachable (bad host/port, firewall rule not
 #                           yet applied, etc.).
+#
+# BUG FIX ("Audit Logs page fails on repeated refresh, but recovers if you
+# stop hammering it for a bit" -- `psycopg2.OperationalError: ... remaining
+# connection slots are reserved for roles with the SUPERUSER attribute`):
+# this engine was ALSO being created with no `pool_size`/`max_overflow` of
+# its own, which meant it silently inherited SQLAlchemy's defaults
+# (pool_size=5, max_overflow=10 -- up to 15 live connections per process
+# that imports this module). See config.py's DB_POOL_SIZE/DB_MAX_OVERFLOW
+# for the full arithmetic, but in short: multiple Container App replicas
+# (infra/main.bicep's `backendMaxReplicas`) x multiple DB-connecting
+# processes per replica (uvicorn + the embedded Celery worker, see
+# start.sh) x 15 connections each can comfortably add up to more
+# connections than a Standard_B1ms managed Postgres server actually grants
+# non-superuser roles. A single request usually still finds a free slot
+# (looks "normal"), but a burst of concurrent requests -- like rapidly
+# refreshing a page -- can exhaust what's left until some pooled
+# connections recycle. `pool_size`/`max_overflow` below cap this engine's
+# own footprint to a per-process budget sized to fit the smallest
+# supported Postgres tier even at max replica count; `pool_timeout` makes
+# "the pool itself is full" fail fast with a clear error instead of a
+# request hanging.
 # -----------------------------------------------------------------------
 engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True,
     pool_recycle=1800,
+    pool_size=settings.DB_POOL_SIZE,
+    max_overflow=settings.DB_MAX_OVERFLOW,
+    pool_timeout=settings.DB_POOL_TIMEOUT_SECONDS,
     connect_args={"connect_timeout": 10},
 )
 
