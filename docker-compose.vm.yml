@@ -240,6 +240,21 @@ services:
       # characters from `openssl rand -base64 24` (`+`/`/`/`=`) don't
       # corrupt postgresql:// URL parsing. Consumed verbatim, not rebuilt.
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
+      # Tells backend/database.py's adaptive connection-pool sizing
+      # (_compute_pool_sizing()) exactly how many DB-connecting processes
+      # can exist AT ONCE on this VM, instead of letting it derive a
+      # (wrong, for this topology) guess from BACKEND_MAX_REPLICAS: this
+      # deployment's replica-shaped derivation doesn't fit `worker`/
+      # `beat` running as their own separate, always-on processes rather
+      # than embedded, or the blue/green pair briefly running together
+      # mid-rollout. Worst case (during a rollout, before the outgoing
+      # slot is torn down): backend-blue (UVICORN_WORKERS=2) + backend-
+      # green (UVICORN_WORKERS=2) + worker (--concurrency=2, i.e. 2
+      # forked processes) + beat (1, no concurrency) = 7. Bump this (on
+      # ALL FOUR of backend-blue/backend-green/worker/beat in this file,
+      # kept in sync by hand since Compose has no shared-anchor env block
+      # here) if UVICORN_WORKERS or worker's --concurrency ever change.
+      DB_EXPECTED_PROCESSES: "7"
       REDIS_URL: redis://redis:6379/0
       EXPORT_RESULT_DIR: /app/export_results
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env}
@@ -403,6 +418,21 @@ services:
       # characters from `openssl rand -base64 24` (`+`/`/`/`=`) don't
       # corrupt postgresql:// URL parsing. Consumed verbatim, not rebuilt.
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
+      # Tells backend/database.py's adaptive connection-pool sizing
+      # (_compute_pool_sizing()) exactly how many DB-connecting processes
+      # can exist AT ONCE on this VM, instead of letting it derive a
+      # (wrong, for this topology) guess from BACKEND_MAX_REPLICAS: this
+      # deployment's replica-shaped derivation doesn't fit `worker`/
+      # `beat` running as their own separate, always-on processes rather
+      # than embedded, or the blue/green pair briefly running together
+      # mid-rollout. Worst case (during a rollout, before the outgoing
+      # slot is torn down): backend-blue (UVICORN_WORKERS=2) + backend-
+      # green (UVICORN_WORKERS=2) + worker (--concurrency=2, i.e. 2
+      # forked processes) + beat (1, no concurrency) = 7. Bump this (on
+      # ALL FOUR of backend-blue/backend-green/worker/beat in this file,
+      # kept in sync by hand since Compose has no shared-anchor env block
+      # here) if UVICORN_WORKERS or worker's --concurrency ever change.
+      DB_EXPECTED_PROCESSES: "7"
       REDIS_URL: redis://redis:6379/0
       EXPORT_RESULT_DIR: /app/export_results
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env}
@@ -556,6 +586,10 @@ services:
       # DATABASE_URL comment above for why this is no longer rebuilt from
       # raw POSTGRES_USER/POSTGRES_PASSWORD here.
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
+      # See backend-blue's matching DB_EXPECTED_PROCESSES comment above
+      # for the full "why 7" breakdown -- this worker's own
+      # --concurrency=2 (2 forked processes) is one of the four inputs.
+      DB_EXPECTED_PROCESSES: "7"
       REDIS_URL: redis://redis:6379/0
       EXPORT_RESULT_DIR: /app/export_results
       # `worker` is what actually generates CSV/PDF exports
@@ -642,6 +676,11 @@ services:
       # DATABASE_URL comment above for why this is no longer rebuilt from
       # raw POSTGRES_USER/POSTGRES_PASSWORD here.
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
+      # See backend-blue's matching DB_EXPECTED_PROCESSES comment above
+      # for the full "why 7" breakdown -- beat itself is only 1 of the 7
+      # (no concurrency), but still needs the SAME total so its own pool
+      # is sized to fit alongside the other six.
+      DB_EXPECTED_PROCESSES: "7"
       REDIS_URL: redis://redis:6379/0
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}

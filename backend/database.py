@@ -11,8 +11,10 @@ instead of an empty one.
 import datetime
 import logging
 import os
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import NullPool
 from models import Base, utc_now
 import models
 from security import hash_password, SUPER_ADMIN_ROLE
@@ -25,6 +27,168 @@ logger = logging.getLogger(__name__)
 # environment (injected by docker-compose.yml from your git-ignored
 # `.env` file) or falls back to a safe local-dev default.
 DATABASE_URL = settings.DATABASE_URL
+
+
+def _probe_postgres_connection_budget(url) -> "tuple[int, int] | None":
+    """
+    One-off, best-effort look at the TARGET Postgres server's actual
+    connection budget, so pool sizing (see `_compute_pool_sizing()` below)
+    adapts to whatever database this process is really pointed at --
+    today's `postgresSkuName` (infra/main.bicep), a manually resized
+    server, or a completely different Postgres altogether -- instead of a
+    number guessed at deploy time that quietly goes stale.
+
+    Returns `(max_connections, superuser_reserved_connections)`, both
+    standard, non-superuser-restricted Postgres GUCs any role can read.
+    Returns None (never raises) if this isn't Postgres or the probe fails
+    for any reason -- callers MUST have a safe static fallback for that
+    case, since e.g. the test suite points this at SQLite, and a brand
+    new environment's Postgres may not even be reachable yet the first
+    time this module is imported.
+
+    Uses its own short-lived, unpooled connection (`NullPool`, a tight
+    3s connect timeout) that's closed again immediately -- this never
+    holds a connection open, so it doesn't itself eat into the very
+    budget it's measuring.
+    """
+    try:
+        if not url.get_backend_name().startswith("postgresql"):
+            return None
+        probe_engine = create_engine(
+            url, poolclass=NullPool, connect_args={"connect_timeout": 3}
+        )
+        try:
+            with probe_engine.connect() as conn:
+                max_conn, reserved = conn.execute(
+                    text(
+                        "SELECT current_setting('max_connections')::int, "
+                        "current_setting('superuser_reserved_connections')::int"
+                    )
+                ).one()
+            return int(max_conn), int(reserved)
+        finally:
+            probe_engine.dispose()
+    except Exception:
+        logger.warning(
+            "database: couldn't probe the Postgres server's connection budget "
+            "(unreachable, not Postgres, or lacking permission to read "
+            "max_connections) -- falling back to a conservative static pool size.",
+            exc_info=True,
+        )
+        return None
+
+
+def _compute_pool_sizing(database_url: str) -> "tuple[int, int]":
+    """
+    Works out this process's own `pool_size`/`max_overflow` so that,
+    across every process that can simultaneously be running this same
+    code, total connections stay comfortably under the target Postgres
+    server's real budget -- automatically, with no number to hand-tune
+    (and re-tune every time infra changes) in config.py, and with no need
+    to touch the production database directly to check its settings.
+
+    settings.DB_POOL_SIZE/DB_MAX_OVERFLOW remain a manual escape hatch:
+    if BOTH are set, they win outright and none of the below runs.
+    Otherwise:
+      1. Work out how many DB-connecting PROCESSES can exist at once.
+         Prefers settings.DB_EXPECTED_PROCESSES if a deployment set it
+         explicitly (docker-compose.yml/docker-compose.vm.yml both do --
+         see that setting's own docstring for why: they run `worker`/
+         `beat` as separate always-on processes rather than embedding
+         them, and Celery's own `--concurrency`/blue-green pairing add
+         more processes than this module can see from the environment
+         alone). Otherwise derives it from settings.BACKEND_MAX_REPLICAS
+         (worst-case Container App replica count -- see
+         infra/main.bicep's `backendMaxReplicas`, wired through as the
+         env var of the same name) x how many uvicorn worker processes
+         run per replica (UVICORN_WORKERS, only honored when
+         ENVIRONMENT is production/prod -- mirrors start.sh's own logic)
+         x whether RUN_EMBEDDED_WORKER (start.sh) also runs an embedded,
+         always-`--concurrency=1` Celery worker in-process -- correct
+         for infra/main.bicep's Container Apps layout and render.yaml's
+         single-instance Free plan.
+      2. Probe the live server for its real `max_connections` /
+         `superuser_reserved_connections`.
+      3. Split (budget - safety margin) evenly across those processes,
+         then this one process's own share between `pool_size` (always-
+         open) and `max_overflow` (burst capacity).
+    If the probe fails (not Postgres, unreachable at import time, etc.),
+    falls back to a small static size that's safe against even the
+    smallest realistic Postgres server regardless of process count.
+    """
+    if settings.DB_POOL_SIZE is not None and settings.DB_MAX_OVERFLOW is not None:
+        logger.info(
+            "database: DB_POOL_SIZE/DB_MAX_OVERFLOW explicitly set (%d/%d) -- "
+            "using them as a fixed size instead of adaptive sizing.",
+            settings.DB_POOL_SIZE, settings.DB_MAX_OVERFLOW,
+        )
+        return settings.DB_POOL_SIZE, settings.DB_MAX_OVERFLOW
+
+    if settings.DB_EXPECTED_PROCESSES is not None:
+        # Explicit, deployment-supplied ground truth wins outright -- see
+        # config.py's DB_EXPECTED_PROCESSES docstring for why the
+        # replica-derived guess below doesn't fit every compose/infra
+        # shape (docker-compose.yml/docker-compose.vm.yml both set this).
+        total_processes = max(settings.DB_EXPECTED_PROCESSES, 1)
+    else:
+        # Mirrors start.sh's OWN logic for when it actually honors
+        # UVICORN_WORKERS (production/prod only -- development runs a
+        # single `--reload` process regardless of this env var), so the
+        # derived process count tracks reality instead of assuming every
+        # deployment runs exactly one uvicorn process per replica.
+        environment = os.environ.get("ENVIRONMENT", "development").strip().lower()
+        is_production = environment in ("production", "prod")
+        uvicorn_workers = int(os.environ.get("UVICORN_WORKERS", "1")) if is_production else 1
+        embedded_worker = os.environ.get("RUN_EMBEDDED_WORKER", "false").lower() == "true"
+        # start.sh's embedded worker is always launched with
+        # `--concurrency=1` (hardcoded there, not configurable) -- exactly
+        # 1 extra process, never more.
+        processes_per_replica = uvicorn_workers + (1 if embedded_worker else 0)
+        total_processes = max(settings.BACKEND_MAX_REPLICAS, 1) * processes_per_replica
+
+    budget = _probe_postgres_connection_budget(make_url(database_url))
+    if budget is None:
+        pool_size, max_overflow = 3, 2
+        logger.info(
+            "database: adaptive pool sizing unavailable -- using conservative "
+            "static defaults (pool_size=%d, max_overflow=%d) instead.",
+            pool_size, max_overflow,
+        )
+        return pool_size, max_overflow
+
+    max_connections, reserved = budget
+    available = max_connections - reserved - settings.DB_CONNECTION_SAFETY_MARGIN
+    # Never let a bad probe/topology reading drive this to zero or
+    # negative -- every process still gets at least a floor of 2
+    # connections (1 pooled + 1 overflow) so the app stays usable even on
+    # a tiny server, at the cost of the safety margin being the thing
+    # that gives if the two truly can't both fit.
+    per_process_budget = max(available // total_processes, 2)
+    # ...and cap the other direction too: a huge/misreported
+    # `max_connections` with a small `total_processes` (e.g. a beefy
+    # Postgres someone pointed a single local `docker compose` container
+    # at) shouldn't hand one process an unreasonably large pool either.
+    per_process_budget = min(per_process_budget, 20)
+    pool_size = max(per_process_budget // 2, 1)
+    max_overflow = per_process_budget - pool_size
+
+    if settings.DB_EXPECTED_PROCESSES is not None:
+        topology_desc = f"DB_EXPECTED_PROCESSES={settings.DB_EXPECTED_PROCESSES} (explicit override)"
+    else:
+        topology_desc = (
+            f"BACKEND_MAX_REPLICAS={settings.BACKEND_MAX_REPLICAS} x "
+            f"{total_processes // max(settings.BACKEND_MAX_REPLICAS, 1)} process/replica (derived)"
+        )
+    logger.info(
+        "database: adaptive pool sizing -- Postgres max_connections=%d "
+        "superuser_reserved=%d, safety_margin=%d, %d process(es) expected "
+        "(%s) -> pool_size=%d max_overflow=%d per process (%d total across "
+        "all processes).",
+        max_connections, reserved, settings.DB_CONNECTION_SAFETY_MARGIN,
+        total_processes, topology_desc,
+        pool_size, max_overflow, per_process_budget * total_processes,
+    )
+    return pool_size, max_overflow
 
 # -----------------------------------------------------------------------
 # BUG FIX ("couldn't access my db" in production, works fine locally):
@@ -75,32 +239,31 @@ DATABASE_URL = settings.DATABASE_URL
 #                           yet applied, etc.).
 #
 # BUG FIX ("Audit Logs page fails on repeated refresh, but recovers if you
-# stop hammering it for a bit" -- `psycopg2.OperationalError: ... remaining
-# connection slots are reserved for roles with the SUPERUSER attribute`):
-# this engine was ALSO being created with no `pool_size`/`max_overflow` of
-# its own, which meant it silently inherited SQLAlchemy's defaults
+# stop hammering it for a bit" -- psycopg2.OperationalError: ... remaining
+# connection slots are reserved for roles with the SUPERUSER attribute):
+# this engine was ALSO being created with no pool_size/max_overflow of its
+# own, which meant it silently inherited SQLAlchemy's defaults
 # (pool_size=5, max_overflow=10 -- up to 15 live connections per process
-# that imports this module). See config.py's DB_POOL_SIZE/DB_MAX_OVERFLOW
-# for the full arithmetic, but in short: multiple Container App replicas
-# (infra/main.bicep's `backendMaxReplicas`) x multiple DB-connecting
-# processes per replica (uvicorn + the embedded Celery worker, see
-# start.sh) x 15 connections each can comfortably add up to more
-# connections than a Standard_B1ms managed Postgres server actually grants
-# non-superuser roles. A single request usually still finds a free slot
-# (looks "normal"), but a burst of concurrent requests -- like rapidly
-# refreshing a page -- can exhaust what's left until some pooled
-# connections recycle. `pool_size`/`max_overflow` below cap this engine's
-# own footprint to a per-process budget sized to fit the smallest
-# supported Postgres tier even at max replica count; `pool_timeout` makes
-# "the pool itself is full" fail fast with a clear error instead of a
-# request hanging.
+# that imports this module), with no awareness of how many OTHER
+# processes (other Container App replicas, each with their own embedded
+# Celery worker -- see start.sh) are doing the exact same thing at once,
+# or of how many connections the target Postgres server can even grant.
+#
+# _compute_pool_sizing() above works both of those out AT STARTUP and
+# adapts automatically -- no fixed number to keep in sync by hand every
+# time backendMaxReplicas (infra/main.bicep) or the Postgres SKU changes,
+# and no need to log into production to check either one. pool_timeout
+# makes "this process's own pool is momentarily full" fail fast with a
+# clear error instead of a request hanging.
 # -----------------------------------------------------------------------
+_DB_POOL_SIZE, _DB_MAX_OVERFLOW = _compute_pool_sizing(DATABASE_URL)
+
 engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True,
     pool_recycle=1800,
-    pool_size=settings.DB_POOL_SIZE,
-    max_overflow=settings.DB_MAX_OVERFLOW,
+    pool_size=_DB_POOL_SIZE,
+    max_overflow=_DB_MAX_OVERFLOW,
     pool_timeout=settings.DB_POOL_TIMEOUT_SECONDS,
     connect_args={"connect_timeout": 10},
 )

@@ -1068,6 +1068,15 @@ resource backendApp 'Microsoft.App/containerApps@2024-03-01' = {
             // No SERVE_FRONTEND -- `frontend` serves the static build,
             // `backend` is API-only. CORS_ORIGINS kept as defense in depth.
             { name: 'CORS_ORIGINS', value: publicOrigin }
+            // Lets database.py's adaptive connection-pool sizing
+            // (_compute_pool_sizing(), see that module) know the actual
+            // worst-case replica fan-out it needs to divide the target
+            // Postgres server's connection budget across, straight from
+            // this same `backendMaxReplicas` param below -- so the two
+            // can never silently drift apart, and pool sizing keeps
+            // itself correct automatically if this param is ever
+            // changed, with no matching code/config edit required.
+            { name: 'BACKEND_MAX_REPLICAS', value: string(backendMaxReplicas) }
           ])
           volumeMounts: [
             { volumeName: 'backup-data', mountPath: '/app/backups' }

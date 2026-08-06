@@ -156,6 +156,21 @@ services:
       # "db" works because Docker Compose puts every service on the same
       # network and lets them reach each other by service name.
       DATABASE_URL: ${DATABASE_URL:-postgresql://admin:supersecret@db:5432/asset_db}
+      # Tells backend/database.py's adaptive connection-pool sizing
+      # (_compute_pool_sizing()) exactly how many DB-connecting processes
+      # can exist AT ONCE in this stack, instead of letting it derive a
+      # (wrong, for this topology) guess from BACKEND_MAX_REPLICAS: this
+      # deployment's replica-shaped derivation doesn't fit `worker`/`beat`
+      # running as their own separate, always-on processes rather than
+      # embedded. Default (unscaled) worst case: backend (1 -- ENVIRONMENT
+      # defaults to development here, and start.sh only honors
+      # UVICORN_WORKERS in production) + worker (--concurrency=2, i.e. 2
+      # forked processes) + beat (1, no concurrency) = 4. If you
+      # `docker compose up --scale backend=N`, bump this on all three of
+      # backend/worker/beat (kept in sync by hand, same as
+      # docker-compose.vm.yml) to reflect the extra replicas -- e.g.
+      # N=3 unscaled-1 extra => 4 + (N-1).
+      DB_EXPECTED_PROCESSES: "4"
       # Broker + result backend for the async export job system (see
       # backend/celery_app.py) -- "redis" is the service name below,
       # resolved by Compose's internal DNS the same way "db" is for
@@ -373,6 +388,10 @@ services:
     environment:
       ENVIRONMENT: ${ENVIRONMENT:-development}
       DATABASE_URL: ${DATABASE_URL:-postgresql://admin:supersecret@db:5432/asset_db}
+      # See `backend`'s matching DB_EXPECTED_PROCESSES comment above for
+      # the full "why 4" breakdown -- this worker's own --concurrency=2
+      # (2 forked processes) is one of the three inputs.
+      DB_EXPECTED_PROCESSES: "4"
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       EXPORT_RESULT_DIR: ${EXPORT_RESULT_DIR:-/app/export_results}
       # `worker` is what actually generates CSV/PDF exports
@@ -480,6 +499,11 @@ services:
     environment:
       ENVIRONMENT: ${ENVIRONMENT:-development}
       DATABASE_URL: ${DATABASE_URL:-postgresql://admin:supersecret@db:5432/asset_db}
+      # See `backend`'s matching DB_EXPECTED_PROCESSES comment above for
+      # the full "why 4" breakdown -- beat itself is only 1 of the 4 (no
+      # concurrency), but still needs the SAME total so its own pool is
+      # sized to fit alongside the other three.
+      DB_EXPECTED_PROCESSES: "4"
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in your .env file -- see .env.example}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}

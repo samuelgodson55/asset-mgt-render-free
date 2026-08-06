@@ -62,7 +62,22 @@
 # itself sets off the release pipeline's Trivy scan on the final image --
 # bumped anyway so an EOL toolchain isn't quietly used to build every
 # release.
-FROM node:25-alpine AS frontend-build
+# BUG FIX -- "npm run build" failing with "Cannot find native binding" /
+# "Cannot find module '@rolldown/binding-linux-x64-musl'" (frontend-app-build
+# stage below, but this stage shares the same base image for consistency).
+# Root cause is a known npm bug (npm/cli#4828): the platform-specific
+# optional-dependency packages Vite 8's bundled Rolldown ships
+# (@rolldown/binding-linux-x64-gnu vs. -musl) both declare identical
+# os:["linux"]/cpu:["x64"] constraints in package-lock.json with NO `libc`
+# field to tell them apart, so `npm ci` running inside an Alpine (musl) image
+# can't reliably resolve which one to actually install -- the musl variant
+# ends up simply missing from node_modules at build time, even though it's
+# listed in the lockfile. Building on a glibc-based image instead
+# (node:25-slim, Debian) sidesteps musl-detection entirely -- npm ci
+# installs the -gnu variant, one npm already resolves correctly every time.
+# This only affects the discarded BUILD stage; the shipped image is still
+# nginx:1.30-alpine (see Stage 3 below), so final image size is unaffected.
+FROM node:25-slim AS frontend-build
 
 ARG BUILD_ENV=development
 ENV BUILD_ENV=${BUILD_ENV}
@@ -88,7 +103,42 @@ RUN node build-frontend/build.js /build/frontend-src /build/frontend-out
 
 
 # =============================================================================
-# Stage 2/2: nginx
+# Stage 2/3: frontend-app-build
+# -----------------------------------------------------------------------------
+# Builds the new React/Vite "Ledger" SPA (frontend-app/) into static
+# assets. Deliberately its own stage rather than folded into the
+# frontend-build stage above: it has its own toolchain (Vite/tsc, not
+# build-frontend/build.js's minify-only pipeline) and its own npm lockfile,
+# so mixing them would bust frontend-build's Docker layer cache every time
+# either app's dependencies change. Not affected by BUILD_ENV -- Vite's own
+# `npm run build` always does a real production build (minified, bundled,
+# content-hashed filenames), which is the point of using it over the
+# legacy site's separate minify/obfuscate knobs.
+#
+# Same Node version as the frontend-build stage above, for the same
+# EOL-avoidance reason (see that stage's own comment).
+# See frontend-build's own comment above (same base image swap, same
+# reason) -- this is the stage that actually runs Vite/Rolldown and hit the
+# musl native-binding error.
+FROM node:25-slim AS frontend-app-build
+
+WORKDIR /build
+
+# Same "install deps in their own cached layer first" shape as
+# frontend-build above.
+COPY frontend-app/package.json frontend-app/package-lock.json* /build/
+RUN npm ci --no-audit --no-fund && npm cache clean --force
+
+COPY frontend-app/ /build/
+
+# `.env.production` (VITE_API_BASE_URL=/api, checked into frontend-app/)
+# is picked up by Vite automatically for `npm run build` -- no --build-arg
+# needed, unlike frontend-build's BUILD_ENV above.
+RUN npm run build
+
+
+# =============================================================================
+# Stage 3/3: nginx
 # -----------------------------------------------------------------------------
 # Unchanged from before this build step was introduced, except the frontend
 # COPY now pulls from the frontend-build stage's *output* directory instead
@@ -161,6 +211,13 @@ COPY scripts/deploy-status-aca/index.html /usr/share/nginx/deploy-status/index.h
 # been minified and/or obfuscated depending on BUILD_ENV -- see that
 # stage's own comment above.
 COPY --from=frontend-build /build/frontend-out/ /usr/share/nginx/html/
+
+# The new React SPA, served alongside the legacy site above at /app/ (see
+# nginx/default.conf.template's `location ^~ /app/` block) rather than
+# replacing it -- frontend-app/vite.config.ts's `base: '/app/'` already
+# bakes that path into every asset URL in dist/index.html, so this can be
+# copied straight in as-is.
+COPY --from=frontend-app-build /build/dist/ /usr/share/nginx/html/app/
 
 # ---------------------------------------------------------------------------
 # Default values baked into the image, so it runs correctly out of the box

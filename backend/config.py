@@ -140,47 +140,79 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql://admin:supersecret@db:5432/asset_db"
 
     # BUG FIX ("Audit Logs page fails on repeated refresh, but recovers if
-    # you stop hammering it for a bit"): database.py's engine was created
-    # with SQLAlchemy's un-bounded defaults -- `pool_size=5` PLUS
-    # `max_overflow=10`, i.e. up to 15 live connections per process that
-    # imports database.py. That's fine against local Docker Compose
-    # Postgres, but it doesn't account for how many SEPARATE processes can
-    # all import database.py at once in production:
-    #   - infra/main.bicep's backend Container App can scale out to
-    #     `backendMaxReplicas` (currently 3) replicas.
-    #   - `start.sh` also launches an embedded Celery worker
-    #     (RUN_EMBEDDED_WORKER=true, see that file) as a second, separate
-    #     OS process INSIDE every one of those replicas -- and that
-    #     process imports database.py too, building its own independent
-    #     15-connection pool.
-    #   That's up to 3 replicas x 2 processes x 15 = 90 possible
-    #   connections, all fighting over whatever the managed Postgres
-    #   allows -- and infra/main.bicep's `postgresSkuName` default,
-    #   Standard_B1ms (the smallest Burstable tier, 2GiB RAM), only grants
-    #   ~50 total connections, a handful of which Postgres itself reserves
-    #   for SUPERUSER-only use (hence the
-    #   `psycopg2.OperationalError: ... remaining connection slots are
-    #   reserved for roles with the SUPERUSER attribute` this throws once
-    #   the non-reserved slots run out). A single request usually finds a
-    #   free slot (hence "refreshing once looks fine"), but a burst of
-    #   concurrent requests/tasks across replicas exhausts them, and it
-    #   only "normalizes" again once enough pooled connections have sat
-    #   idle for `DB_POOL_RECYCLE_SECONDS` (database.py) and gotten
-    #   recycled.
+    # you stop hammering it for a bit" -- `psycopg2.OperationalError: ...
+    # remaining connection slots are reserved for roles with the SUPERUSER
+    # attribute"): database.py's engine used to be created with
+    # SQLAlchemy's un-bounded defaults (`pool_size=5` + `max_overflow=10`
+    # -- up to 15 live connections per process that imports it), with no
+    # awareness of how many OTHER processes are doing the exact same thing
+    # at once: `backendMaxReplicas` Container App replicas (infra/main.bicep)
+    # each also running a second, separate embedded-Celery-worker process
+    # (RUN_EMBEDDED_WORKER, see start.sh) that imports database.py too.
+    # That fan-out can add up to more connections than a small managed
+    # Postgres tier actually grants non-superuser roles -- a single
+    # request usually still finds a free slot, but a burst of concurrent
+    # requests exhausts what's left.
     #
-    # Fix: cap how many connections EACH process is allowed to open, sized
-    # so that (replicas x processes-per-replica x per-engine cap) stays
-    # comfortably under the smallest supported Postgres tier's real
-    # budget, with configurable env vars so a deployment on a bigger
-    # `postgresSkuName` (see infra/main.bicep) can raise them instead of
-    # silently inheriting SQLAlchemy's much larger defaults again.
-    # Budget check at the defaults below: 3 replicas x 2 processes x
-    # (DB_POOL_SIZE + DB_MAX_OVERFLOW = 3 + 3 = 6) = 36, comfortably under
-    # a Standard_B1ms server's ~50 total / ~47 non-superuser connections,
-    # with headroom for `alembic upgrade head`, one-off `scripts/`
-    # invocations, and manual `psql` sessions.
-    DB_POOL_SIZE: int = 3
-    DB_MAX_OVERFLOW: int = 3
+    # Rather than hand-picking a pool size for "today's" replica count and
+    # Postgres tier (a number that goes stale -- and needs a human to
+    # notice and fix -- the moment either changes), database.py now works
+    # this out ITSELF at startup: it asks the target Postgres server what
+    # its real `max_connections`/`superuser_reserved_connections` budget
+    # is, divides that by how many DB-connecting processes can exist at
+    # once (`BACKEND_MAX_REPLICAS` below x 1 or 2 processes/replica
+    # depending on RUN_EMBEDDED_WORKER), and sizes `pool_size`/
+    # `max_overflow` to fit -- see database.py's `_compute_pool_sizing()`.
+    # That self-adjusts automatically if the Postgres SKU is resized or
+    # `backendMaxReplicas` changes, with zero code/config edits and
+    # without ever needing anyone to log into prod and tune a number by
+    # hand. DB_POOL_SIZE/DB_MAX_OVERFLOW below are an ESCAPE HATCH only --
+    # leave them unset (the default) to get the automatic behavior; set
+    # both to force a fixed, non-adaptive size instead (e.g. for a
+    # database that can't be probed, or a deliberately different budget).
+    DB_POOL_SIZE: int | None = None
+    DB_MAX_OVERFLOW: int | None = None
+    # How many connections' worth of headroom to leave un-allocated to any
+    # process's pool, on top of Postgres's own superuser-reserved slots --
+    # covers one-off, non-pooled connections the adaptive sizing above
+    # can't see coming: `alembic upgrade head` during a deploy, someone
+    # running a `scripts/` one-off, or a manual `psql` session.
+    DB_CONNECTION_SAFETY_MARGIN: int = 5
+    # Worst-case number of `backend` Container App replicas that can be
+    # running (and therefore importing database.py) AT ONCE -- mirrors
+    # infra/main.bicep's `backendMaxReplicas` param, which also passes
+    # this same value through as this env var so the two never drift
+    # apart. Defaults to 1, correct for local `docker compose up` (a
+    # single backend container, no autoscaling) and for any other
+    # single-process deployment that never sets this env var.
+    BACKEND_MAX_REPLICAS: int = 1
+    # DIRECT override for "how many separate OS processes, across the
+    # WHOLE deployment, can be importing database.py (and therefore
+    # holding their own pool open) at the same moment" -- for deployment
+    # shapes `BACKEND_MAX_REPLICAS x (1 or 2 depending on
+    # RUN_EMBEDDED_WORKER)` doesn't fit.
+    #
+    # That derivation assumes every DB-connecting process is an
+    # interchangeable `backend` replica (each optionally running several
+    # uvicorn workers, optionally paired with its own embedded, single-
+    # concurrency Celery worker) -- true for infra/main.bicep's Container
+    # Apps layout and render.yaml's single-instance Free plan, but NOT
+    # true for docker-compose.yml (local dev) or docker-compose.vm.yml
+    # (the VM target): both run `worker` (celery --concurrency=2 -- 2
+    # forked processes, not 1) and `beat` as their OWN separate, always-
+    # on containers rather than embedding them, and docker-compose.vm.yml
+    # ALSO briefly runs BOTH its blue and green `backend` pair (each 2
+    # uvicorn workers, UVICORN_WORKERS=2) at once during a rollout, on
+    # top of that. Left at the replica-derived guess, each of those extra
+    # processes would size its own pool as if it were the only consumer,
+    # silently under-accounting for the others -- the same class of bug
+    # this whole adaptive-sizing mechanism exists to prevent.
+    #
+    # Each of those compose files sets this explicitly to its own real,
+    # worst-case concurrent-process count instead of relying on the
+    # derivation; leave unset (None, the default) to keep using the
+    # BACKEND_MAX_REPLICAS-based derivation.
+    DB_EXPECTED_PROCESSES: int | None = None
     # Fail fast with a clear "pool exhausted" error instead of a request
     # hanging indefinitely when every pooled/overflow connection above is
     # already checked out.

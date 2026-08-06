@@ -1,0 +1,23 @@
+const config = {
+  available: { label: "In stock", dot: "bg-moss", text: "text-moss-soft" },
+  low: { label: "Low", dot: "bg-brass", text: "text-brass-soft" },
+  out: { label: "Out", dot: "bg-rust", text: "text-rust-soft" },
+  active: { label: "Active", dot: "bg-sky", text: "text-sky" },
+  overdue: { label: "Overdue", dot: "bg-rust", text: "text-rust-soft" },
+  returned: { label: "Returned", dot: "bg-moss", text: "text-moss-soft" },
+  pending: { label: "Pending", dot: "bg-brass", text: "text-brass-soft" },
+} as const;
+
+export function StatusPill({ status }: { status: keyof typeof config }) {
+  const c = config[status];
+  return (
+    <span className={`inline-flex items-center gap-1.5 text-[11px] font-medium ${c.text} whitespace-nowrap`}>
+      <span className={`relative flex h-1.5 w-1.5 rounded-full ${c.dot}`}>
+        {(status === "overdue" || status === "out") && (
+          <span className={`absolute inline-flex h-full w-full rounded-full ${c.dot} opacity-75 animate-ping`} />
+        )}
+      </span>
+      {c.label}
+    </span>
+  );
+}

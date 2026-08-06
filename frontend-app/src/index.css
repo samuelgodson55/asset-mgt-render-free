@@ -1,0 +1,158 @@
+@import "tailwindcss";
+
+@theme {
+  --font-display: "Space Grotesk", "IBM Plex Sans", sans-serif;
+  --font-sans: "IBM Plex Sans", sans-serif;
+  --font-mono: "IBM Plex Mono", monospace;
+
+  --color-ink: #0F1219;
+  --color-ink-soft: #151923;
+  --color-surface: #1A1E28;
+  --color-surface-raised: #202533;
+  --color-border: #2A2F3E;
+  --color-border-soft: #232838;
+  --color-text: #EDEFF4;
+  --color-text-muted: #8B93A7;
+  --color-text-faint: #5B6274;
+  --color-brass: #C89B3C;
+  --color-brass-soft: #E8C878;
+  --color-moss: #5C9B7C;
+  --color-moss-soft: #7FBD9C;
+  --color-rust: #C86A4A;
+  --color-rust-soft: #E08D6A;
+  --color-sky: #6B93C8;
+}
+
+html {
+  color-scheme: dark;
+}
+
+/* -----------------------------------------------------------------------
+   LIGHT THEME -- "Studio"
+   -----------------------------------------------------------------------
+   `.light` on <html> (toggled + persisted by src/lib/theme.tsx, applied
+   synchronously pre-paint by the inline script in index.html to avoid a
+   flash of the wrong theme) overlays this palette over the same semantic
+   tokens every component already uses -- ink/surface/text/brass etc. --
+   so nothing downstream needs a dark: variant of anything.
+
+   Deliberately NOT a washed-out parchment/beige: base neutrals are cool
+   graphite-on-white (a true studio white, not cream) so the accent hues
+   below carry all the color, and every accent is pushed a click deeper
+   than a naive "just darken it for contrast" pass would give you --
+   the goal is a light mode that reads as an intentional, punchy palette
+   in its own right, not an apologetic inversion of the dark one.
+   ------------------------------------------------------------------- */
+html.light {
+  color-scheme: light;
+  --color-ink: #F3F4F8;
+  --color-ink-soft: #EBEDF4;
+  --color-surface: #FFFFFF;
+  --color-surface-raised: #F7F8FC;
+  --color-border: #D6D9E6;
+  --color-border-soft: #E2E4F0;
+  --color-text: #14151F;
+  --color-text-muted: #545A70;
+  --color-text-faint: #8A8FA6;
+  --color-brass: #966016;
+  --color-brass-soft: #B87D1F;
+  --color-moss: #167A4C;
+  --color-moss-soft: #106239;
+  --color-rust: #C43D1B;
+  --color-rust-soft: #9C2F13;
+  --color-sky: #2456A8;
+}
+
+/* Every color-ish property gets a short shared transition while this
+   class is present (added for ~200ms by theme.tsx around the class
+   swap), so flipping the toggle reads as an intentional cross-fade
+   rather than an abrupt flash. `color` itself is excluded -- swinging
+   the highest-contrast text token from near-white to near-black would
+   pass through a washed-out gray mid-transition. */
+html.theme-transitioning,
+html.theme-transitioning * {
+  transition: background-color .18s ease, border-color .18s ease, box-shadow .18s ease, fill .18s ease, stroke .18s ease !important;
+}
+
+body {
+  background-color: var(--color-ink);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  transition: background-color .18s ease;
+}
+
+::selection {
+  background-color: var(--color-brass);
+  color: var(--color-ink);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border) transparent;
+}
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background-color: var(--color-border); border-radius: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+@keyframes hairline-sweep {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.tag-notch {
+  clip-path: polygon(0 0, calc(100% - 22px) 0, 100% 50%, calc(100% - 22px) 100%, 0 100%);
+}
+
+.perforation {
+  background-image: radial-gradient(circle, var(--color-ink) 1.5px, transparent 1.6px);
+  background-size: 10px 100%;
+  background-repeat: repeat-x;
+  background-position: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-brass);
+  outline-offset: 2px;
+}
+
+/* -----------------------------------------------------------------------
+   THEME TOGGLE
+   -----------------------------------------------------------------------
+   One physical button; the sun/moon icon swap is driven by CSS off the
+   same `.light` class rather than conditional JSX, so the crossfade is
+   cheap and never pops.
+   ------------------------------------------------------------------- */
+.theme-toggle { position: relative; overflow: hidden; }
+.theme-toggle .icon-sun,
+.theme-toggle .icon-moon {
+  position: absolute; inset: 0; margin: auto;
+  display: flex; align-items: center; justify-content: center;
+  transition: opacity .2s ease, transform .3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.theme-toggle .icon-sun { opacity: 0; transform: rotate(-90deg) scale(.4); }
+.theme-toggle .icon-moon { opacity: 1; transform: rotate(0) scale(1); }
+html.light .theme-toggle .icon-sun { opacity: 1; transform: rotate(0) scale(1); }
+html.light .theme-toggle .icon-moon { opacity: 0; transform: rotate(90deg) scale(.4); }
+
+@keyframes ambient-drift {
+  0%, 100% { transform: translate(0, 0); }
+  50% { transform: translate(-2%, 1.5%); }
+}
+
+.ambient-glow {
+  animation: ambient-drift 18s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ambient-glow { animation: none; }
+}

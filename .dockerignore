@@ -15,6 +15,12 @@
 .env.*
 !.env.example
 !.env.azure.example
+# frontend-app/.env.production holds no secret -- just the same
+# same-origin "/api" default already baked into src/lib/api.ts's own
+# fallback -- checked in so a plain local `npm run build` (outside
+# Docker) matches what frontend/Dockerfile's frontend-app-build stage
+# produces.
+!frontend-app/.env.production
 
 # --- Git / editors / OS -------------------------------------------------------
 .git/
