@@ -93,6 +93,13 @@ ALLOWED_ONLY_IN_COMPOSE = {
         # ALLOWED_ONLY_IN_DEV entry for this same key; docker-compose.vm.yml
         # never emits it either, and neither does any bicep/terraform path.
         "BACKUP_HOUR_UTC",
+        # database.py's adaptive DB-pool sizing explicit-override knob --
+        # both compose files set this because they run worker/beat as
+        # separate always-on processes (docker-compose.vm.yml also briefly
+        # doubles up backend during blue-green), which the ACA path's
+        # BACKEND_MAX_REPLICAS-based derivation doesn't need to account for
+        # (see config.py's DB_EXPECTED_PROCESSES docstring).
+        "DB_EXPECTED_PROCESSES",
         # How many uvicorn worker processes backend/start.sh launches --
         # ACA has no equivalent bicep param for this (Container Apps'
         # own `scale`/replica model is the horizontal-scaling knob there
@@ -147,6 +154,12 @@ ALLOWED_ONLY_IN_BICEP = {
         # two keys' own comment in docker-compose.yml) and remove this
         # entry instead of leaving it allow-listed.
         "CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER",
+        # database.py's adaptive DB-pool sizing replica-derived input --
+        # only meaningful where DB_EXPECTED_PROCESSES (compose-only, see
+        # that key's own entry in ALLOWED_ONLY_IN_COMPOSE above) is left
+        # unset, which is exactly the ACA/bicep case (config.py's
+        # BACKEND_MAX_REPLICAS docstring).
+        "BACKEND_MAX_REPLICAS",
     },
     "frontend": {
         # Live blue-green rollout status dashboard, proxied by nginx
