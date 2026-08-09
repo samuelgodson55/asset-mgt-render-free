@@ -1,4 +1,4 @@
-import type { AssetType, Checkout, ExtensionRequest, NotificationItem, DashboardStats, BackupEntry, BackupStatus } from "./types";
+import type { AssetType, Checkout, ExtensionRequest, NotificationItem, DashboardStats, BackupEntry, BackupStatus, CatalogAsset, QuotationCartOrDetail } from "./types";
 
 const categories = ["Field Radios", "Optics", "Power", "Networking", "Fabrication", "Safety"];
 
@@ -94,6 +94,26 @@ export const mockBackupStatus: BackupStatus = {
 };
 
 export const mockDigestRecipients: string[] = ["ops@ledger.example.com"];
+
+// Demo data for the self-service Quotation Catalog/cart (see
+// pages/Quotations.tsx) -- reuses mockAssets' own names/prices/stock so
+// "Demo browsing" shows the same inventory everywhere in the app.
+export const mockCatalog: CatalogAsset[] = mockAssets.map((a) => ({
+  id: a.id,
+  name: a.name,
+  category: a.category,
+  price: a.price,
+  available_quantity: a.available_quantity,
+  status: a.available_quantity > 0 ? "In Stock" : "Out of Stock",
+}));
+
+export const mockQuotationCart: QuotationCartOrDetail = {
+  items: [],
+  subtotal: 0,
+  vat_percent: 7.5,
+  vat_amount: 0,
+  total: 0,
+};
 
 export const mockStats: DashboardStats = {
   total_assets: mockAssets.reduce((s, a) => s + a.total_quantity, 0),

@@ -1,6 +1,16 @@
 # =============================================================================
 # nginx/default.conf.template
 # -----------------------------------------------------------------------------
+# THIS TEMPLATE SHIPS ONLY IN THE `frontend-legacy-only` IMAGE (see
+# frontend/Dockerfile's stage of that name) -- it serves the legacy
+# multi-page static site at "/". The React "Ledger" SPA has its own,
+# separate image and config template: nginx/default.react.conf.template,
+# shipped by the `frontend-react-only` target. The two are mutually
+# exclusive -- a single running container is always exactly one of them,
+# never both side-by-side (there used to be a combined `frontend-final`
+# target with the React app at /app/ alongside this site at /; that's been
+# removed -- see frontend/Dockerfile's own top-of-file comment).
+#
 # This is a TEMPLATE, not a finished nginx config. The official nginx image's
 # entrypoint script (docker-entrypoint.sh -> 20-envsubst-on-templates.sh) runs
 # automatically every time this container starts. It scans /etc/nginx/templates
@@ -284,30 +294,6 @@ server {
         # nginx doesn't reject a moderately large one before it ever reaches
         # FastAPI. Raise this further if you expect bigger CSVs.
         client_max_body_size 10m;
-    }
-
-    # ---- new React SPA ("Ledger", frontend-app/) ---------------------------
-    # Built by frontend/Dockerfile's frontend-app-build stage into
-    # /usr/share/nginx/html/app/ (Vite's `base: '/app/'` already bakes this
-    # prefix into every asset URL in its index.html, so no rewriting is
-    # needed here). Served alongside the legacy static site above instead
-    # of replacing it -- that one's still at "/".
-    #
-    # `^~` is required, not just tidy: without it, nginx prefers ANY
-    # matching regex location over a plain prefix location like this one
-    # regardless of declaration order (see the comment on the `.html`
-    # regex location further down) -- so a sub-path here that happened to
-    # end in ".html" would otherwise be hijacked by that redirect rule
-    # instead of falling through to this SPA. `^~` tells nginx "if this
-    # prefix matches, stop -- skip regex evaluation entirely".
-    #
-    # try_files: real built files (JS/CSS/fonts under /app/assets/...)
-    # resolve straight off disk; anything else (a client-side route like
-    # /app/checkouts that react-router, not a real file, is responsible
-    # for) falls back to /app/index.html so the SPA's own router can take
-    # over instead of 404ing.
-    location ^~ /app/ {
-        try_files $uri $uri/ /app/index.html;
     }
 
     # Convenience passthroughs so you can browse FastAPI's interactive docs

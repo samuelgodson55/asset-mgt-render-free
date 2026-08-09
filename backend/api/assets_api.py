@@ -41,7 +41,7 @@ def list_assets(
     db: Session = Depends(get_db),
     user: dict = Depends(get_current_user),
 ):
-    return asset_service.list_assets(db, limit, offset, search)
+    return asset_service.list_assets(db, user, limit, offset, search)
 
 
 @router.get("/deleted")
@@ -62,6 +62,16 @@ def get_asset_categories(db: Session = Depends(get_db), user: dict = Depends(get
     return asset_service.list_asset_categories(db)
 
 
+@router.get("/activity")
+def get_asset_activity(
+    days: int = Query(14, ge=1, le=90, description="How many trailing days of checkout/return activity to return."),
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    """Daily checkout/return counts feeding the Dashboard's Checkout Activity chart."""
+    return asset_service.get_activity(db, days)
+
+
 @router.get("/export")
 def export_assets_inventory(
     format: str = Query("csv", description="Export format: 'csv' or 'pdf'."),
@@ -77,7 +87,7 @@ def export_assets_inventory(
 
 @router.get("/{asset_id}/details")
 def get_asset_details(asset_id: int, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
-    return asset_service.get_asset_details(db, asset_id)
+    return asset_service.get_asset_details(db, asset_id, user)
 
 
 @router.put("/{asset_id}/quantity")

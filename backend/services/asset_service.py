@@ -16,11 +16,67 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 
 import models
+from config import settings
 from services.search_utils import apply_search_filter
 from models import utc_now
 from schemas.assets_schema import AssetTypeCreate, ExceptionCreate, AdvancedCheckoutRequest, QuantityUpdateRequest, NameUpdateRequest, CategoryUpdateRequest, PriceUpdateRequest
 from services.stock import recalculate_asset_stock
 import services.export_service as export_service
+
+# --- Stock/custody visibility gates -----------------------------------
+# Mirrors services/quotation_service.py's list_catalog() / lib/roles.ts's
+# canSeeStock()/isPrivileged(): a Manager/Admin/Super Admin always sees
+# live stock counts (available/total quantity, in-stock/low/out status);
+# a Staff/Customer sees them only when
+# settings.CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER is on. This used to be a
+# frontend-only distinction -- GET /assets, GET /assets/{id}/details, and
+# the CSV/PDF export all returned full stock data to any authenticated
+# role regardless of this flag, so a Staff/Customer calling the API
+# directly (curl, Postman, a modified frontend) could always see it no
+# matter what the setting said or what the UI chose to render. These
+# helpers, and the call sites below that use them, are what actually
+# enforce the setting server-side.
+_STOCK_VISIBLE_ROLES = ("super_admin", "admin", "manager")
+
+
+def _can_see_stock(user: dict) -> bool:
+    return user["role"] in _STOCK_VISIBLE_ROLES or settings.CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER
+
+
+# Custody data -- who currently holds each unit, org-wide (assignee_name/
+# assignee_type/quantity across every active checkout against a pool) --
+# is a DIFFERENT category of information than stock counts, and is never
+# gated by CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER: it's who-has-what, not
+# how-much-is-available. Mirrors deps.py's require_privileged_role /
+# lib/roles.ts's isPrivileged() (used as AssetDrawer's `canDispatch`
+# gate) -- Super Admin, Admin, or Manager only, regardless of the stock
+# flag's value.
+_CUSTODY_VISIBLE_ROLES = ("super_admin", "admin", "manager")
+
+
+def _can_see_custody(user: dict) -> bool:
+    return user["role"] in _CUSTODY_VISIBLE_ROLES
+
+
+def _serialize_asset_type(asset: "models.AssetType", show_stock: bool) -> dict:
+    """
+    Shapes an AssetType row for the Asset Inventory list, gating the
+    stock-derived fields the same way services/quotation_service.py's
+    list_catalog() already gates them for the Quotation Catalog. Name/
+    category/price are descriptive, not stock, so they're always
+    included -- unchanged from before this fix.
+    """
+    entry = {
+        "id": asset.id,
+        "name": asset.name,
+        "category": asset.category,
+        "price": float(asset.price) if asset.price is not None else None,
+        "custom_fields": asset.custom_fields,
+    }
+    if show_stock:
+        entry["total_quantity"] = asset.total_quantity
+        entry["available_quantity"] = asset.available_quantity
+    return entry
 
 # Same reasoning as user_service.DEFAULT_LIMIT/MAX_LIMIT -- bounds how many
 # asset pools a single request can return (Data Quality & Usability
@@ -90,11 +146,11 @@ def create_asset_type(db: Session, asset: AssetTypeCreate, user: dict) -> dict:
     return {"message": "Asset type created successfully", "id": new_asset_type.id}
 
 
-def list_assets(db: Session, limit: int = DEFAULT_LIMIT, offset: int = 0, search: Optional[str] = None) -> dict:
+def list_assets(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offset: int = 0, search: Optional[str] = None) -> dict:
     """
-    Any authenticated user (admin, manager, or staff) can view the pool
-    list. Soft-deleted pools are excluded -- they're gone from active
-    inventory even though the row is kept for historical checkouts.
+    Any authenticated user (admin, manager, staff, or customer) can view
+    the pool list. Soft-deleted pools are excluded -- they're gone from
+    active inventory even though the row is kept for historical checkouts.
 
     PAGINATION + SEARCH (Data Quality & Usability requirement #4, extended
     to true server-side search): `limit`/`offset` cap how many pools a
@@ -106,6 +162,13 @@ def list_assets(db: Session, limit: int = DEFAULT_LIMIT, offset: int = 0, search
     js/components/assets.js). Applied and counted BEFORE the offset/limit
     slice, so `total`/pagination always reflect the filtered set, not the
     whole table.
+
+    STOCK VISIBILITY (see _can_see_stock above): total_quantity/
+    available_quantity are only included in each item when the caller is
+    a Manager/Admin/Super Admin, or CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER
+    is on -- the same rule the Quotation Catalog already enforces (see
+    services/quotation_service.py's list_catalog()), now enforced here
+    too instead of only being hidden by the frontend.
     """
     limit = max(1, min(limit, MAX_LIMIT))
     offset = max(0, offset)
@@ -114,16 +177,76 @@ def list_assets(db: Session, limit: int = DEFAULT_LIMIT, offset: int = 0, search
     query = apply_search_filter(query, search, [models.AssetType.name])
     query = query.order_by(models.AssetType.id)
     total = query.count()
-    items = query.offset(offset).limit(limit).all()
-    return {"items": items, "total": total, "limit": limit, "offset": offset}
+    rows = query.offset(offset).limit(limit).all()
+
+    show_stock = _can_see_stock(user)
+    items = [_serialize_asset_type(row, show_stock) for row in rows]
+    return {"items": items, "total": total, "limit": limit, "offset": offset, "show_stock": show_stock}
 
 
-def get_asset_details(db: Session, asset_id: int) -> dict:
+def get_activity(db: Session, days: int = 14) -> list[dict]:
+    """
+    Daily checkout/return counts for the last `days` days -- feeds the
+    Dashboard's "Checkout activity" chart (frontend-app/src/pages/
+    Dashboard.tsx). This has no legacy equivalent (the vanilla-JS frontend
+    never had a real endpoint behind that chart either -- see
+    frontend-app/src/lib/api.ts's loadStats(), which previously always
+    returned `activity: []`); it's a genuinely new endpoint, not a port.
+
+    "Checkouts" counts every AssetCheckout row whose checkout_date falls on
+    a given day, regardless of current status. "Returns" counts every row
+    whose returned_at falls on a given day -- returned_at is only stamped
+    once a checkout is FULLY settled (see services/checkout_service.py's
+    return_checkout()), so a day's "returns" reflects checkouts that
+    finished closing out that day, not every partial-return event against
+    them; there's no per-partial-return timestamp to aggregate on.
+
+    Aggregated in Python (not a SQL date_trunc/group-by) to sidestep
+    timezone-bucketing edge cases across the checkout_date/returned_at
+    columns -- the row counts here are small enough (bounded by `days`,
+    capped below) that this comfortably avoids a second, more fragile
+    piece of SQL to maintain.
+    """
+    days = max(1, min(days, 90))
+    since = utc_now() - datetime.timedelta(days=days - 1)
+    since_day = since.date()
+
+    checkout_days = db.query(models.AssetCheckout.checkout_date).filter(
+        models.AssetCheckout.checkout_date >= since
+    ).all()
+    return_days = db.query(models.AssetCheckout.returned_at).filter(
+        models.AssetCheckout.returned_at.isnot(None), models.AssetCheckout.returned_at >= since
+    ).all()
+
+    checkouts_by_day: dict[str, int] = {}
+    for (dt,) in checkout_days:
+        key = dt.date().isoformat()
+        checkouts_by_day[key] = checkouts_by_day.get(key, 0) + 1
+
+    returns_by_day: dict[str, int] = {}
+    for (dt,) in return_days:
+        key = dt.date().isoformat()
+        returns_by_day[key] = returns_by_day.get(key, 0) + 1
+
+    return [
+        {
+            "date": (since_day + datetime.timedelta(days=i)).isoformat(),
+            "checkouts": checkouts_by_day.get((since_day + datetime.timedelta(days=i)).isoformat(), 0),
+            "returns": returns_by_day.get((since_day + datetime.timedelta(days=i)).isoformat(), 0),
+        }
+        for i in range(days)
+    ]
+
+
+def get_asset_details(db: Session, asset_id: int, user: dict) -> dict:
     asset = db.query(models.AssetType).filter(
         models.AssetType.id == asset_id, ~models.AssetType.is_deleted
     ).first()
     if not asset:
         raise HTTPException(status_code=404, detail="Asset category not found")
+
+    show_stock = _can_see_stock(user)
+    show_custody = _can_see_custody(user)
 
     # Only currently-isolated (not-yet-recalled) exceptions count toward the
     # "Isolated" bucket of the Available formula and show up here with a
@@ -163,26 +286,46 @@ def get_asset_details(db: Session, asset_id: int) -> dict:
         })
 
     # Recompute + persist Available = Total - Outbound - Isolated so the
-    # numbers shown here are always live, never stale.
+    # numbers shown here are always live, never stale. This still runs
+    # (and is still persisted) regardless of `show_stock` -- the recompute
+    # keeps the STORED numbers correct for every caller; `show_stock` only
+    # controls what's put in THIS response.
     stock = recalculate_asset_stock(db, asset)
     db.commit()
 
-    return {
+    details = {
         "asset_id": asset.id, "name": asset.name, "category": asset.category,
         # `float(...)` -- asset.price comes back from the DB as a
         # `decimal.Decimal` (Numeric column); cast it to a plain float here
         # so it serializes as an ordinary JSON number, same treatment as
         # every other numeric field in this response.
         "price": float(asset.price) if asset.price is not None else None,
-        "total_quantity": stock["total"],
-        "available_quantity": stock["available"], "outbound_quantity": stock["outbound"],
-        "isolated_quantity": stock["isolated"],
         "under_repair_count": len(repairs),
         "under_repair_items": [{"exception_id": r.id, "serial": r.serial_number, "notes": r.notes} for r in repairs],
         "stolen_count": len(stolen),
         "stolen_items": [{"exception_id": s.id, "serial": s.serial_number, "notes": s.notes} for s in stolen],
-        "active_assignments": checkout_list,
     }
+
+    # STOCK VISIBILITY (see _can_see_stock above): a Staff/Customer only
+    # gets these when CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER is on -- same
+    # rule as list_assets() above and the Quotation Catalog. Previously
+    # this endpoint always included them for any authenticated role,
+    # regardless of the flag or the frontend's own AssetDrawer gating.
+    if show_stock:
+        details["total_quantity"] = stock["total"]
+        details["available_quantity"] = stock["available"]
+        details["outbound_quantity"] = stock["outbound"]
+        details["isolated_quantity"] = stock["isolated"]
+
+    # CUSTODY VISIBILITY (see _can_see_custody above): who currently holds
+    # each unit, org-wide, is only included for a Manager/Admin/Super
+    # Admin -- independent of the stock flag, since this is custody data
+    # (AssetDrawer's `canDispatch` gate), not a stock count. Previously
+    # this endpoint always included it for any authenticated role.
+    if show_custody:
+        details["active_assignments"] = checkout_list
+
+    return details
 
 
 def update_asset_quantity(db: Session, asset_id: int, payload: QuantityUpdateRequest, user: dict) -> dict:
@@ -1000,6 +1143,14 @@ def export_assets_inventory(db: Session, user: dict, category: Optional[str], fm
     narrowed to a single category. `category=None` (or blank/"all")
     means "Download All" -- every active pool regardless of category.
     Soft-deleted pools are excluded, same as the live Asset Inventory table.
+
+    STOCK VISIBILITY (see _can_see_stock above): the Available/Total/
+    Status columns are only included when the caller is a Manager/Admin/
+    Super Admin, or CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER is on -- same
+    rule as list_assets()/get_asset_details() above. Previously this
+    export always included them for any authenticated role, so a Staff/
+    Customer without on-screen stock visibility could still download it
+    via CSV/PDF.
     """
     query = db.query(models.AssetType).filter(~models.AssetType.is_deleted)
 
@@ -1014,11 +1165,15 @@ def export_assets_inventory(db: Session, user: dict, category: Optional[str], fm
 
     pools = query.order_by(models.AssetType.id).all()
 
-    rows = [
-        [p.id, p.name, p.category or "—", export_service.format_money(p.price) if p.price is not None else "—",
-         p.available_quantity, p.total_quantity, _inventory_status_label(p.available_quantity)]
-        for p in pools
-    ]
+    show_stock = _can_see_stock(user)
+    headers = _INVENTORY_EXPORT_HEADERS if show_stock else _INVENTORY_EXPORT_HEADERS[:4]
+
+    rows = []
+    for p in pools:
+        row = [p.id, p.name, p.category or "—", export_service.format_money(p.price) if p.price is not None else "—"]
+        if show_stock:
+            row += [p.available_quantity, p.total_quantity, _inventory_status_label(p.available_quantity)]
+        rows.append(row)
 
     today = utc_now().strftime("%Y-%m-%d")
     scope_label = cat_filter if (cat_filter and cat_filter.lower() != "all") else "All Categories"
@@ -1027,7 +1182,7 @@ def export_assets_inventory(db: Session, user: dict, category: Optional[str], fm
     subtitle = f"Exported by {user['email']} · {len(rows)} pool(s) · {today}"
 
     if fmt == "pdf":
-        pdf_bytes = export_service.build_pdf_bytes(title, subtitle, _INVENTORY_EXPORT_HEADERS, rows)
+        pdf_bytes = export_service.build_pdf_bytes(title, subtitle, headers, rows)
         return pdf_bytes, "application/pdf", f"{filename_stub}_{today}.pdf"
-    csv_bytes = export_service.build_csv_bytes(_INVENTORY_EXPORT_HEADERS, rows)
+    csv_bytes = export_service.build_csv_bytes(headers, rows)
     return csv_bytes, "text/csv", f"{filename_stub}_{today}.csv"

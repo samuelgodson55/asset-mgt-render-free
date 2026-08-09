@@ -1,0 +1,627 @@
+# =============================================================================
+# nginx/default.react.conf.template
+# -----------------------------------------------------------------------------
+# THIS TEMPLATE SHIPS ONLY IN THE `frontend-react-only` IMAGE (see
+# frontend/Dockerfile's stage of that name) -- it serves the React "Ledger"
+# SPA (frontend-app/) at "/". The legacy multi-page static site has its
+# own, separate image and config template: nginx/default.conf.template,
+# shipped by the `frontend-legacy-only` target. The two are mutually
+# exclusive -- a single running container is always exactly one of them,
+# never both side-by-side (there used to be a combined `frontend-final`
+# target with this SPA at /app/ alongside the legacy site at /; that's
+# been removed -- see frontend/Dockerfile's own top-of-file comment).
+#
+# This file is almost entirely identical to nginx/default.conf.template --
+# same reverse-proxy-to-/api/, same /_deploy/ dashboard, same /docs
+# passthrough, same security headers -- the only real difference is the
+# root `location /` block: this one is a genuine SPA fallback
+# (`try_files $uri $uri/ /index.html;`) instead of the legacy site's
+# multi-page "clean URL" try_files chain, and there's no ".html rewrite"
+# section at all, since a Vite build never ships bare .html pages to
+# rewrite. Kept as a fully separate file (not a shared file with `if`
+# branches) so each image's rendered nginx config is simple, readable, and
+# has no dead code for the frontend it doesn't ship.
+#
+# This is a TEMPLATE, not a finished nginx config. The official nginx image's
+# entrypoint script (docker-entrypoint.sh -> 20-envsubst-on-templates.sh) runs
+# automatically every time this container starts. It scans /etc/nginx/templates
+# for any *.template file, substitutes every ${VARIABLE} it finds with that
+# variable's real environment value, and writes the result to
+# /etc/nginx/conf.d/default.conf -- which is the file nginx actually loads.
+#
+# WHY THIS MATTERS FOR YOU (the point of this whole file):
+# Nothing below is hardcoded to "localhost", "backend", or any single
+# environment. The exact same Docker image runs unmodified in all three
+# tiers -- local docker compose, Render, and your cloud environment -- and
+# simply gets handed different environment variables at container start:
+#
+#   Variable       | Local (docker-compose.yml)      | Render / Cloud
+#   ---------------|----------------------------------|--------------------------------
+#   PORT           | 80 (default, see frontend/Dockerfile)| Render injects its own port
+#   BACKEND_HOST   | backend (Compose service name)    | your backend service's hostname
+#   BACKEND_PORT   | 8000                               | whatever port that service listens on
+#   RESOLVER_IP    | 127.0.0.11 (Docker's embedded DNS) | your platform's internal DNS IP
+#   DEPLOY_STATUS_ACCOUNT | "" (default, see frontend/Dockerfile -- empty, not unset: see that ENV's own comment for why) | Blob Storage account name (infra/main.bicep's `storage`)
+#   DEPLOY_STATUS_SAS     | "" (default, see frontend/Dockerfile -- empty, not unset: see that ENV's own comment for why) | read-only SAS query string, incl. leading "?" (infra/main.bicep's `deployStatusSas`)
+#
+# See frontend/Dockerfile for the default values baked into the image, and
+# README.md for how to override them per environment.
+#
+# THE CORE IDEA (what makes this a "reverse proxy" and not just a static
+# file server): the browser NEVER talks to the FastAPI backend directly and
+# never needs to know its hostname. It only ever calls relative paths like
+# "/api/auth/login" against whatever domain served the page. This nginx
+# server is the only thing that knows where the real backend lives, and it
+# quietly forwards ("proxies") those /api/* requests there under the hood --
+# see the `location /api/` block below. That's what lets
+# frontend-app/src/lib/api.ts hardcode nothing (see its API_BASE constant)
+# and just work, unchanged, in every environment.
+# =============================================================================
+
+# Docker Compose, Kubernetes, ECS, and Render all resolve service hostnames
+# through their own internal DNS server rather than a static /etc/hosts
+# entry -- and that DNS mapping CAN change (e.g. when a backend container
+# is redeployed and gets a new internal IP). Declaring a `resolver` and
+# referencing the backend through an nginx *variable* (below) -- instead of
+# a bare hostname literal in `proxy_pass` -- forces nginx to re-resolve DNS
+# on every request instead of caching the IP once at startup and going
+# stale after a redeploy. Local Docker Compose pins the RESOLVER_IP
+# variable substituted below to 127.0.0.11 (Docker's own embedded DNS
+# server); other platforms either set their own correct value explicitly,
+# or -- if left unset -- get it auto-detected at container boot from
+# /etc/resolv.conf by nginx/docker-entrypoint.d/15-detect-resolver-ip.sh
+# (see that script for why we don't just hardcode a guess for every
+# possible platform here). (Deliberately not written as a literal ${...} reference in this
+# comment, since envsubst does blind text substitution and would rewrite
+# this very sentence too otherwise.)
+resolver ${RESOLVER_IP} valid=10s;
+
+server {
+    # ${PORT} lets this exact same image satisfy platforms (like Render)
+    # that assign their own port at runtime, while still defaulting to the
+    # standard port 80 for local Docker Compose. See frontend/Dockerfile.
+    listen ${PORT};
+    server_name _;
+
+    # Don't leak the nginx version number in the Server response header --
+    # low-effort reconnaissance hardening (security requirement: don't
+    # volunteer software version info to anyone probing the app).
+    server_tokens off;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # ---- baseline security headers for static content --------------------
+    # The backend's own SecurityHeadersMiddleware (see
+    # backend/middleware/security_headers.py) already stamps these on every
+    # API response. We add the same baseline here so the HTML/JS/CSS nginx
+    # serves directly gets identical protection, regardless of which layer
+    # answered the request.
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    # ---- Content-Security-Policy ------------------------------------------
+    # Tuned against the React "Ledger" SPA's ACTUAL resource usage
+    # (frontend-app/, built by Vite into a single content-hashed JS/CSS
+    # bundle plus index.html) rather than a generic copy-pasted policy that
+    # would either break the app or be meaninglessly permissive:
+    #
+    #   script-src  'self' -- ONLY the same-origin, content-hashed JS bundle
+    #     Vite emits under /assets/. React itself never uses inline
+    #     <script> tags or eval()/new Function() in a production build, so
+    #     'self' alone is sufficient with no 'unsafe-inline'/'unsafe-eval'.
+    #     If you ever add an inline script, the browser console will refuse
+    #     to run it with a clear CSP error rather than silently executing
+    #     it -- that's the point of dropping 'unsafe-inline' rather than a
+    #     bug to work around.
+    #   style-src   'self' + https://fonts.googleapis.com (the Inter/
+    #     JetBrains Mono stylesheet, same as the legacy site's). Tailwind's
+    #     @tailwindcss/vite plugin compiles every utility class into the
+    #     same content-hashed same-origin CSS bundle (covered by 'self');
+    #     React inline `style={{...}}` props set the DOM style property
+    #     directly and are NOT subject to style-src at all (that's a CSP
+    #     restriction on <style>/style="..." markup, not on JS-driven
+    #     inline styles), so 'unsafe-inline' isn't needed here either.
+    #   font-src    https://fonts.gstatic.com -- where the Google Fonts
+    #     stylesheet's actual .woff2 files are served from.
+    #   img-src     'self' data: -- same-origin images plus any data: URIs
+    #     (e.g. inline SVG/icon data), no third-party image hosts in use.
+    #   connect-src 'self' -- frontend-app/src/lib/api.ts only ever calls
+    #     the SAME origin that served the page (relative /api/... paths --
+    #     see "Deploying Across Environments" in README.md); no external API
+    #     is called directly from the browser.
+    #   frame-ancestors 'none' -- belt-and-suspenders alongside
+    #     X-Frame-Options above (frame-ancestors is the modern CSP
+    #     equivalent and is respected by browsers that ignore X-Frame-Options
+    #     in edge cases, e.g. some cross-origin iframe scenarios).
+    #   base-uri 'self' / form-action 'self' -- this app has no legitimate
+    #     reason to ever run a <base> tag pointing elsewhere, or submit a
+    #     form to another origin.
+    #   object-src 'none' -- no Flash/Java/plugin content anywhere in this app.
+    #
+    # If you add a new external script/stylesheet/font/API host later,
+    # you'll need to add it to the matching directive below -- the browser
+    # console will show a clear "Refused to load/execute ... violates the
+    # following Content Security Policy directive" error naming exactly
+    # which directive blocked it. Likewise, if you ever need to add an
+    # inline <script>/<style> back instead of an external file, you'd need
+    # to reintroduce 'unsafe-inline' (or, better, a per-request nonce --
+    # not straightforward for a plain static-file nginx setup like this
+    # one, but worth it over 'unsafe-inline' if it ever comes to that).
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'" always;
+
+    # ---- compression for static assets ------------------------------------
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 256;
+    gzip_types text/plain text/css application/javascript application/json image/svg+xml;
+
+    # =========================================================================
+    # THE REVERSE PROXY: forward every /api/* call to the FastAPI backend
+    # UNCHANGED (no path rewriting).
+    #
+    # backend/main.py mounts every API router under an "/api" prefix itself
+    # (see that file's "API ROUTES" section), so:
+    #     browser requests  ->  nginx receives      ->  backend actually sees
+    #     /api/auth/login    ->  /api/auth/login      ->  /api/auth/login
+    #     /api/assets?x=1    ->  /api/assets?x=1      ->  /api/assets?x=1
+    #
+    # That's what lets frontend/js/api.js hardcode nothing (see its
+    # API_URL = '/api' constant) and just work, unchanged, in every
+    # environment -- including the free-tier single-service Render
+    # deployment (see Dockerfile.render/render-start.sh), where the browser
+    # talks to that same "/api"-prefixed FastAPI app directly with no nginx
+    # in front of it at all.
+    # =========================================================================
+    # ---- backup/restore: needs much longer timeouts than the rest of the
+    # API -------------------------------------------------------------------
+    # BUG FIX -- "Restore failed: Request failed." with NO request ID shown,
+    # even after api.js/auth.js were fixed to surface one. Root cause was
+    # here, not in either of those files: services/backup_service.py gives
+    # pg_dump up to 600s, the pre-restore schema reset up to 120s, and the
+    # actual restore's psql up to 900s (see that file's `timeout=` args) --
+    # all comfortably longer than the generic /api/ location's 60s
+    # proxy_send_timeout/proxy_read_timeout below. On anything bigger than a
+    # tiny demo database, nginx gave up on the backend and returned ITS OWN
+    # bare 504 page before the backend could ever respond -- which means the
+    # request never finished inside RequestContextMiddleware/
+    # UnhandledExceptionMiddleware at all, so there was no JSON body and no
+    # X-Request-ID header for the frontend to read: exactly the "Request
+    # failed." with no reference the person saw. A longer backend timeout
+    # can never fix this on its own -- nginx sits in front and enforces its
+    # own limit independently, so this location needs to match it. Placed
+    # ahead of the generic /api/ location below purely for readability --
+    # nginx picks the LONGEST matching plain-prefix location for a given
+    # request regardless of declaration order, so /api/backup/... always
+    # matches here rather than the generic block either way.
+    location /api/backup/ {
+        set $backend_upstream ${BACKEND_HOST}:${BACKEND_PORT};
+
+        proxy_pass http://$backend_upstream$request_uri;
+
+        proxy_http_version 1.1;
+
+        proxy_set_header Host $backend_upstream;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Request-ID $request_id;
+
+        # 920s gives every backend subprocess timeout above (largest: 900s
+        # for restore) a little headroom to finish -- and to return its own
+        # proper JSON error (with request_id) -- before nginx would ever cut
+        # the connection itself.
+        proxy_connect_timeout 5s;
+        proxy_send_timeout 920s;
+        proxy_read_timeout 920s;
+
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        # restore-upload accepts a full database dump, not just a CSV --
+        # give it more headroom than the generic 10m used elsewhere.
+        client_max_body_size 200m;
+    }
+
+    location /api/ {
+        set $backend_upstream ${BACKEND_HOST}:${BACKEND_PORT};
+
+        proxy_pass http://$backend_upstream$request_uri;
+
+        proxy_http_version 1.1;
+
+        # Standard reverse-proxy headers so the backend sees the TRUE
+        # original client, not "the nginx container". FastAPI's
+        # `RateLimitMiddleware` and `audit_service.py` logging both key off
+        # the caller's IP, so this isn't optional -- without it every
+        # request would appear to originate from the nginx container's own
+        # address, breaking per-IP login rate limiting entirely.
+        #
+        # BUG FIX -- "backend is unreachable through frontend's /api/
+        # proxy" smoke-test failures, symptom: a 404 (NOT a 502/504) on
+        # every /api/* request, with literally nothing about that request
+        # showing up in backend's own uvicorn logs -- i.e. it never even
+        # reached the container. This used to be `proxy_set_header Host
+        # $host;`, which forwards the CLIENT's original Host header
+        # ("frontend.<env>.<region>.azurecontainerapps.io") straight
+        # through to backend unchanged. On plain Docker Compose that's
+        # harmless (the Host header is irrelevant to Compose's own
+        # networking). On Azure Container Apps it's actively wrong: calls
+        # between container apps in the same environment are routed by
+        # the platform's own shared Envoy proxy layer, which "identifies
+        # the target app from the [request's] hostname" (see Microsoft's
+        # own "Communicate between container apps" docs) -- i.e. Envoy
+        # reads the Host header to decide which app to forward to, the
+        # same way any name-based virtual-hosting reverse proxy would.
+        # Forwarding `frontend`'s own public hostname as the Host header
+        # on a request addressed to `backend`'s internal IP tells Envoy
+        # "route this as if it were for frontend", which has no /api/*
+        # route of its own at that layer -- hence Envoy's own 404, before
+        # FastAPI/uvicorn ever sees the request. Using $backend_upstream
+        # here (the same internal FQDN:port this location already
+        # resolves BACKEND_HOST/BACKEND_PORT into, two lines up) instead
+        # correctly identifies `backend` as the target app to Envoy.
+        # `backend`'s own code never reads the Host header for anything
+        # (checked: no CORS/redirect/URL-building logic keys off it), so
+        # this is safe -- and the original client-facing hostname is
+        # still available to backend if it's ever needed, unchanged,
+        # via X-Forwarded-Host below.
+        proxy_set_header Host $backend_upstream;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+
+        # Correlation ID (see backend/middleware/request_context.py):
+        # generate/forward it here at the true edge of the system, so the
+        # SAME id ties together nginx access logs and every backend log
+        # line for a given request. If a request already arrives with its
+        # own X-Request-ID (e.g. from an upstream load balancer in front of
+        # this proxy), nginx's $request_id below is still ours to set here;
+        # the backend's own middleware only falls back to generating a new
+        # one if this header is entirely absent, so this is safe either way.
+        proxy_set_header X-Request-ID $request_id;
+
+        # Reasonable timeouts: fail fast instead of letting a hung backend
+        # tie up a browser tab indefinitely. CSV import/export (see
+        # services/export_service.py) is the slowest endpoint in this app,
+        # hence the longer read/send timeout vs. the tight connect timeout.
+        proxy_connect_timeout 5s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+
+        # Kept for forward-compatibility even though this app doesn't use
+        # WebSockets today -- harmless to leave in, and one less thing to
+        # remember to add later if that ever changes.
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        # CSV import (POST /assets/import) uploads real files -- make sure
+        # nginx doesn't reject a moderately large one before it ever reaches
+        # FastAPI. Raise this further if you expect bigger CSVs.
+        client_max_body_size 10m;
+    }
+
+    # Convenience passthroughs so you can browse FastAPI's interactive docs
+    # (Swagger UI / ReDoc / the raw OpenAPI schema) through the SAME public
+    # origin as the app -- no separate backend port to expose or remember.
+    # Unlike /api/, these are NOT prefix-stripped, because FastAPI serves
+    # them at these exact root paths (see backend/main.py's custom_openapi).
+    #
+    # SECURITY: gated on ENABLE_API_DOCS as defense in depth, in addition to
+    # (not instead of) backend/main.py's own docs_url/redoc_url/openapi_url
+    # gating on the identically-named backend setting -- see config.py's
+    # ENABLE_API_DOCS docstring for the full reasoning. Set ENABLE_API_DOCS
+    # to anything other than exactly "true" (e.g. "false", or leave it
+    # unset -- see frontend/Dockerfile's ENV default) in any environment
+    # reachable from the public internet, so these routes are blocked
+    # HERE, before the request ever reaches the backend at all -- not
+    # merely relying on the backend happening to be configured correctly.
+    location ~ ^/(docs|redoc|openapi\.json)$ {
+        set $enable_api_docs "${ENABLE_API_DOCS}";
+        if ($enable_api_docs != "true") {
+            return 404;
+        }
+
+        # BUG FIX -- "/docs shows a blank page in dev mode":
+        # FastAPI's default Swagger UI (/docs) and ReDoc (/redoc) pages
+        # don't ship their own JS/CSS -- they load swagger-ui-bundle.js /
+        # redoc.standalone.js and their stylesheets from the jsdelivr CDN.
+        # The server-level Content-Security-Policy above (`add_header
+        # Content-Security-Policy ... always;`) is deliberately locked down
+        # to `script-src 'self'` / `style-src 'self' ...` for OUR frontend's
+        # own JS/CSS -- it had no idea /docs needs a CDN-dependent policy,
+        # so it was silently blocking every one of those CDN requests. The
+        # browser still got a 200 OK for the HTML shell, so the tab loaded
+        # and the URL bar looked fine -- it just rendered nothing, with the
+        # real errors only visible in the browser console ("Refused to
+        # load ... violates ... Content-Security-Policy").
+        #
+        # `add_header` does NOT merge with headers set in an enclosing
+        # block once a location declares its own (same nginx gotcha called
+        # out on the static-asset location below) -- so every baseline
+        # header has to be re-declared here too, not just the CSP.
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'; style-src 'self' https://cdn.jsdelivr.net https://fonts.googleapis.com 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: https://cdn.jsdelivr.net https://fastapi.tiangolo.com; connect-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'" always;
+
+        set $backend_upstream ${BACKEND_HOST}:${BACKEND_PORT};
+        proxy_pass http://$backend_upstream$request_uri;
+        # BUG FIX: same Azure Container Apps Host-header-based routing
+        # issue as the /api/ location above -- see that location's own
+        # comment for the full explanation.
+        proxy_set_header Host $backend_upstream;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # ---- live blue-green rollout status (ACA equivalent of the VM path's
+    # Caddy-served /_deploy/ dashboard) --------------------------------------
+    # status.json/checks.log are proxied LIVE, per-request, straight through
+    # to the `deploy-status` Blob container (infra/main.bicep's
+    # `deployStatusContainer`) -- no mount, no local copy, no cache anywhere
+    # in the path, which is what actually solves the staleness problem this
+    # dashboard used to fight via an Azure Files `mountOptions` tweak (see
+    # infra/main.bicep's own comment: ACA rejects that `actimeo` option
+    # outright, and doesn't support mounting Blob Storage as a volume in
+    # the first place -- proxying instead of mounting sidesteps both).
+    # Written to by .github/workflows/deploy-azure-aca.yml (over the Blob
+    # REST API, via `az storage blob upload`, at every phase transition of
+    # a rollout -- see that workflow's own "Write ACA deploy status" steps,
+    # aca-deploy-status.sh, and blue-green.md's "Monitoring" section).
+    #
+    # AUTH TO BLOB STORAGE: `${DEPLOY_STATUS_SAS}` is a read-only (`rl`),
+    # HTTPS-only, Blob-service-scoped account SAS token generated inside
+    # infra/main.bicep itself (`deployStatusSas`) and injected as a
+    # Container Apps secret. It's appended to the upstream URL entirely
+    # server-side, in the `proxy_pass` below -- the browser never sees it,
+    # only this container's own outbound request to Blob Storage does.
+    #
+    # index.html (the dashboard shell) is NOT proxied to Blob Storage -- it
+    # ships baked into this image instead (frontend/Dockerfile COPYs
+    # scripts/deploy-status-aca/index.html to
+    # /usr/share/nginx/deploy-status/index.html), since it only changes
+    # with a code release, not per-deploy, and serving it locally means the
+    # dashboard's shell still loads (its own client-side fetch() calls
+    # simply failing) even if Blob Storage is ever briefly unreachable.
+    #
+    # HTTP Basic Auth, same purpose as the VM path's Caddy-level auth
+    # (DEPLOY_STATUS_USER/DEPLOY_STATUS_PASSWORD_HASH there) but a
+    # DIFFERENT hash format: Caddy natively supports bcrypt
+    # ($2a$/$2b$/$2y$); nginx's auth_basic_user_file only supports
+    # {PLAIN}, {SSHA}, and $apr1$ (all implemented internally in
+    # ngx_http_auth_basic_module). auth_basic_user_file still needs a real
+    # LOCAL file -- it can't read over HTTP -- so .htpasswd is fetched
+    # ONCE, at container boot, by
+    # nginx/docker-entrypoint.d/25-fetch-deploy-status-htpasswd.sh into
+    # /tmp/deploy-status/.htpasswd (see that script for the full mechanics,
+    # including its fail-closed behavior if the fetch fails).
+    #
+    # Bare `/_deploy` (no trailing slash) doesn't match either location
+    # below -- nginx would otherwise fall through to the SPA catch-all
+    # further down and 404. Redirect it explicitly, same as the VM path's
+    # Caddyfile does for its own `/_deploy` bare path.
+    location = /_deploy {
+        return 308 /_deploy/;
+    }
+
+    # Safety net for "/_deploy/index" specifically (no trailing slash, no
+    # .html) -- what a browser's address bar autocompletes from history
+    # saved before this dashboard's very first bug fix, back when a
+    # since-removed `index index.html;` directive really did produce that
+    # URL and then 404 on it (see CHANGELOG.md). There's no real file at
+    # that path, so redirect rather than 404 so a stale suggestion still
+    # lands on the working dashboard.
+    location = /_deploy/index {
+        return 308 /_deploy/;
+    }
+
+    # Exact match ("=") for the directory URL itself -- serves the LOCAL,
+    # baked-in dashboard shell directly. Deliberately NOT using nginx's
+    # `index` directive here: `index` resolves via an INTERNAL URI rewrite
+    # from "/_deploy/" to "/_deploy/index.html", which re-enters location
+    # matching and lands on this config's global "clean URLs" regex
+    # further down (`location ~ ^/(.+)\.html$`), which 301s it to
+    # "/_deploy/index" -- not a real file/location, so THAT then 404s. Net
+    # effect: every request for "/_deploy/" 404'd, even with everything
+    # else configured correctly, because nginx never got as far as reading
+    # index.html at all.
+    #
+    # BUG FIX: this block used to point `alias` directly at index.html
+    # (`alias /usr/share/nginx/deploy-status/index.html;`) on the theory
+    # that naming the file directly, instead of a directory, would avoid
+    # the `index`-directive rewrite loop above entirely. It does avoid
+    # THAT specific loop, but not a second, unrelated nginx behavior:
+    # ngx_http_index_module fires for ANY request URI ending in "/"
+    # regardless of what `alias`/`root` resolve to -- it unconditionally
+    # appends the default index filename to the resolved path. Since
+    # `alias` here already ends in "index.html", that produced
+    # "/usr/share/nginx/deploy-status/index.htmlindex.html" (sic --
+    # literally concatenated, no separator) and nginx logged `"...
+    # index.htmlindex.html" is not a directory` and returned 500 on
+    # every single request, 401 vs. wrong-password never even entering
+    # into it. `try_files` sidesteps this cleanly: it resolves and serves
+    # a specific file itself, in its own phase, before the index module
+    # ever gets a chance to run -- no `alias`-to-a-file trick needed, and
+    # no dependency on the request URI's trailing slash at all.
+    location = /_deploy/ {
+        root /usr/share/nginx/deploy-status;
+        try_files /index.html =404;
+
+        auth_basic "Deployment status";
+        auth_basic_user_file /tmp/deploy-status/.htpasswd;
+
+        # nginx GOTCHA (same one the /docs location above already works
+        # around -- see its own comment): `add_header` does NOT merge with
+        # headers set in an enclosing block once a location declares its
+        # own, so every server-level baseline header has to be re-declared
+        # here too. The CSP below is deliberately looser
+        # (script-src/style-src 'unsafe-inline') than the app's own,
+        # scoped to ONLY this one internal, Basic-Auth-gated ops
+        # dashboard -- its self-contained index.html has its own inline
+        # <style>/<script> rather than pulling in a build step for this
+        # small status page.
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'; object-src 'none'" always;
+        add_header Cache-Control "no-store" always;
+    }
+
+
+    # Everything ELSE under /_deploy/ -- status.json, checks.log, and any
+    # future file this dashboard's JS ever fetches() -- proxies straight
+    # through to Blob Storage instead of the local filesystem. A regex
+    # location (evaluated strictly after the exact "=" match above, per
+    # nginx's own matching order) so it can capture the remainder of the
+    # URI after "/_deploy/" to rebuild the Blob path with. Built by hand
+    # with `set`/string concatenation rather than relying on proxy_pass's
+    # usual "replace the matched location prefix" auto-rewrite, because
+    # that auto-rewrite only kicks in when the upstream host is a literal
+    # -- ours is a variable (the storage account name), the exact same
+    # reason the /api/ location above builds its own upstream URL with
+    # `$request_uri` instead of leaning on that rewrite -- see that
+    # location's own comment.
+    location ~ ^/_deploy/(?<deploy_status_path>.+)$ {
+        auth_basic "Deployment status";
+        auth_basic_user_file /tmp/deploy-status/.htpasswd;
+
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'; object-src 'none'" always;
+
+        # Rollout state changes by the minute during a deploy -- never let
+        # a browser or intermediate cache serve a stale status.json. This
+        # is now a genuinely live, uncached read of Blob Storage on every
+        # single request, not just a short cache window, so this header is
+        # belt-and-suspenders rather than load-bearing the way it used to be.
+        add_header Cache-Control "no-store" always;
+
+        # .htpasswd must stay readable by 25-fetch-deploy-status-htpasswd.sh's
+        # own `wget` at container boot (see that script), but never
+        # through this proxied, browser-facing path.
+        if ($deploy_status_path = ".htpasswd") {
+            return 404;
+        }
+
+        set $deploy_status_upstream ${DEPLOY_STATUS_ACCOUNT}.blob.core.windows.net;
+        proxy_pass https://$deploy_status_upstream/deploy-status/$deploy_status_path${DEPLOY_STATUS_SAS};
+        proxy_http_version 1.1;
+        proxy_set_header Host $deploy_status_upstream;
+        # BUG FIX: `auth_basic` above only authenticates the BROWSER's
+        # request to nginx -- it does not strip that request's own
+        # `Authorization: Basic ...` header before nginx proxies onward.
+        # Left alone, that header rides along on the upstream request
+        # ALONGSIDE the ?sv=...&sig=... SAS query string appended above.
+        # Blob Storage's REST API treats ANY Authorization header as an
+        # attempt at Shared Key/Bearer auth and validates THAT instead of
+        # falling back to the SAS in the query string -- so a client's
+        # Basic-auth header (which is not a valid Azure signature) makes
+        # every proxied request fail with a generic
+        # "AuthenticationFailed: Server failed to authenticate the
+        # request. Make sure the value of Authorization header is formed
+        # correctly including the signature." even though the SAS token
+        # itself is fine. Clearing the header here (an empty
+        # proxy_set_header value removes it entirely rather than sending
+        # it empty) ensures the SAS query string is the ONLY credential
+        # Blob Storage ever sees on this hop.
+        proxy_set_header Authorization "";
+        # Required whenever proxy_pass's target host comes from a variable
+        # AND the upstream is HTTPS -- without it nginx doesn't send SNI on
+        # the upstream TLS handshake at all, which Blob Storage's
+        # multi-tenant HTTPS endpoint needs to present the right
+        # certificate for this account's hostname.
+        proxy_ssl_server_name on;
+
+        proxy_connect_timeout 5s;
+        proxy_send_timeout 10s;
+        proxy_read_timeout 10s;
+
+        # Don't let Blob Storage's own response headers (ETag, Last-Modified,
+        # x-ms-*) leak storage-layer implementation details to the browser
+        # -- this location's own headers above are everything the
+        # dashboard's JS actually reads.
+        proxy_hide_header ETag;
+        proxy_hide_header Last-Modified;
+        proxy_hide_header x-ms-request-id;
+        proxy_hide_header x-ms-version;
+    }
+
+    # ---- index.html: never cache ---------------------------------------------
+    # index.html is the one file in this image whose CONTENT changes on
+    # every deploy (it references that build's freshly content-hashed
+    # /assets/*.js|css bundle by name) even though its own filename never
+    # does -- so, unlike the hashed assets below, it must never be cached,
+    # or a returning visitor's browser could keep serving a stale
+    # index.html that points at asset filenames a newer deploy already
+    # deleted. Exact match ("=") takes priority over every other location
+    # type regardless of declaration order, so this always wins for this
+    # one path even though the SPA-fallback `location /` below would also
+    # technically resolve it.
+    location = /index.html {
+        add_header Cache-Control "no-cache" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    }
+
+    # ---- the SPA itself -------------------------------------------------------
+    # Everything that isn't /api/*, the docs routes, or /_deploy/ (all
+    # handled above) is either a real built file or a client-side route.
+    # `try_files` tries, in order: the URI exactly as requested (so a real
+    # file like /assets/index-a1b2c3.js still resolves off disk unchanged)
+    # -- then the URI as a directory -- then, for anything else (a
+    # client-side route react-router owns, e.g. /checkouts or /assets/42,
+    # which is NOT a real file on disk), falls back to /index.html so the
+    # SPA's own router can take over and render the right page client-side
+    # instead of nginx 404ing on a URL that only React Router understands.
+    # This is the entire reason this file exists separately from
+    # nginx/default.conf.template -- the legacy multi-page site's
+    # try_files chain (real file, then "$uri.html", then a real 404) has
+    # no equivalent "no matching page is fine, hand it to the client
+    # router" fallback, and adding one there would be wrong for that site
+    # (a truly missing legacy page SHOULD 404).
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # Long-lived, effectively-forever caching for Vite's build output under
+    # /assets/ -- every filename there is content-hashed (e.g.
+    # index-a1b2c3d4.js), so the filename itself changes whenever the
+    # content does. A NEW deploy ships NEW filenames (referenced by the
+    # freshly-served, never-cached index.html above), never reuses an old
+    # one with different content -- so there is no staleness risk in
+    # caching these as aggressively as possible, unlike the legacy site's
+    # plain, non-hashed filenames (see default.conf.template's equivalent
+    # block, which caches for a much more conservative 1h for exactly that
+    # reason). `immutable` additionally tells supporting browsers not to
+    # even bother re-validating with a conditional GET before the max-age
+    # window expires.
+    #
+    # NGINX GOTCHA: `add_header` directives are only inherited from an
+    # enclosing block (the `server {}` above) if the CURRENT block doesn't
+    # declare any `add_header` of its own -- one `add_header Cache-Control`
+    # here would otherwise silently DROP every security header set above
+    # (X-Frame-Options, Content-Security-Policy, etc.) for every CSS/JS/
+    # image response. So this block re-declares the full set explicitly
+    # rather than relying on inheritance.
+    location ~* \.(?:css|js|svg|png|jpg|jpeg|gif|ico|woff2?)$ {
+        expires 1y;
+        add_header Cache-Control "public, max-age=31536000, immutable";
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'" always;
+    }
+
+    # Never serve dotfiles (.env, .git, etc.) even if one somehow ends up in
+    # the image -- defense in depth alongside .gitignore/.dockerignore.
+    location ~ /\. {
+        deny all;
+    }
+}

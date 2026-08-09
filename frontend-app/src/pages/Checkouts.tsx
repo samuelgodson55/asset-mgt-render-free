@@ -25,8 +25,8 @@ function DenyReasonModal({ request, onClose, onDenied }: { request: ExtensionReq
 
   return (
     <AnimatePresence>
-      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={onClose} className="fixed inset-0 bg-ink/70 backdrop-blur-sm z-40" />
-      <motion.div
+      <motion.div key="backdrop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={onClose} className="fixed inset-0 bg-ink/70 backdrop-blur-sm z-40" />
+      <motion.div key="panel"
         initial={{ opacity: 0, y: 12, scale: 0.98 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
         exit={{ opacity: 0, y: 8, scale: 0.98 }}
@@ -68,7 +68,7 @@ export function Checkouts() {
   const refreshExtensions = () => api.getExtensionRequests().then(setExtensions);
 
   useEffect(() => {
-    api.getCheckouts().then(setCheckouts);
+    api.getCheckouts(true).then(setCheckouts);
     refreshExtensions();
   }, []);
 

@@ -26,3 +26,49 @@ const PRIVILEGED_ROLES = new Set(["admin", "super_admin", "manager"]);
 export function isPrivileged(role: string | undefined | null): boolean {
   return !!role && PRIVILEGED_ROLES.has(role);
 }
+
+// Mirrors services/user_service.py's MANAGER_PROVISIONABLE_ROLES: a
+// Manager may create a new login, edit an existing one, or revoke one
+// (convert-to-outsider) for a "staff" or "customer" account ONLY -- never
+// for another Manager, an Admin, or the Super Admin. A Super Admin/Admin
+// has no such restriction and can act on any account (see deps.py's
+// require_privileged_role for the create/edit/revoke routes themselves,
+// and update_user()/convert_user_to_outsider()'s own extra per-row check
+// on top of that for the Manager case specifically).
+const MANAGER_PROVISIONABLE_ROLES = new Set(["staff", "customer"]);
+
+export function isManagerProvisionableRole(role: string | undefined | null): boolean {
+  return !!role && MANAGER_PROVISIONABLE_ROLES.has(role);
+}
+
+// Whether `actorRole` may create/edit/revoke-login-for an account whose
+// OWN role is `targetRole` (irrelevant for create, where there's no
+// existing row yet -- pass the role about to be assigned instead). Full
+// admins (Super Admin/Admin) always can; a Manager only when the role in
+// question is staff/customer.
+export function canManageUserRole(
+  actorRole: string | undefined | null,
+  targetRole: string | undefined | null,
+  demo: boolean
+): boolean {
+  if (demo || isFullAdmin(actorRole)) return true;
+  return actorRole === "manager" && isManagerProvisionableRole(targetRole);
+}
+
+// Mirrors services/quotation_service.py's list_catalog(): a Manager/Admin/
+// Super Admin sees real-time stock (available_quantity/status) no matter
+// what; a Staff/Customer sees it only when the operator has explicitly
+// turned CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER on. `catalogShowStock` is
+// that flag's current value, read once from GET /config/public (see
+// lib/auth.tsx). Used to gate every stock-derived UI element -- Dashboard's
+// Available/Low-stock cards, the Inventory tag grid, and the Asset Drawer --
+// not just the Quotation Catalog it was originally scoped to, since the
+// setting is meant to answer one question ("can this role see live stock
+// numbers?") everywhere in the app, not just on one page.
+export function canSeeStock(
+  role: string | undefined | null,
+  demo: boolean,
+  catalogShowStock: boolean
+): boolean {
+  return demo || isPrivileged(role) || catalogShowStock;
+}

@@ -460,6 +460,7 @@ resource "azurerm_linux_virtual_machine" "this" {
     cloudflare_origin_cert_key        = var.cloudflare_origin_cert_key
     dockerhub_backend_image           = var.dockerhub_backend_image
     dockerhub_frontend_image          = var.dockerhub_frontend_image
+    frontend_build_target             = var.frontend_build_target
     initial_image_tag                 = var.initial_image_tag
     dockerhub_username                = var.dockerhub_username
     dockerhub_token                   = var.dockerhub_token

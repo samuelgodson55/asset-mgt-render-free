@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { PackageCheck, CalendarClock, X, Send } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
 import { myItemsApi, extensionsApi, ApiError, formatDate } from "../lib/api";
 import type { MyItem } from "../lib/types";
+import { ExportButtons } from "../components/ExportButtons";
 
 function errMsg(err: unknown, fallback: string): string {
   if (err instanceof ApiError) return err.message;
@@ -43,8 +45,8 @@ function ExtensionRequestModal({ item, onClose, onSent }: { item: MyItem | null;
 
   return (
     <AnimatePresence>
-      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={onClose} className="fixed inset-0 bg-ink/70 backdrop-blur-sm z-40" />
-      <motion.div
+      <motion.div key="backdrop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={onClose} className="fixed inset-0 bg-ink/70 backdrop-blur-sm z-40" />
+      <motion.div key="panel"
         initial={{ opacity: 0, y: 16, scale: 0.98 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
         exit={{ opacity: 0, y: 8, scale: 0.98 }}
@@ -98,6 +100,7 @@ export function MyItems() {
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<MyItem | null>(null);
   const [sentMsg, setSentMsg] = useState<string | null>(null);
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const refresh = () =>
     myItemsApi
@@ -110,11 +113,31 @@ export function MyItems() {
     refresh();
   }, []);
 
+  // Deep link from the Notification Bell (?extend=<checkout_id>) -- opens
+  // the Request Extension modal straight away for that item, same
+  // click-through as legacy notifications.js's personal alert rows.
+  useEffect(() => {
+    const raw = searchParams.get("extend");
+    if (!raw || items.length === 0) return;
+    const checkoutId = Number(raw);
+    const item = items.find((i) => i.checkout_id === checkoutId);
+    if (item) setSelected(item);
+    setSearchParams((prev) => { const next = new URLSearchParams(prev); next.delete("extend"); return next; }, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items]);
+
   return (
     <div>
-      <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }} className="mb-6">
-        <h1 className="font-display text-2xl font-semibold text-text">My Items</h1>
-        <p className="text-text-muted text-sm mt-1">{items.length} item(s) currently checked out to you</p>
+      <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }} className="mb-6 flex items-start justify-between gap-3">
+        <div>
+          <h1 className="font-display text-2xl font-semibold text-text">My Items</h1>
+          <p className="text-text-muted text-sm mt-1">{items.length} item(s) currently checked out to you</p>
+        </div>
+        <ExportButtons
+          disabled={items.length === 0}
+          urlFor={(format) => myItemsApi.exportUrl(format)}
+          filenameFor={(format) => `my_properties.${format}`}
+        />
       </motion.div>
 
       {sentMsg && <div className="max-w-xl bg-moss/10 border border-moss/30 text-moss-soft text-[13px] rounded-[3px] px-4 py-3 mb-4">{sentMsg}</div>}

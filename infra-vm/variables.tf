@@ -381,8 +381,18 @@ variable "dockerhub_backend_image" {
 }
 
 variable "dockerhub_frontend_image" {
-  description = "Docker Hub repository for the frontend image, e.g. \"yourusername/snipeit-lite-frontend\"."
+  description = "Docker Hub repository for the frontend image, e.g. \"yourusername/snipeit-lite-frontend-legacy\" or \"yourusername/snipeit-lite-frontend-react\" -- MUST match whichever flavor frontend_build_target below names (there are two separate, mutually exclusive Docker Hub repos now, one per frontend flavor -- see frontend/Dockerfile's own top-of-file comment for why)."
   type        = string
+}
+
+variable "frontend_build_target" {
+  description = "Which of frontend/Dockerfile's two mutually exclusive final stages the image in dockerhub_frontend_image is EXPECTED to be built from: \"react\" (frontend-react-only, the React \"Ledger\" SPA at /) or \"legacy\" (frontend-legacy-only, the legacy static site at /, the default). This VM path pulls a pre-built image over SSH (docker-compose.vm.yml's `image:` line) rather than building it itself -- the actual build target is chosen in CI by that Docker Hub image's paired GitHub Environment's own FRONTEND_BUILD_TARGET Actions variable (see .github/workflows/deploy-azure-vm.yml's resolve-target job and frontend-app/README.md's \"Detaching this app\" section), NOT by this variable. This is documentation/expectation only: it's written into /opt/snipeit/.env as EXPECTED_FRONTEND_BUILD_TARGET so an operator SSHed into the VM (or reading Terraform state) can see at a glance which kind of image this environment is supposed to be running, and so it doesn't silently drift out of sync with whichever GitHub Environment variable actually controls the CI build -- keep the two in agreement by hand, INCLUDING dockerhub_frontend_image above, which must point at the matching flavor's own Docker Hub repo."
+  type        = string
+  default     = "legacy"
+  validation {
+    condition     = contains(["react", "legacy"], var.frontend_build_target)
+    error_message = "frontend_build_target must be exactly \"react\" or \"legacy\" -- see frontend/Dockerfile's own stage names (frontend-react-only / frontend-legacy-only)."
+  }
 }
 
 variable "initial_image_tag" {

@@ -430,8 +430,10 @@ confuse them:**
   the dropdown defaults to `prod` if you don't touch it, so an
   unattended/default run always targets production; pick `vm-staging`
   explicitly if that's what you want. A version-tag push (`git tag vX.Y.Z
-  && git push origin vX.Y.Z`) always deploys `prod` regardless of the
-  dropdown -- that trigger means "cut a real release" on its own.
+  && git push origin vX.Y.Z`) never deploys by itself -- it only builds and
+  publishes the release images (see `release.yml`); run this workflow by
+  hand afterward, targeting `prod`, with that version in `image_tag`, when
+  you're ready to actually deploy it.
 - **Frontend build mode** (minified-only vs. minified+obfuscated, and the
   `ENVIRONMENT` value the backend/worker/beat containers themselves read --
   see `backend/config.py`'s `apply_environment_defaults`): a **Variable**
@@ -457,12 +459,47 @@ confuse them:**
   fresh skips this entirely** -- it reuses whatever build mode that image
   was originally built with, regardless of what the variable is set to
   now.
+- **Frontend type** (which of the two mutually exclusive frontend images
+  ships): a **Variable** named `FRONTEND_BUILD_TARGET`, same per-Environment
+  scoping as `ENVIRONMENT` above. Leave unset (the default) to ship
+  `frontend/Dockerfile`'s `frontend-legacy-only` stage -- the legacy static
+  site, served at `/`. Set it to exactly `react` on an Environment that
+  should ship the React "Ledger" SPA instead (`frontend-react-only`, also
+  served at `/`); anything else resolves to the legacy site, so a typo
+  never silently switches which frontend ships. Also read by the
+  `resolve-target` job and fed into `frontend/Dockerfile` as `--target`
+  instead of `BUILD_ENV`; independent of the `ENVIRONMENT` variable above,
+  so you can obfuscate a legacy build or leave a React build unobfuscated
+  (though `BUILD_ENV` only affects the legacy target's minify/obfuscate
+  pipeline -- Vite's own production build for the React SPA is unaffected
+  either way). `infra-deploy-vm.yml` reads the SAME variable and passes it
+  to Terraform as `frontend_build_target` purely so `/opt/snipeit/.env` on
+  the VM documents which kind of image that environment is supposed to be
+  running (see `infra-vm/variables.tf`'s `frontend_build_target`
+  description) -- keep the two in sync by hand if you ever change one
+  without the other, and make sure `dockerhub_frontend_image` in your
+  `terraform.tfvars` points at the matching flavor's own Docker Hub repo
+  (there are two separate repos now, one per flavor -- see
+  `frontend/Dockerfile`'s own top-of-file comment). See
+  `frontend-app/README.md`'s "Detaching this app" section for the full
+  reasoning, and this same per-Environment variable is read the same way by
+  `deploy-azure-aca.yml`. **This variable is the standing default only.**
+  For a one-off override on a single run -- ship the React SPA just this
+  once without touching Settings, or vice versa -- use the
+  **`frontend_type`** dropdown right on the "Run workflow" form instead
+  (`(environment default)` / `react` / `legacy`); it beats the variable for
+  that run and nothing is persisted, so the very next run goes back to
+  whatever `FRONTEND_BUILD_TARGET` says. Ignored, with a note in the run
+  summary, whenever `image_tag` reuses an already-built image. The run
+  summary's **Frontend type** row also says which of the two actually
+  decided it.
 
 Add these to each Environment (Secrets unless marked **Variable**):
 
 | Name | Value | Used by |
 |---|---|---|
 | `ENVIRONMENT` (**Variable**, not secret) | `production` for a minified+obfuscated frontend build and `ENVIRONMENT=production` in the containers; `development`/unset for minified-only and `ENVIRONMENT=development` -- set this independently on EACH Environment page (`prod`, and `vm-staging` if used) | `deploy-azure-vm.yml` (`resolve-target` job) |
+| `FRONTEND_BUILD_TARGET` (**Variable**, not secret) | `react` to ship the React "Ledger" SPA; unset/anything else for the default legacy static site -- the two are mutually exclusive (no combined option) -- set independently on EACH Environment page | `deploy-azure-vm.yml` (`resolve-target` job), `infra-deploy-vm.yml` |
 | `TF_STATE_RESOURCE_GROUP` (**Variable**, not secret) | `rg-snipeit-tfstate` from step 1's state backend setup | `infra-deploy-vm.yml` |
 | `TF_STATE_STORAGE_ACCOUNT` (**Variable**, not secret) | `snipeittfstate01` (or whatever you named it) from step 1 | `infra-deploy-vm.yml` |
 | `TF_STATE_CONTAINER` (**Variable**, not secret) | `vm-state` from step 1 | `infra-deploy-vm.yml` |
@@ -730,10 +767,13 @@ Terraform to create a brand new token and rewire GitHub to match:
 ## 10. Deploy the application (`deploy-azure-vm.yml`)
 
 In GitHub: **Actions → Deploy to Azure VM → Run workflow**, `environment:
-prod`, leave `image_tag` blank (build fresh). A plain `git push` to `main`
-no longer triggers this automatically — only a `git tag vX.Y.Z && git push
-origin vX.Y.Z` does (see "Tagging & Versioning" below); everything else
-goes through the manual `workflow_dispatch` run described here.
+prod`, leave `image_tag` blank (build fresh). This workflow only ever runs
+via this manual `workflow_dispatch` step — there is no `push` trigger and
+no `workflow_call` entry point, so neither a plain `git push` to `main` nor
+a `git tag vX.Y.Z && git push origin vX.Y.Z` triggers it automatically
+(see "Tagging & Versioning" below for what a tag push *does* do — publish
+the release images, nothing more). To deploy an already-published version
+instead of building fresh, put it in `image_tag`.
 
 This runs: `ci.yml` (full test suite) → build + push both images to Docker
 Hub → SSH in, sync `docker-compose.vm.yml`/`Caddyfile`/`caddy/weights.conf`/
@@ -965,11 +1005,12 @@ git tag v1.4.2
 git push origin v1.4.2
 ```
 
-Pushing a tag matching `v*.*.*` is what `deploy-azure-vm.yml`'s `on.push.
-tags` trigger listens for (mirrors `release.yml`'s identical trigger for
-the Container Apps path — see [Using both deployment
-targets](#using-both-deployment-targets-optional) below if you have both
-set up). This single push does all of the following, automatically:
+Pushing a tag matching `v*.*.*` triggers `release.yml` — and *only*
+`release.yml`; `deploy-azure-vm.yml` has no `push` trigger and no
+`workflow_call` entry point, so this push does not deploy anything to the
+VM (or to Azure Container Apps — see [Using both deployment
+targets](#using-both-deployment-targets-optional) below). What it does do,
+automatically:
 
 1. Runs the full `ci.yml` gate (lint, tests, Trivy scan) — same as any push.
 2. Builds and pushes **both** images to Docker Hub, tagged **three ways**:
@@ -977,15 +1018,23 @@ set up). This single push does all of the following, automatically:
    (exact-source traceability), and `:latest` (convenience). Each image
    also carries OCI labels (`org.opencontainers.image.version`,
    `.revision`, `.created`) — visible via `docker inspect`.
-3. SSHes to the VM (through the Cloudflare Tunnel/Access — see step 2)
-   and deploys `v1.4.2` — pull, `docker compose up -d`, `alembic upgrade
-   head`, smoke test.
-4. **Only if the smoke test passes**, writes `/opt/snipeit/CURRENT_RELEASE`
-   on the VM and a summary table in the GitHub Actions run — see
-   [Checking the current running version](#checking-the-current-running-version)
-   below. A failed smoke test means this step never runs, so the marker
-   keeps pointing at whatever the last *confirmed-healthy* version was —
-   deliberately, not a bug.
+3. Opens a PR against `main` with the new `CHANGELOG.md` section and cuts
+   a GitHub Release with the same notes.
+
+That's it — the tag push stops there. **To actually deploy `v1.4.2` to the
+VM**, run `deploy-azure-vm.yml` yourself: Actions tab → "Deploy to VM" →
+"Run workflow", `environment: prod`, and paste `v1.4.2` into `image_tag`.
+It pulls the exact image built above rather than rebuilding, then SSHes to
+the VM (through the Cloudflare Tunnel/Access — see step 2), deploys it —
+pull, `docker compose up -d`, `alembic upgrade head`, smoke test — and,
+**only if the smoke test passes**, writes `/opt/snipeit/CURRENT_RELEASE`
+on the VM and a summary table in the GitHub Actions run — see
+[Checking the current running version](#checking-the-current-running-version)
+below. A failed smoke test means this step never runs, so the marker keeps
+pointing at whatever the last *confirmed-healthy* version was —
+deliberately, not a bug. Run the same tag against `deploy-azure-aca.yml`
+too if you're also shipping to Container Apps — the two are independent
+manual runs, on your own schedule.
 
 Use [Semantic Versioning](https://semver.org) for the tag itself:
 `MAJOR.MINOR.PATCH` — bump `MAJOR` for breaking changes (e.g. a migration
@@ -1111,46 +1160,26 @@ set that up before this note existed, see the callout in [step
 5](#5-configure-github-oidc-federation-for-terraform--no-client-secrets)
 for how to migrate to `vm-staging` instead.)
 
-If you also have the Container Apps path (`DEPLOYMENT.md`) set up
-against the *same* repo, pushing a version tag triggers **both**
-`release.yml` (changelog PR + GitHub Release + Container Apps deploy) and
-`deploy-azure-vm.yml` (VM deploy) — both independently build+push the
-same images under the same tag, which is redundant but harmless (same
-content, just built twice). This is fine if you genuinely run both
-targets in parallel (e.g. VM for a cost-capped primary environment,
-Container Apps for a burst-capacity secondary).
-
-If you're **only** using the VM path, `release.yml`'s own `deploy` job
-(which calls `deploy-azure-aca.yml`) will still attempt to run on
-every version tag and fail, since it targets Container Apps
-infrastructure that was never provisioned — harmless (no destructive
-action, just a red X in Actions), but avoid the noise by removing
-`release.yml`'s trigger:
-
-```yaml
-# .github/workflows/release.yml
-on:
-  push:
-    tags:
-      - 'v*.*.*'   # <- comment out or remove this whole `on:` block's
-                   #    push trigger if you don't use the Container Apps
-                   #    path at all; deploy-azure-vm.yml's own identical
-                   #    trigger is unaffected either way.
-```
-
-`CHANGELOG.md` is currently only maintained by `release.yml`'s
-`changelog` job — if you disable that trigger, `CHANGELOG.md` stops
-updating automatically too. Keep it enabled (its `changelog` job doesn't
-depend on Container Apps existing, only `deploy` does) if you still want
-automatic changelog entries + GitHub Releases while skipping just the
-Container Apps deploy attempt — remove only the `deploy:` job from
-`release.yml`, not the whole trigger, to get that combination.
+If you also have the Container Apps path (`DEPLOYMENT.md`) set up against
+the *same* repo, the two paths never conflict or step on each other: a
+pushed version tag runs `release.yml` exactly once (builds + Trivy-scans +
+publishes the images under that tag, cuts the changelog PR/GitHub Release)
+— it doesn't call either deploy workflow. Deploying to the VM
+(`deploy-azure-vm.yml`) and deploying to Container Apps
+(`deploy-azure-aca.yml`) are both separate, manual `workflow_dispatch`
+runs you trigger yourself, whenever you choose, in whatever order you
+choose — run one, the other, or both against the same version tag if you
+genuinely run both targets in parallel (e.g. VM for a cost-capped primary
+environment, Container Apps for a burst-capacity secondary). Neither
+workflow has a `push` trigger or a `workflow_call` entry point, so there's
+nothing to disable if you only use one path.
 
 ### Redeploying without a version bump
 
-**Normal redeploy** (new code, not yet a named release): `git push` to
-`main`, or run `deploy-azure-vm.yml` manually with `environment: vm-staging`
-(or `prod`, with no `image_tag`) — see [How a real, named release is
+**Normal redeploy** (new code, not yet a named release): run
+`deploy-azure-vm.yml` manually with `environment: vm-staging` (or `prod`),
+leaving `image_tag` blank so it builds fresh from whichever branch/ref you
+run it against — see [How a real, named release is
 created](#how-a-real-named-release-is-created) above for how this differs
 from a tagged release.
 

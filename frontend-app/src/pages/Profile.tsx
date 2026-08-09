@@ -2,8 +2,8 @@ import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { UserRound, KeyRound, ShieldCheck, Download, Check } from "lucide-react";
 import { profileApi, ApiError } from "../lib/api";
-import { useAuth } from "../lib/auth";
-import { isTrueSuperAdmin } from "../lib/roles";
+import { useAuth } from "../lib/useAuth";
+import { isFullAdmin, isTrueSuperAdmin } from "../lib/roles";
 import type { ProfileDetail } from "../lib/types";
 
 function errMsg(err: unknown, fallback: string): string {
@@ -68,8 +68,15 @@ function ChangePasswordCard({ userId }: { userId: number }) {
   );
 }
 
-// Legacy admin.html gates this to the Super Admin's own identity section
-// only -- so it's mirrored here rather than exposed to every role.
+// Available to every role on the backend (PATCH /auth/me is deliberately
+// self-only, see services/auth_service.py's update_identity() docstring),
+// but the legacy admin.html only ever surfaced it for the Super Admin's own
+// identity section -- every other role's name/email/username can instead
+// be fixed by a Super Admin OR a plain Admin via the User Directory's Edit
+// action. Mirrored here for BOTH full-admin tiers (not just the root
+// account) since a plain Admin has that same "nobody above me to fix it"
+// gap for their OWN row -- another Admin can edit them, but self-service
+// is still worth having, same as the Super Admin gets it.
 function UpdateIdentityCard({ profile, onUpdated }: { profile: ProfileDetail; onUpdated: (p: ProfileDetail) => void }) {
   const [name, setName] = useState(profile.name);
   const [email, setEmail] = useState(profile.email);
@@ -102,7 +109,7 @@ function UpdateIdentityCard({ profile, onUpdated }: { profile: ProfileDetail; on
         </div>
         <div>
           <h2 className="font-display text-[15px] font-medium text-text">Account details</h2>
-          <p className="text-[12.5px] text-text-muted mt-0.5">Root Super Admin only. Re-enter your password to confirm any change.</p>
+          <p className="text-[12.5px] text-text-muted mt-0.5">Re-enter your password to confirm any change.</p>
         </div>
       </div>
       <form onSubmit={submit} className="flex flex-col gap-3">
@@ -217,8 +224,14 @@ export function Profile() {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 max-w-3xl">
         {profile && <ChangePasswordCard userId={profile.id} />}
-        {profile && isTrueSuperAdmin(user?.role) && <UpdateIdentityCard profile={profile} onUpdated={setProfile} />}
-        <RecoveryCodesCard />
+        {profile && isFullAdmin(user?.role) && <UpdateIdentityCard profile={profile} onUpdated={setProfile} />}
+        {/* 2FA is Super-Admin-only end to end (see services/auth_service.py's
+            login() -- only role == SUPER_ADMIN_ROLE ever gets an mfa_required/
+            mfa_setup_required challenge in the first place), and
+            regenerate_recovery_codes() rejects anyone else server-side too --
+            so a plain Admin, despite being full-admin-equivalent everywhere
+            else, never sees this card. */}
+        {isTrueSuperAdmin(user?.role) && <RecoveryCodesCard />}
       </div>
     </div>
   );

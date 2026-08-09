@@ -87,7 +87,19 @@ applicationinsights_connection_string = ""
 
 # ---- Container images ------------------------------------------------
 dockerhub_backend_image  = "yourusername/snipeit-lite-backend"
-dockerhub_frontend_image = "yourusername/snipeit-lite-frontend"
+# MUST match whichever flavor frontend_build_target below names -- these
+# are two separate, mutually exclusive Docker Hub repos now (one per
+# frontend flavor, see frontend/Dockerfile's own top-of-file comment).
+# Use the "-legacy" repo for the default frontend_build_target = "legacy"
+# below, or the "-react" repo if you set frontend_build_target = "react".
+dockerhub_frontend_image = "yourusername/snipeit-lite-frontend-legacy"
+# Documentation only -- doesn't change what gets pulled, see this
+# variable's own description in variables.tf. Set to "react" if
+# dockerhub_frontend_image above is a client's React "Ledger" SPA build
+# (i.e. that Docker Hub image's paired GitHub Environment has
+# FRONTEND_BUILD_TARGET=react set) -- leave at the default ("legacy")
+# otherwise.
+# frontend_build_target   = "legacy"
 initial_image_tag        = "latest"
 # Only needed if the two repos above are PRIVATE:
 dockerhub_username = ""

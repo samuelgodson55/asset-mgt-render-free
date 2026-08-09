@@ -175,6 +175,16 @@ jobs:
       TF_VAR_applicationinsights_connection_string: ${{ secrets.APPLICATIONINSIGHTS_CONNECTION_STRING }}
       TF_VAR_dockerhub_backend_image: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend${{ inputs.environment == 'vm-staging' && '-staging' || '' }}
       TF_VAR_dockerhub_frontend_image: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-frontend${{ inputs.environment == 'vm-staging' && '-staging' || '' }}
+      # Same source as deploy-azure-vm.yml's resolve-target job reads to
+      # actually pick frontend/Dockerfile's --target when THAT Docker Hub
+      # image above gets built -- reading the identical Environment
+      # variable here means this only ever documents (infra-vm/
+      # variables.tf's frontend_build_target -- see its own description)
+      # what deploy-azure-vm.yml is already doing, and the two can't drift
+      # out of sync with each other by definition. Same fail-safe default:
+      # only the exact string "react" opts into the React SPA; anything
+      # else (including unset) resolves to "legacy".
+      TF_VAR_frontend_build_target: ${{ vars.FRONTEND_BUILD_TARGET == 'react' && 'react' || 'legacy' }}
       TF_VAR_dockerhub_username: ${{ secrets.DOCKERHUB_USERNAME }}
       TF_VAR_dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
 

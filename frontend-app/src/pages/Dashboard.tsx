@@ -2,13 +2,14 @@ import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 import { Boxes, PackageCheck, AlarmClockOff, TrendingDown, ArrowRight } from "lucide-react";
-import { api, relativeTime, formatDate } from "../lib/api";
+import { api, myItemsApi, relativeTime, formatDate } from "../lib/api";
 import { StatCard } from "../components/StatCard";
 import { StatusPill } from "../components/StatusPill";
-import type { Checkout, DashboardStats } from "../lib/types";
+import type { Checkout, DashboardStats, MyItem } from "../lib/types";
 import { Link } from "react-router-dom";
-import { useAuth } from "../lib/auth";
-import { useTheme } from "../lib/theme";
+import { useAuth } from "../lib/useAuth";
+import { useTheme } from "../lib/useTheme";
+import { isPrivileged } from "../lib/roles";
 
 // recharts needs literal color strings (SVG attrs, not the app's CSS
 // custom properties), so the two palettes are mirrored here by hand.
@@ -20,20 +21,42 @@ const CHART_COLORS = {
 export function Dashboard() {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [checkouts, setCheckouts] = useState<Checkout[]>([]);
-  const { user } = useAuth();
+  const [myItems, setMyItems] = useState<MyItem[]>([]);
+  const { user, demo, canSeeStock } = useAuth();
   const { theme } = useTheme();
   const chart = CHART_COLORS[theme];
   const firstName = user?.name?.trim().split(/\s+/)[0];
+  // Overdue/due-soon checkouts (system-wide) and the extension-request
+  // review queue are require_privileged_role on the backend -- a Staff/
+  // Customer session sees their OWN items in "Needs attention" instead
+  // (see lib/api.ts's loadStats()/loadCheckouts() for why this can't just
+  // attempt the privileged endpoints and let a 403 fall through to mock
+  // data).
+  const privileged = demo || isPrivileged(user?.role);
 
   useEffect(() => {
-    api.getStats().then(setStats);
-    api.getCheckouts().then(setCheckouts);
-  }, []);
+    api.getStats(privileged).then(setStats);
+    if (privileged) {
+      api.getCheckouts(privileged).then(setCheckouts);
+    } else {
+      myItemsApi.list().then((d) => setMyItems(d.assigned_items)).catch(() => setMyItems([]));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [privileged]);
 
-  const attention = checkouts
-    .filter((c) => c.status === "overdue" || (new Date(c.due_at).getTime() - Date.now()) / 86400000 <= 2)
-    .sort((a, b) => new Date(a.due_at).getTime() - new Date(b.due_at).getTime())
-    .slice(0, 5);
+  const attention = privileged
+    ? checkouts
+        .filter((c) => c.status === "overdue" || (new Date(c.due_at).getTime() - Date.now()) / 86400000 <= 2)
+        .sort((a, b) => new Date(a.due_at).getTime() - new Date(b.due_at).getTime())
+        .slice(0, 5)
+    : [];
+
+  const myAttention = privileged
+    ? []
+    : myItems
+        .filter((i) => i.overdue || i.due_soon)
+        .sort((a, b) => new Date(a.due_date).getTime() - new Date(b.due_date).getTime())
+        .slice(0, 5);
 
   return (
     <div>
@@ -43,11 +66,22 @@ export function Dashboard() {
         <p className="text-text-muted text-sm mt-1">Here's what the ledger looks like this morning.</p>
       </motion.div>
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+      {/* "Available now" and "Low stock pools" both surface real-time stock
+          levels -- gated behind canSeeStock the same way the Quotation
+          Catalog already gates available_quantity/status for a Staff/
+          Customer session (see lib/roles.ts's canSeeStock()). Grid columns
+          adapt to however many cards actually render so a Staff/Customer
+          session without the flag doesn't end up with lopsided empty
+          space. */}
+      <div className={`grid grid-cols-2 gap-3 mb-6 ${canSeeStock ? "md:grid-cols-4" : "md:grid-cols-2"}`}>
         <StatCard index={0} label="Total pooled units" value={stats?.total_assets ?? "—"} icon={Boxes} accent="sky" hint="Across all categories" />
-        <StatCard index={1} label="Available now" value={stats?.available ?? "—"} icon={PackageCheck} accent="moss" hint="Ready to check out" />
-        <StatCard index={2} label="Overdue returns" value={stats?.overdue ?? "—"} icon={AlarmClockOff} accent="rust" hint="Needs follow-up" />
-        <StatCard index={3} label="Low stock pools" value={stats?.low_stock ?? "—"} icon={TrendingDown} accent="brass" hint="Below 25% available" />
+        {canSeeStock && (
+          <StatCard index={1} label="Available now" value={stats?.available ?? "—"} icon={PackageCheck} accent="moss" hint="Ready to check out" />
+        )}
+        <StatCard index={2} label={privileged ? "Overdue returns" : "Your overdue items"} value={stats?.overdue ?? "—"} icon={AlarmClockOff} accent="rust" hint={privileged ? "Needs follow-up" : "Return these first"} />
+        {canSeeStock && (
+          <StatCard index={3} label="Low stock pools" value={stats?.low_stock ?? "—"} icon={TrendingDown} accent="brass" hint="Below 25% available" />
+        )}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
@@ -99,26 +133,51 @@ export function Dashboard() {
           className="lg:col-span-2 border border-border-soft bg-surface rounded-[3px] p-5 flex flex-col"
         >
           <div className="flex items-center justify-between mb-3">
-            <h2 className="font-display text-[15px] font-medium text-text">Needs attention</h2>
-            <Link to="/checkouts" className="text-[11px] text-brass-soft flex items-center gap-1 hover:gap-1.5 transition-all">
-              View all <ArrowRight size={11} />
-            </Link>
+            <h2 className="font-display text-[15px] font-medium text-text">{privileged ? "Needs attention" : "Your items needing attention"}</h2>
+            {privileged && (
+              <Link to="/checkouts" className="text-[11px] text-brass-soft flex items-center gap-1 hover:gap-1.5 transition-all">
+                View all <ArrowRight size={11} />
+              </Link>
+            )}
+            {!privileged && (
+              <Link to="/my-items" className="text-[11px] text-brass-soft flex items-center gap-1 hover:gap-1.5 transition-all">
+                My Items <ArrowRight size={11} />
+              </Link>
+            )}
           </div>
-          <div className="flex flex-col divide-y divide-border-soft">
-            {attention.length === 0 && <p className="text-[12px] text-text-faint py-6 text-center">Nothing overdue. Ledger's clean.</p>}
-            {attention.map((c) => (
-              <div key={c.id} className="py-2.5 flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="text-[12.5px] text-text truncate">{c.asset_name}</p>
-                  <p className="text-[11px] text-text-faint font-mono truncate">{c.tag} · {c.checked_out_to}</p>
+          {privileged ? (
+            <div className="flex flex-col divide-y divide-border-soft">
+              {attention.length === 0 && <p className="text-[12px] text-text-faint py-6 text-center">Nothing overdue. Ledger's clean.</p>}
+              {attention.map((c) => (
+                <div key={c.id} className="py-2.5 flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-[12.5px] text-text truncate">{c.asset_name}</p>
+                    <p className="text-[11px] text-text-faint font-mono truncate">{c.tag} · {c.checked_out_to}</p>
+                  </div>
+                  <div className="text-right shrink-0">
+                    <StatusPill status={c.status === "overdue" ? "overdue" : "active"} />
+                    <p className="text-[10px] text-text-faint mt-0.5">{relativeTime(c.due_at)}</p>
+                  </div>
                 </div>
-                <div className="text-right shrink-0">
-                  <StatusPill status={c.status === "overdue" ? "overdue" : "active"} />
-                  <p className="text-[10px] text-text-faint mt-0.5">{relativeTime(c.due_at)}</p>
+              ))}
+            </div>
+          ) : (
+            <div className="flex flex-col divide-y divide-border-soft">
+              {myAttention.length === 0 && <p className="text-[12px] text-text-faint py-6 text-center">Nothing of yours is overdue or due soon.</p>}
+              {myAttention.map((i) => (
+                <div key={i.checkout_id} className="py-2.5 flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-[12.5px] text-text truncate">{i.asset_name}</p>
+                    <p className="text-[11px] text-text-faint font-mono truncate">qty {i.quantity}</p>
+                  </div>
+                  <div className="text-right shrink-0">
+                    <StatusPill status={i.overdue ? "overdue" : "active"} />
+                    <p className="text-[10px] text-text-faint mt-0.5">{relativeTime(i.due_date)}</p>
+                  </div>
                 </div>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
         </motion.div>
       </div>
 

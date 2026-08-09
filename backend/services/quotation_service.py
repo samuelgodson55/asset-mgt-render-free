@@ -69,9 +69,18 @@ from schemas.quotations_schema import (
 )
 import services.export_service as export_service
 from services.stock import recalculate_asset_stock
+from services.search_utils import apply_search_filter
 
 VAT_SETTING_KEY = "vat_percent"
 _DEFAULT_VAT_PERCENT = Decimal("0")
+
+# Pagination defaults for list_catalog() -- CATALOG_DEFAULT_LIMIT is
+# deliberately generous (not the small page size the UI defaults to) so
+# any caller that omits limit/offset entirely still gets the full active
+# catalog in one response, same as list_catalog()'s pre-pagination
+# behavior. Mirrors services/asset_service.py's DEFAULT_LIMIT/MAX_LIMIT.
+CATALOG_DEFAULT_LIMIT = 500
+CATALOG_MAX_LIMIT = 1000
 
 TWO_PLACES = Decimal("0.01")
 
@@ -168,7 +177,7 @@ def set_vat_percent(db: Session, payload: VatUpdateRequest, user: dict) -> dict:
 # ---------------------------------------------------------------------------
 # Asset Catalog (read-only, for building a Quotation)
 # ---------------------------------------------------------------------------
-def list_catalog(db: Session, user: dict) -> dict:
+def list_catalog(db: Session, user: dict, limit: int = CATALOG_DEFAULT_LIMIT, offset: int = 0, search: Optional[str] = None) -> dict:
     """
     Every active (non-soft-deleted) asset pool, shaped for the self-
     service Quotation Catalog. Name/category/price are always
@@ -177,16 +186,34 @@ def list_catalog(db: Session, user: dict) -> dict:
     is a Manager/Admin/Super Admin (whose own Asset Inventory view
     already shows full stock detail today, so hiding it here would be a
     downgrade for them, not a privacy boundary).
+
+    PAGINATION + SEARCH -- same true server-side `limit`/`offset`/`search`
+    contract as services/asset_service.py's list_assets() (which the Asset
+    Inventory page, User/Ad-Hoc directories, and Audit Trail already use):
+    `search` narrows to pools whose name OR category contains it
+    (case-insensitive), applied and counted BEFORE the offset/limit slice
+    so `total` always reflects the filtered set. `limit`/`offset` default
+    to the historical "return everything" behavior (CATALOG_DEFAULT_LIMIT
+    is generous enough to cover any realistic catalog in one page) so
+    existing callers that never passed pagination params -- the Admin/
+    Manager Quote Detail drawer's "Add another asset" typeahead, which
+    needs the FULL catalog client-side to search against -- keep working
+    unchanged; only the Quotations page's own browsable catalog table
+    passes real limit/offset/search to get a true paged, server-searched
+    view (mirrors PaginationBar's "Asset Inventory, User Directory, ...,
+    Quotations" doc comment in lib/pagination.ts).
     """
     full_admin_roles = ("super_admin", "admin", "manager")
     show_stock = user["role"] in full_admin_roles or settings.CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER
 
-    pools = (
-        db.query(models.AssetType)
-        .filter(~models.AssetType.is_deleted)
-        .order_by(models.AssetType.name)
-        .all()
-    )
+    limit = max(1, min(limit, CATALOG_MAX_LIMIT))
+    offset = max(0, offset)
+
+    query = db.query(models.AssetType).filter(~models.AssetType.is_deleted)
+    query = apply_search_filter(query, search, [models.AssetType.name, models.AssetType.category])
+    query = query.order_by(models.AssetType.name)
+    total = query.count()
+    pools = query.offset(offset).limit(limit).all()
 
     items = []
     for p in pools:
@@ -201,7 +228,14 @@ def list_catalog(db: Session, user: dict) -> dict:
             entry["status"] = _inventory_status_label(p.available_quantity)
         items.append(entry)
 
-    return {"items": items, "show_stock": show_stock, "currency_code": settings.CURRENCY_CODE}
+    return {
+        "items": items,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "show_stock": show_stock,
+        "currency_code": settings.CURRENCY_CODE,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -924,7 +958,20 @@ def admin_create_quotation(db: Session, actor: dict, payload: QuotationCreateReq
 
 def assign_quotation(db: Session, actor: dict, quotation_id: int, payload: QuotationAssignRequest) -> dict:
     quotation = _get_quotation_or_404(db, quotation_id)
-    _ensure_admin_editable(quotation)
+    # A Manager/Admin may assign their OWN still-draft cart -- the
+    # collated "My Order" quote they're actively building via the
+    # Quotations page's "Add to quote" action (including from the
+    # Inventory page's Asset Drawer) -- to a user right away, without
+    # waiting for Submit first. This is their own in-progress request,
+    # not a stranger's, so the "don't let an admin edit someone else's
+    # still-in-progress cart" concern _ensure_admin_editable() guards
+    # against below doesn't apply to it. Any other draft (nobody else's
+    # cart should ever reach this endpoint, but guard anyway) still goes
+    # through the normal admin-editable gate, same as every submitted/
+    # approved/fulfilled quote.
+    is_own_draft = quotation.status == "draft" and quotation.user_id == int(actor["sub"])
+    if not is_own_draft:
+        _ensure_admin_editable(quotation)
     # A customer/staff account's OWN self-submitted request (built via
     # their own "My Order" cart, see models.py's Quotation docstring) is
     # never reassignable by an Admin/Manager -- who the equipment goes to

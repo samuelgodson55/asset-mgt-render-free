@@ -1,11 +1,30 @@
 import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { ArrowRight, Lock, AlertCircle, ShieldCheck, KeyRound, Download, Check, ScanLine, Boxes, Radar } from "lucide-react";
+import {
+  ArrowRight, ArrowLeft, Lock, AlertCircle, ShieldCheck, KeyRound, Download, Check, ScanLine, Boxes, Radar,
+  ClipboardList, MailCheck,
+} from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import QRCode from "qrcode";
-import { useAuth } from "../lib/auth";
-import { ApiError } from "../lib/api";
+import { useAuth } from "../lib/useAuth";
+import { ApiError, auth as authApi } from "../lib/api";
 import { ThemeToggle } from "../components/ThemeToggle";
+
+/** Reads (and, once read, strips) `?reset_token=...` off the current URL --
+ * the query param a "forgot password?" email link lands on. Read synchronously
+ * on first render so a hard refresh of the link goes straight to the reset
+ * screen instead of flashing the login form first. */
+function readAndStripResetToken(): string | null {
+  if (typeof window === "undefined") return null;
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get("reset_token");
+  if (token) {
+    params.delete("reset_token");
+    const qs = params.toString();
+    window.history.replaceState({}, "", window.location.pathname + (qs ? `?${qs}` : ""));
+  }
+  return token;
+}
 
 const CARD_TRANSITION = { duration: 0.35, ease: [0.16, 1, 0.3, 1] as const };
 
@@ -65,7 +84,13 @@ function StepIndicator({ active }: { active: (typeof STEPS)[number]["key"] }) {
 }
 
 /** POST /auth/login form -- plain identifier/password, no 2FA state involved. */
-function LoginForm({ onSwitchToDemo }: { onSwitchToDemo: () => void }) {
+function LoginForm({
+  onSwitchToDemo,
+  onForgotPassword,
+}: {
+  onSwitchToDemo: () => void;
+  onForgotPassword: () => void;
+}) {
   const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -105,7 +130,16 @@ function LoginForm({ onSwitchToDemo }: { onSwitchToDemo: () => void }) {
           />
         </label>
         <label className="block">
-          <span className="text-[11px] uppercase tracking-wider text-text-faint">Password</span>
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] uppercase tracking-wider text-text-faint">Password</span>
+            <button
+              type="button"
+              onClick={onForgotPassword}
+              className="text-[11px] text-brass-soft hover:text-brass transition-colors"
+            >
+              Forgot password?
+            </button>
+          </div>
           <input
             type="password"
             autoComplete="current-password"
@@ -144,6 +178,201 @@ function LoginForm({ onSwitchToDemo }: { onSwitchToDemo: () => void }) {
         Continue with demo data
       </button>
       <p className="text-[11px] text-text-faint text-center mt-3">Real sign-in hits the live backend; demo data needs no account.</p>
+    </>
+  );
+}
+
+/** POST /auth/forgot-password screen -- collects an email or username and always shows the same generic confirmation, whether or not it matched an account (see lib/api.ts's auth.forgotPassword). */
+function ForgotPasswordForm({ onBack }: { onBack: () => void }) {
+  const [identifier, setIdentifier] = useState("");
+  const [sentTo, setSentTo] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  if (sentTo) {
+    return (
+      <>
+        <div className="flex items-center gap-2 text-moss-soft mb-2">
+          <MailCheck size={16} />
+          <span className="text-[11px] uppercase tracking-wider">Check your inbox</span>
+        </div>
+        <h1 className="font-display text-[26px] font-semibold text-text leading-tight">Reset link sent</h1>
+        <p className="text-[13.5px] text-text-muted mt-2 mb-7">
+          If <span className="text-text">{sentTo}</span> matches an account, we've emailed a link to reset the
+          password. It expires soon, so use it shortly after it arrives.
+        </p>
+        <button
+          type="button"
+          onClick={onBack}
+          className="w-full flex items-center justify-center gap-2 bg-gradient-to-b from-brass-soft to-brass hover:brightness-110 text-ink font-semibold text-[13.5px] rounded-[4px] py-3 transition-all shadow-[0_1px_0_0_rgba(255,255,255,0.25)_inset,0_8px_20px_-10px_var(--color-brass)] group"
+        >
+          <ArrowLeft size={13} className="group-hover:-translate-x-0.5 transition-transform" />
+          Back to sign in
+        </button>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={onBack}
+        className="flex items-center gap-1.5 text-[12px] text-text-faint hover:text-text mb-6 transition-colors"
+      >
+        <ArrowLeft size={13} />
+        Back to sign in
+      </button>
+      <h1 className="font-display text-[26px] font-semibold text-text leading-tight">Reset your password</h1>
+      <p className="text-[13.5px] text-text-muted mt-2 mb-7">
+        Enter the email or username on your account and we'll send you a link to set a new password.
+      </p>
+
+      <form
+        onSubmit={async (e) => {
+          e.preventDefault();
+          setError(null);
+          setSubmitting(true);
+          try {
+            await authApi.forgotPassword(identifier.trim());
+            setSentTo(identifier.trim());
+          } catch (err) {
+            setError(errorMessage(err, "Couldn't reach the server. Try again."));
+          } finally {
+            setSubmitting(false);
+          }
+        }}
+        className="flex flex-col gap-4"
+      >
+        <label className="block">
+          <span className="text-[11px] uppercase tracking-wider text-text-faint">Email or Username</span>
+          <input
+            type="text"
+            autoComplete="username"
+            autoFocus
+            value={identifier}
+            onChange={(e) => setIdentifier(e.target.value)}
+            placeholder="you@organization.com or username"
+            className="w-full mt-1.5 bg-ink-soft border border-border-soft rounded-[4px] px-3.5 py-3 text-[13.5px] text-text placeholder:text-text-faint focus:border-brass focus:ring-2 focus:ring-brass/15 focus:outline-none transition-all"
+          />
+        </label>
+
+        {error && <ErrorBanner message={error} />}
+
+        <button
+          type="submit"
+          disabled={submitting || !identifier.trim()}
+          className="mt-2 flex items-center justify-center gap-2 bg-gradient-to-b from-brass-soft to-brass hover:brightness-110 disabled:opacity-60 text-ink font-semibold text-[13.5px] rounded-[4px] py-3 transition-all shadow-[0_1px_0_0_rgba(255,255,255,0.25)_inset,0_8px_20px_-10px_var(--color-brass)] group"
+        >
+          <MailCheck size={13} />
+          {submitting ? "Sending…" : "Send reset link"}
+          <ArrowRight size={13} className="group-hover:translate-x-0.5 transition-transform" />
+        </button>
+      </form>
+    </>
+  );
+}
+
+/** POST /auth/reset-password screen -- reached via the emailed link's ?reset_token=... query param (see readAndStripResetToken above). Sets a new password; doesn't grant a session, so the person signs in normally afterward. */
+function ResetPasswordForm({ token, onDone }: { token: string; onDone: () => void }) {
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [done, setDone] = useState(false);
+
+  if (done) {
+    return (
+      <>
+        <div className="flex items-center gap-2 text-moss-soft mb-2">
+          <Check size={16} />
+          <span className="text-[11px] uppercase tracking-wider">Password updated</span>
+        </div>
+        <h1 className="font-display text-[26px] font-semibold text-text leading-tight">You're all set</h1>
+        <p className="text-[13.5px] text-text-muted mt-2 mb-7">
+          Your password has been changed. Sign in with it below.
+        </p>
+        <button
+          type="button"
+          onClick={onDone}
+          className="w-full flex items-center justify-center gap-2 bg-gradient-to-b from-brass-soft to-brass hover:brightness-110 text-ink font-semibold text-[13.5px] rounded-[4px] py-3 transition-all shadow-[0_1px_0_0_rgba(255,255,255,0.25)_inset,0_8px_20px_-10px_var(--color-brass)] group"
+        >
+          Continue to sign in
+          <ArrowRight size={13} className="group-hover:translate-x-0.5 transition-transform" />
+        </button>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <div className="flex items-center gap-2 text-brass-soft mb-2">
+        <KeyRound size={16} />
+        <span className="text-[11px] uppercase tracking-wider">Password recovery</span>
+      </div>
+      <h1 className="font-display text-[26px] font-semibold text-text leading-tight">Choose a new password</h1>
+      <p className="text-[13.5px] text-text-muted mt-2 mb-7">Use at least 8 characters, ideally a passphrase you don't reuse elsewhere.</p>
+
+      <form
+        onSubmit={async (e) => {
+          e.preventDefault();
+          setError(null);
+          if (password.length < 8) {
+            setError("Password must be at least 8 characters.");
+            return;
+          }
+          if (password !== confirm) {
+            setError("Passwords don't match.");
+            return;
+          }
+          setSubmitting(true);
+          try {
+            await authApi.resetPassword(token, password);
+            setDone(true);
+          } catch (err) {
+            setError(errorMessage(err, "This reset link is invalid or has expired."));
+          } finally {
+            setSubmitting(false);
+          }
+        }}
+        className="flex flex-col gap-4"
+      >
+        <label className="block">
+          <span className="text-[11px] uppercase tracking-wider text-text-faint">New password</span>
+          <input
+            type="password"
+            autoComplete="new-password"
+            autoFocus
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder="••••••••"
+            className="w-full mt-1.5 bg-ink-soft border border-border-soft rounded-[4px] px-3.5 py-3 text-[13.5px] text-text placeholder:text-text-faint focus:border-brass focus:ring-2 focus:ring-brass/15 focus:outline-none transition-all"
+          />
+        </label>
+        <label className="block">
+          <span className="text-[11px] uppercase tracking-wider text-text-faint">Confirm password</span>
+          <input
+            type="password"
+            autoComplete="new-password"
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
+            placeholder="••••••••"
+            className="w-full mt-1.5 bg-ink-soft border border-border-soft rounded-[4px] px-3.5 py-3 text-[13.5px] text-text placeholder:text-text-faint focus:border-brass focus:ring-2 focus:ring-brass/15 focus:outline-none transition-all"
+          />
+        </label>
+
+        {error && <ErrorBanner message={error} />}
+
+        <button
+          type="submit"
+          disabled={submitting}
+          className="mt-2 flex items-center justify-center gap-2 bg-gradient-to-b from-brass-soft to-brass hover:brightness-110 disabled:opacity-60 text-ink font-semibold text-[13.5px] rounded-[4px] py-3 transition-all shadow-[0_1px_0_0_rgba(255,255,255,0.25)_inset,0_8px_20px_-10px_var(--color-brass)] group"
+        >
+          <Lock size={13} />
+          {submitting ? "Updating…" : "Update password"}
+          <ArrowRight size={13} className="group-hover:translate-x-0.5 transition-transform" />
+        </button>
+      </form>
     </>
   );
 }
@@ -406,15 +635,18 @@ function RecoveryCodesScreen({ codes }: { codes: string[] }) {
   );
 }
 
+// Real product capabilities, not placeholder copy -- each one maps to an
+// actual page in the app (Assets, Checkouts, Notifications, and this very
+// login flow's own 2FA screens above) rather than invented marketing stats.
+const VALUE_PROPS = [
+  { icon: Boxes, title: "Full inventory visibility", desc: "Quantities, categories, and condition tracked across every pool." },
+  { icon: ScanLine, title: "Tag-level tracking", desc: "Every unit gets its own ID, from checkout to return." },
+  { icon: ClipboardList, title: "Overdue alerts, automatically", desc: "Reminders fire before — and after — a due date passes." },
+  { icon: ShieldCheck, title: "2FA-secured accounts", desc: "Admin and manager logins are protected by two-factor auth." },
+] as const;
+
 /** Left brand panel -- always the dark palette regardless of the active theme, so the app has one confident visual anchor rather than washing out to match light mode. Purely decorative; hidden below lg. */
 function BrandPanel() {
-  const tags = [
-    { rot: -8, x: -120, y: -140, delay: 0.15, cat: "OPT-0114", label: "Vortex Diamondback HD" },
-    { rot: 5, x: 140, y: -40, delay: 0.3, cat: "PWR-0087", label: "EcoFlow Delta Pro" },
-    { rot: -5, x: -80, y: 160, delay: 0.45, cat: "NET-0203", label: "Cradlepoint IBR900" },
-    { rot: 9, x: 150, y: 190, delay: 0.6, cat: "FAB-0031", label: "Prusa MK4S" },
-  ];
-
   return (
     <div className="relative hidden lg:flex flex-col justify-between w-[46%] shrink-0 overflow-hidden bg-[#0F1219] px-12 py-12">
       <div
@@ -440,17 +672,22 @@ function BrandPanel() {
         </svg>
       </div>
 
-      <div className="relative z-10 pointer-events-none">
-        {tags.map((t, i) => (
+      <div className="relative z-10 flex flex-col gap-4 max-w-sm">
+        {VALUE_PROPS.map((v, i) => (
           <motion.div
-            key={i}
-            initial={{ opacity: 0, x: t.x, y: t.y + 24, rotate: t.rot }}
-            animate={{ opacity: 0.9, y: t.y }}
-            transition={{ duration: 1, delay: t.delay, ease: [0.16, 1, 0.3, 1] }}
-            className="absolute left-1/2 top-0 tag-notch bg-[#1A1E28] border border-[#2A2F3E] px-4 py-2.5 pr-6 shadow-lg shadow-black/30"
+            key={v.title}
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.5, delay: 0.1 + i * 0.08, ease: [0.16, 1, 0.3, 1] }}
+            className="flex items-start gap-3 bg-[#1A1E28]/70 border border-[#2A2F3E] rounded-[5px] px-4 py-3"
           >
-            <p className="font-mono text-[9.5px] text-[#E8C878]/80 tracking-widest">{t.cat}</p>
-            <p className="text-[11px] text-[#EDEFF4] mt-0.5 whitespace-nowrap">{t.label}</p>
+            <div className="shrink-0 w-7 h-7 rounded-[4px] bg-[#20253359] border border-[#2A2F3E] flex items-center justify-center text-[#E8C878]">
+              <v.icon size={14} />
+            </div>
+            <div className="min-w-0">
+              <p className="text-[12.5px] font-medium text-[#EDEFF4] leading-tight">{v.title}</p>
+              <p className="text-[11.5px] text-[#8B93A7] mt-0.5 leading-snug">{v.desc}</p>
+            </div>
           </motion.div>
         ))}
       </div>
@@ -479,6 +716,14 @@ export function Login() {
   const { user, mfaChallenge, recoveryCodes, continueAsDemo } = useAuth();
   const navigate = useNavigate();
 
+  // A "forgot password?" email link lands here as .../login?reset_token=...
+  // Read (and strip) it once up front so a hard refresh of that link goes
+  // straight to the reset screen. `forgotOpen` is separate local UI state
+  // for the in-flow "Forgot password?" link -- neither of these touch
+  // AuthContext since resetting a password never issues a session.
+  const [resetToken, setResetToken] = useState(() => readAndStripResetToken());
+  const [forgotOpen, setForgotOpen] = useState(false);
+
   // Navigate once a real session actually exists -- covers plain login,
   // mfa/verify, and mfa/setup/confirm alike. Held back while recoveryCodes
   // is showing so that one-time screen isn't skipped past.
@@ -490,6 +735,8 @@ export function Login() {
   if (recoveryCodes) screenKey = "recovery";
   else if (mfaChallenge?.kind === "verify") screenKey = "mfa-verify";
   else if (mfaChallenge?.kind === "setup") screenKey = "mfa-setup";
+  else if (resetToken) screenKey = "reset-password";
+  else if (forgotOpen) screenKey = "forgot-password";
 
   return (
     <div className="min-h-screen flex bg-ink">
@@ -524,7 +771,12 @@ export function Login() {
                   continueAsDemo();
                   navigate("/");
                 }}
+                onForgotPassword={() => setForgotOpen(true)}
               />
+            )}
+            {screenKey === "forgot-password" && <ForgotPasswordForm onBack={() => setForgotOpen(false)} />}
+            {screenKey === "reset-password" && resetToken && (
+              <ResetPasswordForm token={resetToken} onDone={() => setResetToken(null)} />
             )}
             {screenKey === "mfa-verify" && <MfaVerifyScreen />}
             {screenKey === "mfa-setup" && mfaChallenge?.kind === "setup" && (

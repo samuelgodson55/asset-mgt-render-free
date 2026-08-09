@@ -1,29 +1,37 @@
 # .github/workflows/release.yml
 # -----------------------------------------------------------------------------
-# THE trigger for production releases: `git tag v1.x.x && git push origin
-# v1.x.x` (annotated or lightweight, either works -- `--sort=-creatordate`
-# downstream in DEPLOYMENT_VM.md's rollback runbook relies on tag creation
-# date, which both kinds have). Pushing a tag matching `v*.*.*` is now the
-# ONLY path to a production deploy, and this file is the ONLY thing that tag
-# triggers -- neither `deploy-azure-vm.yml` nor `deploy-azure-aca.yml` has
-# its own `push` trigger anymore; both are reusable workflows THIS one calls
-# at the end (in parallel with each other), same as it always called
-# `ci.yml`/`build-push-images.yml`. A version tag now deploys to BOTH
-# targets every time -- there's no picking one deploy target over the other
-# via a tag push; each target is still also fully usable on its own via its
-# own `workflow_dispatch` entry point, independent of a tag push.
+# THE trigger for cutting a production-grade RELEASE ARTIFACT: `git tag
+# v1.x.x && git push origin v1.x.x` (annotated or lightweight, either works
+# -- `--sort=-creatordate` downstream in DEPLOYMENT_VM.md's rollback runbook
+# relies on tag creation date, which both kinds have). Pushing a tag
+# matching `v*.*.*` is the ONLY thing this file reacts to, and this file is
+# the ONLY thing that tag triggers.
+#
+# IMPORTANT: pushing a version tag builds and publishes the official
+# release images -- it does NOT deploy anything. Neither `deploy-azure-vm.yml`
+# nor `deploy-azure-aca.yml` is called from here (neither has a `push`
+# trigger, and neither is invoked via `uses:` below). Actually rolling a
+# version out to production is a deliberate, separate, manual step: open
+# "Deploy to VM" or "Deploy to ACA" in the Actions tab (`workflow_dispatch`),
+# pick `prod`/`production`, choose which frontend to ship (`react` or
+# `legacy`), and paste the version tag (e.g. `v1.4.2`) into that run's
+# `image_tag` input -- it will pull the exact backend + frontend images
+# this workflow already built and Trivy-scanned rather than rebuilding
+# anything. Run either or both, whenever you choose to.
 #
 # What happens on `git push origin vX.Y.Z`:
 #   1. `ci`          -- re-runs the same fast gate as every push (lint, tests,
 #                       image build + Trivy scan, bicep validate). Reused via
 #                       `uses: ./.github/workflows/ci.yml`, NOT copy-pasted.
-#   2. `build-push`  -- builds BOTH images and pushes each to Docker Hub
-#                       tagged with the VERSION itself (e.g. `:v1.4.2`), not
-#                       just a commit SHA -- this is what makes a version tag
-#                       a real, independently-pullable release artifact.
-#                       Also tags `:latest` and `:<sha>` on the same images
-#                       for convenience/traceability. Trivy scan is blocking
-#                       on CRITICAL, same bar as the old production pipeline.
+#   2. `build-push`  -- builds backend + BOTH frontend flavors (react and
+#                       legacy) and pushes each to Docker Hub, under three
+#                       separate repo names, tagged with the VERSION itself
+#                       (e.g. `:v1.4.2`), not just a commit SHA -- this is
+#                       what makes a version tag a real, independently-
+#                       pullable release artifact. Also tags `:latest` and
+#                       `:<sha>` on the same images for convenience/
+#                       traceability. Trivy scan is blocking on CRITICAL,
+#                       same bar as the old production pipeline.
 #   3. `changelog`   -- diffs this tag against the previous one
 #                       (`git tag --sort=-creatordate`) and inserts a new
 #                       "## [vX.Y.Z] - <date>" section into CHANGELOG.md,
@@ -31,22 +39,12 @@
 #                       (never pushes to `main` directly -- see that job's
 #                       comments), and cuts a GitHub Release with the same
 #                       notes.
-#   4. `deploy`      -- calls deploy-azure-vm.yml (workflow_call entry point,
-#                       always prod) with `image_tag: vX.Y.Z` to actually
-#                       roll the already-built images out to the VM over
-#                       SSH (migrate -> blue-green rollout -> smoke test ->
-#                       auto-rollback).
-#   5. `deploy-aca`  -- calls deploy-azure-aca.yml (workflow_call entry
-#                       point, always production) with the same
-#                       `image_tag: vX.Y.Z`, rolling the same already-built
-#                       images out to Azure Container Apps (migrate ->
-#                       blue-green canary ramp -> smoke test ->
-#                       auto-rollback). Runs in parallel with `deploy`
-#                       (both only depend on `build-push`) and with
-#                       `changelog` -- a docs PR waiting on human review, or
-#                       one deploy target taking longer than the other,
-#                       shouldn't hold up shipping an already-built, already
-#                       Trivy-scanned release to either target.
+#
+# That's it -- this workflow's job is done once the images are published and
+# the changelog PR/GitHub Release are cut. No deploy job runs from here, to
+# either target, ever. Deploying (to the VM, to ACA, or both) always happens
+# from that target's own workflow, on its own workflow_dispatch, at a time
+# and to an environment you choose explicitly.
 #
 # `changelog` opens a PR rather than committing straight to `main` because
 # this repo's `main` only ever changes via reviewed pull request (feature
@@ -71,33 +69,53 @@ jobs:
     uses: ./.github/workflows/ci.yml
 
   build-push:
-    name: Build + tag + push both images
+    name: Build + tag + push backend + both frontend images
     needs: [ci]
     permissions:
       contents: read
     # Delegates to build-push-images.yml -- the single source of truth for
-    # how the backend/frontend images actually get built, shared with
-    # deploy-azure-vm.yml and deploy-azure-aca.yml's fresh-build path, so
-    # "the shared image" is genuinely the same artifact no matter which of
-    # those pipelines built it. See that file's own top-of-file comment for
-    # the full "why".
+    # how every image actually gets built, shared with deploy-azure-vm.yml
+    # and deploy-azure-aca.yml's fresh-build path, so "the shared image" is
+    # genuinely the same artifact no matter which of those pipelines built
+    # it. See that file's own top-of-file comment for the full "why".
+    #
+    # A GIT TAG PUSH BUILDS BOTH FRONTEND FLAVORS, ALWAYS -- unlike the
+    # per-environment deploy workflows (which build exactly ONE frontend
+    # flavor per run, chosen by that run's `frontend_type` input/Environment
+    # variable), a version tag is meant to be a complete, immutable release
+    # artifact set: `snipeit-lite-frontend-react:vX.Y.Z` AND
+    # `snipeit-lite-frontend-legacy:vX.Y.Z` both get built, Trivy-scanned,
+    # and pushed together, under their own separate Docker Hub repo names
+    # (see frontend/Dockerfile's own top-of-file comment for why there are
+    # two mutually exclusive frontend images at all -- the old combined
+    # `frontend-final` target has been removed). Whichever flavor a given
+    # environment actually deploys is decided later, at deploy time, by
+    # that "Deploy to VM"/"Deploy to ACA" run's own frontend_type
+    # input/Environment variable -- see those workflows' own comments.
     #
     # image_tags: three tags on the same build -- VERSION (the real release
-    # artifact, e.g. v1.4.2 -- what the `deploy` job below hands to
-    # deploy-azure-vm.yml to pull), the commit SHA (traceability back to
-    # exactly what was built), and `latest` (convenience for anyone pulling
-    # without pinning a version).
+    # artifact, e.g. v1.4.2 -- what a later "Deploy to VM"/"Deploy to ACA"
+    # run hands to build-push-images.yml's own image_tags to pull), the
+    # commit SHA (traceability back to exactly what was built), and
+    # `latest` (convenience for anyone pulling without pinning a version).
     #
     # BUILD_ENV=production is what makes frontend/Dockerfile's BUILD_ENV
-    # build-arg actually obfuscate (not just minify) the shipped JS -- see
-    # that Dockerfile's own comment. Previously this workflow's own build
-    # step forgot to pass it at all (see git history / CHANGELOG); now it's
-    # set once, here, and every caller of build-push-images.yml inherits the
+    # build-arg actually obfuscate (not just minify) the legacy-only
+    # image's shipped JS -- see that Dockerfile's own comment (it has no
+    # effect on the react-only image's Vite build, which is always a real
+    # production build regardless -- see build-push-images.yml's own
+    # build_env input comment). Previously this workflow's own build step
+    # forgot to pass it at all (see git history / CHANGELOG); now it's set
+    # once, here, and every caller of build-push-images.yml inherits the
     # same "don't forget this again" guarantee.
     uses: ./.github/workflows/build-push-images.yml
     with:
-      backend_image_name: snipeit-lite-backend
-      frontend_image_name: snipeit-lite-frontend
+      build_matrix: |
+        [
+          {"service":"backend","dockerfile":"backend/Dockerfile","context":"backend","image_name":"snipeit-lite-backend"},
+          {"service":"frontend-react","dockerfile":"frontend/Dockerfile","context":".","target":"frontend-react-only","image_name":"snipeit-lite-frontend-react"},
+          {"service":"frontend-legacy","dockerfile":"frontend/Dockerfile","context":".","target":"frontend-legacy-only","image_name":"snipeit-lite-frontend-legacy"}
+        ]
       image_tags: ${{ github.ref_name }} ${{ github.sha }} latest
       version_label: ${{ github.ref_name }}
       build_env: production
@@ -196,68 +214,12 @@ jobs:
             --title "${{ github.ref_name }}" \
             --notes "${{ steps.notes.outputs.notes }}"
 
-  deploy:
-    name: Deploy this version to the VM (Production)
-    needs: [build-push] # not `changelog` -- a changelog PR awaiting review shouldn't hold up shipping an already-built, already-scanned release
-    permissions:
-      contents: read
-      # No `id-token: write` here -- unlike the ACA path, deploy-azure-vm.yml
-      # never calls `azure/login`; it authenticates to the VM over SSH,
-      # proxied through Cloudflare Access via CF_ACCESS_CLIENT_ID/SECRET
-      # (plain repository/environment secrets, not OIDC).
-      #
-      # `actions: read` is only actually USED by deploy-azure-vm.yml's
-      # `verify-ci` job, which is gated with
-      # `if: github.event_name == 'workflow_dispatch' && ...` and never
-      # runs on this workflow_call (tag-release) path. GitHub still
-      # statically validates a called reusable workflow's permission
-      # requests against the UNION of every `permissions:` block declared
-      # anywhere in it -- top-level AND every job's own, regardless of
-      # whether that job's `if:` would actually let it run -- so without
-      # this line here the whole call is rejected at trigger time with
-      # "Error calling workflow ... requesting 'actions: read', but is
-      # only allowed ...", even though nothing in this run's actual
-      # execution path needs it.
-      actions: read
-    # deploy-azure-vm.yml's workflow_call entry point always targets
-    # prod -- there's no `environment` input on this path (that choice
-    # only exists on its workflow_dispatch entry point). See `deploy-aca`
-    # below for the other deploy target this same tag triggers, in
-    # parallel.
-    uses: ./.github/workflows/deploy-azure-vm.yml
-    with:
-      image_tag: ${{ github.ref_name }}
-    secrets: inherit
-
-  deploy-aca:
-    name: Deploy this version to Azure Container Apps (Production)
-    needs: [build-push] # same reasoning as `deploy` above -- not `changelog`, and independent of the VM deploy so a slow/stuck VM rollout can't hold this one back either (both jobs only share `build-push`, so they run in parallel)
-    permissions:
-      contents: read
-      id-token: write # OIDC federated Azure login -- deploy-azure-aca.yml calls `azure/login`, unlike the VM path (SSH + Cloudflare Access, plain secrets, no OIDC)
-      # `actions: read` is only actually USED by deploy-azure-aca.yml's
-      # `verify-ci` job, which is gated with
-      # `if: github.event_name == 'workflow_dispatch' && ...` and never
-      # runs on this workflow_call (tag-release) path -- same situation
-      # as the `deploy` job's identical `actions: read` above. GitHub
-      # still statically validates a called reusable workflow's
-      # permission requests against the UNION of every `permissions:`
-      # block declared anywhere in it (top-level AND every job's own,
-      # regardless of whether that job's `if:` would let it run), so
-      # without this line the whole call is rejected at trigger time
-      # with "Error calling workflow ... requesting 'actions: read', but
-      # is only allowed ...", even though nothing in this run's actual
-      # execution path needs it.
-      actions: read
-    # deploy-azure-aca.yml's workflow_call entry point always targets
-    # production -- there's no `environment` input on this path (that
-    # choice only exists on its workflow_dispatch entry point), same
-    # shape as deploy-azure-vm.yml's equivalent entry point above. A
-    # version tag now deploys to BOTH targets: the VM (`deploy`, above)
-    # and Azure Container Apps (this job) -- each is still also fully
-    # usable on its own via its own workflow_dispatch run, independent of
-    # a tag push.
-    uses: ./.github/workflows/deploy-azure-aca.yml
-    with:
-      image_tag: ${{ github.ref_name }}
-    secrets: inherit
+  # No `deploy`/`deploy-aca` job here on purpose. This workflow's job ends
+  # at "images built, Trivy-scanned, and pushed to Docker Hub under this
+  # version tag; changelog PR and GitHub Release cut." It never rolls
+  # anything out to the VM or to Azure Container Apps. To deploy this
+  # version to production (or to staging/vm-staging), run "Deploy to VM"
+  # or "Deploy to ACA" from the Actions tab (workflow_dispatch), choose the
+  # target environment, and paste this tag (e.g. "${{ github.ref_name }}")
+  # into that run's `image_tag` input -- it pulls the exact image built
+  # above rather than rebuilding.

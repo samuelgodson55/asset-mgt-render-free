@@ -388,3 +388,80 @@ def test_fulfilled_quotation_cannot_be_deleted(as_admin, as_staff, as_manager):
 
     delete_response = admin_client.delete(f"/api/quotations/{quotation_id}", headers=admin_headers)
     assert delete_response.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# 6) GET /assets/catalog now supports the same true server-side
+#    limit/offset/search + total contract as every other directory
+#    endpoint (GET /assets, /users, /outsiders) -- see
+#    services/quotation_service.py's list_catalog().
+# ---------------------------------------------------------------------------
+def test_asset_catalog_supports_pagination_and_search(as_admin, as_staff):
+    admin_client, admin_headers = as_admin
+    staff_client, staff_headers = as_staff
+
+    # The seeded demo dataset already has its own asset pools, so this
+    # asserts against a uniquely-named trio it adds rather than an
+    # absolute total -- resilient to whatever else is already in the DB.
+    baseline_total = staff_client.get("/api/assets/catalog?limit=1", headers=staff_headers).json()["total"]
+
+    _create_pool(admin_client, admin_headers, "Zzz-Alpha Tent", total_quantity=2, price=10.00)
+    _create_pool(admin_client, admin_headers, "Zzz-Bravo Tent", total_quantity=2, price=12.00)
+    _create_pool(admin_client, admin_headers, "Zzz-Charlie Cooler", total_quantity=2, price=8.00)
+
+    searched = staff_client.get("/api/assets/catalog?search=Zzz-", headers=staff_headers)
+    assert searched.status_code == 200, searched.text
+    searched_body = searched.json()
+    assert searched_body["total"] == 3
+    assert {item["name"] for item in searched_body["items"]} == {"Zzz-Alpha Tent", "Zzz-Bravo Tent", "Zzz-Charlie Cooler"}
+
+    first_page = staff_client.get("/api/assets/catalog?limit=2&offset=0&search=Zzz-", headers=staff_headers)
+    body = first_page.json()
+    assert body["total"] == 3
+    assert body["limit"] == 2
+    assert body["offset"] == 0
+    assert [item["name"] for item in body["items"]] == ["Zzz-Alpha Tent", "Zzz-Bravo Tent"]
+
+    second_page = staff_client.get("/api/assets/catalog?limit=2&offset=2&search=Zzz-", headers=staff_headers)
+    assert [item["name"] for item in second_page.json()["items"]] == ["Zzz-Charlie Cooler"]
+
+    tent_only = staff_client.get("/api/assets/catalog?search=Zzz-A", headers=staff_headers)
+    assert {item["name"] for item in tent_only.json()["items"]} == {"Zzz-Alpha Tent"}
+
+    # Omitting limit/offset/search entirely still returns the whole active
+    # catalog in one response (now including the 3 pools just created) --
+    # the pre-pagination default every existing full-catalog caller (e.g.
+    # the Admin/Manager Quote Detail drawer's typeahead) relies on.
+    unpaginated = staff_client.get("/api/assets/catalog", headers=staff_headers)
+    assert unpaginated.json()["total"] == baseline_total + 3
+    assert len(unpaginated.json()["items"]) == baseline_total + 3
+
+
+# ---------------------------------------------------------------------------
+# 7) A Manager/Admin's own "My Order" cart (still `status="draft"`) can be
+#    assigned to a user straight away -- assign_quotation() only blocks
+#    on `status == "fulfilled"` (_ensure_admin_editable()), and the
+#    "personal request" reassignment guard only fires for a staff/customer
+#    requester, not a Manager/Admin building an order on someone's behalf.
+#    This is what powers the Quotations page's "Assign Quote" button.
+# ---------------------------------------------------------------------------
+def test_manager_can_assign_own_draft_cart_to_a_user_before_submitting(as_admin, as_manager, as_customer):
+    admin_client, admin_headers = as_admin
+    manager_client, manager_headers = as_manager
+    customer_client, customer_headers = as_customer
+
+    asset_id = _create_pool(admin_client, admin_headers, "Projector", total_quantity=3, price=40.00)
+    cart = _add_to_cart(manager_client, manager_headers, asset_id, quantity=1, start_date=TODAY, due_date=TODAY)
+    cart_id = cart["id"]
+    assert cart["status"] == "draft"
+
+    customer_id = customer_client.get("/api/auth/me", headers=customer_headers).json()["id"]
+
+    assign_response = manager_client.post(
+        f"/api/quotations/{cart_id}/assign", headers=manager_headers,
+        json={"assignee_type": "user", "user_id": customer_id},
+    )
+    assert assign_response.status_code == 200, assign_response.text
+    body = assign_response.json()
+    assert body["status"] == "draft"
+    assert body["assigned_to"]["id"] == customer_id

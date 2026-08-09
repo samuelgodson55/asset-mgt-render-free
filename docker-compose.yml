@@ -655,6 +655,19 @@ services:
       # ran, so you can see exactly what changed.
       args:
         BUILD_ENV: ${ENVIRONMENT:-development}
+      # Which of frontend/Dockerfile's two mutually exclusive final stages
+      # to build -- "frontend-legacy-only" (the legacy static site) or
+      # "frontend-react-only" (the React "Ledger" SPA); both land at "/".
+      # There is no combined default anymore (the old `frontend-final`
+      # stage that shipped both side-by-side has been removed -- see
+      # frontend/Dockerfile's own top-of-file comment), so this arg always
+      # resolves to a real, explicit choice: FRONTEND_BUILD_TARGET in .env
+      # controls it, defaulting to "frontend-legacy-only" (the smaller,
+      # longer-proven surface) if left unset. Set
+      # FRONTEND_BUILD_TARGET=frontend-react-only in .env to build the
+      # React SPA instead; see frontend/Dockerfile's own stage comments and
+      # frontend-app/README.md's "Detaching this app" section.
+      target: ${FRONTEND_BUILD_TARGET:-frontend-legacy-only}
     container_name: snipeit_lite_frontend
     restart: unless-stopped
     environment:

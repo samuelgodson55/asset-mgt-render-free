@@ -1,14 +1,22 @@
 import { motion } from "framer-motion";
 import type { AssetType } from "../lib/types";
+import { formatPrice } from "../lib/api";
 import { StatusPill } from "./StatusPill";
 
 interface Props {
   asset: AssetType;
   index?: number;
   onSelect?: (a: AssetType) => void;
+  /** From useAuth()'s canSeeStock -- Manager/Admin/Super Admin/demo always
+   * true; a Staff/Customer session only when
+   * CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER is on. Hides the
+   * available/total quantity readout, its progress bar, and the in-stock/
+   * low/out StatusPill, mirroring what the Quotation Catalog already
+   * withholds from the same roles (see lib/roles.ts's canSeeStock()). */
+  showStock: boolean;
 }
 
-export function AssetTag({ asset, index = 0, onSelect }: Props) {
+export function AssetTag({ asset, index = 0, onSelect, showStock }: Props) {
   const pct = asset.total_quantity ? Math.round((asset.available_quantity / asset.total_quantity) * 100) : 0;
 
   return (
@@ -34,34 +42,40 @@ export function AssetTag({ asset, index = 0, onSelect }: Props) {
               </h3>
               <p className="text-xs text-text-muted mt-0.5">{asset.category ?? "Uncategorized"}</p>
             </div>
-            <StatusPill status={asset.status} />
+            {showStock && <StatusPill status={asset.status} />}
           </div>
 
           <div className="mt-4 flex items-end justify-between">
-            <div>
-              <p className="text-[10px] uppercase tracking-wider text-text-faint">Available</p>
-              <p className="font-mono text-lg text-text leading-none mt-1">
-                {asset.available_quantity}
-                <span className="text-text-faint text-sm">/{asset.total_quantity}</span>
-              </p>
-            </div>
+            {showStock ? (
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-text-faint">Available</p>
+                <p className="font-mono text-lg text-text leading-none mt-1">
+                  {asset.available_quantity}
+                  <span className="text-text-faint text-sm">/{asset.total_quantity}</span>
+                </p>
+              </div>
+            ) : (
+              <span />
+            )}
             {asset.price != null && (
-              <p className="font-mono text-xs text-text-muted">${asset.price.toLocaleString()}</p>
+              <p className="font-mono text-xs text-text-muted">{formatPrice(asset.price)}</p>
             )}
           </div>
 
-          <div className="mt-3 h-[3px] w-full bg-border-soft rounded-full overflow-hidden">
-            <motion.div
-              initial={{ width: 0 }}
-              whileInView={{ width: `${pct}%` }}
-              viewport={{ once: true }}
-              transition={{ duration: 0.6, delay: 0.1, ease: "easeOut" }}
-              className={
-                "h-full rounded-full " +
-                (asset.status === "out" ? "bg-rust" : asset.status === "low" ? "bg-brass" : "bg-moss")
-              }
-            />
-          </div>
+          {showStock && (
+            <div className="mt-3 h-[3px] w-full bg-border-soft rounded-full overflow-hidden">
+              <motion.div
+                initial={{ width: 0 }}
+                whileInView={{ width: `${pct}%` }}
+                viewport={{ once: true }}
+                transition={{ duration: 0.6, delay: 0.1, ease: "easeOut" }}
+                className={
+                  "h-full rounded-full " +
+                  (asset.status === "out" ? "bg-rust" : asset.status === "low" ? "bg-brass" : "bg-moss")
+                }
+              />
+            </div>
+          )}
         </div>
 
         <div className="perforation w-0 border-l border-dashed border-border-soft" />

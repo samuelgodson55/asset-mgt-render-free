@@ -588,14 +588,17 @@ snipe-it-lite/
 │       │                                  # copy-pasted `docker build` matrix
 │       ├── deploy-azure-aca.yml        # ONE workflow for the Container Apps
 │       │                                  # target -- pick `staging` or
-│       │                                  # `production` from the Actions tab
-│       │                                  # (workflow_dispatch; no push-to-
-│       │                                  # deploy on `develop` anymore), or
-│       │                                  # it's called by release.yml on a
-│       │                                  # `git tag v1.x.x` push (always
-│       │                                  # production). Builds -> migrates ->
-│       │                                  # rolls out via a blue-green canary
-│       │                                  # (see .github/scripts/aca-blue-
+│       │                                  # `production` from the Actions tab.
+│       │                                  # workflow_dispatch ONLY -- no
+│       │                                  # push-to-deploy, and release.yml
+│       │                                  # does NOT call this; a `git tag`
+│       │                                  # push never deploys anything by
+│       │                                  # itself. To ship a tagged release
+│       │                                  # here, run this by hand and paste
+│       │                                  # the version into `image_tag`.
+│       │                                  # Builds -> migrates -> rolls out
+│       │                                  # via a blue-green canary (see
+│       │                                  # .github/scripts/aca-blue-
 │       │                                  # green.sh) with automatic rollback
 │       │                                  # on a failed smoke test. Replaces
 │       │                                  # what used to be two separate
@@ -604,10 +607,15 @@ snipe-it-lite/
 │       │                                  # deploy-azure-production.yml)
 │       ├── release.yml                 # Triggered by `git tag v1.x.x` push --
 │       │                                # builds + tags both images with the
-│       │                                # VERSION (not just a SHA), updates
-│       │                                # CHANGELOG.md, cuts a GitHub Release,
-│       │                                # then calls deploy-azure-aca.yml
-│       │                                # (always production on this path)
+│       │                                # VERSION (not just a SHA), pushes
+│       │                                # them to Docker Hub, updates
+│       │                                # CHANGELOG.md, and cuts a GitHub
+│       │                                # Release. Does NOT deploy anywhere --
+│       │                                # deploy-azure-aca.yml/deploy-azure-
+│       │                                # vm.yml are run by hand afterward
+│       │                                # (workflow_dispatch), with the
+│       │                                # version tag pasted into image_tag,
+│       │                                # whenever you choose to ship it
 │       ├── infra-deploy.yml            # One-time/occasional: provisions or
 │       │                                  # updates infra/main.bicep itself
 │       │                                  # (separate from the workflows
@@ -615,9 +623,13 @@ snipe-it-lite/
 │       ├── deploy-azure-vm.yml         # VM-path equivalent of
 │       │                                  # deploy-azure-aca.yml above -- pick
 │       │                                  # `vm-staging`/`prod` from the
-│       │                                  # Actions tab (or a `git tag`
-│       │                                  # release for prod) -- build + push
-│       │                                  # both images via build-push-
+│       │                                  # Actions tab. workflow_dispatch
+│       │                                  # ONLY, same as the ACA path -- a
+│       │                                  # `git tag` push never triggers
+│       │                                  # this; run it by hand with the
+│       │                                  # version in `image_tag` to ship a
+│       │                                  # release -- build + push both
+│       │                                  # images via build-push-
 │       │                                  # images.yml, blocking Trivy scan,
 │       │                                  # SSH over the Cloudflare Tunnel,
 │       │                                  # sync docker-compose.vm.yml/
@@ -3221,16 +3233,18 @@ is also invoked as a reusable `workflow_call` by every deploy workflow
 below; coverage isn't 100% of the app yet, see [Suggested Future
 Features](#suggested-future-features) for what's still missing),
 [`deploy-azure-aca.yml`](.github/workflows/deploy-azure-aca.yml)
-(manual `workflow_dispatch` -- pick `staging` or `production` -- no push
-trigger, so a push to `develop` never auto-deploys; also callable via
-`workflow_call`, which always targets production -- see `release.yml`
-below),
+(manual `workflow_dispatch` ONLY -- pick `staging` or `production` -- no
+push trigger and no `workflow_call` entry point, so nothing but a human
+running this workflow ever deploys here; a push to `develop`, and a `git
+tag` push, both never auto-deploy),
 [`release.yml`](.github/workflows/release.yml) (triggered by pushing a
 `git tag v1.x.x` — builds and pushes both images tagged with that VERSION,
 not just a commit SHA, opens a pull request against `main` with a new
 [`CHANGELOG.md`](CHANGELOG.md) section (never a direct commit — this
-repo's `main` only changes via reviewed PR) and cuts a GitHub Release, and
-in parallel calls `deploy-azure-aca.yml` via `workflow_call`)
+repo's `main` only changes via reviewed PR) and cuts a GitHub Release. It
+does NOT deploy anywhere -- run `deploy-azure-aca.yml`/`deploy-azure-vm.yml`
+by hand, whenever you choose, with the version tag pasted into `image_tag`,
+to actually ship a release)
 — plus
 [`infra-deploy.yml`](.github/workflows/infra-deploy.yml), run separately and
 occasionally, for provisioning/updating `infra/main.bicep` itself. All of
@@ -3243,10 +3257,11 @@ equivalent of `infra-deploy.yml` above),
 [`deploy-azure-vm.yml`](.github/workflows/deploy-azure-vm.yml) (build both
 images → Trivy scan → SSH over the Cloudflare Tunnel → sync
 `docker-compose.vm.yml`/`Caddyfile` → `docker compose up -d` → migrate →
-smoke test — same `git tag v1.x.x`-triggers-production, everything-else-
-is-manual-`workflow_dispatch` shape as `release.yml`/
-`deploy-azure-aca.yml` above, just without a Container Apps
-control plane in the middle), and
+smoke test — same manual-`workflow_dispatch`-only shape as
+`deploy-azure-aca.yml` above (no push trigger, no `workflow_call` entry
+point); a `git tag v1.x.x` push builds and publishes the release images via
+`release.yml` but never deploys them here on its own, just without a
+Container Apps control plane in the middle), and
 [`sync-secrets-vm.yml`](.github/workflows/sync-secrets-vm.yml) (pushes
 updated `.env` values out to the running VM without a full redeploy). The
 two paths are independent — use one, the other, or both side by side —
@@ -3283,10 +3298,13 @@ The full walkthrough — one-time setup, what each workflow does stage by
 stage, rollback, scaling, monitoring, and cost — lives in
 [`DEPLOYMENT.md`](DEPLOYMENT.md)'s **Azure Container Apps Production
 Deployment** section rather than being duplicated here. Short version:
-deploys are manually triggered (`workflow_dispatch` from the Actions tab)
-for staging, and a pushed `git tag v1.x.x` off `main` still automatically
-ships production (merging to `main` alone, without a tag, never deploys
-anything); nothing manual beyond that after the one-time setup.
+deploys are always manually triggered (`workflow_dispatch` from the
+Actions tab), for both staging and production. Pushing a `git tag v1.x.x`
+off `main` builds and publishes the official release images and cuts a
+GitHub Release/CHANGELOG entry, but does not ship anything by itself —
+run `deploy-azure-aca.yml` (or `deploy-azure-vm.yml`) by hand, pick
+`production`, and paste that version into `image_tag` whenever you're
+ready to deploy it.
 
 ### Azure VM
 
@@ -3296,9 +3314,11 @@ Cloudflare Tunnel replaces both inbound SSH and any open inbound app port
 (no public IP ever has port 22/80/443 listening on it), and `docker
 compose -f docker-compose.vm.yml` runs the same six services as local dev
 as plain containers pulled by tag from Docker Hub, plus `caddy` (TLS
-re-presentation) and `cloudflared` (the tunnel). Same "push a version tag,
-it ships itself" shape as the Container Apps path above, just over SSH
-instead of `az containerapp update`. Full one-time setup (Cloudflare
+re-presentation) and `cloudflared` (the tunnel). Same manual-`workflow_
+dispatch`-only shape as the Container Apps path above -- a pushed version
+tag publishes the images but you still run this workflow by hand with that
+tag to deploy it -- just over SSH instead of `az containerapp update`. Full
+one-time setup (Cloudflare
 account, Terraform apply, GitHub OIDC federation, secrets) and day-2
 tasks (rollback, growing the data disk, Google Drive backups, updating
 secrets on a running VM) live in their entirety in

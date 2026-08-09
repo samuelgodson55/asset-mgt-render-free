@@ -3,12 +3,13 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
 export default defineConfig({
-  // Served by nginx at /app/ alongside the existing legacy static site
-  // (see nginx/default.conf.template's `location ^~ /app/` block and
-  // frontend/Dockerfile's frontend-app-build stage) -- every built asset
-  // URL and the client-side router's basename (see src/App.tsx) both need
-  // to agree with this.
-  base: '/app/',
+  // Served by nginx at the site root ("/") -- this SPA ships in its own
+  // standalone image (frontend/Dockerfile's `frontend-react-only` target,
+  // paired with nginx/default.react.conf.template's SPA-fallback `location /`
+  // block), not side-by-side with the legacy static site, so there's no
+  // /app/ sub-path to reserve. Every built asset URL and the client-side
+  // router's basename (see src/App.tsx) both need to agree with this.
+  base: '/',
   plugins: [react(), tailwindcss()],
   server: {
     host: true,

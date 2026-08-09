@@ -1,10 +1,11 @@
 # =============================================================================
 # frontend/Dockerfile
 # -----------------------------------------------------------------------------
-# Builds ONE image that serves the static frontend AND reverse-proxies /api/*
-# to the FastAPI backend -- the same image is used unmodified in local Docker
-# Compose, Render, and any cloud environment (see nginx/default.conf.template
-# for the full explanation of how per-environment config is injected).
+# Builds ONE image that serves a static frontend AND reverse-proxies /api/*
+# to the FastAPI backend -- the same image shape is used unmodified in local
+# Docker Compose, Render, and any cloud environment (see
+# nginx/default.conf.template / nginx/default.react.conf.template for the
+# full explanation of how per-environment config is injected).
 #
 # This file lives in frontend/ (alongside the static site it builds) even
 # though the runtime half of the image is nginx -- that mirrors
@@ -13,21 +14,39 @@
 #
 # Build context: this Dockerfile still expects to be built from the PROJECT
 # ROOT (not from inside frontend/), because it also needs to COPY the
-# nginx/ folder (default.conf.template, docker-entrypoint.d) and
-# build-frontend/ (the JS/HTML processing step). docker-compose.yml is
-# already set up this way:
+# nginx/ folder (default.conf.template, default.react.conf.template,
+# docker-entrypoint.d) and build-frontend/ (the JS/HTML processing step).
+# docker-compose.yml is already set up this way:
 #     frontend:
 #       build:
 #         context: .
 #         dockerfile: frontend/Dockerfile
 # If building manually instead of via Compose, run this from the project
 # root:
-#     docker build -f frontend/Dockerfile -t snipeit-lite-frontend \
-#         --build-arg BUILD_ENV=production .
+#     docker build -f frontend/Dockerfile --target frontend-legacy-only \
+#         --build-arg BUILD_ENV=production -t snipeit-lite-frontend-legacy .
+#     docker build -f frontend/Dockerfile --target frontend-react-only \
+#         -t snipeit-lite-frontend-react .
+#
+# TARGET: this Dockerfile produces TWO mutually exclusive final images from
+# the same source, selected with `--target` (there is no default -- see
+# "no combined stage" below, so `--target` is REQUIRED, not optional):
+#   frontend-legacy-only   legacy static site ONLY, served at / --
+#                           no React build, no Node/Vite toolchain run at all
+#   frontend-react-only    the React "Ledger" SPA ONLY, served at / --
+#                           no legacy static site, no build-frontend/build.js
+#                           minify/obfuscate step at all
+# Both land at the site root ("/") -- exactly one of them ever ships in a
+# given image, so there's no /app/ sub-path or any other collision to
+# arbitrate between the two. See frontend-app/README.md's "Detaching this
+# app" section for the operational reasoning (client-specific builds,
+# staging vs. prod, etc.) -- what used to be a single "ship everything"
+# default (`frontend-final`, legacy + React side-by-side) has been removed
+# entirely: every build is now a deliberate choice of exactly one frontend.
 # =============================================================================
 
 # =============================================================================
-# Stage 1/2: frontend-build
+# Stage 1/4: frontend-build
 # -----------------------------------------------------------------------------
 # Runs build-frontend/build.js against frontend/ BEFORE anything reaches the
 # actual nginx image below. What it does to the JS and HTML depends entirely
@@ -55,13 +74,17 @@
 # build` (or `docker build`) output shows exactly what happened for the
 # mode you just built -- that's the "real-time build characteristics" this
 # stage exists to surface.
+#
+# ONLY executed when `--target frontend-legacy-only` is built below --
+# BuildKit only runs the stages a chosen target actually depends on, and
+# frontend-react-only never references this one, so a React-only build
+# never runs build-frontend/build.js at all.
 # =============================================================================
 # Node 20 reached end-of-life 2026-04-30 -- no more upstream security
 # patches for it or its Alpine base. Node 22 is the current LTS. This stage
-# is discarded before the image ships (see Stage 2 below), so it never
-# itself sets off the release pipeline's Trivy scan on the final image --
-# bumped anyway so an EOL toolchain isn't quietly used to build every
-# release.
+# is discarded before the image ships, so it never itself sets off the
+# release pipeline's Trivy scan on the final image -- bumped anyway so an
+# EOL toolchain isn't quietly used to build every release.
 # BUG FIX -- "npm run build" failing with "Cannot find native binding" /
 # "Cannot find module '@rolldown/binding-linux-x64-musl'" (frontend-app-build
 # stage below, but this stage shares the same base image for consistency).
@@ -103,11 +126,11 @@ RUN node build-frontend/build.js /build/frontend-src /build/frontend-out
 
 
 # =============================================================================
-# Stage 2/3: frontend-app-build
+# Stage 2/4: frontend-app-build
 # -----------------------------------------------------------------------------
-# Builds the new React/Vite "Ledger" SPA (frontend-app/) into static
-# assets. Deliberately its own stage rather than folded into the
-# frontend-build stage above: it has its own toolchain (Vite/tsc, not
+# Builds the React/Vite "Ledger" SPA (frontend-app/) into static assets.
+# Deliberately its own stage rather than folded into the frontend-build
+# stage above: it has its own toolchain (Vite/tsc, not
 # build-frontend/build.js's minify-only pipeline) and its own npm lockfile,
 # so mixing them would bust frontend-build's Docker layer cache every time
 # either app's dependencies change. Not affected by BUILD_ENV -- Vite's own
@@ -116,10 +139,16 @@ RUN node build-frontend/build.js /build/frontend-src /build/frontend-out
 # legacy site's separate minify/obfuscate knobs.
 #
 # Same Node version as the frontend-build stage above, for the same
-# EOL-avoidance reason (see that stage's own comment).
-# See frontend-build's own comment above (same base image swap, same
-# reason) -- this is the stage that actually runs Vite/Rolldown and hit the
-# musl native-binding error.
+# EOL-avoidance reason (see that stage's own comment) -- this is the stage
+# that actually runs Vite/Rolldown and hit the musl native-binding error.
+#
+# ONLY executed when `--target frontend-react-only` is built below --
+# BuildKit only runs the stages a chosen target actually depends on, and
+# frontend-legacy-only never references this one. That's what makes the
+# legacy-only target genuinely React-free (no Node/Vite toolchain run, no
+# frontend-app/ npm install), not just "built but unused" -- and,
+# symmetrically, what makes the react-only target genuinely free of
+# build-frontend/build.js's own minify/obfuscate pipeline.
 FROM node:25-slim AS frontend-app-build
 
 WORKDIR /build
@@ -133,17 +162,24 @@ COPY frontend-app/ /build/
 
 # `.env.production` (VITE_API_BASE_URL=/api, checked into frontend-app/)
 # is picked up by Vite automatically for `npm run build` -- no --build-arg
-# needed, unlike frontend-build's BUILD_ENV above.
+# needed, unlike frontend-build's BUILD_ENV above. vite.config.ts's
+# `base: '/'` bakes the site root into every built asset URL, since this
+# SPA -- when shipped at all -- is the ONLY thing served at that origin
+# (see frontend-react-only below), not one of two apps sharing it.
 RUN npm run build
 
 
 # =============================================================================
-# Stage 3/3: nginx
+# Stage 3/4: nginx-base
 # -----------------------------------------------------------------------------
-# Unchanged from before this build step was introduced, except the frontend
-# COPY now pulls from the frontend-build stage's *output* directory instead
-# of the raw frontend/ folder on disk -- everything else about how this
-# image serves the site and proxies /api/* is identical.
+# Everything the shipped image needs REGARDLESS of which frontend it ends up
+# serving: the resolver-ip/deploy-status-htpasswd entrypoint hook scripts,
+# the /_deploy/ dashboard shell, and every runtime ENV/EXPOSE/HEALTHCHECK
+# default. Named (not left anonymous) specifically so the two real final
+# stages below can both `FROM nginx-base` and only differ in the nginx
+# config template + built app content they each COPY -- see
+# frontend-app/README.md's "Detaching this app" section for the operational
+# reasoning behind having two separate images at all.
 #
 # THIS is the image release.yml's Trivy scan actually checks (backend/
 # Dockerfile succeeded fine -- python:3.12-slim is still actively
@@ -155,16 +191,10 @@ RUN npm run build
 # too (was report-only), so this class of failure surfaces on a normal push
 # instead of only at `git tag` time.
 # =============================================================================
-FROM nginx:1.30-alpine
+FROM nginx:1.30-alpine AS nginx-base
 
 # Drop nginx's stock default site -- we ship our own (see below).
 RUN rm -f /etc/nginx/conf.d/default.conf
-
-# This is a *.template file, not a finished config. nginx's own
-# docker-entrypoint.sh automatically envsubst's every ${VARIABLE} in any
-# /etc/nginx/templates/*.template file into /etc/nginx/conf.d/<name>.conf
-# each time the container starts -- no custom entrypoint script needed.
-COPY nginx/default.conf.template /etc/nginx/templates/default.conf.template
 
 # Auto-detects RESOLVER_IP from the container's own /etc/resolv.conf at
 # boot if it isn't already set -- see the script's own header comment for
@@ -187,37 +217,22 @@ COPY nginx/default.conf.template /etc/nginx/templates/default.conf.template
 COPY --chmod=755 nginx/docker-entrypoint.d/15-detect-resolver-ip.envsh /docker-entrypoint.d/15-detect-resolver-ip.envsh
 
 # Fetches the /_deploy/ dashboard's .htpasswd from Blob Storage into a
-# local file at boot -- auth_basic_user_file (nginx/default.conf.template's
-# own /_deploy/ location) can't read it over HTTP directly. Plain
-# executable ".sh" (exec'd as a child process, not sourced -- no env var
-# needs to survive into a later hook script here, unlike the ".envsh"
-# above) -- see the script's own header comment for the full reasoning.
+# local file at boot -- auth_basic_user_file (each config template's own
+# /_deploy/ location) can't read it over HTTP directly. Plain executable
+# ".sh" (exec'd as a child process, not sourced -- no env var needs to
+# survive into a later hook script here, unlike the ".envsh" above) -- see
+# the script's own header comment for the full reasoning.
 COPY --chmod=755 nginx/docker-entrypoint.d/25-fetch-deploy-status-htpasswd.sh /docker-entrypoint.d/25-fetch-deploy-status-htpasswd.sh
 
 # The /_deploy/ dashboard's own shell (status.json/checks.log are proxied
-# LIVE to Blob Storage at request time instead -- see
-# nginx/default.conf.template's own /_deploy/ comment for why only this
-# static shell, not the data, is baked into the image). Deliberately
-# separate from the `frontend-build` stage's output below -- this file
-# isn't part of the app's own frontend/ tree and doesn't go through
-# build-frontend/build.js's minification/obfuscation pipeline at all;
-# nginx/default.conf.template's `alias` for `location = /_deploy/` points
-# straight at this exact path.
+# LIVE to Blob Storage at request time instead -- see the config
+# templates' own /_deploy/ comment for why only this static shell, not the
+# data, is baked into the image). This file isn't part of either app's own
+# tree and doesn't go through any minification/obfuscation/bundling
+# pipeline at all; both config templates' `alias` for `location = /_deploy/`
+# points straight at this exact path, regardless of which frontend the
+# image ships.
 COPY scripts/deploy-status-aca/index.html /usr/share/nginx/deploy-status/index.html
-
-# The static site: index.html/admin.html/staff.html/manager.html/
-# customer.html and js/*. CSS/images pass through the frontend-build stage
-# untouched; HTML has been minified (development/production) and js/* has
-# been minified and/or obfuscated depending on BUILD_ENV -- see that
-# stage's own comment above.
-COPY --from=frontend-build /build/frontend-out/ /usr/share/nginx/html/
-
-# The new React SPA, served alongside the legacy site above at /app/ (see
-# nginx/default.conf.template's `location ^~ /app/` block) rather than
-# replacing it -- frontend-app/vite.config.ts's `base: '/app/'` already
-# bakes that path into every asset URL in dist/index.html, so this can be
-# copied straight in as-is.
-COPY --from=frontend-app-build /build/dist/ /usr/share/nginx/html/app/
 
 # ---------------------------------------------------------------------------
 # Default values baked into the image, so it runs correctly out of the box
@@ -249,21 +264,21 @@ ENV BACKEND_PORT=8000
 # boot instead -- see that script for the full reasoning. Only set this ENV
 # yourself if you've confirmed your platform needs something different.
 
-# Gates the /docs, /redoc, /openapi.json passthrough block in
-# default.conf.template -- see that block's own comment and config.py's
-# ENABLE_API_DOCS docstring for the full reasoning. Defaults to "true" here
-# purely for local-dev convenience (matches backend/config.py's own default
-# so `docker compose up` gives you working docs out of the box with zero
+# Gates the /docs, /redoc, /openapi.json passthrough block in both config
+# templates -- see that block's own comment and config.py's ENABLE_API_DOCS
+# docstring for the full reasoning. Defaults to "true" here purely for
+# local-dev convenience (matches backend/config.py's own default so
+# `docker compose up` gives you working docs out of the box with zero
 # configuration). SECURITY: override to "false" in Render/cloud -- see
 # render.yaml and README.md's "Deploying Across Environments" section,
 # which both already do this for you.
 ENV ENABLE_API_DOCS=true
 
 # DEPLOY_STATUS_ACCOUNT / DEPLOY_STATUS_SAS default to an EMPTY STRING here
-# -- NOT "no default" as before. Local Docker Compose, the VM path, and
-# Render genuinely have no Blob Storage and never set these; the sole
-# purpose of this ENV is to make sure the two names are still PRESENT in
-# the container's environment even then.
+# -- NOT "no default". Local Docker Compose, the VM path, and Render
+# genuinely have no Blob Storage and never set these; the sole purpose of
+# this ENV is to make sure the two names are still PRESENT in the
+# container's environment even then.
 #
 # BUG FIX: leaving them fully unset broke `nginx -t` (and therefore the
 # container's boot) on every one of those platforms, not just "degraded
@@ -272,19 +287,18 @@ ENV ENABLE_API_DOCS=true
 # ONLY the variable names actually present in the environment -- so when a
 # var is genuinely absent (not just empty), envsubst leaves the literal
 # "${DEPLOY_STATUS_ACCOUNT}"/"${DEPLOY_STATUS_SAS}" text sitting in the
-# rendered nginx/default.conf.template's `set`/`proxy_pass` lines. nginx's
-# OWN config parser then reads that literal "${...}" as a reference to an
-# nginx variable that was never `set` anywhere -- "unknown
-# \"deploy_status_account\" variable" -- a hard `nginx -t` failure, not a
-# runtime 401. Giving both an explicit empty-string default here makes
-# them show up in `env`, which is all envsubst's restricted whitelist
-# needs to substitute them -- with an empty string, same as before this
-# fix wherever they're genuinely unused. nginx/test-config.sh mirrors this
-# same default so the CI check that caught this can't regress silently.
-# The REST of the original reasoning is unchanged: with an empty account
-# name, the /_deploy/ dashboard shell still loads (frontend/Dockerfile's
-# own baked-in index.html) and every fetch()/Basic-Auth attempt against it
-# still fails closed -- nothing here grants real Blob Storage access.
+# rendered config's `set`/`proxy_pass` lines. nginx's OWN config parser
+# then reads that literal "${...}" as a reference to an nginx variable
+# that was never `set` anywhere -- "unknown \"deploy_status_account\"
+# variable" -- a hard `nginx -t` failure, not a runtime 401. Giving both an
+# explicit empty-string default here makes them show up in `env`, which is
+# all envsubst's restricted whitelist needs to substitute them -- with an
+# empty string, same as before this fix wherever they're genuinely unused.
+# nginx/test-config.sh mirrors this same default so the CI check that
+# caught this can't regress silently. The REST of the original reasoning
+# is unchanged: with an empty account name, the /_deploy/ dashboard shell
+# still loads and every fetch()/Basic-Auth attempt against it still fails
+# closed -- nothing here grants real Blob Storage access.
 # infra/main.bicep's `frontendApp` overrides both to their real values in
 # Azure -- see that resource's own env comment.
 ENV DEPLOY_STATUS_ACCOUNT=""
@@ -297,14 +311,13 @@ EXPOSE 80
 # actually answering" (a bad envsubst render, a config nginx -t would have
 # caught but didn't get run, etc.), not just "the process crashed" (which
 # `restart: unless-stopped` in docker-compose.yml already covers on its
-# own). Hits "/" -- served by the `location /` block in
-# nginx/default.conf.template, which resolves to index.html and needs no
-# backend connectivity at all, so this stays a pure LIVENESS check for
-# THIS container, mirroring the backend's own /healthz-not-/readyz split
-# (see main.py's health_check() docstring) -- nginx being unable to reach
-# the backend container is a separate, already-handled failure mode (the
-# backend's own healthcheck/restart policy), not a reason to also kill and
-# restart nginx.
+# own). Hits "/" -- served by the `location /` block in whichever config
+# template shipped, and needs no backend connectivity at all, so this
+# stays a pure LIVENESS check for THIS container, mirroring the backend's
+# own /healthz-not-/readyz split (see main.py's health_check() docstring)
+# -- nginx being unable to reach the backend container is a separate,
+# already-handled failure mode (the backend's own healthcheck/restart
+# policy), not a reason to also kill and restart nginx.
 #
 # nginx:alpine ships BusyBox wget (no curl) -- shell form (not exec form)
 # so `$PORT` expands; defaults to 80 to match this Dockerfile's own
@@ -315,3 +328,53 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 # nginx:alpine's base image already defines the correct ENTRYPOINT
 # (docker-entrypoint.sh, which runs the envsubst templating step and then
 # execs nginx) and CMD (["nginx", "-g", "daemon off;"]) -- nothing to add.
+
+
+# =============================================================================
+# Stage 4a/4: frontend-legacy-only
+# -----------------------------------------------------------------------------
+# The legacy static site, served at "/" -- no React build, no Node/Vite
+# toolchain touched at all (BuildKit resolves targets lazily, so choosing
+# this target means frontend-app-build above never even starts). Build with:
+#     docker build -f frontend/Dockerfile --target frontend-legacy-only \
+#         -t snipeit-lite-frontend-legacy .
+# nginx/default.conf.template is this target's config: legacy multi-page
+# "clean URL" serving (try_files against admin.html/staff.html/etc. at the
+# root), no SPA fallback.
+# =============================================================================
+FROM nginx-base AS frontend-legacy-only
+
+COPY nginx/default.conf.template /etc/nginx/templates/default.conf.template
+
+# The static site: index.html/admin.html/staff.html/manager.html/
+# customer.html and js/*, served at the site root. CSS/images pass through
+# the frontend-build stage untouched; HTML has been minified
+# (development/production) and js/* has been minified and/or obfuscated
+# depending on BUILD_ENV -- see that stage's own comment above.
+COPY --from=frontend-build /build/frontend-out/ /usr/share/nginx/html/
+
+
+# =============================================================================
+# Stage 4b/4: frontend-react-only
+# -----------------------------------------------------------------------------
+# The React "Ledger" SPA, served at "/" -- no legacy static site, no
+# build-frontend/build.js minify/obfuscate pipeline touched at all
+# (BuildKit resolves targets lazily, so choosing this target means
+# frontend-build above never even starts). Build with:
+#     docker build -f frontend/Dockerfile --target frontend-react-only \
+#         -t snipeit-lite-frontend-react .
+# nginx/default.react.conf.template is this target's config: a real SPA
+# fallback (`try_files $uri $uri/ /index.html;`) at the root, so a direct
+# hit on a client-side route (e.g. /checkouts) still resolves to the SPA's
+# own index.html instead of 404ing, and no legacy "clean URL"/.html
+# rewriting (there are no .html pages in this image to rewrite).
+# =============================================================================
+FROM nginx-base AS frontend-react-only
+
+COPY nginx/default.react.conf.template /etc/nginx/templates/default.conf.template
+
+# frontend-app-build's dist/ output, served at the site root.
+# frontend-app/vite.config.ts's `base: '/'` already bakes the root path
+# into every built asset URL in dist/index.html, so this can be copied
+# straight in as-is.
+COPY --from=frontend-app-build /build/dist/ /usr/share/nginx/html/

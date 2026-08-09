@@ -1,53 +1,73 @@
 # .github/workflows/build-push-images.yml
 # -----------------------------------------------------------------------------
 # Reusable `workflow_call` workflow: the ONE place that knows how to build,
-# tag, push, and Trivy-scan the backend + frontend images. Every pipeline
-# that ships a real, deployable image -- release.yml (git-tag production
-# releases), deploy-azure-vm.yml ("Deploy to VM": VM path, both vm-staging
-# and prod), and deploy-azure-aca.yml ("Deploy to ACA": Container Apps path,
-# both staging and production, including a fresh build with no git tag --
-# see that workflow's `build-push` job) -- calls THIS workflow instead of
-# running its own copy-pasted `docker build` matrix.
+# tag, push, and Trivy-scan any of this repo's images -- backend, or either
+# frontend flavor (frontend-react-only / frontend-legacy-only). Every
+# pipeline that ships a real, deployable image -- release.yml (git-tag
+# production releases, which now builds backend + BOTH frontend flavors,
+# each under its own Docker Hub repo name), deploy-azure-vm.yml ("Deploy to
+# VM": VM path, both vm-staging and prod, ONE frontend flavor per run,
+# chosen by that run's `frontend_type` input/Environment variable), and
+# deploy-azure-aca.yml ("Deploy to ACA": Container Apps path, same
+# one-flavor-per-run shape) -- calls THIS workflow instead of running its
+# own copy-pasted `docker build` matrix.
 #
 # WHY THIS EXISTS: before this file, the exact same "docker build -f
 # <dockerfile> --build-arg BUILD_ENV=... -t <name>:<tag> ..." logic was
 # copy-pasted across four separate workflow files. That's precisely how the
-# BUILD_ENV bug happened (see release.yml's BUILD_ENV comment, and
-# deploy-azure-vm.yml's matching one): a fix landed in one copy and not the
-# others, so "the same" backend/frontend image silently differed depending
-# on which pipeline happened to build it. Docker Hub only ever sees ONE
-# backend image name (per environment: -staging or not) and ONE frontend
-# image name -- if the thing that builds it differs by which workflow
-# triggered the build, the image behind that name isn't actually a single
-# consistent artifact irrespective of environment, it's N slightly-different
-# artifacts that happen to share a name. Consolidating the build step here
-# is what makes "the shared image" a true invariant instead of a convention
-# multiple files have to independently remember to honor.
+# BUILD_ENV bug happened (see release.yml's BUILD_ENV comment): a fix
+# landed in one copy and not the others, so "the same" backend/frontend
+# image silently differed depending on which pipeline happened to build it.
+# Consolidating the build step here is what makes each shipped image a true
+# invariant instead of a convention multiple files have to independently
+# remember to honor.
 #
-# Every image gets OCI labels now (version/revision/created/source) --
-# previously only deploy-azure-vm.yml's build step set these; now every
-# caller gets them for free, for the same "don't let the copies drift"
-# reason.
+# MATRIX-BY-INPUT, NOT A FIXED backend+frontend PAIR: this used to hardcode
+# a two-entry matrix (exactly one backend image, exactly one frontend
+# image). Now that there are TWO independent, mutually exclusive frontend
+# flavors (see frontend/Dockerfile's own top-of-file comment for why the
+# old single combined `frontend-final` target was removed) and different
+# callers need different COMBINATIONS of images built in one call --
+# release.yml wants backend + frontend-react + frontend-legacy all at once;
+# the two deploy-azure-*.yml workflows want backend + exactly ONE frontend
+# flavor, decided per-run -- the matrix itself is now caller-supplied as a
+# JSON array (`build_matrix` below), one object per image to build. Each
+# caller assembles exactly the set of images IT needs; this workflow no
+# longer has any built-in opinion about which images go together.
+#
+# Every image gets OCI labels (version/revision/created/source) applied the
+# same way regardless of which images a given call builds, for the same
+# "don't let the copies drift" reason.
 # -----------------------------------------------------------------------------
 name: Build + push images (reusable)
 
 on:
   workflow_call:
     inputs:
-      backend_image_name:
-        description: 'Docker Hub repo name for backend, WITHOUT the username -- e.g. "snipeit-lite-backend" or "snipeit-lite-backend-staging". The full ref is built inside this workflow as "<DOCKERHUB_USERNAME secret>/<this>", since a workflow_call caller''s `with:` block cannot itself reference the secrets context.'
-        required: true
-        type: string
-      frontend_image_name:
-        description: 'Docker Hub repo name for frontend, WITHOUT the username -- same convention as backend_image_name.'
+      build_matrix:
+        description: >-
+          JSON array of image definitions to build in this call. Each entry:
+          {"service": "<label for logs/job names>",
+           "dockerfile": "<path>", "context": "<build context>",
+           "image_name": "<Docker Hub repo name WITHOUT the username>",
+           "target": "<optional --target; omit/empty for images with no
+             build stages, e.g. backend>"}.
+          The full ref is built inside this workflow as
+          "<DOCKERHUB_USERNAME secret>/<image_name>", since a workflow_call
+          caller's `with:` block cannot itself reference the secrets
+          context. Example (release.yml's shape -- backend once, both
+          frontend flavors):
+            [{"service":"backend","dockerfile":"backend/Dockerfile","context":"backend","image_name":"snipeit-lite-backend"},
+             {"service":"frontend-react","dockerfile":"frontend/Dockerfile","context":".","target":"frontend-react-only","image_name":"snipeit-lite-frontend-react"},
+             {"service":"frontend-legacy","dockerfile":"frontend/Dockerfile","context":".","target":"frontend-legacy-only","image_name":"snipeit-lite-frontend-legacy"}]
         required: true
         type: string
       image_tags:
-        description: 'Space-separated list of tags to build once and push under -- e.g. "v1.4.2 abc1234 latest". The FIRST tag in the list is what gets Trivy-scanned (all tags point at the exact same image, so scanning one scans all of them).'
+        description: 'Space-separated list of tags to build once and push under -- e.g. "v1.4.2 abc1234 latest". Applied to EVERY image in build_matrix. The FIRST tag in the list is what gets Trivy-scanned (all tags point at the exact same image, so scanning one scans all of them).'
         required: true
         type: string
       build_env:
-        description: 'frontend/Dockerfile''s BUILD_ENV build-arg: "production" (minified + obfuscated) or "development" (minified only) -- see that Dockerfile''s own comment.'
+        description: 'frontend/Dockerfile''s BUILD_ENV build-arg: "production" (minified + obfuscated) or "development" (minified only) -- see that Dockerfile''s own comment. Only meaningful for the frontend-legacy-only target (frontend-react-only''s Vite build always does a real production build regardless of this value -- see frontend/Dockerfile''s frontend-app-build stage comment); passed to every matrix entry regardless, since an unconsumed --build-arg on an entry whose Dockerfile has no matching ARG (backend, frontend-react-only) is a harmless no-op.'
         required: true
         type: string
       version_label:
@@ -68,23 +88,17 @@ on:
 
 jobs:
   build-push:
-    name: Build + push both images
+    name: Build + push ${{ matrix.service }}
     runs-on: ubuntu-latest
     strategy:
       # fail-fast defaults to true, which would let one image's failure
-      # cancel the other mid-build/push even though backend and frontend are
-      # entirely independent artifacts -- one failing tells you nothing
-      # about the other. See release.yml's original matching comment (this
-      # is where that reasoning now lives).
+      # cancel every other one mid-build/push even though each entry in
+      # build_matrix is an entirely independent artifact -- one failing
+      # tells you nothing about the others. See release.yml's own matching
+      # comment (this is where that reasoning now lives).
       fail-fast: false
       matrix:
-        include:
-          - service: backend
-            dockerfile: backend/Dockerfile
-            context: backend
-          - service: frontend
-            dockerfile: frontend/Dockerfile
-            context: .
+        include: ${{ fromJson(inputs.build_matrix) }}
     steps:
       - uses: actions/checkout@v7
 
@@ -97,20 +111,21 @@ jobs:
       - name: Resolve image name + primary tag
         id: img
         run: |
-          if [ "${{ matrix.service }}" = "backend" ]; then
-            echo "name=${{ secrets.DOCKERHUB_USERNAME }}/${{ inputs.backend_image_name }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "name=${{ secrets.DOCKERHUB_USERNAME }}/${{ inputs.frontend_image_name }}" >> "$GITHUB_OUTPUT"
-          fi
+          echo "name=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.image_name }}" >> "$GITHUB_OUTPUT"
           PRIMARY_TAG=$(echo "${{ inputs.image_tags }}" | awk '{print $1}')
           echo "primary_tag=$PRIMARY_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Build + push ${{ matrix.service }} image
         run: |
           set -euo pipefail
-          BUILD_ARGS=()
-          if [ "${{ matrix.service }}" = "frontend" ]; then
-            BUILD_ARGS+=(--build-arg "BUILD_ENV=${{ inputs.build_env }}")
+          TARGET_ARGS=()
+          # matrix.target is only set for entries that name a real --target
+          # (e.g. frontend-react-only/frontend-legacy-only) -- an entry
+          # with no `target` key in build_matrix (e.g. backend, whose
+          # Dockerfile has no stages at all) leaves this unset, and no
+          # --target flag is passed at all in that case.
+          if [ -n "${{ matrix.target || '' }}" ]; then
+            TARGET_ARGS+=(--target "${{ matrix.target }}")
           fi
 
           TAG_ARGS=()
@@ -119,7 +134,8 @@ jobs:
           done
 
           docker build -f ${{ matrix.dockerfile }} \
-                       "${BUILD_ARGS[@]}" \
+                       --build-arg "BUILD_ENV=${{ inputs.build_env }}" \
+                       "${TARGET_ARGS[@]}" \
                        --label org.opencontainers.image.version="${{ inputs.version_label != '' && inputs.version_label || steps.img.outputs.primary_tag }}" \
                        --label org.opencontainers.image.revision="${{ github.sha }}" \
                        --label org.opencontainers.image.created="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \

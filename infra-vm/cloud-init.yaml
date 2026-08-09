@@ -73,6 +73,17 @@ write_files:
       IMAGE_TAG=${initial_image_tag}
       DOCKERHUB_BACKEND_IMAGE=${dockerhub_backend_image}
       DOCKERHUB_FRONTEND_IMAGE=${dockerhub_frontend_image}
+      # DOCUMENTATION ONLY -- nothing on this VM reads this value; no
+      # process here builds the frontend image, it's only ever pulled
+      # (see DOCKERHUB_FRONTEND_IMAGE above). The real switch is the
+      # paired GitHub Environment's FRONTEND_BUILD_TARGET Actions
+      # variable, read by .github/workflows/deploy-azure-vm.yml's
+      # resolve-target job when THAT image was built and pushed. This
+      # line exists so `cat /opt/snipeit/.env` (or Terraform state) tells
+      # an operator which kind of image this environment is SUPPOSED to
+      # be running -- keep it in sync with that Actions variable by hand;
+      # see infra-vm/variables.tf's frontend_build_target description.
+      EXPECTED_FRONTEND_BUILD_TARGET=${frontend_build_target}
 
       # Zero-downtime blue-green deploys (see docker-compose.vm.yml's own
       # "ZERO-DOWNTIME BLUE-GREEN DEPLOYMENTS" header comment,

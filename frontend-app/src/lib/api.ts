@@ -1,10 +1,12 @@
-import { mockAssets, mockCheckouts, mockExtensions, mockNotifications, mockStats, mockBackups, mockBackupStatus, mockDigestRecipients } from "./mock";
-import type { AssetType, Checkout, ExtensionRequest, NotificationItem, DashboardStats, BackupEntry, BackupStatus, RestoreResult, ImportResult, MyItem, ProfileDetail, UserRow, OutsiderRow, CustodyItem, AuditLogEntry } from "./types";
+import { mockAssets, mockCheckouts, mockExtensions, mockNotifications, mockStats, mockBackups, mockBackupStatus, mockDigestRecipients, mockCatalog, mockQuotationCart } from "./mock";
+import type { AssetType, Checkout, ExtensionRequest, NotificationItem, DashboardStats, BackupEntry, BackupStatus, RestoreResult, ImportResult, MyItem, ProfileDetail, UserRow, OutsiderRow, CustodyItem, AuditLogEntry, PublicConfig, CatalogAsset, QuotationCartOrDetail, QuotationListRow, FulfillmentQueueRow, QuotationOutsourcedItemCreate, QuotationOutsourceShortfallItem, AssetDetails, DeletedAssetRow, DeletedUserRow, RosterUser, BulkExtendResult, MyExtensionDecision } from "./types";
+
 
 // Points at the FastAPI backend. In production this app is built with
-// `base: '/app/'` and served by the same nginx that proxies `/api/*` to
-// the backend (see nginx/default.conf.template's `location /api/` block),
-// so the default here is a same-origin relative path -- no CORS, and the
+// `base: '/'` and served (as its own standalone image, frontend/Dockerfile's
+// `frontend-react-only` target) by the same nginx that proxies `/api/*` to
+// the backend (see nginx/default.react.conf.template's `location /api/`
+// block), so the default here is a same-origin relative path -- no CORS, and the
 // httpOnly `access_token` session cookie set by POST /auth/login is sent
 // automatically. For local `npm run dev` against a bare `uvicorn main:app`
 // on another port, set VITE_API_BASE_URL in `.env.local` instead (see
@@ -161,6 +163,18 @@ export const auth = {
     rawFetch<LoginResult>("/auth/mfa/setup/confirm", { method: "POST", body: JSON.stringify({ mfa_setup_token, code }) }),
   logout: () => rawFetch<{ message: string }>("/auth/logout", { method: "POST" }),
   me: () => rawFetch<AuthUser>("/auth/me"),
+  // POST /auth/forgot-password -- backend always responds with the same
+  // generic message whether or not `identifier` matches an account (see
+  // schemas/auth_schema.py's ForgotPasswordRequest docstring), so there's
+  // nothing for the UI to branch on beyond a genuine network/server error.
+  forgotPassword: (identifier: string) =>
+    rawFetch<{ message?: string }>("/auth/forgot-password", { method: "POST", body: JSON.stringify({ identifier }) }),
+  // POST /auth/reset-password -- completes the flow using the plaintext
+  // `token` off the emailed link's ?reset_token= query param. Doesn't grant
+  // a session; the person still signs in normally afterward with the new
+  // password.
+  resetPassword: (token: string, newPassword: string) =>
+    rawFetch<{ message?: string }>("/auth/reset-password", { method: "POST", body: JSON.stringify({ token, new_password: newPassword }) }),
 };
 
 // ---------------------------------------------------------------------------
@@ -215,6 +229,8 @@ interface RawCheckoutAlert {
   quantity: number;
   outstanding: number;
   due_date: string; // "YYYY-MM-DD"
+  entity_id?: number | null;
+  entity_type?: "user" | "outsider" | null;
 }
 
 function mapCheckoutAlert(raw: RawCheckoutAlert, status: Checkout["status"]): Checkout {
@@ -233,6 +249,8 @@ function mapCheckoutAlert(raw: RawCheckoutAlert, status: Checkout["status"]): Ch
     // here -- due_at is reused rather than inventing a timestamp.
     checked_out_at: raw.due_date,
     status,
+    entity_id: raw.entity_id ?? null,
+    entity_type: raw.entity_type ?? null,
   };
 }
 
@@ -244,6 +262,9 @@ interface RawExtensionRequest {
   requested_new_due_date: string;
   reason: string | null;
   status: "pending" | "approved" | "denied";
+  entity_id?: number | null;
+  entity_type?: "user" | "outsider" | null;
+  assignee_name?: string;
 }
 
 function mapExtension(raw: RawExtensionRequest): ExtensionRequest {
@@ -255,6 +276,9 @@ function mapExtension(raw: RawExtensionRequest): ExtensionRequest {
     requested_until: raw.requested_new_due_date,
     reason: raw.reason ?? "",
     status: raw.status,
+    entity_id: raw.entity_id ?? null,
+    entity_type: raw.entity_type ?? null,
+    assignee_name: raw.assignee_name ?? raw.requested_by_label,
   };
 }
 
@@ -280,12 +304,65 @@ async function loadDueSoon(): Promise<Checkout[]> {
   return (data.items ?? []).map((r) => mapCheckoutAlert(r, "active"));
 }
 
-async function loadCheckouts(): Promise<Checkout[]> {
+export interface AlertFeed {
+  items: Checkout[];
+  total: number;
+}
+
+// Small, capped feeds purpose-built for the Notification Bell dropdown
+// (js/components/overdue.js / due-soon.js's loadOverdueAlerts()/
+// loadDueSoonAlerts()) -- unlike loadOverdue()/loadDueSoon() above (used
+// for the Checkouts page's full table), the bell only ever shows a
+// handful of rows grouped by person, but still needs the true `total`
+// count for its badge. Privileged-role only on the backend
+// (require_privileged_role); a Staff/Customer calling this just gets a
+// harmless empty feed back via tryLoad's fallback.
+export const alertsApi = {
+  overdue: (limit = 5) =>
+    tryLoad(async (): Promise<AlertFeed> => {
+      const data = await rawFetch<{ items: RawCheckoutAlert[]; total: number }>(`/checkouts/overdue?limit=${limit}`);
+      const items = data.items ?? [];
+      return { items: items.map((r) => mapCheckoutAlert(r, "overdue")), total: data.total ?? items.length };
+    }, { items: [], total: 0 }),
+  dueSoon: (limit = 5) =>
+    tryLoad(async (): Promise<AlertFeed> => {
+      const data = await rawFetch<{ items: RawCheckoutAlert[]; total: number }>(`/checkouts/due-soon?limit=${limit}`);
+      const items = data.items ?? [];
+      return { items: items.map((r) => mapCheckoutAlert(r, "active")), total: data.total ?? items.length };
+    }, { items: [], total: 0 }),
+};
+
+// GET /checkouts/overdue and /checkouts/due-soon are require_privileged_role
+// on the backend (Super Admin/Admin/Manager -- see backend/deps.py). A
+// Staff/Customer calling either just gets a 403. Every loader below that
+// touches them therefore takes an explicit `privileged` flag from its
+// caller (always `demo || isPrivileged(user?.role)`, mirroring
+// NotificationBell.tsx) rather than trying-and-catching its way there --
+// letting the 403 happen and fall through to tryLoad's fallback would
+// silently hand a real, signed-in Staff/Customer session a screen full of
+// fabricated demo data (mockCheckouts/mockStats/mockNotifications) the
+// moment a live backend is linked, which is exactly the failure mode the
+// demo dataset is meant to never cause.
+async function loadMyItems(): Promise<MyItem[]> {
+  try {
+    const data = await rawFetch<{ assigned_items: MyItem[] }>("/users/me/items");
+    return data.assigned_items ?? [];
+  } catch {
+    return [];
+  }
+}
+
+async function loadCheckouts(privileged: boolean): Promise<Checkout[]> {
   // The backend has no single "list every active checkout" route (custody
   // is tracked per-user/-outsider via GET /users/{id}/items instead) --
   // the overdue + due-soon alert feeds are the closest real analogue to a
   // system-wide checkouts table, and are exactly what admin.html's own
   // dashboard alerts are built from (see backend/api/checkouts_api.py).
+  // Not privileged? There's no system-wide table to show at all -- the
+  // Dashboard falls back to that person's own items instead (see
+  // Dashboard.tsx), same split as legacy's admin.html/manager.html
+  // (system-wide) vs staff.html/customer.html (personal only).
+  if (!privileged) return [];
   const [overdue, dueSoon] = await Promise.all([loadOverdue(), loadDueSoon()]);
   return [...overdue, ...dueSoon];
 }
@@ -295,12 +372,39 @@ async function loadExtensionRequests(): Promise<ExtensionRequest[]> {
   return (data.items ?? []).map(mapExtension);
 }
 
-async function loadNotifications(): Promise<NotificationItem[]> {
+async function loadNotifications(privileged: boolean): Promise<NotificationItem[]> {
   // There's no in-app notification-feed endpoint on the backend today
   // (api/notifications_api.py is only the digest-email recipient
   // settings) -- same as the legacy frontend's notification bell
-  // (js/components/notifications.js), this is synthesized client-side
-  // from the overdue/due-soon/extension-request feeds.
+  // (js/components/notifications.js), this is synthesized client-side.
+  // WHO SEES WHAT mirrors NotificationBell.tsx/legacy notifications.js:
+  // the review-facing org-wide feeds (overdue/due-soon/pending extension
+  // requests) only for a privileged role; everyone (including Staff/
+  // Customer) gets their own personal item alerts from /users/me/items.
+  const personalItems = await loadMyItems();
+  const personal: NotificationItem[] = [
+    ...personalItems.filter((i) => i.overdue).map((i) => ({
+      id: 4_000_000 + i.checkout_id,
+      title: `${i.asset_name} is overdue`,
+      body: `You still have ${i.quantity} unit(s) checked out, due ${formatDate(i.due_date)}.`,
+      kind: "overdue" as const,
+      created_at: i.due_date,
+      read: false,
+    })),
+    ...personalItems.filter((i) => i.due_soon && !i.overdue).map((i) => ({
+      id: 5_000_000 + i.checkout_id,
+      title: `${i.asset_name} is due soon`,
+      body: `You have ${i.quantity} unit(s) due back ${formatDate(i.due_date)}.`,
+      kind: "system" as const,
+      created_at: i.due_date,
+      read: true,
+    })),
+  ];
+
+  if (!privileged) {
+    return personal.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+  }
+
   const [overdue, dueSoon, extensions] = await Promise.all([
     loadOverdue(),
     loadDueSoon(),
@@ -308,6 +412,7 @@ async function loadNotifications(): Promise<NotificationItem[]> {
   ]);
 
   const items: NotificationItem[] = [
+    ...personal,
     ...overdue.map((c) => ({
       id: 1_000_000 + c.id,
       title: `${c.asset_name} is overdue`,
@@ -337,8 +442,20 @@ async function loadNotifications(): Promise<NotificationItem[]> {
   return items.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 }
 
-async function loadStats(): Promise<DashboardStats> {
-  const [assets, overdue, dueSoon] = await Promise.all([loadAssets(), loadOverdue(), loadDueSoon()]);
+async function loadStats(privileged: boolean): Promise<DashboardStats> {
+  // total_assets/available/low_stock/categories all come from GET /assets,
+  // which is open to any signed-in role -- only the overdue/due-soon
+  // counts need the privileged-only feeds, so those two are swapped for
+  // that person's OWN overdue/due-soon count (from /users/me/items, open
+  // to everyone) when the signed-in role isn't privileged, rather than
+  // ever attempting the org-wide endpoints and risking a 403 -> mock
+  // fallback for a real Staff/Customer session.
+  const [assets, overdueCount, dueSoonCount, activity] = await Promise.all([
+    loadAssets(),
+    privileged ? loadOverdue().then((r) => r.length) : loadMyItems().then((items) => items.filter((i) => i.overdue).length),
+    privileged ? loadDueSoon().then((r) => r.length) : loadMyItems().then((items) => items.filter((i) => i.due_soon && !i.overdue).length),
+    rawFetch<{ date: string; checkouts: number; returns: number }[]>("/assets/activity").catch(() => []),
+  ]);
 
   const totalAssets = assets.reduce((sum, a) => sum + a.total_quantity, 0);
   const available = assets.reduce((sum, a) => sum + a.available_quantity, 0);
@@ -354,25 +471,28 @@ async function loadStats(): Promise<DashboardStats> {
     total_assets: totalAssets,
     available,
     checked_out: Math.max(totalAssets - available, 0),
-    overdue: overdue.length,
-    due_soon: dueSoon.length,
+    overdue: overdueCount,
+    due_soon: dueSoonCount,
     low_stock: lowStock,
     categories: Array.from(byCategory, ([name, count]) => ({ name, count })),
-    // No historical checkout/return time-series endpoint exists on the
-    // backend yet -- left empty (rather than fabricated) when live; the
-    // chart just renders blank until one is added (e.g. GET
-    // /assets/activity), same spirit as the activity comment above.
-    activity: [],
+    // GET /assets/activity -- daily checkout/return counts, same shape as
+    // this field always expected. Falls back to an empty series (rather
+    // than fabricated data) if the request fails for any reason.
+    activity,
   };
 }
 
 export const api = {
   isLive: () => backendReachable === true,
   getAssets: () => tryLoad(loadAssets, mockAssets),
-  getCheckouts: () => tryLoad(loadCheckouts, mockCheckouts),
+  // `privileged` mirrors `demo || isPrivileged(user?.role)` at every call
+  // site (Dashboard.tsx/Layout.tsx/Notifications.tsx) -- see the loaders
+  // above for why this can't just try the privileged endpoints and let
+  // tryLoad's fallback catch the 403 the way getAssets() above safely can.
+  getCheckouts: (privileged: boolean) => tryLoad(() => loadCheckouts(privileged), mockCheckouts),
   getExtensionRequests: () => tryLoad(loadExtensionRequests, mockExtensions),
-  getNotifications: () => tryLoad(loadNotifications, mockNotifications),
-  getStats: () => tryLoad(loadStats, mockStats),
+  getNotifications: (privileged: boolean) => tryLoad(() => loadNotifications(privileged), mockNotifications),
+  getStats: (privileged: boolean) => tryLoad(() => loadStats(privileged), mockStats),
 };
 
 // ---------------------------------------------------------------------------
@@ -436,6 +556,10 @@ export const importApi = {
 
 export const myItemsApi = {
   list: () => rawFetch<{ name: string; department_role?: string | null; assigned_items: MyItem[] }>("/users/me/items"),
+  // Not a JSON round trip -- GET /users/me/items/export streams the file
+  // directly (same pattern as assetsApi.exportUrl below). Ported from the
+  // legacy frontend's components/exports.js's exportMyItems().
+  exportUrl: (format: "csv" | "pdf") => `${API_BASE}/users/me/items/export${qs({ format })}`,
 };
 
 export const extensionsApi = {
@@ -450,6 +574,15 @@ export const extensionsApi = {
       method: "POST",
       body: JSON.stringify({ approve, note }),
     }),
+  // Self-service alert feed: the CALLER's own recently approved/denied
+  // extension requests -- open to any logged-in account. Powers the
+  // Notification Bell's "My Extension Decisions" section. See
+  // backend/services/extension_service.py's list_my_recent_extension_decisions().
+  myDecisions: (limit = 10) =>
+    tryLoad(async () => {
+      const data = await rawFetch<{ items: MyExtensionDecision[]; total: number }>(`/checkouts/my-extension-decisions?limit=${limit}`);
+      return data.items ?? [];
+    }, [] as MyExtensionDecision[]),
 };
 
 // ---------------------------------------------------------------------------
@@ -500,8 +633,16 @@ export const usersApi = {
     rawFetch<{ message?: string }>(`/users/${id}/reset-password`, { method: "POST", body: JSON.stringify({ new_password: newPassword, admin_password: adminPassword }) }),
   remove: (id: number) => rawFetch<void>(`/users/${id}`, { method: "DELETE" }),
   restore: (id: number) => rawFetch<{ message?: string }>(`/users/${id}/restore`, { method: "POST" }),
-  listDeleted: (limit: number, offset: number, search: string) => rawFetch<DirectoryPage<UserRow>>(`/users/deleted${qs({ limit, offset, search })}`),
+  purge: (id: number) => rawFetch<{ message?: string }>(`/users/${id}/purge`, { method: "POST" }),
+  listDeleted: (limit: number, offset: number, search: string) => rawFetch<DirectoryPage<DeletedUserRow>>(`/users/deleted${qs({ limit, offset, search })}`),
+  convertToOutsider: (id: number, req: Partial<{ email: string; phone_number: string; company: string }>) =>
+    rawFetch<OutsiderRow>(`/users/${id}/convert-to-outsider`, { method: "POST", body: JSON.stringify(req) }),
   items: (id: number) => rawFetch<{ name: string; assigned_items: CustodyItem[] }>(`/users/${id}/items`),
+  // Direct-download links (not JSON round trips), mirrored from the legacy
+  // frontend's components/exports.js -- exportCustodyItems() for one
+  // person's ledger, exportAllUsers() for the whole directory.
+  itemsExportUrl: (id: number, format: "csv" | "pdf") => `${API_BASE}/users/${id}/items/export${qs({ format })}`,
+  exportUrl: (format: "csv" | "pdf") => `${API_BASE}/users/export${qs({ format })}`,
 };
 
 // ---------------------------------------------------------------------------
@@ -515,7 +656,14 @@ export const outsidersApi = {
   update: (id: number, req: Partial<{ name: string; email: string; phone_number: string; company: string }>) =>
     rawFetch<OutsiderRow>(`/outsiders/${id}`, { method: "PATCH", body: JSON.stringify(req) }),
   remove: (id: number) => rawFetch<void>(`/outsiders/${id}`, { method: "DELETE" }),
+  convertToUser: (id: number, req: { email: string; phone_number?: string; password: string; role: string; department?: string; department_role?: string }) =>
+    rawFetch<UserRow>(`/outsiders/${id}/convert-to-user`, { method: "POST", body: JSON.stringify(req) }),
   items: (id: number) => rawFetch<{ name: string; assigned_items: CustodyItem[] }>(`/outsiders/${id}/items`),
+  // Direct-download links, mirrored from the legacy frontend's
+  // components/exports.js -- exportCustodyItems() for one profile's
+  // ledger, exportAllOutsiders() for the whole Ad-Hoc Directory.
+  itemsExportUrl: (id: number, format: "csv" | "pdf") => `${API_BASE}/outsiders/${id}/items/export${qs({ format })}`,
+  exportUrl: (format: "csv" | "pdf") => `${API_BASE}/outsiders/export${qs({ format })}`,
 };
 
 // ---------------------------------------------------------------------------
@@ -538,7 +686,241 @@ export const auditApi = {
 
 export const checkoutsApi = {
   returnItem: (checkoutId: number, quantity: number) => rawFetch<{ message?: string }>(`/checkouts/${checkoutId}/return`, { method: "POST", body: JSON.stringify({ quantity }) }),
+  // Direct grant, no request/decision round trip -- the Custody Ledger
+  // drawer's "Extend" button (require_privileged_role). See
+  // backend/services/extension_service.py's extend_checkout_directly().
+  extend: (checkoutId: number, newDueDate: string, reason: string | null) =>
+    rawFetch<{ message?: string; due_date?: string }>(`/checkouts/${checkoutId}/extend`, {
+      method: "POST",
+      body: JSON.stringify({ new_due_date: newDueDate, reason: reason || null }),
+    }),
+  // Applies one new due date to many active checkouts at once -- the
+  // Custody Ledger drawer's "Bulk Extend Selected" action, reusing the
+  // same checkbox selection used for bulk returns. See
+  // backend/services/extension_service.py's extend_checkouts_bulk().
+  bulkExtend: (checkoutIds: number[], newDueDate: string, reason: string | null) =>
+    rawFetch<BulkExtendResult>(`/checkouts/bulk-extend`, {
+      method: "POST",
+      body: JSON.stringify({ checkout_ids: checkoutIds, new_due_date: newDueDate, reason: reason || null }),
+    }),
 };
+
+// ---------------------------------------------------------------------------
+// Asset Inventory core -- ported from the legacy frontend's
+// js/components/assets.js. Backed by backend/api/assets_api.py +
+// backend/services/asset_service.py. List/details/categories/export are
+// open to any authenticated user (get_current_user); everything that
+// mutates a pool (create/rename/recategorize/reprice/capacity/delete/
+// restore/purge/exception/recall) is require_super_admin; dispatch
+// (checkout_advanced) is require_privileged_role (Super Admin/Admin/Manager).
+// ---------------------------------------------------------------------------
+
+export interface AssetTypeCreateRequest {
+  name: string;
+  total_quantity: number;
+  category?: string | null;
+  price?: number | null;
+}
+
+export interface AdvancedCheckoutPayload {
+  assignee_type: "user" | "outsider";
+  quantity: number;
+  due_date?: string | null;
+  user_id?: number;
+  outsider_id?: number;
+  outsider_name?: string;
+  outsider_email?: string | null;
+  outsider_phone?: string | null;
+  outsider_company?: string | null;
+}
+
+export const assetsApi = {
+  // tryLoad-wrapped (unlike the rest of this module) so the main Inventory
+  // page -- reachable by every role, including someone just browsing demo
+  // data with no backend session -- keeps working with client-paginated
+  // mock data, same spirit as api.getAssets() above.
+  list: (limit: number, offset: number, search: string): Promise<DirectoryPage<AssetType>> =>
+    tryLoad(async () => {
+      const data = await rawFetch<{ items: RawAssetType[]; total: number; limit: number; offset: number }>(`/assets${qs({ limit, offset, search })}`);
+      return { items: (data.items ?? []).map(mapAsset), total: data.total, limit: data.limit, offset: data.offset };
+    }, (() => {
+      const filtered = search.trim()
+        ? mockAssets.filter((a) => a.name.toLowerCase().includes(search.trim().toLowerCase()))
+        : mockAssets;
+      return { items: filtered.slice(offset, offset + limit), total: filtered.length, limit, offset };
+    })()),
+  listDeleted: (limit: number, offset: number, search: string) => rawFetch<DirectoryPage<DeletedAssetRow>>(`/assets/deleted${qs({ limit, offset, search })}`),
+  categories: () => rawFetch<{ categories: string[] }>("/assets/categories"),
+  activity: (days = 14) => rawFetch<{ date: string; checkouts: number; returns: number }[]>(`/assets/activity${qs({ days })}`),
+  details: (assetId: number) => rawFetch<AssetDetails>(`/assets/${assetId}/details`),
+  create: (payload: AssetTypeCreateRequest) => rawFetch<{ message?: string; id: number }>("/assets", { method: "POST", body: JSON.stringify(payload) }),
+  updateQuantity: (assetId: number, newTotal: number) => rawFetch<{ message?: string }>(`/assets/${assetId}/quantity`, { method: "PUT", body: JSON.stringify({ new_total: newTotal }) }),
+  updateName: (assetId: number, name: string) => rawFetch<{ message?: string }>(`/assets/${assetId}/name`, { method: "PUT", body: JSON.stringify({ name }) }),
+  updateCategory: (assetId: number, category: string | null) => rawFetch<{ message?: string }>(`/assets/${assetId}/category`, { method: "PUT", body: JSON.stringify({ category }) }),
+  updatePrice: (assetId: number, price: number | null) => rawFetch<{ message?: string }>(`/assets/${assetId}/price`, { method: "PUT", body: JSON.stringify({ price }) }),
+  remove: (assetId: number) => rawFetch<{ message?: string }>(`/assets/${assetId}`, { method: "DELETE" }),
+  restore: (assetId: number) => rawFetch<{ message?: string }>(`/assets/${assetId}/restore`, { method: "POST" }),
+  purge: (assetId: number) => rawFetch<{ message?: string }>(`/assets/${assetId}/purge`, { method: "POST" }),
+  flagException: (assetId: number, payload: { serial_number: string; status_label: string; notes?: string | null }) =>
+    rawFetch<{ message?: string }>(`/assets/${assetId}/exception`, { method: "POST", body: JSON.stringify(payload) }),
+  recallException: (assetId: number, exceptionId: number) =>
+    rawFetch<{ message?: string }>(`/assets/${assetId}/exception/${exceptionId}/recall`, { method: "POST" }),
+  checkoutAdvanced: (assetId: number, payload: AdvancedCheckoutPayload) =>
+    rawFetch<{ message?: string }>(`/assets/${assetId}/checkout_advanced`, { method: "POST", body: JSON.stringify(payload) }),
+  // Roster helpers powering the Dispatch drawer's "Assign To" dropdowns --
+  // separate, unfiltered fetches (mirrors users.js/outsiders.js's
+  // loadUsers()/loadOutsiders() populating #staffSelect/#customerSelect/
+  // #adhocExistingSelect), not the paginated/search-narrowed directory
+  // slices those pages themselves show.
+  staffRoster: async (): Promise<RosterUser[]> => {
+    const data = await rawFetch<{ items: RosterUser[] }>("/users?limit=1000");
+    return (data.items ?? []).filter((u) => u.role !== "customer");
+  },
+  customerRoster: async (): Promise<RosterUser[]> => {
+    const data = await rawFetch<{ items: RosterUser[] }>("/users?limit=1000");
+    return (data.items ?? []).filter((u) => u.role === "customer");
+  },
+  outsiderRoster: () => rawFetch<{ items: OutsiderRow[] }>("/outsiders?limit=1000").then((d) => d.items ?? []),
+  // Not a JSON round trip -- GET /assets/export streams the file directly
+  // (see backend's Response(..., headers={"Content-Disposition": ...})),
+  // same same-origin-cookie approach as backupApi.downloadUrl above.
+  exportUrl: (format: "csv" | "pdf", category?: string) => `${API_BASE}/assets/export${qs({ format, category })}`,
+};
+
+// ---------------------------------------------------------------------------
+// Quotation feature -- ported from the legacy frontend's
+// js/components/quotation.js. Backed by backend/api/quotations_api.py +
+// backend/services/quotation_service.py; see that module's own docstring
+// for the two-halves shape (self-service cart/history vs Admin/Manager
+// Quotes tab) this mirrors.
+// ---------------------------------------------------------------------------
+
+export const quotationsApi = {
+  // Fallback only ever applies in pure offline/demo mode (no backend
+  // reachable at all) -- the mock dataset it pairs with already shows full
+  // stock everywhere, so defaulting true here is consistent, not a leak.
+  publicConfig: () => tryLoad(() => rawFetch<PublicConfig>("/config/public"), { currency_code: "NGN", site_name: "Ledger", show_stock_to_staff_customer: true }),
+  // Omitting limit/offset/search returns the WHOLE active catalog in one
+  // response (backend default -- see services/quotation_service.py's
+  // list_catalog()), which is what every full-catalog consumer still
+  // wants (the Admin/Manager Quote Detail drawer's "Add another asset"
+  // typeahead searches this list entirely client-side).
+  catalog: () => tryLoad(async () => (await rawFetch<{ items: CatalogAsset[]; show_stock: boolean }>("/assets/catalog")).items, mockCatalog),
+  // True server-side paged + searched catalog page -- same
+  // limit/offset/search -> {items,total,limit,offset} contract as
+  // assetsApi.list/usersApi.list/etc (DirectoryPage<T>). Used by the
+  // Quotations page's own browsable "Asset Catalog" table.
+  catalogPage: (limit: number, offset: number, search: string): Promise<DirectoryPage<CatalogAsset>> =>
+    tryLoad(async () => {
+      const data = await rawFetch<{ items: CatalogAsset[]; total: number; limit: number; offset: number; show_stock: boolean }>(`/assets/catalog${qs({ limit, offset, search })}`);
+      return { items: data.items ?? [], total: data.total, limit: data.limit, offset: data.offset };
+    }, (() => {
+      const filtered = search.trim()
+        ? mockCatalog.filter((a) => a.name.toLowerCase().includes(search.trim().toLowerCase()) || (a.category ?? "").toLowerCase().includes(search.trim().toLowerCase()))
+        : mockCatalog;
+      return { items: filtered.slice(offset, offset + limit), total: filtered.length, limit, offset };
+    })()),
+
+  // ---- self-service: "My Order" (draft cart) ----
+  myCart: () => tryLoad(() => rawFetch<QuotationCartOrDetail>("/quotations/me"), mockQuotationCart),
+  addToCart: (assetId: number, quantity: number, startDate: string, dueDate: string) =>
+    rawFetch<QuotationCartOrDetail>("/quotations/items", {
+      method: "POST",
+      body: JSON.stringify({ asset_id: assetId, quantity, start_date: startDate, due_date: dueDate }),
+    }),
+  updateCartItem: (itemId: number, quantity: number) =>
+    rawFetch<QuotationCartOrDetail>(`/quotations/items/${itemId}`, { method: "PUT", body: JSON.stringify({ quantity }) }),
+  removeCartItem: (itemId: number) => rawFetch<QuotationCartOrDetail>(`/quotations/items/${itemId}`, { method: "DELETE" }),
+  submitCart: () => rawFetch<QuotationCartOrDetail>("/quotations/submit", { method: "POST" }),
+
+  // ---- self-service: "My Quotes" (submitted history + own detail) ----
+  myHistory: () => tryLoad(async () => (await rawFetch<{ items: QuotationListRow[] }>("/quotations/me/history")).items, []),
+  myQuoteDetail: (quotationId: number) => rawFetch<QuotationCartOrDetail>(`/quotations/me/${quotationId}`),
+  updateMyQuoteItem: (quotationId: number, itemId: number, quantity: number) =>
+    rawFetch<QuotationCartOrDetail>(`/quotations/me/${quotationId}/items/${itemId}`, { method: "PUT", body: JSON.stringify({ quantity }) }),
+  removeMyQuoteItem: (quotationId: number, itemId: number) =>
+    rawFetch<QuotationCartOrDetail>(`/quotations/me/${quotationId}/items/${itemId}`, { method: "DELETE" }),
+  addMyQuoteItem: (quotationId: number, assetId: number, quantity: number, startDate: string, dueDate: string) =>
+    rawFetch<QuotationCartOrDetail>(`/quotations/me/${quotationId}/items`, {
+      method: "POST",
+      body: JSON.stringify({ asset_id: assetId, quantity, start_date: startDate, due_date: dueDate }),
+    }),
+
+  // ---- Admin/Manager: the "Quotes" tab (require_privileged_role) ----
+  list: (limit: number, offset: number, search: string) =>
+    rawFetch<DirectoryPage<QuotationListRow>>(`/quotations${qs({ limit, offset, search })}`),
+  detail: (quotationId: number) => rawFetch<QuotationCartOrDetail & { id: number }>(`/quotations/${quotationId}`),
+  create: (payload: Record<string, unknown>) => rawFetch<QuotationCartOrDetail & { id: number }>("/quotations", { method: "POST", body: JSON.stringify(payload) }),
+  remove: (quotationId: number) => rawFetch<void>(`/quotations/${quotationId}`, { method: "DELETE" }),
+  approve: (quotationId: number) => rawFetch<QuotationCartOrDetail>(`/quotations/${quotationId}/approve`, { method: "POST" }),
+  saveNotes: (quotationId: number, notes: string) =>
+    rawFetch<QuotationCartOrDetail>(`/quotations/${quotationId}`, { method: "PUT", body: JSON.stringify({ notes: notes || null }) }),
+  saveDiscount: (quotationId: number, discountPercent: number) =>
+    rawFetch<QuotationCartOrDetail>(`/quotations/${quotationId}/discount`, { method: "PUT", body: JSON.stringify({ discount_percent: discountPercent }) }),
+  addItem: (quotationId: number, assetId: number, quantity: number, startDate: string, dueDate: string) =>
+    rawFetch<QuotationCartOrDetail>(`/quotations/${quotationId}/items`, {
+      method: "POST",
+      body: JSON.stringify({ asset_id: assetId, quantity, start_date: startDate, due_date: dueDate }),
+    }),
+  updateItem: (quotationId: number, itemId: number, quantity: number) =>
+    rawFetch<QuotationCartOrDetail>(`/quotations/${quotationId}/items/${itemId}`, { method: "PUT", body: JSON.stringify({ quantity }) }),
+  removeItem: (quotationId: number, itemId: number) => rawFetch<QuotationCartOrDetail>(`/quotations/${quotationId}/items/${itemId}`, { method: "DELETE" }),
+  assign: (quotationId: number, payload: Record<string, unknown>) =>
+    rawFetch<QuotationCartOrDetail>(`/quotations/${quotationId}/assign`, { method: "POST", body: JSON.stringify(payload) }),
+
+  // ---- Admin/Manager-only: "not currently in inventory" lines (Manager/
+  // Admin-added, requester can see but not edit/remove) ----
+  addOutsourcedItem: (quotationId: number, payload: QuotationOutsourcedItemCreate) =>
+    rawFetch<QuotationCartOrDetail>(`/quotations/${quotationId}/outsourced-items`, { method: "POST", body: JSON.stringify(payload) }),
+  removeOutsourcedItem: (quotationId: number, itemId: number) =>
+    rawFetch<QuotationCartOrDetail>(`/quotations/${quotationId}/outsourced-items/${itemId}`, { method: "DELETE" }),
+
+  // ---- Admin/Manager: Fulfillment Drawer (approved -> checked out) ----
+  fulfillmentQueue: () => tryLoad(async () => (await rawFetch<{ items: FulfillmentQueueRow[] }>("/quotations/fulfillment-queue")).items, []),
+  // `outsourceShortfallItems` pre-authorizes specific inventory-backed lines
+  // (optionally split across more than one external source) to be sourced
+  // externally rather than blocking the whole checkout if the row-locked
+  // stock check at this exact moment finds them genuinely short -- see
+  // QuotationCheckoutRequest/bulk_checkout_quotation() on the backend.
+  checkout: (quotationId: number, outsourceShortfallItems: QuotationOutsourceShortfallItem[] = []) =>
+    rawFetch<{ message?: string }>(`/quotations/${quotationId}/checkout`, { method: "POST", body: JSON.stringify({ outsource_shortfall_items: outsourceShortfallItems }) }),
+
+  // ---- Admin-only: global VAT setting ----
+  getVat: () => rawFetch<{ vat_percent: number }>("/settings/vat"),
+  setVat: (vatPercent: number) => rawFetch<{ vat_percent: number }>("/settings/vat", { method: "PUT", body: JSON.stringify({ vat_percent: vatPercent }) }),
+
+  // ---- PDF export links (not JSON round trips -- each streams a file
+  // directly, same pattern as assetsApi.exportUrl). Ported from the legacy
+  // frontend's components/exports.js: exportQuotation() for the caller's
+  // current draft, exportMyQuoteDetail()/exportQuoteDetail() for one
+  // submitted Quotation by ID (self-service vs Admin/Manager). PDF only --
+  // unlike the directory/custody exports above, the backend never
+  // accepted a `format` query param here (a Quotation is a formatted
+  // document, not a tabular row set). ----
+  exportCartUrl: () => `${API_BASE}/quotations/export`,
+  exportMyQuoteUrl: (quotationId: number) => `${API_BASE}/quotations/me/${quotationId}/export`,
+  exportQuoteUrl: (quotationId: number) => `${API_BASE}/quotations/${quotationId}/export`,
+};
+
+// Mirrors the legacy frontend's js/ui.js formatPrice()/setCurrencyCode() --
+// defaults to Naira, overridable at runtime once quotationsApi.publicConfig()
+// resolves the real deployment value (settings.CURRENCY_CODE).
+let _currencyCode = "NGN";
+
+export function setCurrencyCode(code: string | null | undefined) {
+  if (code) _currencyCode = code;
+}
+
+export function formatPrice(price: number | null | undefined): string {
+  if (price === null || price === undefined) return "—";
+  try {
+    return new Intl.NumberFormat("en-NG", { style: "currency", currency: _currencyCode }).format(price);
+  } catch {
+    // Unknown/unsupported currency code -- fall back to a plain number
+    // rather than letting Intl throw and break the whole render.
+    return `${_currencyCode} ${Number(price).toFixed(2)}`;
+  }
+}
 
 export function relativeTime(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime();

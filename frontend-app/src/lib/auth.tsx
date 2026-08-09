@@ -1,38 +1,7 @@
-import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
-import { auth, type AuthUser } from "./api";
-
-// Mirrors backend/services/auth_service.py's two 2FA challenge shapes --
-// see README's "Two-factor authentication (2FA)" section. Only super_admin
-// accounts ever produce one of these; every other role's login() resolves
-// straight to a session.
-export type MfaChallenge =
-  | { kind: "setup"; token: string; totpSecret: string; otpauthUri: string; message?: string }
-  | { kind: "verify"; token: string };
-
-interface AuthContextValue {
-  user: AuthUser | null;
-  /** true while the initial GET /auth/me check (on load/refresh) is in flight */
-  loading: boolean;
-  /** true once the person has explicitly chosen to skip real sign-in and browse demo data instead */
-  demo: boolean;
-  /** set after login() returns mfa_required or mfa_setup_required -- Login.tsx renders the matching screen while this is non-null */
-  mfaChallenge: MfaChallenge | null;
-  /** shown exactly once, right after mfa/setup/confirm succeeds, before the person continues into the app */
-  recoveryCodes: string[] | null;
-  login: (identifier: string, password: string) => Promise<void>;
-  /** submits a 6-digit TOTP code (or an XXXXX-XXXXX recovery code) against an mfaChallenge of kind "verify" */
-  verifyMfaCode: (code: string) => Promise<void>;
-  /** submits the first live code from a freshly-scanned authenticator app against an mfaChallenge of kind "setup" */
-  confirmMfaSetup: (code: string) => Promise<void>;
-  /** abandons an in-progress MFA challenge and returns to the plain login form */
-  cancelMfa: () => void;
-  /** dismisses the one-time recovery-codes screen once the person has saved them */
-  dismissRecoveryCodes: () => void;
-  logout: () => Promise<void>;
-  continueAsDemo: () => void;
-}
-
-const AuthContext = createContext<AuthContextValue | null>(null);
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { auth, quotationsApi, type AuthUser } from "./api";
+import { canSeeStock as computeCanSeeStock } from "./roles";
+import { AuthContext, type MfaChallenge } from "./auth-context";
 
 // Session-scoped (not localStorage) so closing the tab drops back to a
 // real sign-in prompt next time, rather than a demo choice persisting
@@ -45,6 +14,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [demo, setDemo] = useState(() => sessionStorage.getItem(DEMO_FLAG_KEY) === "1");
   const [mfaChallenge, setMfaChallenge] = useState<MfaChallenge | null>(null);
   const [recoveryCodes, setRecoveryCodes] = useState<string[] | null>(null);
+  // Safe-by-default (false) until GET /config/public resolves -- see
+  // canSeeStock's docstring above.
+  const [catalogShowStock, setCatalogShowStock] = useState(false);
+
+  useEffect(() => {
+    // Public, unauthenticated-safe endpoint (also powers the Login page's
+    // site_name) -- fetched once per app load, independent of sign-in
+    // state, so it's ready by the time `user`/`demo` settle.
+    quotationsApi.publicConfig().then((config) => {
+      setCatalogShowStock(!!config.show_stock_to_staff_customer);
+    });
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -147,6 +128,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setDemo(true);
   }, []);
 
+  const canSeeStock = useMemo(
+    () => computeCanSeeStock(user?.role, demo, catalogShowStock),
+    [user?.role, demo, catalogShowStock]
+  );
+
   return (
     <AuthContext.Provider
       value={{
@@ -162,15 +148,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         dismissRecoveryCodes,
         logout,
         continueAsDemo,
+        canSeeStock,
       }}
     >
       {children}
     </AuthContext.Provider>
   );
-}
-
-export function useAuth() {
-  const ctx = useContext(AuthContext);
-  if (!ctx) throw new Error("useAuth must be used inside <AuthProvider>");
-  return ctx;
 }

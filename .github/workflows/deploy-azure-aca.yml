@@ -14,25 +14,22 @@
 # silently absent from the other for a while). One file, parameterized by
 # `$ENVIRONMENT`, makes that class of drift structurally impossible.
 #
-# TWO WAYS IN:
-#   A. MANUAL (workflow_dispatch): open this workflow in the Actions tab,
-#      choose `staging` or `production`, and "Run workflow". Leave
-#      `image_tag` BLANK to build fresh from whichever branch/ref you run it
-#      against (the normal case) -- `ci` + `build-push` run first. Supply an
-#      EXISTING Docker Hub tag (a commit SHA from a prior successful
-#      "Build + push both images" run, a version like `v1.4.2`, or `latest`)
-#      to skip straight to `migrate` -> `deploy` with that already-built
-#      image instead -- this is also the rollback/redeploy path. `skip_migrate:
-#      true` additionally skips `migrate`, for when you know the schema
-#      hasn't changed since that image was built.
-#   B. TAG RELEASE (workflow_call, production only): `git tag vX.Y.Z && git
-#      push origin vX.Y.Z` runs release.yml, which builds + Trivy-scans +
-#      pushes both images tagged with that VERSION and then calls THIS
-#      workflow (`uses: ./.github/workflows/deploy-azure-aca.yml`) with that
-#      already-built `image_tag`. There is no `environment` input on this
-#      path -- a git-tag release always means production; see
-#      `$ENVIRONMENT` below. `ci`/`build-push` both skip themselves out here
-#      exactly as before, since release.yml already ran an equivalent gate.
+# ONE WAY IN: workflow_dispatch. Open this workflow in the Actions tab,
+#   choose `staging` or `production`, and "Run workflow". Leave `image_tag`
+#   BLANK to build fresh from whichever branch/ref you run it against (the
+#   normal case) -- `ci` + `build-push` run first. Supply an EXISTING Docker
+#   Hub tag (a commit SHA from a prior successful "Build + push both images"
+#   run, a version like `v1.4.2`, or `latest`) to skip straight to
+#   `migrate` -> `deploy` with that already-built image instead -- this is
+#   also the rollback/redeploy path, AND how you push a production release:
+#   `git tag vX.Y.Z && git push origin vX.Y.Z` (see release.yml) builds,
+#   Trivy-scans, and publishes the images to Docker Hub under that version
+#   tag, but does not deploy them anywhere on its own -- run this workflow by
+#   hand afterward, choose `production`, and put that version in `image_tag`
+#   when you're ready to actually ship it. `skip_migrate: true` additionally
+#   skips `migrate`, for when you know the schema hasn't changed since that
+#   image was built. There is no `workflow_call` entry point and no `push`
+#   trigger -- nothing but a human running this workflow ever deploys here.
 #
 # WHAT DIFFERS BETWEEN staging AND production (everything else is identical,
 # driven off the same `$ENVIRONMENT`/`$RESOURCE_GROUP`/`$BACKEND_IMAGE`/
@@ -82,12 +79,6 @@
 name: Deploy to ACA
 
 on:
-  workflow_call:
-    inputs:
-      image_tag:
-        description: 'Docker image tag to deploy, e.g. v1.4.2 (must already exist on Docker Hub -- see release.yml). This entry point always targets production.'
-        required: true
-        type: string
   workflow_dispatch:
     inputs:
       environment:
@@ -101,6 +92,12 @@ on:
         description: 'Existing tag on Docker Hub to redeploy/roll back to, e.g. "v1.4.2" or a commit SHA from a prior successful build (skips `ci` + `build-push` entirely). Leave BLANK to build FRESH from whichever branch/ref you run this workflow against.'
         required: false
         type: string
+      frontend_type:
+        description: 'Which frontend to ship: "react" (the React "Ledger" SPA) or "legacy" (the legacy static site) -- see frontend/Dockerfile''s top-of-file comment; the two are mutually exclusive, both land at "/". "(environment default)" uses this target''s own FRONTEND_BUILD_TARGET Actions variable (Settings > Environments > staging|production > Environment variables) -- the normal case, and the only option that needs no code/settings change to keep working. Pick one of the other two to override that variable for THIS run only. Ignored entirely when `image_tag` above is set -- a reused image was already built with whatever flavor it was built with.'
+        required: false
+        type: choice
+        options: ['(environment default)', react, legacy]
+        default: '(environment default)'
       skip_migrate:
         description: 'Skip the migrate job (only safe if you are certain no migration has changed since image_tag was built -- e.g. re-running just the deploy/rollout logic after a workflow-file-only fix)'
         required: false
@@ -108,10 +105,9 @@ on:
         default: false
 
 concurrency:
-  # workflow_call (release.yml) has no `inputs.environment` of its own --
-  # always production. A workflow_dispatch run always carries a concrete
-  # "staging" or "production" in inputs.environment now that the dropdown
-  # has no "from-variable" sentinel to resolve.
+  # workflow_dispatch is the only trigger now, and its `environment` input
+  # is required with a default, so this always carries a concrete "staging"
+  # or "production".
   group: deploy-aca-${{ inputs.environment || 'production' }}
   cancel-in-progress: false # never cancel a deploy mid-flight -- let it finish or fail cleanly
 
@@ -120,43 +116,23 @@ permissions:
   contents: read
 
 env:
-  # WHICH TARGET this run deploys to. workflow_call (release.yml, a
-  # git-tag release) is always "production" -- there is no "staging
-  # release". A workflow_dispatch run always carries a concrete "staging"
-  # or "production" in inputs.environment (the dropdown has no
-  # "from-variable" sentinel to resolve anymore, and its own default is
-  # "production" -- see that input's description). This only decides
-  # which GitHub Environment's OIDC secrets get used and which resource
-  # group this run touches -- NOT the frontend build mode or which Docker
-  # Hub image repo gets pulled. Both of those are BUILD_ENV/image_suffix,
-  # computed by the `resolve-target` job below from each target's own
-  # `ENVIRONMENT` Actions variable (see that job's own comment for why).
-  #
-  # BUG FIX: github.event_name inside a CALLED reusable workflow is always
-  # the CALLER's original triggering event, never 'workflow_call' -- per
-  # GitHub's own docs, "the github context is always associated with the
-  # caller workflow". `(github.event_name == 'workflow_call') &&
-  # 'production' || inputs.environment` would therefore always fall
-  # through to inputs.environment, which is empty on an actual
-  # workflow_call (that trigger never declares an `environment` input),
-  # binding every `environment:`-scoped job below to Environment '' instead
-  # of 'production' and hiding every secret scoped to the real 'production'
-  # Environment -- exactly the "Missing/empty secret(s) for GitHub
-  # Environment ''" failure this repo already hit live on the VM path (see
-  # deploy-azure-vm.yml's identical fix). Caught here before this
-  # workflow_call entry point was ever actually wired up to a tag push
-  # (release.yml's new `deploy-aca` job), so this never misfired in
-  # production -- but it would have the first time a tag release ran.
-  # Fixed the same way: read inputs.environment directly (empty on
-  # workflow_call, always a real value on workflow_dispatch since that
-  # input is required with a default), falling back to 'production'.
+  # WHICH TARGET this run deploys to. workflow_dispatch is the only
+  # trigger, its `environment` input is required with a default of
+  # "production", so this always carries a concrete "staging" or
+  # "production". This only decides which GitHub Environment's OIDC
+  # secrets get used and which resource group this run touches -- NOT the
+  # frontend build mode or which Docker Hub image repo gets pulled. Both
+  # of those are BUILD_ENV/image_suffix, computed by the `resolve-target`
+  # job below from each target's own `ENVIRONMENT` Actions variable (see
+  # that job's own comment for why).
   ENVIRONMENT: ${{ inputs.environment || 'production' }}
   RESOURCE_GROUP: ${{ (inputs.environment || 'production') == 'production' && secrets.PROD_RESOURCE_GROUP || secrets.STAGING_RESOURCE_GROUP }}
-  # workflow_call (release.yml) always supplies a real image_tag. On
-  # workflow_dispatch, a blank image_tag means "build fresh" -- fall back to
-  # the commit SHA of whatever ref this run was dispatched against, so
-  # build-push below and the rest of this pipeline always have a concrete
-  # tag to work with even though the human left the input blank.
+  # A blank image_tag means "build fresh" -- fall back to the commit SHA of
+  # whatever ref this run was dispatched against, so build-push below and
+  # the rest of this pipeline always have a concrete tag to work with even
+  # though the human left the input blank. Supply an existing, already-
+  # published tag (e.g. a version like "v1.4.2" cut by release.yml) to
+  # deploy exactly that image instead.
   IMAGE_TAG: ${{ inputs.image_tag != '' && inputs.image_tag || github.sha }}
   # NOTE: BACKEND_IMAGE/FRONTEND_IMAGE deliberately do NOT live here
   # anymore -- they used to be a ternary on `inputs.environment` alone
@@ -209,8 +185,27 @@ jobs:
       # job (`build-push`, `migrate`, `deploy`) now reads instead of
       # re-deriving it from `inputs.environment` itself.
       image_suffix: ${{ steps.resolve.outputs.image_suffix }}
+      # Which of the two mutually exclusive frontend flavors this
+      # environment ships: "react" (frontend/Dockerfile's
+      # frontend-react-only target, the React "Ledger" SPA) or "legacy"
+      # (frontend-legacy-only, the legacy static site) -- see that
+      # Dockerfile's top-of-file comment for why there's no longer a
+      # combined default. Two ways to control this, in priority order:
+      #   1. This run's own `frontend_type` workflow_dispatch input, if
+      #      set to anything other than "(environment default)" -- a
+      #      one-off override for THIS run only, nothing persisted.
+      #   2. Otherwise, this GitHub Environment's own FRONTEND_BUILD_TARGET
+      #      Actions variable, independent of staging vs. production -- a
+      #      legacy-only client's production Environment sets this without
+      #      touching anything else.
+      # See frontend-app/README.md's "Detaching this app" section.
+      frontend_type: ${{ steps.resolve.outputs.frontend_type }}
+      # Whether frontend_type above came from this run's own input or
+      # fell back to the Environment variable -- see deploy-azure-vm.yml's
+      # matching output for why this is surfaced separately.
+      frontend_type_source: ${{ steps.resolve.outputs.frontend_type_source }}
     steps:
-      - name: Read this environment's ENVIRONMENT variable
+      - name: Read this environment's ENVIRONMENT + FRONTEND_BUILD_TARGET variables
         id: resolve
         # vars.ENVIRONMENT here is the Actions variable set on THIS run's
         # target GitHub Environment (staging or production), value
@@ -226,8 +221,25 @@ jobs:
         # suffix, so an unset/misconfigured variable never silently ships
         # an unobfuscated build OR silently pulls a `-staging` image into
         # what you thought was a real deploy.
+        #
+        # vars.FRONTEND_BUILD_TARGET is a separate, independent Actions
+        # variable on the same Environment, value "react" or "legacy" --
+        # which of the two mutually exclusive frontend images this
+        # environment ships. There's no "ship everything" fail-safe
+        # anymore (the old combined `frontend-final` target is gone) --
+        # anything other than exactly "react" (including unset) resolves
+        # to "legacy", chosen as the safe default because it's the
+        # smaller, longer-proven surface. This run's own
+        # `inputs.frontend_type` (the workflow_dispatch dropdown) takes
+        # priority over that variable when explicitly set to "react" or
+        # "legacy" -- its default value, "(environment default)", falls
+        # straight through to the variable instead, so leaving the
+        # dropdown alone reproduces this environment's standing
+        # configuration exactly.
         env:
           RAW_ENVIRONMENT_VAR: ${{ vars.ENVIRONMENT }}
+          RAW_FRONTEND_BUILD_TARGET: ${{ vars.FRONTEND_BUILD_TARGET }}
+          RAW_FRONTEND_TYPE_INPUT: ${{ inputs.frontend_type }}
         run: |
           if [ "$RAW_ENVIRONMENT_VAR" = "development" ]; then
             echo "build_env=development" >> "$GITHUB_OUTPUT"
@@ -235,6 +247,17 @@ jobs:
           else
             echo "build_env=production" >> "$GITHUB_OUTPUT"
             echo "image_suffix=" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [ "$RAW_FRONTEND_TYPE_INPUT" = "react" ] || [ "$RAW_FRONTEND_TYPE_INPUT" = "legacy" ]; then
+            echo "frontend_type=$RAW_FRONTEND_TYPE_INPUT" >> "$GITHUB_OUTPUT"
+            echo "frontend_type_source=this run's frontend_type input" >> "$GITHUB_OUTPUT"
+          elif [ "$RAW_FRONTEND_BUILD_TARGET" = "react" ]; then
+            echo "frontend_type=react" >> "$GITHUB_OUTPUT"
+            echo "frontend_type_source=this environment's FRONTEND_BUILD_TARGET variable" >> "$GITHUB_OUTPUT"
+          else
+            echo "frontend_type=legacy" >> "$GITHUB_OUTPUT"
+            echo "frontend_type_source=this environment's FRONTEND_BUILD_TARGET variable" >> "$GITHUB_OUTPUT"
           fi
 
   verify-ci:
@@ -322,10 +345,21 @@ jobs:
       # outputs), which -- unlike `env` -- IS allowed here; see
       # resolve-target's own comment for why both have to be resolved in
       # a separate job.
-      backend_image_name: snipeit-lite-backend${{ needs.resolve-target.outputs.image_suffix }}
-      frontend_image_name: snipeit-lite-frontend${{ needs.resolve-target.outputs.image_suffix }}
       image_tags: ${{ inputs.image_tag != '' && inputs.image_tag || github.sha }} latest
       build_env: ${{ needs.resolve-target.outputs.build_env }}
+      # backend + exactly the ONE frontend flavor this run resolved to
+      # (needs.resolve-target.outputs.frontend_type: "react" or "legacy")
+      # -- see deploy-azure-vm.yml's matching build_matrix comment. Image
+      # names are built from frontend_type directly, so
+      # "snipeit-lite-frontend-react"/"snipeit-lite-frontend-legacy" (plus
+      # this environment's own `-staging` suffix, if any) -- see the
+      # `migrate`/`deploy` jobs' own FRONTEND_IMAGE for the matching
+      # pull-time name.
+      build_matrix: |
+        [
+          {"service":"backend","dockerfile":"backend/Dockerfile","context":"backend","image_name":"snipeit-lite-backend${{ needs.resolve-target.outputs.image_suffix }}"},
+          {"service":"frontend-${{ needs.resolve-target.outputs.frontend_type }}","dockerfile":"frontend/Dockerfile","context":".","target":"frontend-${{ needs.resolve-target.outputs.frontend_type }}-only","image_name":"snipeit-lite-frontend-${{ needs.resolve-target.outputs.frontend_type }}${{ needs.resolve-target.outputs.image_suffix }}"}
+        ]
       # Trivy blocking follows the deploy TARGET (staging vs production --
       # a safety posture about which resource this run touches), not
       # BUILD_ENV (a frontend minification setting) -- the two happen to
@@ -498,7 +532,7 @@ jobs:
     # images needed here for the backend/frontend rollout steps below.
     env:
       BACKEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend${{ needs.resolve-target.outputs.image_suffix }}
-      FRONTEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-frontend${{ needs.resolve-target.outputs.image_suffix }}
+      FRONTEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-frontend-${{ needs.resolve-target.outputs.frontend_type }}${{ needs.resolve-target.outputs.image_suffix }}
     steps:
       # Needed now (wasn't before) -- this job runs aca-blue-green.sh out of
       # .github/scripts/, unlike every other step here, which only ever
@@ -893,6 +927,7 @@ jobs:
             echo "| **Backend image** | \`$BACKEND_IMAGE:$IMAGE_TAG\` |"
             echo "| **Frontend image** | \`$FRONTEND_IMAGE:$IMAGE_TAG\` |"
             echo "| **Frontend build mode** | \`${{ needs.resolve-target.outputs.build_env }}\`${{ (github.event_name == 'workflow_dispatch' && inputs.image_tag != '') && ' _(reused an existing image -- not rebuilt this run, so this reflects whatever mode that image was originally built with, not necessarily this environment’s current `ENVIRONMENT` variable)_' || '' }} |"
+            echo "| **Frontend type** | \`${{ needs.resolve-target.outputs.frontend_type }}\`${{ needs.resolve-target.outputs.frontend_type == 'legacy' && ' _(legacy static site -- no React "Ledger" SPA in this image)_' || ' _(React "Ledger" SPA)_' }}${{ (github.event_name == 'workflow_dispatch' && inputs.image_tag != '') && ' _(reused an existing image -- reflects whatever flavor that image was originally built with)_' || format(' _(via {0})_', needs.resolve-target.outputs.frontend_type_source) }} |"
             echo "| **Deployed by** | @${{ github.actor }} |"
             echo "| **Previously live** | \`${{ steps.previous.outputs.backend_image }}\` / \`${{ steps.previous.outputs.frontend_image }}\` |"
             echo ""

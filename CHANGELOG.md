@@ -1,7 +1,7 @@
 # Changelog
 
 All notable changes to this project are documented here, one section per
-`git tag v*.*.*` production release. Entries below the marker are inserted
+`git tag v*.*.*` release. Entries below the marker are inserted
 automatically by [`release.yml`](.github/workflows/release.yml) at
 tag-push time, generated from `git log <previous-tag>..<new-tag>` (see that
 workflow's `changelog` job) — the same previous-tag lookup

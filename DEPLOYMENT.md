@@ -442,14 +442,17 @@ as in a single-instance deployment.
 This is the **primary production target**: Azure Container Apps (ACA), with
 a fast, zero-downtime deploy pipeline built to be the **cheapest realistic
 way to run this app on Azure** while keeping full functionality and real
-autoscaling. All deployments are manually triggered from the Actions tab
-(`workflow_dispatch`) — a plain push to `develop` or `main` never deploys
-anything by itself, it only runs `ci.yml`'s fast lint/test/build gate.
-**A pushed `git tag v1.x.x` is the one exception**: it still automatically
-triggers a production release (see
-[Versioning & Cutting a Release](#versioning--cutting-a-release) below for
-the full walkthrough). Nothing manual after the one-time setup below either
-way.
+autoscaling. **Every deployment is manually triggered from the Actions tab**
+(`workflow_dispatch`, `deploy-azure-aca.yml`) — a plain push to `develop`
+or `main` never deploys anything by itself (it only runs `ci.yml`'s fast
+lint/test/build gate), and neither does pushing a `git tag v1.x.x`. A
+version tag only runs `release.yml`, which builds, Trivy-scans, and
+publishes the official release images to Docker Hub and cuts a
+CHANGELOG/GitHub Release entry (see
+[Versioning & Cutting a Release](#versioning--cutting-a-release) below) --
+it stops there. To actually put that version into production, run
+`deploy-azure-aca.yml` yourself, pick `production`, and paste the version
+into its `image_tag` input.
 
 > **Deploy target vs. frontend build mode -- two separate settings, don't
 > confuse them:**
@@ -459,8 +462,8 @@ way.
 >   tab (`workflow_dispatch`). There is no repo-level fallback for this
 >   anymore -- the dropdown defaults to `production` if you don't touch it,
 >   so an unattended/default run always targets production; pick `staging`
->   explicitly if that's what you want. A version-tag push always deploys
->   `production` regardless of the dropdown.
+>   explicitly if that's what you want. A version-tag push never deploys by
+>   itself at all -- see above.
 > - **Frontend build mode** (minified-only vs. minified+obfuscated): a
 >   separate **Variable** named `ENVIRONMENT`, set PER GitHub Environment --
 >   `Settings → Environments → staging` (and again under `→ production`)
@@ -708,6 +711,7 @@ Leave otelExporterOtlpHeaders (and otelExporterOtlpEndpoint) empty and use otelA
    | Variable | Scope | Notes |
    |---|---|---|
    | `ENVIRONMENT` | per-environment | `production` for a minified+obfuscated frontend build (read by `deploy-azure-aca.yml`'s `resolve-target` job, fed into `frontend/Dockerfile`'s `BUILD_ENV`); `development`/unset for minified-only -- set independently on EACH GitHub Environment (`staging`, `production`). See the callout above -- this does NOT pick which Azure resource group/environment gets deployed, that's the workflow's `environment` dropdown. |
+   | `FRONTEND_BUILD_TARGET` | per-environment | `react` to ship the React "Ledger" SPA (served at `/`), `legacy`/unset (default) to ship the legacy static site (also served at `/`) -- the two are mutually exclusive; there's no longer a combined option that ships both. Read by the same `resolve-target` job, fed into `frontend/Dockerfile`'s `--target` -- independent of `ENVIRONMENT` above, so build mode and which frontend ships are separate choices. Set independently on EACH GitHub Environment. This is the **standing default** -- for a one-off override on a single run, use the `frontend_type` dropdown on that workflow's "Run workflow" form instead (`(environment default)` / `react` / `legacy`); no Settings page needed, and nothing is saved past that run. See `frontend-app/README.md`'s "Detaching this app" section. |
    | `AZURE_LOCATION` | repo | e.g. `eastus2` — see the note on region restrictions in step 3 above; `centralus` is the fallback if `eastus2` is also restricted on your subscription. Falls back to `eastus2` if unset. |
    | `CUSTOM_DOMAIN` | per-environment | Optional — leave unset to use the generated `*.azurecontainerapps.io` FQDN |
    | `NOTIFICATIONS_ENABLED` | per-environment | Optional, string `"true"`/`"false"` — master switch for all outbound email. Leave unset (defaults to off) until the four `SMTP_*` secrets above are set. See [POST_DEPLOYMENT.md](POST_DEPLOYMENT.md) for the full walkthrough. |
@@ -778,17 +782,17 @@ Leave otelExporterOtlpHeaders (and otelExporterOtlpEndpoint) empty and use otelA
    commit inside the branch.
 
 9. **Manually run `deploy-azure-aca.yml`** (Actions tab → "Run
-   workflow" → `environment: staging`) for Staging, or **push a `git tag
-   v1.x.x`** off `main` for Production — either builds real images, pushes
-   them to Docker Hub, runs migrations, and rolls them out (a manual
-   `deploy-azure-aca.yml` run with `environment: staging` for the former;
-   `release.yml` → `deploy-azure-aca.yml` (called with `workflow_call`,
-   which always targets production) for the latter — see
-   [Versioning & Cutting a Release](#versioning--cutting-a-release)
-   below for the full tagging walkthrough). From here on, deploys are just
-   `git push --tags` for production, or a manual `deploy-azure-aca.yml` run
-   for staging -- a plain `git push` to any branch never deploys anything
-   by itself, only `ci.yml`.
+   workflow"): `environment: staging` for Staging, or `environment:
+   production` for Production — either way this builds real images, pushes
+   them to Docker Hub, runs migrations, and rolls them out. To deploy a
+   tagged release rather than building fresh, first `git push --tags` (see
+   [Versioning & Cutting a Release](#versioning--cutting-a-release) below --
+   this only builds and publishes the images, it does not deploy them),
+   then run `deploy-azure-aca.yml` with `environment: production` and that
+   version pasted into `image_tag`. From here on, every deploy — staging or
+   production — is a manual `deploy-azure-aca.yml` run; a plain `git push`
+   to any branch or tag never deploys anything by itself, only `ci.yml`
+   (and, for a tag, `release.yml`'s build-and-publish step).
 
 ### Versioning & Cutting a Release
 
@@ -806,8 +810,8 @@ don't use pre-release-looking tags unless you mean it).
    `ci.yml` runs on the feature branch itself — no deploy, no versioning.
 2. Merge that PR into `develop`. Only `ci.yml` runs on the merge itself --
    there's no automatic deploy anymore (see `deploy-azure-aca.yml`'s own
-   `on:` block: `workflow_call` and `workflow_dispatch` only, no `push`
-   trigger). When you want to verify it on staging, manually run
+   `on:` block: `workflow_dispatch` only, no `push` trigger and no
+   `workflow_call` entry point). When you want to verify it on staging, manually run
    `deploy-azure-aca.yml` (Actions tab → "Run workflow" → `environment:
    staging`, leave `image_tag` blank to build fresh off `develop`) --
    builds a SHA-tagged image and rolls it out to staging.
@@ -818,18 +822,24 @@ don't use pre-release-looking tags unless you mean it).
    deploy, no version bump, no changelog entry. `main` can sit any number
    of merges ahead of what's actually live in production; that's expected,
    not a problem to fix.
-4. **Decide it's time to release, and only then tag:**
+4. **Decide it's time to cut a release, and only then tag:**
    ```bash
    git checkout main && git pull
    git tag v1.5.0                # bump MAJOR.MINOR.PATCH -- see below for which
    git push origin v1.5.0
    ```
-   This is the one command that actually changes production. Everything
-   from here on is automatic — see
+   This publishes the official release artifact — it does NOT touch
+   production by itself. See
    [The pipeline, branch by branch](#the-pipeline-branch-by-branch) for the
    stage-by-stage breakdown of what `release.yml` does with that tag
    (build + tag both images with `v1.5.0`, open the `CHANGELOG.md` PR, cut
-   a GitHub Release, and deploy).
+   a GitHub Release). No deploy job runs from `release.yml`.
+5. **When you're ready to actually ship it, deploy it yourself:** run
+   `deploy-azure-aca.yml` from the Actions tab, `environment: production`,
+   with `v1.5.0` pasted into `image_tag` — it pulls the exact image
+   `release.yml` already built and Trivy-scanned rather than rebuilding.
+   Run it whenever you choose; nothing forces this to happen right after
+   the tag push.
 
 **Which part of `MAJOR.MINOR.PATCH` to bump** — a quick rule of thumb for a
 project at this stage (pre-1.0 conventions can be looser, but pick one and
@@ -940,28 +950,32 @@ then `production`) to populate both new apps' images.
   block) → run `migrate` job against the new `backend` image → roll out
   `backend` then `frontend`. Both run with min replicas 0 on staging — pure
   scale-to-zero.
-- **`git tag v1.x.x` push → Production** (`release.yml` calling
-  `deploy-azure-aca.yml` via `workflow_call`, which always targets
-  production): `release.yml` builds BOTH images and
-  pushes each tagged with the **version itself** (e.g. `:v1.4.2`, not just a
-  SHA — see [Rollback](#rollback) for why that's the point), with Trivy
-  **blocking** on CRITICAL findings for either image; opens a pull request
-  against `main` with the new `CHANGELOG.md` section (never a direct commit
-  — see [Cutting a production release](#azure-container-apps-production-deployment-cost-optimized)
-  above) and cuts a GitHub Release; and, **in parallel, not sequentially**,
-  calls `deploy-azure-aca.yml`, which runs `migrate` against the new
-  `backend` image, rolls out `backend` then `frontend`, and smoke tests
-  `frontend`'s `/` AND `/api/auth/me` (proving the whole chain — nginx's
-  reverse proxy actually reaching `backend` — works, not just that
-  `frontend` serves static files) — a failure triggers automatic rollback
-  of both apps to their previously-deployed images. Both `backend` AND
-  `frontend` run with min replicas 1 in production by default (see
-  `infra-deploy.yml`'s "Resolve replica floors" step) — zero cold starts
-  anywhere in the production request path, at the cost of two always-on
-  replicas instead of one. `deploy-azure-aca.yml` itself
-  has no `push` trigger of its own at all — it only runs when `release.yml`
-  calls it (always production), or via a manual `workflow_dispatch` (either
-  `staging` or `production`, see [Rollback](#rollback)).
+- **`git tag v1.x.x` push → build + publish only, NOT a deploy**:
+  `release.yml` builds BOTH images and pushes each tagged with the
+  **version itself** (e.g. `:v1.4.2`, not just a SHA — see
+  [Rollback](#rollback) for why that's the point), with Trivy **blocking**
+  on CRITICAL findings for either image; opens a pull request against
+  `main` with the new `CHANGELOG.md` section (never a direct commit — see
+  [Cutting a production release](#azure-container-apps-production-deployment-cost-optimized)
+  above) and cuts a GitHub Release. That's the entire tag-push pipeline —
+  `release.yml` never calls `deploy-azure-aca.yml` and has no deploy job of
+  its own.
+- **Manual `deploy-azure-aca.yml` run (`environment: production`) →
+  Production**: the only path that actually deploys to production. Leave
+  `image_tag` blank to build fresh, or paste in an already-published
+  version (e.g. `v1.4.2`, from the tag push above) to deploy that exact
+  image without rebuilding. Runs `migrate` against the new `backend` image,
+  rolls out `backend` then `frontend`, and smoke tests `frontend`'s `/` AND
+  `/api/auth/me` (proving the whole chain — nginx's reverse proxy actually
+  reaching `backend` — works, not just that `frontend` serves static
+  files) — a failure triggers automatic rollback of both apps to their
+  previously-deployed images. Both `backend` AND `frontend` run with min
+  replicas 1 in production by default (see `infra-deploy.yml`'s "Resolve
+  replica floors" step) — zero cold starts anywhere in the production
+  request path, at the cost of two always-on replicas instead of one.
+  `deploy-azure-aca.yml` has no `push` trigger and no `workflow_call` entry
+  point at all — `workflow_dispatch` (either `staging` or `production`, see
+  [Rollback](#rollback)) is the only way it ever runs.
 - **`redis` and `postgresServer` are never touched by either pipeline** —
   `redis` runs a fixed official image, only changing when
   `infra/main.bicep` itself changes (re-run `infra-deploy.yml` manually);

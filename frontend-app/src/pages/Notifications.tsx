@@ -3,6 +3,8 @@ import { motion } from "framer-motion";
 import { AlarmClockOff, CalendarClock, Info, TrendingDown } from "lucide-react";
 import { api, relativeTime } from "../lib/api";
 import type { NotificationItem } from "../lib/types";
+import { useAuth } from "../lib/useAuth";
+import { isPrivileged } from "../lib/roles";
 
 const iconMap = {
   overdue: { icon: AlarmClockOff, color: "text-rust-soft bg-rust/10" },
@@ -13,10 +15,17 @@ const iconMap = {
 
 export function Notifications() {
   const [items, setItems] = useState<NotificationItem[]>([]);
+  const { user, demo } = useAuth();
+  // Review-facing (org-wide overdue/due-soon/extension-request) items only
+  // come through for a privileged role -- see lib/api.ts's
+  // loadNotifications() for why this can't just call the privileged
+  // endpoints for every role and let a 403 fall through to mock data.
+  const privileged = demo || isPrivileged(user?.role);
 
   useEffect(() => {
-    api.getNotifications().then(setItems);
-  }, []);
+    api.getNotifications(privileged).then(setItems);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [privileged]);
 
   return (
     <div>

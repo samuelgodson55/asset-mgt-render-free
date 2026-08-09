@@ -57,18 +57,15 @@ revision and a live new one.
 
 ### How to push
 
-Two ways to trigger `deploy-azure-aca.yml`:
-
-- **Manual** — open the workflow in the Actions tab, pick `staging` or
-  `production`, hit **Run workflow**. Leave `image_tag` blank to build
-  fresh from the branch/ref you're running against (runs `ci.yml` +
-  `build-push-images.yml` first), or supply an existing Docker Hub tag to
-  redeploy/roll forward to something already built.
-- **Tag release** — `git tag vX.Y.Z && git push origin vX.Y.Z` runs
-  `release.yml` (build + Trivy scan + push both images tagged `vX.Y.Z`),
-  which then calls `deploy-azure-vm.yml`'s `deploy` job AND this workflow's
-  `deploy-aca` job for **production**, in parallel, automatically — a
-  version tag now deploys to both targets every release.
+`deploy-azure-aca.yml` only ever runs manually — open the workflow in the
+Actions tab, pick `staging` or `production`, hit **Run workflow**. Leave
+`image_tag` blank to build fresh from the branch/ref you're running
+against (runs `ci.yml` + `build-push-images.yml` first), or supply an
+existing Docker Hub tag (e.g. a version like `vX.Y.Z` published by
+`git tag vX.Y.Z && git push origin vX.Y.Z` -- see `release.yml`) to
+redeploy/roll forward to something already built. A version-tag push by
+itself only builds, Trivy-scans, and publishes the images -- it never
+calls this workflow.
 
 ### What happens per app, in order
 

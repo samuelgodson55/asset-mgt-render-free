@@ -36,9 +36,23 @@ def get_public_config():
 
 
 @router.get("/assets/catalog")
-def get_asset_catalog(db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
-    """The self-service Quotation Catalog -- every active asset pool, shaped by role + CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER."""
-    return quotation_service.list_catalog(db, user)
+def get_asset_catalog(
+    limit: int = Query(quotation_service.CATALOG_DEFAULT_LIMIT, ge=1, le=quotation_service.CATALOG_MAX_LIMIT, description="Max rows to return"),
+    offset: int = Query(0, ge=0, description="Rows to skip (for paging through a large catalog)"),
+    search: Optional[str] = Query(None, description="Case-insensitive substring match against asset name or category"),
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    """The self-service Quotation Catalog -- every active asset pool, shaped by role + CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER.
+
+    limit/offset/search default to returning the whole active catalog
+    unfiltered (same as before pagination was added) so existing callers
+    that never passed these -- e.g. the Admin/Manager Quote Detail
+    drawer's "Add another asset" typeahead, which needs the full catalog
+    client-side -- keep working unchanged. The Quotations page's own
+    browsable catalog table passes real values for true server-side
+    paging + search."""
+    return quotation_service.list_catalog(db, user, limit, offset, search)
 
 
 # ---------------------------------------------------------------------------
