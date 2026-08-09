@@ -45,13 +45,15 @@ def get_asset_catalog(
 ):
     """The self-service Quotation Catalog -- every active asset pool, shaped by role + CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER.
 
-    limit/offset/search default to returning the whole active catalog
-    unfiltered (same as before pagination was added) so existing callers
-    that never passed these -- e.g. the Admin/Manager Quote Detail
-    drawer's "Add another asset" typeahead, which needs the full catalog
+    limit/offset/search default to CATALOG_DEFAULT_LIMIT rows so existing
+    callers that never pass these -- e.g. the Admin/Manager Quote Detail
+    drawer's "Add another asset" typeahead, which needs the catalog
     client-side -- keep working unchanged. The Quotations page's own
     browsable catalog table passes real values for true server-side
-    paging + search."""
+    paging + search. Either way, CATALOG_MAX_LIMIT (see
+    services/quotation_service.py) is a hard cap enforced both by this
+    route's `le=` and again inside list_catalog() -- no request can ever
+    get an unbounded response."""
     return quotation_service.list_catalog(db, user, limit, offset, search)
 
 

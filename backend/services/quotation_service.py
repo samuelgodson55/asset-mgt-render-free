@@ -75,10 +75,17 @@ VAT_SETTING_KEY = "vat_percent"
 _DEFAULT_VAT_PERCENT = Decimal("0")
 
 # Pagination defaults for list_catalog() -- CATALOG_DEFAULT_LIMIT is
-# deliberately generous (not the small page size the UI defaults to) so
-# any caller that omits limit/offset entirely still gets the full active
-# catalog in one response, same as list_catalog()'s pre-pagination
-# behavior. Mirrors services/asset_service.py's DEFAULT_LIMIT/MAX_LIMIT.
+# deliberately generous (not the small page size the UI defaults to) so a
+# caller that omits limit/offset entirely -- e.g. the Admin/Manager Quote
+# Detail drawer's "Add another asset" typeahead, which needs the whole
+# catalog client-side to filter against -- still gets it in one response
+# for any realistically-sized catalog. CATALOG_MAX_LIMIT is the part that
+# actually matters for stability: it's a hard ceiling enforced BOTH by
+# FastAPI's `le=` on the query param AND again in list_catalog() itself,
+# so no caller -- whatever limit they pass, or if they pass none at all --
+# can ever force a response larger than 1000 rows. There is no "give me
+# everything" escape hatch from this cap. Mirrors services/asset_service.py's
+# DEFAULT_LIMIT/MAX_LIMIT.
 CATALOG_DEFAULT_LIMIT = 500
 CATALOG_MAX_LIMIT = 1000
 
@@ -86,6 +93,14 @@ TWO_PLACES = Decimal("0.01")
 
 DEFAULT_LIST_LIMIT = 10
 MAX_LIST_LIMIT = 100
+
+# Defensive server-side ceiling for list_my_submitted_quotations() -- that
+# endpoint takes no limit/offset params (it's a self-service "my history"
+# panel, not a paged directory), so it needs its own hard cap rather than
+# relying on a caller-supplied limit. Generous enough that no real account
+# will ever hit it in normal use, but guarantees the query can never grow
+# unbounded.
+MY_HISTORY_MAX_ROWS = 2000
 
 
 def _money(value: Decimal) -> float:
@@ -193,15 +208,17 @@ def list_catalog(db: Session, user: dict, limit: int = CATALOG_DEFAULT_LIMIT, of
     `search` narrows to pools whose name OR category contains it
     (case-insensitive), applied and counted BEFORE the offset/limit slice
     so `total` always reflects the filtered set. `limit`/`offset` default
-    to the historical "return everything" behavior (CATALOG_DEFAULT_LIMIT
-    is generous enough to cover any realistic catalog in one page) so
-    existing callers that never passed pagination params -- the Admin/
-    Manager Quote Detail drawer's "Add another asset" typeahead, which
-    needs the FULL catalog client-side to search against -- keep working
-    unchanged; only the Quotations page's own browsable catalog table
-    passes real limit/offset/search to get a true paged, server-searched
-    view (mirrors PaginationBar's "Asset Inventory, User Directory, ...,
-    Quotations" doc comment in lib/pagination.ts).
+    to CATALOG_DEFAULT_LIMIT (generous enough to cover any realistic
+    catalog in one page) so existing callers that never pass pagination
+    params -- e.g. the Admin/Manager Quote Detail drawer's "Add another
+    asset" typeahead, which needs the catalog client-side to search
+    against -- keep working unchanged; the Quotations page's own
+    browsable catalog table passes real limit/offset/search to get a true
+    paged, server-searched view (mirrors PaginationBar's "Asset Inventory,
+    User Directory, ..., Quotations" doc comment in lib/pagination.ts).
+    Regardless of what any caller passes (or omits), CATALOG_MAX_LIMIT is
+    a hard server-side ceiling -- see its comment above -- so this can
+    never be turned into an unbounded "return everything" query.
     """
     full_admin_roles = ("super_admin", "admin", "manager")
     show_stock = user["role"] in full_admin_roles or settings.CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER
@@ -423,7 +440,16 @@ def list_my_submitted_quotations(db: Session, user: dict) -> dict:
     approves it, and a final "Fulfilled" once physically checked out).
     `include_admin_fields=True` below is what puts `requester` on each row
     -- js/components/quotation.js's renderMyQuotationHistory() uses it to
-    label rows the caller didn't build themselves ("Requested by ...")."""
+    label rows the caller didn't build themselves ("Requested by ...").
+
+    No limit/offset query params -- this is a self-service "my history"
+    panel, not a paged/searched directory -- but it's still capped at
+    MY_HISTORY_MAX_ROWS server-side (newest-first, so the cap only ever
+    drops the oldest rows) as a defensive ceiling: for code stability, no
+    listing endpoint should be able to hand back an unbounded result set,
+    even one scoped to a single account, since a long-lived power-user
+    account accumulating years of submitted/assigned quotations could
+    otherwise turn this into an ever-growing, unbounded query."""
     uid = int(user["sub"])
     quotations = (
         db.query(models.Quotation)
@@ -432,6 +458,7 @@ def list_my_submitted_quotations(db: Session, user: dict) -> dict:
             models.Quotation.status != "draft",
         )
         .order_by(models.Quotation.submitted_at.desc())
+        .limit(MY_HISTORY_MAX_ROWS)
         .all()
     )
     return {"items": [_serialize_quotation(db, q, include_admin_fields=True) for q in quotations]}
