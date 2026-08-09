@@ -7,9 +7,10 @@ import { QuoteDetailDrawer } from "../components/QuoteDetailDrawer";
 import { StatusPill } from "../components/StatusPill";
 import { ExportButtons } from "../components/ExportButtons";
 import { PaginationBar, RowsPerPageSelect } from "../components/PaginationBar";
-import { DEFAULT_PAGE_SIZE } from "../lib/pagination";
+import { DEFAULT_PAGE_SIZE, MOBILE_DEFAULT_PAGE_SIZE, MOBILE_PAGE_SIZE_OPTIONS, PAGE_SIZE_OPTIONS } from "../lib/pagination";
 import { useAuth } from "../lib/useAuth";
 import { isPrivileged } from "../lib/roles";
+import { useIsMobile } from "../lib/useIsMobile";
 
 function errMsg(err: unknown, fallback: string): string {
   if (err instanceof ApiError) return err.message;
@@ -35,6 +36,11 @@ export function Quotations() {
   const { user, demo } = useAuth();
   const canAssign = demo || isPrivileged(user?.role);
 
+  // Below the `lg` breakpoint this page's catalog rows render as tall
+  // stacked cards instead of table rows (see the layout below), so a
+  // smaller default page size keeps the initial scroll reasonable.
+  const isMobile = useIsMobile();
+
   // ---- Asset Catalog table: true server-side pagination + search, same
   // {items,total,limit,offset} contract every other directory table in
   // the app uses (Assets.tsx/Admin.tsx's User/Ad-Hoc/Audit tables) --
@@ -43,7 +49,7 @@ export function Quotations() {
   const [catalog, setCatalog] = useState<CatalogAsset[]>([]);
   const [catalogTotal, setCatalogTotal] = useState(0);
   const [catalogOffset, setCatalogOffset] = useState(0);
-  const [catalogPerPage, setCatalogPerPage] = useState(DEFAULT_PAGE_SIZE);
+  const [catalogPerPage, setCatalogPerPage] = useState(isMobile ? MOBILE_DEFAULT_PAGE_SIZE : DEFAULT_PAGE_SIZE);
   const [catalogLoading, setCatalogLoading] = useState(true);
 
   const [cart, setCart] = useState<QuotationCartOrDetail | null>(null);
@@ -224,7 +230,12 @@ export function Quotations() {
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <div className="lg:col-span-2">
+        {/* On mobile (single column) this comes second in the DOM but is
+            pushed above the catalog via `order-2`, so "My Order"/"My
+            Quotes" is visible without scrolling past the whole catalog
+            first. At `lg` and up it's back in its normal second-column
+            spot (`lg:order-2`), unchanged from before. */}
+        <div className="order-2 lg:order-1 lg:col-span-2">
           <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
             <h2 className="font-display text-[15px] font-medium text-text">Asset Catalog</h2>
             <div className="flex items-center gap-2 flex-wrap">
@@ -237,7 +248,11 @@ export function Quotations() {
                   className="w-full bg-surface border border-border-soft rounded-[3px] pl-8 pr-3 py-1.5 text-[12px] text-text placeholder:text-text-faint focus:border-brass/50 focus:outline-none transition-colors"
                 />
               </div>
-              <RowsPerPageSelect value={catalogPerPage} onChange={handleCatalogPerPageChange} />
+              <RowsPerPageSelect
+                value={catalogPerPage}
+                onChange={handleCatalogPerPageChange}
+                options={isMobile ? MOBILE_PAGE_SIZE_OPTIONS : PAGE_SIZE_OPTIONS}
+              />
             </div>
           </div>
 
@@ -314,7 +329,7 @@ export function Quotations() {
           </div>
         </div>
 
-        <div>
+        <div className="order-1 lg:order-2">
           <div className="flex items-center gap-1 mb-3 border-b border-border-soft">
             <button
               onClick={() => setTab("order")}

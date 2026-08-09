@@ -439,6 +439,13 @@ function RestoreCompleteModal({ result, onContinue }: { result: RestoreResult | 
   );
 }
 
+// Lives on the Settings tab (Super Admin AND a plain Admin, via
+// canSettings/isFullAdmin below) rather than the System Backups tab --
+// System Backups itself is gated to the TRUE Super Admin only
+// (canBackups/isTrueSuperAdmin), which would have hidden this list from a
+// plain Admin even though the backend route behind it
+// (GET/PUT /settings/digest-recipients) has always allowed a plain Admin,
+// not just Super Admin -- see backend/api/notifications_api.py.
 function DigestRecipients() {
   const [emails, setEmails] = useState<string[]>([]);
   const [input, setInput] = useState("");
@@ -595,7 +602,7 @@ function SystemBackupsPanel() {
   return (
     <div className="flex flex-col gap-4">
       <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.35 }} className="border border-border-soft bg-surface rounded-[3px] p-5">
-        <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
           <div className="flex items-center gap-2.5">
             <div className="w-9 h-9 rounded-full bg-brass/10 flex items-center justify-center shrink-0">
               <DatabaseBackup size={16} className="text-brass-soft" />
@@ -605,7 +612,7 @@ function SystemBackupsPanel() {
               <p className="text-[11.5px] text-text-faint">Restricted to the root Super Admin account</p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <button
               onClick={() => setPendingRestore({ mode: "upload" })}
               className="flex items-center gap-1.5 border border-border-soft hover:border-brass/40 text-text text-[12px] rounded-[3px] px-3 py-1.5 transition-colors"
@@ -715,8 +722,6 @@ function SystemBackupsPanel() {
         </div>
       </motion.div>
 
-      <DigestRecipients />
-
       <RestoreModal
         pending={pendingRestore}
         onClose={() => setPendingRestore(null)}
@@ -770,38 +775,58 @@ function SettingsPanel() {
   };
 
   return (
-    <div className="max-w-sm">
-      <div className="border border-border-soft bg-surface rounded-[3px] p-5">
-        <div className="flex items-center gap-2 mb-1">
-          <Percent size={14} className="text-brass-soft" />
-          <h2 className="font-display text-[14px] font-semibold text-text">Quotation Settings</h2>
-        </div>
-        <p className="text-[12px] text-text-muted mb-4">The global VAT percentage applied to every Quotation's total.</p>
+    <div className="flex flex-col lg:flex-row lg:items-start gap-6">
+      <div className="w-full lg:max-w-sm lg:shrink-0">
+        <div className="border border-border-soft bg-surface rounded-[3px] p-5">
+          <div className="flex items-center gap-2 mb-1">
+            <Percent size={14} className="text-brass-soft" />
+            <h2 className="font-display text-[14px] font-semibold text-text">Quotation Settings</h2>
+          </div>
+          <p className="text-[12px] text-text-muted mb-4">The global VAT percentage applied to every Quotation's total.</p>
 
-        {loading ? (
-          <p className="text-[12px] text-text-faint">Loading…</p>
-        ) : (
-          <form onSubmit={submit} className="flex flex-col gap-3">
-            <label className="block">
-              <span className="text-[11px] uppercase tracking-wider text-text-faint">VAT percent</span>
-              <input
-                type="number"
-                min={0}
-                max={100}
-                step={0.01}
-                value={vatPercent}
-                onChange={(e) => setVatPercent(e.target.value)}
-                className="w-full mt-1.5 bg-ink-soft border border-border-soft rounded-[3px] px-3 py-2.5 text-[13px] text-text focus:border-brass/50 focus:outline-none transition-colors"
-              />
-            </label>
-            {message && (
-              <p className={`text-[12px] font-medium ${message.ok ? "text-moss-soft" : "text-rust-soft"}`}>{message.text}</p>
-            )}
-            <button type="submit" disabled={saving} className="bg-brass hover:bg-brass-soft disabled:opacity-60 text-ink font-medium text-[13px] rounded-[3px] py-2.5 transition-colors">
-              {saving ? "Saving…" : "Save VAT setting"}
-            </button>
-          </form>
-        )}
+          {loading ? (
+            <p className="text-[12px] text-text-faint">Loading…</p>
+          ) : (
+            <form onSubmit={submit} className="flex flex-col gap-3">
+              <label className="block">
+                <span className="text-[11px] uppercase tracking-wider text-text-faint">VAT percent</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  step={0.01}
+                  value={vatPercent}
+                  onChange={(e) => setVatPercent(e.target.value)}
+                  className="w-full mt-1.5 bg-ink-soft border border-border-soft rounded-[3px] px-3 py-2.5 text-[13px] text-text focus:border-brass/50 focus:outline-none transition-colors"
+                />
+              </label>
+              {message && (
+                <p className={`text-[12px] font-medium ${message.ok ? "text-moss-soft" : "text-rust-soft"}`}>{message.text}</p>
+              )}
+              <button type="submit" disabled={saving} className="bg-brass hover:bg-brass-soft disabled:opacity-60 text-ink font-medium text-[13px] rounded-[3px] py-2.5 transition-colors">
+                {saving ? "Saving…" : "Save VAT setting"}
+              </button>
+            </form>
+          )}
+        </div>
+      </div>
+
+      {/* Daily Digest Recipients -- moved here from the System Backups tab.
+          That tab is gated require_true_super_admin on the frontend
+          (isTrueSuperAdmin(), see canBackups below), but this list's own
+          backend route is only require_super_admin (Super Admin AND a
+          plain Admin account -- see backend/api/notifications_api.py), so
+          a plain Admin could never reach it there even though they were
+          always allowed to manage it. Settings is gated on canSettings
+          (isFullAdmin -- Super Admin OR Admin, see below), the correct
+          audience for this list.
+
+          Sits beside the VAT card at `lg` and up (`flex-row` on the
+          parent) so the wide Settings tab's spare horizontal room gets
+          used instead of leaving this card stranded under a much
+          narrower one; stacks back underneath it on smaller screens. */}
+      <div className="w-full lg:flex-1 lg:max-w-xl">
+        <DigestRecipients />
       </div>
     </div>
   );
@@ -1128,12 +1153,12 @@ function UsersPanel({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 flex-wrap">
         <div className="relative flex-1 max-w-xs">
           <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-faint" />
           <input value={search} onChange={(e) => { setOffset(0); setSearch(e.target.value); }} placeholder="Search directory…" className="w-full bg-surface border border-border-soft rounded-[3px] pl-7 pr-3 py-2 text-[12.5px] text-text placeholder:text-text-faint focus:border-brass/50 focus:outline-none" />
         </div>
-        <div className="ml-auto flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap sm:ml-auto">
           <RowsPerPageSelect value={perPage} onChange={handlePerPageChange} />
           <ExportButtons
             compact
@@ -1150,6 +1175,7 @@ function UsersPanel({
       </div>
 
       <div className="border border-border-soft bg-surface rounded-[3px] overflow-hidden">
+        <div className="overflow-x-auto">
         <table className="w-full text-left text-[12.5px]">
           <thead className="bg-surface-raised text-text-faint text-[11px] uppercase tracking-wide">
             <tr>
@@ -1183,6 +1209,7 @@ function UsersPanel({
             ))}
           </tbody>
         </table>
+        </div>
       </div>
 
       <PaginationBar total={total} perPage={perPage} offset={offset} onOffsetChange={setOffset} />
@@ -1369,7 +1396,7 @@ function OutsidersPanel({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 flex-wrap">
         <div className="relative max-w-xs flex-1">
           <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-faint" />
           <input value={search} onChange={(e) => { setOffset(0); setSearch(e.target.value); }} placeholder="Search ad-hoc profiles…" className="w-full bg-surface border border-border-soft rounded-[3px] pl-7 pr-3 py-2 text-[12.5px] text-text placeholder:text-text-faint focus:border-brass/50 focus:outline-none" />
@@ -1384,6 +1411,7 @@ function OutsidersPanel({
       </div>
 
       <div className="border border-border-soft bg-surface rounded-[3px] overflow-hidden">
+        <div className="overflow-x-auto">
         <table className="w-full text-left text-[12.5px]">
           <thead className="bg-surface-raised text-text-faint text-[11px] uppercase tracking-wide">
             <tr>
@@ -1416,6 +1444,7 @@ function OutsidersPanel({
             ))}
           </tbody>
         </table>
+        </div>
       </div>
 
       <PaginationBar total={total} perPage={perPage} offset={offset} onOffsetChange={setOffset} />
@@ -1504,6 +1533,7 @@ function DeletedUsersPanel() {
       {error && <div className="bg-rust/10 border border-rust/30 text-rust-soft text-[12px] rounded-[3px] px-3 py-2.5">{error}</div>}
 
       <div className="border border-border-soft bg-surface rounded-[3px] overflow-hidden">
+        <div className="overflow-x-auto">
         <table className="w-full text-left text-[12.5px]">
           <thead className="bg-surface-raised text-text-faint text-[11px] uppercase tracking-wide">
             <tr>
@@ -1534,6 +1564,7 @@ function DeletedUsersPanel() {
             ))}
           </tbody>
         </table>
+        </div>
       </div>
 
       <PaginationBar total={total} perPage={perPage} offset={offset} onOffsetChange={setOffset} />
@@ -1618,6 +1649,7 @@ function DeletedAssetsPanel() {
       {error && <div className="bg-rust/10 border border-rust/30 text-rust-soft text-[12px] rounded-[3px] px-3 py-2.5">{error}</div>}
 
       <div className="border border-border-soft bg-surface rounded-[3px] overflow-hidden">
+        <div className="overflow-x-auto">
         <table className="w-full text-left text-[12.5px]">
           <thead className="bg-surface-raised text-text-faint text-[11px] uppercase tracking-wide">
             <tr>
@@ -1648,6 +1680,7 @@ function DeletedAssetsPanel() {
             ))}
           </tbody>
         </table>
+        </div>
       </div>
 
       <PaginationBar total={total} perPage={perPage} offset={offset} onOffsetChange={setOffset} />
@@ -1740,6 +1773,7 @@ function AuditPanel() {
       {exportError && !exportModalOpen && <div className="bg-rust/10 border border-rust/30 text-rust-soft text-[12px] rounded-[3px] px-3 py-2.5">{exportError}</div>}
 
       <div className="border border-border-soft bg-surface rounded-[3px] overflow-hidden">
+        <div className="overflow-x-auto">
         <table className="w-full text-left text-[12.5px]">
           <thead className="bg-surface-raised text-text-faint text-[11px] uppercase tracking-wide">
             <tr>
@@ -1762,6 +1796,7 @@ function AuditPanel() {
             ))}
           </tbody>
         </table>
+        </div>
       </div>
 
       <PaginationBar total={total} perPage={perPage} offset={offset} onOffsetChange={setOffset} />
@@ -2135,6 +2170,7 @@ function QuotesPanel() {
           </div>
 
           <div className="border border-border-soft bg-surface rounded-[3px] overflow-hidden">
+            <div className="overflow-x-auto">
             <table className="w-full text-left text-[12.5px]">
               <thead className="bg-surface-raised text-text-faint text-[11px] uppercase tracking-wide">
                 <tr>
@@ -2182,6 +2218,7 @@ function QuotesPanel() {
                 ))}
               </tbody>
             </table>
+            </div>
           </div>
 
           <PaginationBar total={total} perPage={perPage} offset={offset} onOffsetChange={setOffset} />

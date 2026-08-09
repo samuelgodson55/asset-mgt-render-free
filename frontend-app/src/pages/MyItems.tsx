@@ -169,6 +169,7 @@ export function MyItems() {
       {sentMsg && <div className="max-w-xl bg-moss/10 border border-moss/30 text-moss-soft text-[13px] rounded-[3px] px-4 py-3 mb-4">{sentMsg}</div>}
 
       <div className="border border-border-soft bg-surface rounded-[3px] overflow-hidden">
+        <div className="overflow-x-auto">
         <table className="w-full text-left text-[12.5px]">
           <thead className="bg-surface-raised text-text-faint text-[11px] uppercase tracking-wide">
             <tr>
@@ -189,16 +190,56 @@ export function MyItems() {
               <tr key={item.checkout_id}>
                 <td className="px-5 py-3">
                   <p className="text-text font-medium flex items-center gap-2"><PackageCheck size={13} className="text-moss-soft shrink-0" />{item.asset_name}</p>
+                  {/* MOBILE FIX: qty/checked-out/due-back and the "Request
+                      extension" action all lived in columns hidden below
+                      `sm`, with no fallback -- on a phone there was
+                      previously no way to see when an item was due, let
+                      alone request an extension on it. Mirrors the same
+                      "stack it under the primary cell on mobile" pattern
+                      already used for the System Backups table. */}
+                  <p className="mt-1 text-[11px] text-text-faint sm:hidden">
+                    Qty {item.quantity} · Out {formatDate(item.checkout_date)} · Due {formatDate(item.due_date)}
+                  </p>
+                  <button
+                    onClick={() => setSelected(item)}
+                    className="sm:hidden mt-2 flex items-center gap-1.5 rounded-md border border-border-soft px-2.5 py-1 text-[11.5px] font-medium text-text-muted hover:border-sky/50 hover:text-sky transition-colors"
+                  >
+                    <CalendarClock size={11} /> Request extension
+                  </button>
                 </td>
                 <td className="hidden sm:table-cell px-5 py-3 font-mono text-text-muted">{item.quantity}</td>
                 <td className="hidden sm:table-cell px-5 py-3 font-mono text-text-muted">{formatDate(item.checkout_date)}</td>
                 <td className="hidden sm:table-cell px-5 py-3 font-mono text-text-muted">{formatDate(item.due_date)}</td>
                 <td className="px-5 py-3">
-                  {item.due_soon ? (
-                    <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-brass-soft"><span className="w-1.5 h-1.5 rounded-full bg-brass" />Due soon</span>
-                  ) : (
-                    <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-sky"><span className="w-1.5 h-1.5 rounded-full bg-sky" />On loan</span>
-                  )}
+                  {/* STATUS FIX: this only ever checked item.due_soon, so
+                      an item that had already gone overdue still showed
+                      the same "On loan" badge as one with weeks left --
+                      the backend was already computing item.overdue
+                      alongside due_soon (services/user_service.py's
+                      _group_assigned_items()), it just wasn't read here.
+                      Overdue takes priority over due-soon since a loan
+                      can't be both at once, and overdue is the more
+                      urgent of the two. item.pending_extension is a
+                      separate, non-exclusive state -- a loan can be
+                      overdue/due-soon/on-loan AND have a request sitting
+                      in review at the same time -- so it renders as its
+                      own badge alongside the primary one rather than
+                      replacing it, same sky color Notifications.tsx and
+                      Admin.tsx's AlertDots already use for this state. */}
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                    {item.overdue ? (
+                      <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-rust-soft"><span className="w-1.5 h-1.5 rounded-full bg-rust" />Overdue</span>
+                    ) : item.due_soon ? (
+                      <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-brass-soft"><span className="w-1.5 h-1.5 rounded-full bg-brass" />Due soon</span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-sky"><span className="w-1.5 h-1.5 rounded-full bg-sky" />On loan</span>
+                    )}
+                    {item.pending_extension && (
+                      <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-sky" title="You already have an extension request awaiting review for this item">
+                        <span className="w-1.5 h-1.5 rounded-full bg-sky" />Extension pending
+                      </span>
+                    )}
+                  </div>
                 </td>
                 <td className="hidden sm:table-cell px-5 py-3 text-right">
                   <button
@@ -212,6 +253,7 @@ export function MyItems() {
             ))}
           </tbody>
         </table>
+        </div>
       </div>
 
       <div className="mt-5">

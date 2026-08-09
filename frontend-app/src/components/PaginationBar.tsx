@@ -19,9 +19,14 @@ import { PAGE_SIZE_OPTIONS, DEFAULT_PAGE_SIZE } from "../lib/pagination";
 export function RowsPerPageSelect({
   value,
   onChange,
+  options = PAGE_SIZE_OPTIONS,
 }: {
   value: number;
   onChange: (n: number) => void;
+  /** Defaults to the shared PAGE_SIZE_OPTIONS; pass a page-specific list
+   * (e.g. Quotations' MOBILE_PAGE_SIZE_OPTIONS) when that page offers a
+   * size the shared list doesn't. */
+  options?: number[];
 }) {
   return (
     <div className="flex items-center gap-2 text-[12px] text-text-muted whitespace-nowrap">
@@ -31,7 +36,7 @@ export function RowsPerPageSelect({
         onChange={(e) => onChange(parseInt(e.target.value, 10) || DEFAULT_PAGE_SIZE)}
         className="bg-surface border border-border-soft rounded-[3px] px-2 py-1.5 text-text focus:border-brass/50 focus:outline-none"
       >
-        {PAGE_SIZE_OPTIONS.map((n) => (
+        {options.map((n) => (
           <option key={n} value={n}>
             {n}
           </option>

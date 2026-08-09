@@ -4,6 +4,8 @@ import { X, Send } from "lucide-react";
 import { api, extensionsApi, getDueSoonReminderDays, relativeTime, formatDate } from "../lib/api";
 import type { Checkout, ExtensionRequest } from "../lib/types";
 import { StatusPill } from "../components/StatusPill";
+import { PaginationBar, RowsPerPageSelect } from "../components/PaginationBar";
+import { DEFAULT_PAGE_SIZE } from "../lib/pagination";
 
 const tabs = ["All", "Overdue", "Due Soon", "Active"] as const;
 
@@ -64,6 +66,23 @@ export function Checkouts() {
   const [extensions, setExtensions] = useState<ExtensionRequest[]>([]);
   const [tab, setTab] = useState<(typeof tabs)[number]>("All");
   const [denying, setDenying] = useState<ExtensionRequest | null>(null);
+  // Client-side pagination over the already-loaded (and tab-filtered) list
+  // below -- GET /checkouts is fetched once, up to `limit=500`, the same
+  // way it always has been (see loadCheckouts() in lib/api.ts), so this
+  // just adds "Rows per page"/Prev-Next controls on top of that in-memory
+  // list rather than round-tripping to the server per page turn. Mirrors
+  // the shape (not the data source) of every other paginated table in the
+  // app -- see components/PaginationBar.tsx.
+  const [perPage, setPerPage] = useState(DEFAULT_PAGE_SIZE);
+  const [offset, setOffset] = useState(0);
+  // Client-side pagination over the "Extension requests" side panel too --
+  // previously rendered every pending request with no limit at all, so a
+  // backlog of them just made the whole page scroll endlessly. Mirrors the
+  // checkouts list's own client-side paging above (GET
+  // /checkouts/extension-requests has no limit/offset params to page
+  // server-side against).
+  const [extPerPage, setExtPerPage] = useState(DEFAULT_PAGE_SIZE);
+  const [extOffset, setExtOffset] = useState(0);
   // Read after getCheckouts() resolves below (not at mount) -- lib/api.ts's
   // loadCheckouts() only learns the real, .env-configured
   // settings.DUE_SOON_REMINDER_DAYS value from GET /checkouts' own
@@ -95,6 +114,32 @@ export function Checkouts() {
     return c.status === "active";
   });
 
+  // Switching tabs changes the underlying result set, so always jump back
+  // to the first page -- same behavior as every other paginated table's
+  // "rows per page" / search change (see Assets.tsx's handlePerPageChange).
+  const changeTab = (t: (typeof tabs)[number]) => {
+    setTab(t);
+    setOffset(0);
+  };
+  const handlePerPageChange = (n: number) => {
+    setPerPage(n);
+    setOffset(0);
+  };
+  const handleExtPerPageChange = (n: number) => {
+    setExtPerPage(n);
+    setExtOffset(0);
+  };
+
+  // An approve/deny (or a background refresh) can shrink the list out from
+  // under whatever page was open -- snap back to the first page rather
+  // than stranding the panel on a now-empty page.
+  useEffect(() => {
+    if (extOffset >= extensions.length) setExtOffset(0);
+  }, [extensions.length, extOffset]);
+
+  const paged = filtered.slice(offset, offset + perPage);
+  const pagedExtensions = extensions.slice(extOffset, extOffset + extPerPage);
+
   return (
     <div>
       <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }} className="mb-6">
@@ -104,21 +149,26 @@ export function Checkouts() {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div className="lg:col-span-2">
-          <div className="flex items-center gap-1 mb-4 border-b border-border-soft">
-            {tabs.map((t) => (
-              <button
-                key={t}
-                onClick={() => setTab(t)}
-                className={`relative px-3 py-2 text-[12.5px] font-medium transition-colors ${
-                  tab === t ? "text-text" : "text-text-muted hover:text-text"
-                }`}
-              >
-                {t === "Due Soon" ? `Due Soon (≤${dueSoonDays}d)` : t}
-                {tab === t && (
-                  <motion.div layoutId="checkout-tab" className="absolute left-0 right-0 -bottom-px h-[2px] bg-brass" transition={{ type: "spring", stiffness: 500, damping: 40 }} />
-                )}
-              </button>
-            ))}
+          <div className="flex items-center justify-between gap-2 mb-4 border-b border-border-soft flex-wrap">
+            <div className="flex items-center gap-1">
+              {tabs.map((t) => (
+                <button
+                  key={t}
+                  onClick={() => changeTab(t)}
+                  className={`relative px-3 py-2 text-[12.5px] font-medium transition-colors ${
+                    tab === t ? "text-text" : "text-text-muted hover:text-text"
+                  }`}
+                >
+                  {t === "Due Soon" ? `Due Soon (≤${dueSoonDays}d)` : t}
+                  {tab === t && (
+                    <motion.div layoutId="checkout-tab" className="absolute left-0 right-0 -bottom-px h-[2px] bg-brass" transition={{ type: "spring", stiffness: 500, damping: 40 }} />
+                  )}
+                </button>
+              ))}
+            </div>
+            <div className="pb-2">
+              <RowsPerPageSelect value={perPage} onChange={handlePerPageChange} />
+            </div>
           </div>
 
           <div className="border border-border-soft rounded-[3px] bg-surface overflow-hidden">
@@ -128,7 +178,7 @@ export function Checkouts() {
               <span className="w-16 text-right">Status</span>
             </div>
             <div className="divide-y divide-border-soft">
-              {filtered.map((c, i) => (
+              {paged.map((c, i) => (
                 <motion.div
                   key={c.id}
                   initial={{ opacity: 0 }}
@@ -158,12 +208,19 @@ export function Checkouts() {
               {filtered.length === 0 && <p className="text-center text-text-faint text-[12px] py-10">No checkouts in this view.</p>}
             </div>
           </div>
+
+          <div className="mt-4">
+            <PaginationBar total={filtered.length} perPage={perPage} offset={offset} onOffsetChange={setOffset} />
+          </div>
         </div>
 
         <div>
-          <h2 className="font-display text-[15px] font-medium text-text mb-3">Extension requests</h2>
+          <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
+            <h2 className="font-display text-[15px] font-medium text-text">Extension requests</h2>
+            {extensions.length > extPerPage && <RowsPerPageSelect value={extPerPage} onChange={handleExtPerPageChange} />}
+          </div>
           <div className="flex flex-col gap-3">
-            {extensions.map((e, i) => (
+            {pagedExtensions.map((e, i) => (
               <motion.div
                 key={e.id}
                 initial={{ opacity: 0, y: 8 }}
@@ -189,6 +246,11 @@ export function Checkouts() {
             ))}
             {extensions.length === 0 && <p className="text-text-faint text-[12px]">No pending requests.</p>}
           </div>
+          {extensions.length > extPerPage && (
+            <div className="mt-3">
+              <PaginationBar total={extensions.length} perPage={extPerPage} offset={extOffset} onOffsetChange={setExtOffset} />
+            </div>
+          )}
         </div>
       </div>
 

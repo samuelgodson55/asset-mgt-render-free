@@ -1,64 +1,254 @@
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { AlarmClockOff, CalendarClock, Info, TrendingDown } from "lucide-react";
-import { api, relativeTime } from "../lib/api";
-import type { NotificationItem } from "../lib/types";
+import { X } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { alertsApi, extensionsApi, myItemsApi, formatDate } from "../lib/api";
 import { useAuth } from "../lib/useAuth";
 import { isPrivileged } from "../lib/roles";
+import { readDismissedSet, dismissDecisionIds } from "../lib/notificationDismissals";
+import type { Checkout, ExtensionRequest, MyExtensionDecision, MyItem } from "../lib/types";
 
-const iconMap = {
-  overdue: { icon: AlarmClockOff, color: "text-rust-soft bg-rust/10" },
-  extension: { icon: CalendarClock, color: "text-sky bg-sky/10" },
-  system: { icon: Info, color: "text-text-muted bg-surface-raised" },
-  low_stock: { icon: TrendingDown, color: "text-brass-soft bg-brass/10" },
-};
+// =============================================================================
+// pages/Notifications.tsx
+// -----------------------------------------------------------------------------
+// The full "what needs my attention" page -- what used to live in the header
+// Bell's dropdown (components/NotificationBell.tsx) now lives here instead,
+// as its own routed page, so it's reachable by URL and has room to breathe.
+// The Bell itself is now just a badge that navigates to /notifications on
+// tap (see NotificationBell.tsx) -- the two are directly linked.
+//
+// WHO SEES WHAT: the review-facing sections (Overdue Checkouts, Due Soon,
+// Extension Requests awaiting a decision) only render for a privileged role
+// (Super Admin/Admin/Manager) -- same require_privileged_role gate as the
+// backend endpoints they call. The personal sections (My overdue / My due
+// soon / My pending requests / My Extension Decisions) render for EVERYONE,
+// since any signed-in account can have its own checked-out items.
+//
+// CLICK-THROUGH ("View ->" / "Request extension ->"): a grouped admin-facing
+// row navigates straight into that person's Custody Ledger via a
+// `?custody=type:id&name=...` query param on /admin or /manager (see
+// pages/Admin.tsx's AdminOrManagerPage, which reads it and opens the
+// drawer). A personal Overdue/Due Soon row navigates to /my-items with
+// `?extend=<checkout_id>`, which opens the Request Extension modal directly
+// for that item.
+// =============================================================================
+
+interface PersonGroup {
+  entityId: number | null;
+  entityType: "user" | "outsider" | null;
+  name: string;
+  count: number;
+}
+
+function groupByPerson(items: Array<{ entity_id?: number | null; entity_type?: "user" | "outsider" | null; name: string }>): PersonGroup[] {
+  const groups = new Map<string, PersonGroup>();
+  for (const item of items) {
+    const key = item.entity_id != null && item.entity_type ? `${item.entity_type}:${item.entity_id}` : `name:${item.name}`;
+    const existing = groups.get(key);
+    if (existing) existing.count += 1;
+    else groups.set(key, { entityId: item.entity_id ?? null, entityType: item.entity_type ?? null, name: item.name, count: 1 });
+  }
+  return Array.from(groups.values());
+}
+
+function SectionCard({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.3 }}
+      className="border border-border-soft bg-surface rounded-[3px] p-4"
+    >
+      <p className="text-[10.5px] uppercase tracking-wider text-text-faint mb-2.5">{title}</p>
+      {children}
+    </motion.div>
+  );
+}
+
+function GroupedRow({ group, color, suffix, onClick }: { group: PersonGroup; color: string; suffix: string; onClick?: () => void }) {
+  const clickable = !!onClick;
+  return (
+    <li
+      onClick={onClick}
+      className={`flex items-center justify-between gap-3 px-2 py-2 rounded-[2px] ${clickable ? "cursor-pointer hover:bg-surface-raised transition-colors" : ""}`}
+    >
+      <span className="truncate text-[12.5px] text-text">
+        <span className="font-medium">{group.name}</span>
+        <span className="text-text-faint"> has {group.count} {suffix}{group.count === 1 ? "" : "s"}</span>
+      </span>
+      {clickable && <span className={`shrink-0 text-[11.5px] font-semibold ${color}`}>View →</span>}
+    </li>
+  );
+}
 
 export function Notifications() {
-  const [items, setItems] = useState<NotificationItem[]>([]);
   const { user, demo } = useAuth();
-  // Review-facing (org-wide overdue/due-soon/extension-request) items only
-  // come through for a privileged role -- see lib/api.ts's
-  // loadNotifications() for why this can't just call the privileged
-  // endpoints for every role and let a 403 fall through to mock data.
-  const privileged = demo || isPrivileged(user?.role);
+  const navigate = useNavigate();
 
-  useEffect(() => {
-    api.getNotifications(privileged).then(setItems).catch((err) => console.error("Failed to load notifications:", err));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [privileged]);
+  const [loading, setLoading] = useState(true);
+  const [overdue, setOverdue] = useState<{ items: Checkout[]; total: number }>({ items: [], total: 0 });
+  const [dueSoon, setDueSoon] = useState<{ items: Checkout[]; total: number }>({ items: [], total: 0 });
+  const [extensions, setExtensions] = useState<ExtensionRequest[]>([]);
+  const [myItems, setMyItems] = useState<MyItem[]>([]);
+  const [decisions, setDecisions] = useState<MyExtensionDecision[]>([]);
+
+  const privileged = demo || isPrivileged(user?.role);
+  const adminBase = user?.role === "manager" ? "/manager" : "/admin";
+
+  const refresh = () => {
+    setLoading(true);
+    const dismissed = readDismissedSet();
+    const tasks: Promise<void>[] = [
+      myItemsApi.list().then((d) => setMyItems(d.assigned_items)).catch(() => setMyItems([])),
+      extensionsApi.myDecisions(10).then((items) => setDecisions(items.filter((d) => !dismissed.has(d.id)))).catch(() => setDecisions([])),
+    ];
+    if (privileged) {
+      tasks.push(alertsApi.overdue(20).then(setOverdue).catch((err) => { console.error("Failed to load overdue alerts:", err); setOverdue({ items: [], total: 0 }); }));
+      tasks.push(alertsApi.dueSoon(20).then(setDueSoon).catch((err) => { console.error("Failed to load due-soon alerts:", err); setDueSoon({ items: [], total: 0 }); }));
+      tasks.push(extensionsApi.listPending().then((items) => setExtensions(items.filter((e) => e.status === "pending"))).catch((err) => { console.error("Failed to load pending extension requests:", err); setExtensions([]); }));
+    } else {
+      setOverdue({ items: [], total: 0 });
+      setDueSoon({ items: [], total: 0 });
+      setExtensions([]);
+    }
+    Promise.all(tasks).finally(() => setLoading(false));
+  };
+
+  useEffect(refresh, [privileged]);
+
+  const myOverdue = myItems.filter((i) => i.overdue);
+  const myDueSoon = myItems.filter((i) => i.due_soon && !i.overdue);
+  const myPending = myItems.filter((i) => i.pending_extension);
+
+  const totalCount =
+    overdue.total + dueSoon.total + extensions.length + myOverdue.length + myDueSoon.length + myPending.length + decisions.length;
+
+  const openCustody = (entityId: number | null, entityType: "user" | "outsider" | null, name: string) => {
+    if (entityId == null || !entityType) return;
+    navigate(`${adminBase}?custody=${entityType}:${entityId}&name=${encodeURIComponent(name)}`);
+  };
+
+  const openExtensionRequest = (item: MyItem) => {
+    navigate(`/my-items?extend=${item.checkout_id}`);
+  };
+
+  const dismissDecision = (id: number) => {
+    dismissDecisionIds([id]);
+    setDecisions((prev) => prev.filter((d) => d.id !== id));
+  };
+
+  const overdueGroups = groupByPerson(overdue.items.map((c) => ({ entity_id: c.entity_id, entity_type: c.entity_type, name: c.checked_out_to })));
+  const dueSoonGroups = groupByPerson(dueSoon.items.map((c) => ({ entity_id: c.entity_id, entity_type: c.entity_type, name: c.checked_out_to })));
+  const extensionGroups = groupByPerson(extensions.map((e) => ({ entity_id: e.entity_id, entity_type: e.entity_type, name: e.assignee_name ?? e.requested_by })));
+
+  const nothingToShow = totalCount === 0 && !loading;
 
   return (
     <div>
       <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }} className="mb-6">
         <h1 className="font-display text-2xl font-semibold text-text">Notifications</h1>
-        <p className="text-text-muted text-sm mt-1">{items.filter((i) => !i.read).length} unread</p>
+        <p className="text-text-muted text-sm mt-1">
+          {loading ? "Loading…" : nothingToShow ? "All caught up — nothing needs your attention." : `${totalCount} item(s) need your attention.`}
+        </p>
       </motion.div>
 
-      <div className="max-w-xl flex flex-col gap-2">
-        {items.map((n, i) => {
-          const { icon: Icon, color } = iconMap[n.kind];
-          return (
-            <motion.div
-              key={n.id}
-              initial={{ opacity: 0, x: -8 }}
-              animate={{ opacity: 1, x: 0 }}
-              transition={{ duration: 0.3, delay: i * 0.05 }}
-              className={`flex gap-3 p-4 rounded-[3px] border ${n.read ? "border-border-soft bg-surface" : "border-brass/30 bg-surface-raised"}`}
-            >
-              <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${color}`}>
-                <Icon size={14} strokeWidth={1.75} />
-              </div>
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <p className="text-[13px] text-text font-medium">{n.title}</p>
-                  {!n.read && <span className="w-1.5 h-1.5 rounded-full bg-brass shrink-0" />}
-                </div>
-                <p className="text-[12px] text-text-muted mt-0.5">{n.body}</p>
-                <p className="text-[10.5px] text-text-faint mt-1.5 font-mono">{relativeTime(n.created_at)}</p>
-              </div>
-            </motion.div>
-          );
-        })}
+      {loading && <p className="text-[12px] text-text-faint text-center py-10">Loading…</p>}
+
+      <div className="max-w-2xl flex flex-col gap-3">
+        {!loading && privileged && overdueGroups.length > 0 && (
+          <SectionCard title={`Overdue checkouts (${overdue.total})`}>
+            <ul className="flex flex-col divide-y divide-border-soft">
+              {overdueGroups.map((g) => (
+                <GroupedRow key={`${g.entityType}:${g.entityId}:${g.name}`} group={g} color="text-rust-soft" suffix="overdue checkout" onClick={g.entityId != null ? () => openCustody(g.entityId, g.entityType, g.name) : undefined} />
+              ))}
+            </ul>
+          </SectionCard>
+        )}
+
+        {!loading && privileged && dueSoonGroups.length > 0 && (
+          <SectionCard title={`Due soon (${dueSoon.total})`}>
+            <ul className="flex flex-col divide-y divide-border-soft">
+              {dueSoonGroups.map((g) => (
+                <GroupedRow key={`${g.entityType}:${g.entityId}:${g.name}`} group={g} color="text-brass-soft" suffix="item due soon" onClick={g.entityId != null ? () => openCustody(g.entityId, g.entityType, g.name) : undefined} />
+              ))}
+            </ul>
+          </SectionCard>
+        )}
+
+        {!loading && privileged && extensionGroups.length > 0 && (
+          <SectionCard title={`Extension requests (${extensions.length})`}>
+            <ul className="flex flex-col divide-y divide-border-soft">
+              {extensionGroups.map((g) => (
+                <GroupedRow key={`${g.entityType}:${g.entityId}:${g.name}`} group={g} color="text-sky" suffix="pending extension request" onClick={g.entityId != null ? () => openCustody(g.entityId, g.entityType, g.name) : undefined} />
+              ))}
+            </ul>
+          </SectionCard>
+        )}
+
+        {!loading && myOverdue.length > 0 && (
+          <SectionCard title="Your overdue items">
+            <ul className="flex flex-col divide-y divide-border-soft">
+              {myOverdue.map((item) => (
+                <li key={item.checkout_id} onClick={() => openExtensionRequest(item)} className="flex items-center justify-between gap-3 px-2 py-2 rounded-[2px] cursor-pointer hover:bg-surface-raised transition-colors">
+                  <span className="truncate text-[12.5px] text-text">{item.asset_name} <span className="text-text-faint">· due {formatDate(item.due_date)}</span></span>
+                  <span className="shrink-0 text-[11.5px] font-semibold text-rust-soft">Request extension →</span>
+                </li>
+              ))}
+            </ul>
+          </SectionCard>
+        )}
+
+        {!loading && myDueSoon.length > 0 && (
+          <SectionCard title="Your items due soon">
+            <ul className="flex flex-col divide-y divide-border-soft">
+              {myDueSoon.map((item) => (
+                <li key={item.checkout_id} onClick={() => openExtensionRequest(item)} className="flex items-center justify-between gap-3 px-2 py-2 rounded-[2px] cursor-pointer hover:bg-surface-raised transition-colors">
+                  <span className="truncate text-[12.5px] text-text">{item.asset_name} <span className="text-text-faint">· due {formatDate(item.due_date)}</span></span>
+                  <span className="shrink-0 text-[11.5px] font-semibold text-brass-soft">Request extension →</span>
+                </li>
+              ))}
+            </ul>
+          </SectionCard>
+        )}
+
+        {!loading && myPending.length > 0 && (
+          <SectionCard title="Your pending extension requests">
+            <ul className="flex flex-col divide-y divide-border-soft">
+              {myPending.map((item) => (
+                <li key={item.checkout_id} className="px-2 py-2 text-[12.5px] text-text">
+                  {item.asset_name} <span className="text-text-faint">· awaiting a decision</span>
+                </li>
+              ))}
+            </ul>
+          </SectionCard>
+        )}
+
+        {!loading && decisions.length > 0 && (
+          <SectionCard title="Extension decisions">
+            <ul className="flex flex-col gap-0.5">
+              {decisions.map((d) => {
+                const approved = d.status === "approved";
+                return (
+                  <li key={d.id} className="flex items-start justify-between gap-2 px-2 py-2">
+                    <p className="min-w-0 text-[12.5px] leading-snug">
+                      <span className={`font-semibold ${approved ? "text-moss-soft" : "text-rust-soft"}`}>{approved ? "Approved" : "Denied"}:</span>{" "}
+                      <span className="text-text">{d.asset_name}</span>{" "}
+                      <span className="text-text-faint">
+                        {approved ? `— new due date ${formatDate(d.due_date ?? d.requested_new_due_date ?? "")}` : "— current due date unchanged"}
+                      </span>
+                      {d.decision_note && <span className="block text-text-faint italic mt-0.5">"{d.decision_note}"</span>}
+                    </p>
+                    <button onClick={() => dismissDecision(d.id)} className="shrink-0 text-text-faint hover:text-text transition-colors mt-0.5"><X size={13} /></button>
+                  </li>
+                );
+              })}
+            </ul>
+          </SectionCard>
+        )}
+
+        {!loading && nothingToShow && (
+          <p className="text-[12.5px] text-text-faint text-center py-10">All caught up — nothing needs your attention.</p>
+        )}
       </div>
     </div>
   );
