@@ -269,6 +269,9 @@ def update_user(db: Session, user_id: int, req: UserUpdateRequest, user: dict) -
     if "phone_number" in updates:
         target.phone_number = updates["phone_number"] or None
 
+    if "company" in updates:
+        target.company = updates["company"] or None
+
     db.add(models.AuditLog(
         operator=user["email"], action="USER_UPDATED", target_type="User", target_id=target.id,
         details=f"Updated account details for {target.name}.",
@@ -278,7 +281,7 @@ def update_user(db: Session, user_id: int, req: UserUpdateRequest, user: dict) -
     return {
         "message": f"User {target.name} updated successfully.",
         "id": target.id, "name": target.name, "username": target.username, "email": target.email,
-        "phone_number": target.phone_number,
+        "phone_number": target.phone_number, "company": target.company,
     }
 
 
@@ -317,7 +320,7 @@ def list_users(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offset: int 
     # see _visible_users_query()'s docstring.
     query = _visible_users_query(db)
     query = apply_search_filter(query, search, [
-        models.User.name, models.User.email, models.User.phone_number, models.User.role,
+        models.User.name, models.User.email, models.User.phone_number, models.User.company, models.User.role,
         models.User.department, models.User.department_role,
     ])
 
@@ -345,6 +348,7 @@ def list_users(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offset: int 
             "name": u.name,
             "email": u.email,
             "phone_number": u.phone_number,
+            "company": u.company,
             "username": u.username,
             "role": u.role,
             "department": u.department,
@@ -443,12 +447,26 @@ def _group_assigned_items(checkouts: list["models.AssetCheckout"], include_outso
     return grouped_items
 
 
-def get_my_assigned_items(db: Session, user: dict) -> dict:
+def get_my_assigned_items(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offset: int = 0) -> dict:
     """
     Self-service version of get_user_assigned_items: lets ANY logged-in
     account (staff, customer, manager, super_admin) see their own
     checked-out items, without needing elevated privileges. Powers
-    staff.html and customer.html.
+    staff.html/customer.html's "My Items" table.
+
+    PAGINATION (same true server-side pattern as list_users/list_assets --
+    see the DEFAULT_LIMIT/MAX_LIMIT constants above): the My Items table's
+    own "Rows per page" selector maps straight onto `limit`/`offset` here.
+    Grouping quote-based checkout splits into one row per item (see
+    _group_assigned_items() above) has to happen BEFORE we know the true
+    row count, so -- unlike the SQL-level `.offset()/.limit()` used by
+    list_users() -- pagination here is applied to the already-grouped
+    Python list. One person's outstanding checkouts are never anywhere
+    near large enough for that to be a real cost, and every other caller
+    of this function (Notification Bell, Dashboard, the CSV/PDF export)
+    keeps working unchanged: they call it with the default `limit`
+    (`DEFAULT_LIMIT` = 500), which is effectively "everything" for a
+    single person's custody ledger, and ignore the added `total` field.
     """
     target = db.query(models.User).filter(models.User.id == int(user["sub"])).first()
     if not target:
@@ -459,9 +477,15 @@ def get_my_assigned_items(db: Session, user: dict) -> dict:
     ).all()
     items = _group_assigned_items(active_checkouts, include_outsourced_details=False)
 
+    limit = max(1, min(limit, MAX_LIMIT))
+    offset = max(0, offset)
+    total = len(items)
+    page_items = items[offset:offset + limit]
+
     return {
         "user_id": target.id, "name": target.name, "email": target.email, "role": target.role,
-        "department": target.department, "department_role": target.department_role, "assigned_items": items,
+        "department": target.department, "department_role": target.department_role,
+        "assigned_items": page_items, "total": total, "limit": limit, "offset": offset,
     }
 
 
@@ -950,7 +974,7 @@ def list_deleted_users(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offs
         models.User.purged_at.is_(None),
     )
     query = apply_search_filter(query, search, [
-        models.User.name, models.User.email, models.User.phone_number, models.User.role,
+        models.User.name, models.User.email, models.User.phone_number, models.User.company, models.User.role,
         models.User.department, models.User.department_role,
     ])
 

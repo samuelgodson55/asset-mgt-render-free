@@ -265,6 +265,43 @@ function mapAsset(raw: RawAssetType): AssetType {
   };
 }
 
+interface RawCheckout {
+  checkout_id: number;
+  asset_id: number | null;
+  asset_name: string;
+  assignee_name: string;
+  assignee_type: string;
+  quantity: number;
+  outstanding: number;
+  due_date: string | null; // "YYYY-MM-DD", null for an open-ended checkout
+  is_overdue: boolean;
+  is_due_soon: boolean;
+  entity_id?: number | null;
+  entity_type?: "user" | "outsider" | null;
+}
+
+function mapCheckout(raw: RawCheckout): Checkout {
+  return {
+    id: raw.checkout_id,
+    asset_id: raw.asset_id ?? 0,
+    asset_name: raw.asset_name,
+    tag: poolTag(raw.asset_id),
+    quantity: raw.outstanding ?? raw.quantity,
+    checked_out_to: raw.assignee_name,
+    checked_out_by: raw.assignee_type,
+    due_at: raw.due_date ?? "",
+    // GET /checkouts (this endpoint) returns due_date but not the
+    // original checkout_date, so there's no real value to put here --
+    // due_at is reused rather than inventing a timestamp (same tradeoff
+    // mapCheckoutAlert below already makes for the overdue/due-soon feeds).
+    checked_out_at: raw.due_date ?? "",
+    status: raw.is_overdue ? "overdue" : "active",
+    due_soon: raw.is_due_soon,
+    entity_id: raw.entity_id ?? null,
+    entity_type: raw.entity_type ?? null,
+  };
+}
+
 interface RawCheckoutAlert {
   checkout_id: number;
   asset_id: number | null;
@@ -397,19 +434,38 @@ async function loadMyItems(): Promise<MyItem[]> {
   }
 }
 
+// Mutable module-level cache of the LAST-SEEN settings.DUE_SOON_REMINDER_DAYS
+// value (.env, echoed back by GET /checkouts -- see backend/services/
+// checkout_service.py's list_active_checkouts()). Set every time
+// loadCheckouts() below actually hits the real endpoint; read by the
+// Checkouts page to label its "Due soon" column with the true configured
+// window instead of a hardcoded guess. Starts at the backend's own
+// documented default (config.py's DUE_SOON_REMINDER_DAYS) so the column
+// still reads sensibly before the first successful load.
+let lastKnownDueSoonReminderDays = 2;
+export function getDueSoonReminderDays(): number {
+  return lastKnownDueSoonReminderDays;
+}
+
 async function loadCheckouts(privileged: boolean): Promise<Checkout[]> {
-  // The backend has no single "list every active checkout" route (custody
-  // is tracked per-user/-outsider via GET /users/{id}/items instead) --
-  // the overdue + due-soon alert feeds are the closest real analogue to a
-  // system-wide checkouts table, and are exactly what admin.html's own
-  // dashboard alerts are built from (see backend/api/checkouts_api.py).
-  // Not privileged? There's no system-wide table to show at all -- the
-  // Dashboard falls back to that person's own items instead (see
-  // Dashboard.tsx), same split as legacy's admin.html/manager.html
-  // (system-wide) vs staff.html/customer.html (personal only).
+  // GET /checkouts (root) is the real, full "who has what" table --
+  // every ACTIVE checkout org-wide, not just the ones that happen to be
+  // overdue or landing within the due-soon reminder window. It used to
+  // fall back to combining the overdue + due-soon alert feeds instead
+  // (the closest analogue available before this endpoint existed), which
+  // silently hid any healthy, non-imminent checkout from the Checkouts
+  // page's "All" tab -- a freshly dispatched item with a due date weeks
+  // out would never appear anywhere. Not privileged? There's no
+  // system-wide table to show at all -- the Dashboard falls back to that
+  // person's own items instead (see Dashboard.tsx), same split as
+  // legacy's admin.html/manager.html (system-wide) vs staff.html/
+  // customer.html (personal only).
   if (!privileged) return [];
-  const [overdue, dueSoon] = await Promise.all([loadOverdue(), loadDueSoon()]);
-  return [...overdue, ...dueSoon];
+  const data = await rawFetch<{ items: RawCheckout[]; total: number; due_soon_reminder_days: number }>("/checkouts?limit=500");
+  if (typeof data.due_soon_reminder_days === "number") {
+    lastKnownDueSoonReminderDays = data.due_soon_reminder_days;
+  }
+  return (data.items ?? []).map(mapCheckout);
 }
 
 async function loadExtensionRequests(): Promise<ExtensionRequest[]> {
@@ -600,7 +656,15 @@ export const importApi = {
 // ---------------------------------------------------------------------------
 
 export const myItemsApi = {
-  list: () => rawFetch<{ name: string; department_role?: string | null; assigned_items: MyItem[] }>("/users/me/items"),
+  // `limit`/`offset` are optional -- the Notification Bell and Dashboard
+  // call this with none of these (getting the backend's generous default
+  // page, effectively "everything" for one person's custody ledger), while
+  // the My Items table (see pages/MyItems.tsx) passes them explicitly for
+  // TRUE server-side pagination, same pattern as assetsApi.list/usersApi.list.
+  list: (limit?: number, offset?: number) =>
+    rawFetch<{ name: string; department_role?: string | null; assigned_items: MyItem[]; total: number; limit: number; offset: number }>(
+      `/users/me/items${qs({ limit, offset })}`
+    ),
   // Not a JSON round trip -- GET /users/me/items/export streams the file
   // directly (same pattern as assetsApi.exportUrl below). Ported from the
   // legacy frontend's components/exports.js's exportMyItems().
@@ -643,10 +707,13 @@ export const profileApi = {
       method: "POST",
       body: JSON.stringify({ user_id: userId, current_password: currentPassword, new_password: newPassword }),
     }),
-  updateIdentity: (name: string, email: string, username: string, currentPassword: string) =>
+  updateIdentity: (name: string, email: string, username: string, currentPassword: string, phoneNumber?: string, company?: string) =>
     rawFetch<ProfileDetail & { message?: string }>("/auth/me", {
       method: "PATCH",
-      body: JSON.stringify({ name, email, username, current_password: currentPassword }),
+      body: JSON.stringify({
+        name, email, username, current_password: currentPassword,
+        phone_number: phoneNumber, company,
+      }),
     }),
   regenerateRecoveryCodes: (password: string) =>
     rawFetch<{ recovery_codes: string[] }>("/auth/mfa/recovery-codes/regenerate", {
@@ -672,7 +739,7 @@ export const usersApi = {
   list: (limit: number, offset: number, search: string) => rawFetch<DirectoryPage<UserRow>>(`/users${qs({ limit, offset, search })}`),
   create: (req: { name: string; email: string; phone_number?: string; role: string; password: string; department?: string; department_role?: string }) =>
     rawFetch<UserRow>("/users", { method: "POST", body: JSON.stringify(req) }),
-  update: (id: number, req: Partial<{ name: string; username: string; email: string; phone_number: string }>) =>
+  update: (id: number, req: Partial<{ name: string; username: string; email: string; phone_number: string; company: string }>) =>
     rawFetch<UserRow>(`/users/${id}`, { method: "PATCH", body: JSON.stringify(req) }),
   resetPassword: (id: number, newPassword: string, adminPassword: string) =>
     rawFetch<{ message?: string }>(`/users/${id}/reset-password`, { method: "POST", body: JSON.stringify({ new_password: newPassword, admin_password: adminPassword }) }),

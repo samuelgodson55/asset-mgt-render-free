@@ -202,7 +202,7 @@ def reset_password(req: ResetPasswordRequest, db: Session = Depends(get_db)):
     return auth_service.confirm_password_reset(db, req)
 
 
-# --- Self-service identity rotation (name / username / email) --------------
+# --- Self-service identity rotation (name / username / email / phone / company) --
 @router.patch("/me")
 def update_my_identity(req: IdentityUpdateRequest, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
     return auth_service.update_identity(db, req, user)

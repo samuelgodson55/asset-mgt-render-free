@@ -107,9 +107,10 @@ class ResetPasswordRequest(BaseModel):
 class IdentityUpdateRequest(BaseModel):
     """
     Body for PATCH /auth/me -- lets the CURRENTLY LOGGED-IN account rotate
-    its own name/username/email, the same self-service shape
-    update_password() already established for the password itself. See
-    services/auth_service.py -> update_identity() for the full flow.
+    its own name/username/email/phone_number/company, the same
+    self-service shape update_password() already established for the
+    password itself. See services/auth_service.py -> update_identity() for
+    the full flow.
 
     Distinct from schemas.users_schema.UserUpdateRequest (which an
     Admin/Super Admin uses to edit a DIFFERENT account, and which
@@ -128,13 +129,25 @@ class IdentityUpdateRequest(BaseModel):
     name: Optional[str] = None
     username: Optional[str] = None
     email: Optional[str] = None
+    phone_number: Optional[str] = None
+    company: Optional[str] = None
     current_password: str
 
     # Same "a present-but-blank value would silently blank the field out"
-    # guard as UserUpdateRequest's identical validator.
+    # guard as UserUpdateRequest's identical validator. Doesn't apply to
+    # phone_number/company below -- both are nullable, optional contact
+    # details, and an explicit empty string is a legitimate "clear it"
+    # (same as UserUpdateRequest.phone_number / OutsiderUpdateRequest's
+    # email/phone_number/company fields already treat their own nullable
+    # counterparts).
     @field_validator("name", "username", "email")
     @classmethod
     def _reject_blank(cls, value: Optional[str]) -> Optional[str]:
         if value is not None and not value.strip():
             raise ValueError("This field cannot be blank.")
+        return value.strip() if value is not None else value
+
+    @field_validator("phone_number", "company")
+    @classmethod
+    def _strip_contact_detail(cls, value: Optional[str]) -> Optional[str]:
         return value.strip() if value is not None else value

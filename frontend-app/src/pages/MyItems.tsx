@@ -5,6 +5,8 @@ import { useSearchParams } from "react-router-dom";
 import { myItemsApi, extensionsApi, ApiError, formatDate } from "../lib/api";
 import type { MyItem } from "../lib/types";
 import { ExportButtons } from "../components/ExportButtons";
+import { PaginationBar, RowsPerPageSelect } from "../components/PaginationBar";
+import { DEFAULT_PAGE_SIZE } from "../lib/pagination";
 
 function errMsg(err: unknown, fallback: string): string {
   if (err instanceof ApiError) return err.message;
@@ -97,25 +99,46 @@ function ExtensionRequestModal({ item, onClose, onSent }: { item: MyItem | null;
 
 export function MyItems() {
   const [items, setItems] = useState<MyItem[]>([]);
+  const [total, setTotal] = useState(0);
+  const [offset, setOffset] = useState(0);
+  const [perPage, setPerPage] = useState(DEFAULT_PAGE_SIZE);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<MyItem | null>(null);
   const [sentMsg, setSentMsg] = useState<string | null>(null);
   const [searchParams, setSearchParams] = useSearchParams();
 
-  const refresh = () =>
+  // TRUE server-side pagination (same `limit`/`offset` pattern as the
+  // Asset Inventory table -- see pages/Assets.tsx) -- every page turn or
+  // "rows per page" change re-fetches just that slice from
+  // GET /users/me/items?limit=&offset= instead of downloading the whole
+  // custody ledger and paging through it in memory.
+  const refresh = () => {
+    setLoading(true);
     myItemsApi
-      .list()
-      .then((data) => setItems(data.assigned_items))
-      .catch(() => setItems([]))
+      .list(perPage, offset)
+      .then((data) => {
+        setItems(data.assigned_items);
+        setTotal(data.total);
+      })
+      .catch(() => { setItems([]); setTotal(0); })
       .finally(() => setLoading(false));
+  };
 
-  useEffect(() => {
-    refresh();
-  }, []);
+  useEffect(refresh, [perPage, offset]);
+
+  // Called from the "Rows per page" <select> -- always jumps back to the
+  // first page on a page-size change (mirrors Assets.tsx's handlePerPageChange).
+  const handlePerPageChange = (n: number) => {
+    setPerPage(n);
+    setOffset(0);
+  };
 
   // Deep link from the Notification Bell (?extend=<checkout_id>) -- opens
   // the Request Extension modal straight away for that item, same
-  // click-through as legacy notifications.js's personal alert rows.
+  // click-through as legacy notifications.js's personal alert rows. Only
+  // matches against whichever page happens to be loaded; if the item
+  // isn't on the current page nothing opens, same limitation the legacy
+  // client-paginated table already had.
   useEffect(() => {
     const raw = searchParams.get("extend");
     if (!raw || items.length === 0) return;
@@ -131,13 +154,16 @@ export function MyItems() {
       <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }} className="mb-6 flex items-start justify-between gap-3">
         <div>
           <h1 className="font-display text-2xl font-semibold text-text">My Items</h1>
-          <p className="text-text-muted text-sm mt-1">{items.length} item(s) currently checked out to you</p>
+          <p className="text-text-muted text-sm mt-1">{total} item(s) currently checked out to you</p>
         </div>
-        <ExportButtons
-          disabled={items.length === 0}
-          urlFor={(format) => myItemsApi.exportUrl(format)}
-          filenameFor={(format) => `my_properties.${format}`}
-        />
+        <div className="flex items-center gap-2 flex-wrap">
+          <RowsPerPageSelect value={perPage} onChange={handlePerPageChange} />
+          <ExportButtons
+            disabled={total === 0}
+            urlFor={(format) => myItemsApi.exportUrl(format)}
+            filenameFor={(format) => `my_properties.${format}`}
+          />
+        </div>
       </motion.div>
 
       {sentMsg && <div className="max-w-xl bg-moss/10 border border-moss/30 text-moss-soft text-[13px] rounded-[3px] px-4 py-3 mb-4">{sentMsg}</div>}
@@ -186,6 +212,10 @@ export function MyItems() {
             ))}
           </tbody>
         </table>
+      </div>
+
+      <div className="mt-5">
+        <PaginationBar total={total} perPage={perPage} offset={offset} onOffsetChange={setOffset} />
       </div>
 
       <ExtensionRequestModal

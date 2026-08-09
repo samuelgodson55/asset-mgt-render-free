@@ -344,9 +344,23 @@ class User(Base):
     # Optional, no uniqueness constraint (unlike email/username above) --
     # a phone number is a convenience contact detail, not a login
     # credential, so several accounts legitimately sharing one (e.g. a
-    # shared office line) is fine. Editable via UserUpdateRequest exactly
-    # like name/username/email.
+    # shared office line) is fine. Editable via UserUpdateRequest (Admin/
+    # Manager editing someone else) and IdentityUpdateRequest (self-service
+    # via PATCH /auth/me) exactly like name/username/email.
     phone_number = Column(String, nullable=True)
+
+    # Free-text employer/organization name -- primarily meaningful for an
+    # external-facing account (e.g. role == "customer") that isn't part of
+    # this org's own `department` structure below, but left available to
+    # every role since e.g. a Staff/Manager account might still want to
+    # record a contracting agency or client site here. Distinct from
+    # `department`: that's an INTERNAL team within this org (and scopes a
+    # Manager's visibility); this is an external, purely descriptive
+    # contact detail with no access-control meaning, same spirit as
+    # `Outsider.company` below. Added alongside `phone_number` to
+    # UserUpdateRequest/IdentityUpdateRequest so both admin-side editing
+    # and self-service rotation cover the same contact-detail fields.
+    company = Column(String, nullable=True)
 
     # --- Username login (Data Quality & Usability requirement #6) ---------
     # Auto-derived from the local part of the email address the FIRST time

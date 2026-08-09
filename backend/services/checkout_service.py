@@ -9,6 +9,7 @@ api/checkouts.py.
 import datetime
 import logging
 import math
+from typing import Optional
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
@@ -26,6 +27,23 @@ logger = logging.getLogger(__name__)
 # how many overdue rows a single request can return.
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 500
+
+
+def _resolve_assignee(c: "models.AssetCheckout") -> tuple[str, str, "Optional[int]", "Optional[str]"]:
+    """
+    Shared by list_active_checkouts()/list_overdue_checkouts()/
+    list_due_soon_checkouts() below: a checkout is always against EITHER a
+    linked system User OR an unlinked ad-hoc Outsider (never both, never
+    neither -- see models.AssetCheckout's docstring). Resolves that into
+    the (name, role-label, id, type) tuple every checkout-listing feed
+    shapes its rows with.
+    """
+    if c.user:
+        return c.user.name, c.user.role.capitalize(), c.user.id, "user"
+    if c.outsider:
+        label = f"{c.outsider.name} ({c.outsider.company or 'No Company'})"
+        return label, "External Outsider", c.outsider.id, "outsider"
+    return "Unknown", "Unknown", None, None  # unreachable given DB constraints, but never crash a listing over it
 
 
 def return_checkout(db: Session, checkout_id: int, req: ReturnRequest, user: dict) -> dict:
@@ -99,6 +117,110 @@ def return_checkout(db: Session, checkout_id: int, req: ReturnRequest, user: dic
     }
 
 
+def _as_aware_utc(dt: "Optional[datetime.datetime]") -> "Optional[datetime.datetime]":
+    """
+    Normalizes a DB-read due_date for a direct Python-level comparison
+    against utc_now(). The `due_date` column is declared
+    DateTime(timezone=True) and is always written as UTC (see
+    services/asset_service.py's advanced_checkout()), but SQLite -- used
+    in tests, never in production Postgres -- doesn't actually preserve
+    tzinfo on round-trip, so a value read back here can come back naive
+    even though it's still UTC underneath. A raw `<`/`>` between that and
+    utc_now()'s timezone-AWARE value raises TypeError ("can't compare
+    offset-naive and offset-aware datetimes"); this makes it safe by
+    attaching UTC to anything naive before comparing. SQL-level filters
+    elsewhere in this file (list_overdue_checkouts()/list_due_soon_checkouts())
+    don't need this -- they compare inside the query itself, which each
+    DB backend already handles consistently.
+    """
+    if dt is not None and dt.tzinfo is None:
+        return dt.replace(tzinfo=datetime.timezone.utc)
+    return dt
+
+
+def list_active_checkouts(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offset: int = 0) -> dict:
+    """
+    Powers GET /checkouts (root) -- the full org-wide "who has what" table
+    behind the Checkouts page's "All" tab. Neither list_overdue_checkouts()
+    nor list_due_soon_checkouts() above is a substitute for this: together
+    they only cover checkouts whose due_date has ALREADY passed, or is
+    landing within settings.DUE_SOON_REMINDER_DAYS (2 days by default) --
+    a perfectly healthy checkout dispatched today with a due_date three
+    weeks out falls into neither bucket and would otherwise never appear
+    anywhere in the Checkouts page at all, even though it's real,
+    outstanding custody. This lists every ACTIVE checkout regardless of
+    how far off its due_date is (or whether it has one), so "All" really
+    does mean all.
+
+    SCOPING: Super Admins and Managers see every active checkout
+    system-wide -- same as list_overdue_checkouts()/list_due_soon_checkouts()
+    above (Managers have no department-scoping anywhere in this app).
+
+    Sorted with the MOST RECENTLY checked-out item first, so the newest
+    custody is what a Manager/Admin sees at the top of the table -- the
+    same "most recent first" ordering the rest of this app's activity
+    feeds default to.
+
+    Each item also carries `is_overdue`/`is_due_soon` flags (and the
+    response echoes `due_soon_reminder_days`) so the Checkouts page can
+    render a "Due soon" column driven by the SAME settings.DUE_SOON_
+    REMINDER_DAYS environment value (.env) the Dashboard's own "Due Soon"
+    banner already uses, instead of the frontend guessing or hardcoding
+    its own window.
+    """
+    limit = max(1, min(limit, MAX_LIMIT))
+    offset = max(0, offset)
+    now = utc_now()
+
+    query = db.query(models.AssetCheckout).filter(models.AssetCheckout.status == "active")
+
+    total = query.count()
+    active = query.order_by(models.AssetCheckout.checkout_date.desc()).offset(offset).limit(limit).all()
+
+    # DUE SOON: same window list_due_soon_checkouts() uses for the
+    # Dashboard's own "Due Soon" alert banner --
+    # settings.DUE_SOON_REMINDER_DAYS (read from the environment/.env, see
+    # config.py) days out from right now, and not already overdue. Kept in
+    # sync with that function's definition on purpose so the Checkouts
+    # page's "Due soon" column and the Dashboard's alert banner always
+    # agree on what counts as "soon" -- changing DUE_SOON_REMINDER_DAYS in
+    # .env moves both at once.
+    due_soon_horizon = now + datetime.timedelta(days=settings.DUE_SOON_REMINDER_DAYS)
+
+    items = []
+    for c in active:
+        assignee_name, assignee_type, entity_id, entity_type = _resolve_assignee(c)
+        due_date = _as_aware_utc(c.due_date)
+        is_overdue = due_date is not None and due_date < now
+        is_due_soon = due_date is not None and not is_overdue and due_date <= due_soon_horizon
+        items.append({
+            "checkout_id": c.id,
+            "asset_id": c.asset_id,
+            "asset_name": models.checkout_display_name(c),
+            "is_outsourced": c.is_outsourced,
+            "assignee_name": assignee_name,
+            "assignee_type": assignee_type,
+            "entity_id": entity_id,
+            "entity_type": entity_type,
+            "quantity": c.quantity,
+            "outstanding": c.quantity - c.quantity_returned,
+            "due_date": c.due_date.strftime("%Y-%m-%d") if c.due_date else None,
+            "is_overdue": is_overdue,
+            "is_due_soon": is_due_soon,
+        })
+
+    return {
+        "items": items,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        # Echoed back so the frontend can label the "Due soon" column with
+        # the actual configured window (e.g. "Due soon (≤2d)") instead of
+        # a hardcoded guess that could silently drift from .env's real value.
+        "due_soon_reminder_days": settings.DUE_SOON_REMINDER_DAYS,
+    }
+
+
 def list_overdue_checkouts(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offset: int = 0) -> dict:
     """
     Powers GET /checkouts/overdue (Operations & Observability requirement
@@ -137,15 +259,7 @@ def list_overdue_checkouts(db: Session, user: dict, limit: int = DEFAULT_LIMIT, 
 
     items = []
     for c in overdue:
-        if c.user:
-            assignee_name, assignee_type = c.user.name, c.user.role.capitalize()
-            entity_id, entity_type = c.user.id, "user"
-        elif c.outsider:
-            assignee_name, assignee_type = f"{c.outsider.name} ({c.outsider.company or 'No Company'})", "External Outsider"
-            entity_id, entity_type = c.outsider.id, "outsider"
-        else:
-            assignee_name, assignee_type = "Unknown", "Unknown"
-            entity_id, entity_type = None, None
+        assignee_name, assignee_type, entity_id, entity_type = _resolve_assignee(c)
 
         days_overdue = (now - c.due_date).days
         items.append({
@@ -209,15 +323,7 @@ def list_due_soon_checkouts(db: Session, user: dict, limit: int = DEFAULT_LIMIT,
 
     items = []
     for c in due_soon:
-        if c.user:
-            assignee_name, assignee_type = c.user.name, c.user.role.capitalize()
-            entity_id, entity_type = c.user.id, "user"
-        elif c.outsider:
-            assignee_name, assignee_type = f"{c.outsider.name} ({c.outsider.company or 'No Company'})", "External Outsider"
-            entity_id, entity_type = c.outsider.id, "outsider"
-        else:
-            assignee_name, assignee_type = "Unknown", "Unknown"
-            entity_id, entity_type = None, None
+        assignee_name, assignee_type, entity_id, entity_type = _resolve_assignee(c)
 
         # Ceiling division on the remaining time, not floor: something due
         # in 6 hours should read "due in 1 day", not "due in 0 days"

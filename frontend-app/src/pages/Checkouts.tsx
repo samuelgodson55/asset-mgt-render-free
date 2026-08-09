@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { X, Send } from "lucide-react";
-import { api, extensionsApi, relativeTime, formatDate } from "../lib/api";
+import { api, extensionsApi, getDueSoonReminderDays, relativeTime, formatDate } from "../lib/api";
 import type { Checkout, ExtensionRequest } from "../lib/types";
 import { StatusPill } from "../components/StatusPill";
 
-const tabs = ["All", "Overdue", "Active"] as const;
+const tabs = ["All", "Overdue", "Due Soon", "Active"] as const;
 
 function DenyReasonModal({ request, onClose, onDenied }: { request: ExtensionRequest | null; onClose: () => void; onDenied: () => void }) {
   const [note, setNote] = useState("");
@@ -64,11 +64,22 @@ export function Checkouts() {
   const [extensions, setExtensions] = useState<ExtensionRequest[]>([]);
   const [tab, setTab] = useState<(typeof tabs)[number]>("All");
   const [denying, setDenying] = useState<ExtensionRequest | null>(null);
+  // Read after getCheckouts() resolves below (not at mount) -- lib/api.ts's
+  // loadCheckouts() only learns the real, .env-configured
+  // settings.DUE_SOON_REMINDER_DAYS value from GET /checkouts' own
+  // response, so this has to be re-read once that request lands rather
+  // than assumed up front.
+  const [dueSoonDays, setDueSoonDays] = useState(getDueSoonReminderDays());
 
   const refreshExtensions = () => api.getExtensionRequests().then(setExtensions).catch((err) => console.error("Failed to load extension requests:", err));
 
   useEffect(() => {
-    api.getCheckouts(true).then(setCheckouts).catch((err) => console.error("Failed to load checkouts:", err));
+    api.getCheckouts(true)
+      .then((data) => {
+        setCheckouts(data);
+        setDueSoonDays(getDueSoonReminderDays());
+      })
+      .catch((err) => console.error("Failed to load checkouts:", err));
     refreshExtensions();
   }, []);
 
@@ -80,6 +91,7 @@ export function Checkouts() {
   const filtered = checkouts.filter((c) => {
     if (tab === "All") return true;
     if (tab === "Overdue") return c.status === "overdue";
+    if (tab === "Due Soon") return c.due_soon;
     return c.status === "active";
   });
 
@@ -101,7 +113,7 @@ export function Checkouts() {
                   tab === t ? "text-text" : "text-text-muted hover:text-text"
                 }`}
               >
-                {t}
+                {t === "Due Soon" ? `Due Soon (≤${dueSoonDays}d)` : t}
                 {tab === t && (
                   <motion.div layoutId="checkout-tab" className="absolute left-0 right-0 -bottom-px h-[2px] bg-brass" transition={{ type: "spring", stiffness: 500, damping: 40 }} />
                 )}
@@ -129,11 +141,17 @@ export function Checkouts() {
                     <p className="text-[11px] text-text-faint font-mono">{c.tag} · {c.checked_out_to} · qty {c.quantity}</p>
                   </div>
                   <div className="text-right">
-                    <p className="text-[12px] text-text">{formatDate(c.due_at)}</p>
-                    <p className="text-[10.5px] text-text-faint">{relativeTime(c.due_at)}</p>
+                    {c.due_at ? (
+                      <>
+                        <p className="text-[12px] text-text">{formatDate(c.due_at)}</p>
+                        <p className="text-[10.5px] text-text-faint">{relativeTime(c.due_at)}</p>
+                      </>
+                    ) : (
+                      <p className="text-[12px] text-text-faint">No due date</p>
+                    )}
                   </div>
                   <div className="w-16 flex justify-end">
-                    <StatusPill status={c.status === "overdue" ? "overdue" : "active"} />
+                    <StatusPill status={c.due_soon ? "due_soon" : c.status === "overdue" ? "overdue" : "active"} />
                   </div>
                 </motion.div>
               ))}

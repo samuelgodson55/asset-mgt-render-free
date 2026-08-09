@@ -80,6 +80,13 @@ export interface Checkout {
   due_at: string;
   checked_out_at: string;
   status: "active" | "returned" | "overdue";
+  // Mirrors backend/services/checkout_service.py's list_active_checkouts()
+  // `is_due_soon` -- true when this checkout's due date falls within the
+  // environment-configured settings.DUE_SOON_REMINDER_DAYS window (.env)
+  // and it isn't already overdue. Only populated by GET /checkouts (the
+  // "All"-tab loader); the overdue/due-soon alert feeds don't need it
+  // since each of those is already implicitly one or the other.
+  due_soon?: boolean;
   // Who currently holds this checkout, in a form the Notification Bell can
   // group by and click through to that person's Custody Ledger -- see
   // backend/services/checkout_service.py's list_overdue_checkouts()/
@@ -199,6 +206,12 @@ export interface MyItem {
   checkout_date: string;
   due_date: string;
   due_soon: boolean;
+  // Backend's _group_assigned_items() (services/user_service.py) already
+  // computes this alongside due_soon -- surfaced here so the Dashboard's
+  // "Fleet by category" card can group a Staff/Customer session's own
+  // items by category the same way it groups org-wide totals for a
+  // privileged session, instead of only being usable by the CSV/PDF export.
+  asset_category?: string | null;
   // Backend's _group_assigned_items() already computes these alongside
   // due_soon (see services/user_service.py) -- surfaced here so the
   // Notification Bell's personal alert sections (My overdue / My pending
@@ -212,6 +225,8 @@ export interface ProfileDetail {
   name: string;
   email: string;
   username: string | null;
+  phone_number?: string | null;
+  company?: string | null;
   role: string;
   department?: string | null;
   department_role?: string | null;
@@ -228,6 +243,7 @@ export interface UserRow {
   name: string;
   email: string;
   phone_number?: string | null;
+  company?: string | null;
   username?: string | null;
   role: string;
   department?: string | null;

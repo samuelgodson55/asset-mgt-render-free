@@ -494,6 +494,8 @@ def get_profile(db: Session, current_user: dict) -> dict:
         "name": user.name,
         "email": user.email,
         "username": user.username,
+        "phone_number": user.phone_number,
+        "company": user.company,
         "role": user.role,
         "department": user.department,
         "department_role": user.department_role,
@@ -696,7 +698,7 @@ def confirm_password_reset(db: Session, req: ResetPasswordRequest) -> dict:
 def update_identity(db: Session, req: IdentityUpdateRequest, current_user: dict) -> dict:
     """
     PATCH /auth/me. Lets the CURRENTLY LOGGED-IN account rotate its own
-    name/username/email -- the same self-service shape update_password()
+    name/username/email/phone_number/company -- the same self-service shape update_password()
     already established for the password itself. Available to EVERY role
     (Super Admin, Admin, Manager, Staff, Customer alike), not just
     SUPER_ADMIN_ROLE: that role is simply the one account with no admin
@@ -793,6 +795,19 @@ def update_identity(db: Session, req: IdentityUpdateRequest, current_user: dict)
         changes.append(f"Name changed from {target.name} to {updates['name'].strip()}.")
         target.name = updates["name"].strip()
 
+    # phone_number/company are plain contact details, not authentication
+    # material -- unlike name/username/email above, changing either can't
+    # let anyone impersonate this account or hijack its login, so neither
+    # is added to `changes`/triggers the security notification email
+    # below. An explicit empty string clears the field (same "blank is a
+    # legitimate value, not a no-op" handling user_service.py's
+    # update_user() already gives phone_number).
+    if "phone_number" in updates:
+        target.phone_number = updates["phone_number"] or None
+
+    if "company" in updates:
+        target.company = updates["company"] or None
+
     # NOTE: `operator` uses `target.email` (the row's own, just-committed
     # value) rather than `current_user["email"]` (the JWT's snapshot at
     # login time) -- this action is always self-service (target IS the
@@ -804,7 +819,7 @@ def update_identity(db: Session, req: IdentityUpdateRequest, current_user: dict)
     # actually is right now.
     db.add(models.AuditLog(
         operator=target.email, action="IDENTITY_UPDATED", target_type="User", target_id=target.id,
-        details="Updated own account name/username/email.",
+        details="Updated own account details.",
     ))
     db.commit()
     db.refresh(target)
@@ -816,6 +831,7 @@ def update_identity(db: Session, req: IdentityUpdateRequest, current_user: dict)
     return {
         "message": "Profile updated successfully.",
         "name": target.name, "username": target.username, "email": target.email,
+        "phone_number": target.phone_number, "company": target.company,
     }
 
 

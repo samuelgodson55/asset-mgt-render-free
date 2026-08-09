@@ -1,6 +1,7 @@
 """
 api/checkouts.py
 -----------------
+GET  /checkouts             -- full org-wide "who has what" table of every active checkout.
 POST /checkouts/{id}/return -- quantified return processing.
 GET  /checkouts/overdue     -- dashboard alert feed of overdue checkouts.
 GET  /checkouts/due-soon    -- dashboard alert feed of checkouts due soon
@@ -27,6 +28,21 @@ import services.checkout_service as checkout_service
 import services.extension_service as extension_service
 
 router = APIRouter(prefix="/checkouts", tags=["checkouts"])
+
+
+# NOTE ON ROUTE ORDERING: registered first purely for readability -- this
+# is the literal root path ("" under the /checkouts prefix), so it can
+# never collide with "/{checkout_id}/return" or any other
+# {checkout_id}-parameterized route below regardless of where it's placed.
+@router.get("")
+def get_active_checkouts(
+    limit: int = Query(checkout_service.DEFAULT_LIMIT, ge=1, le=checkout_service.MAX_LIMIT, description="Max rows to return"),
+    offset: int = Query(0, ge=0, description="Rows to skip (for paging through a large checkout table)"),
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_privileged_role),
+):
+    """The full org-wide 'who has what' table -- every ACTIVE checkout, not just the overdue/due-soon subsets. Powers the Checkouts page's 'All' tab."""
+    return checkout_service.list_active_checkouts(db, user, limit, offset)
 
 
 @router.post("/{checkout_id}/return")

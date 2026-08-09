@@ -68,8 +68,13 @@ def get_asset_activity(
     db: Session = Depends(get_db),
     user: dict = Depends(get_current_user),
 ):
-    """Daily checkout/return counts feeding the Dashboard's Checkout Activity chart."""
-    return asset_service.get_activity(db, days)
+    """
+    Daily checkout/return counts feeding the Dashboard's Checkout Activity
+    chart. Org-wide for Super Admin/Admin/Manager, narrowed to the caller's
+    own checkouts for Staff/Customer -- see asset_service.get_activity()'s
+    docstring for the reasoning.
+    """
+    return asset_service.get_activity(db, user, days)
 
 
 @router.get("/export")

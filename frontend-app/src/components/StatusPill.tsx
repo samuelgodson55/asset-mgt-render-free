@@ -4,6 +4,7 @@ const config = {
   out: { label: "Out", dot: "bg-rust", text: "text-rust-soft" },
   active: { label: "Active", dot: "bg-sky", text: "text-sky" },
   overdue: { label: "Overdue", dot: "bg-rust", text: "text-rust-soft" },
+  due_soon: { label: "Due soon", dot: "bg-brass", text: "text-brass-soft" },
   returned: { label: "Returned", dot: "bg-moss", text: "text-moss-soft" },
   pending: { label: "Pending", dot: "bg-brass", text: "text-brass-soft" },
 } as const;

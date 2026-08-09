@@ -184,7 +184,7 @@ def list_assets(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offset: int
     return {"items": items, "total": total, "limit": limit, "offset": offset, "show_stock": show_stock}
 
 
-def get_activity(db: Session, days: int = 14) -> list[dict]:
+def get_activity(db: Session, user: dict, days: int = 14) -> list[dict]:
     """
     Daily checkout/return counts for the last `days` days -- feeds the
     Dashboard's "Checkout activity" chart (frontend-app/src/pages/
@@ -201,6 +201,18 @@ def get_activity(db: Session, days: int = 14) -> list[dict]:
     finished closing out that day, not every partial-return event against
     them; there's no per-partial-return timestamp to aggregate on.
 
+    SCOPE (mirrors _can_see_custody above / deps.require_privileged_role):
+    a Super Admin/Admin/Manager sees org-wide activity across every
+    checkout, the same "whole ledger" view the rest of the Overview
+    dashboard (Total Pooled Units, Overdue Returns, etc.) already gives
+    them. A Staff/Customer is not privileged to see who-has-what org-wide
+    (see _can_see_custody's docstring), so their chart is narrowed to only
+    checkouts made against their own account (`user_id`) -- matching what
+    "My Items" already shows them elsewhere in the app. Outsourced-to-an-
+    outsider checkouts (`user_id IS NULL`, see AssetCheckout's docstring)
+    never belong to any Staff/Customer, so they're naturally excluded from
+    the narrowed view along with everyone else's checkouts.
+
     Aggregated in Python (not a SQL date_trunc/group-by) to sidestep
     timezone-bucketing edge cases across the checkout_date/returned_at
     columns -- the row counts here are small enough (bounded by `days`,
@@ -211,12 +223,18 @@ def get_activity(db: Session, days: int = 14) -> list[dict]:
     since = utc_now() - datetime.timedelta(days=days - 1)
     since_day = since.date()
 
-    checkout_days = db.query(models.AssetCheckout.checkout_date).filter(
+    checkout_query = db.query(models.AssetCheckout.checkout_date).filter(
         models.AssetCheckout.checkout_date >= since
-    ).all()
-    return_days = db.query(models.AssetCheckout.returned_at).filter(
+    )
+    return_query = db.query(models.AssetCheckout.returned_at).filter(
         models.AssetCheckout.returned_at.isnot(None), models.AssetCheckout.returned_at >= since
-    ).all()
+    )
+    if not _can_see_custody(user):
+        checkout_query = checkout_query.filter(models.AssetCheckout.user_id == int(user["sub"]))
+        return_query = return_query.filter(models.AssetCheckout.user_id == int(user["sub"]))
+
+    checkout_days = checkout_query.all()
+    return_days = return_query.all()
 
     checkouts_by_day: dict[str, int] = {}
     for (dt,) in checkout_days:

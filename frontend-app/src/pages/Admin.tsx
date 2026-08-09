@@ -941,13 +941,13 @@ function ResetPasswordModal({ target, onClose, onDone }: { target: UserRow | nul
 }
 
 function EditUserModal({ target, onClose, onDone }: { target: UserRow | null; onClose: () => void; onDone: () => void }) {
-  const [form, setForm] = useState({ name: "", username: "", email: "", phone_number: "" });
+  const [form, setForm] = useState({ name: "", username: "", email: "", phone_number: "", company: "" });
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     if (target) {
-      setForm({ name: target.name, username: target.username ?? "", email: target.email, phone_number: target.phone_number ?? "" });
+      setForm({ name: target.name, username: target.username ?? "", email: target.email, phone_number: target.phone_number ?? "", company: target.company ?? "" });
       setError(null);
     }
   }, [target]);
@@ -981,6 +981,7 @@ function EditUserModal({ target, onClose, onDone }: { target: UserRow | null; on
           <input value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} placeholder="Username (optional)" className="bg-ink-soft border border-border-soft rounded-[3px] px-3 py-2.5 text-[13px] text-text placeholder:text-text-faint focus:border-brass/50 focus:outline-none" />
           <input required type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="Email" className="bg-ink-soft border border-border-soft rounded-[3px] px-3 py-2.5 text-[13px] text-text placeholder:text-text-faint focus:border-brass/50 focus:outline-none" />
           <input value={form.phone_number} onChange={(e) => setForm({ ...form, phone_number: e.target.value })} placeholder="Phone (optional)" className="bg-ink-soft border border-border-soft rounded-[3px] px-3 py-2.5 text-[13px] text-text placeholder:text-text-faint focus:border-brass/50 focus:outline-none" />
+          <input value={form.company} onChange={(e) => setForm({ ...form, company: e.target.value })} placeholder="Company (optional)" className="bg-ink-soft border border-border-soft rounded-[3px] px-3 py-2.5 text-[13px] text-text placeholder:text-text-faint focus:border-brass/50 focus:outline-none" />
           {error && <div className="bg-rust/10 border border-rust/30 text-rust-soft text-[12px] rounded-[3px] px-3 py-2.5">{error}</div>}
           <button type="submit" disabled={submitting} className="bg-brass hover:bg-brass-soft disabled:opacity-60 text-ink font-medium text-[13px] rounded-[3px] py-2.5 transition-colors">
             {submitting ? "Saving…" : "Save changes"}
@@ -1665,6 +1666,9 @@ function AuditPanel() {
   const [offset, setOffset] = useState(0);
   const [perPage, setPerPage] = useState(DEFAULT_PAGE_SIZE);
   const [loading, setLoading] = useState(true);
+  const [exportModalOpen, setExportModalOpen] = useState(false);
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
   const [exporting, setExporting] = useState<"csv" | "pdf" | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
 
@@ -1682,11 +1686,25 @@ function AuditPanel() {
     setOffset(0);
   };
 
+  // Same date-range gate as legacy's #auditExportModal (js/components/
+  // audit.js's openAuditExportModal()/exportAuditLogs()): "Export Ledger"
+  // opens a From/To range picker -- both optional, defaulting to the full
+  // (unbounded) ledger -- rather than immediately generating a file, since
+  // the ledger has no natural size limit and a wide/unscoped export can
+  // take a while to build on the worker.
+  const openExportModal = () => {
+    setStartDate("");
+    setEndDate("");
+    setExportError(null);
+    setExportModalOpen(true);
+  };
+
   const runExport = async (format: "csv" | "pdf") => {
     setExporting(format);
     setExportError(null);
     try {
-      const { task_id } = await auditApi.startExport(format);
+      const { task_id } = await auditApi.startExport(format, startDate || undefined, endDate || undefined);
+      setExportModalOpen(false);
       const deadline = Date.now() + 60_000;
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 1500));
@@ -1714,15 +1732,12 @@ function AuditPanel() {
         <p className="text-[12.5px] text-text-muted">{total} entries in the ledger</p>
         <div className="ml-auto flex items-center gap-2">
           <RowsPerPageSelect value={perPage} onChange={handlePerPageChange} />
-          <button onClick={() => runExport("csv")} disabled={!!exporting} className="flex items-center gap-1.5 border border-border-soft hover:border-brass/40 disabled:opacity-60 text-[12px] text-text rounded-[3px] px-3 py-1.5 transition-colors">
-            {exporting === "csv" ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />} Export CSV
-          </button>
-          <button onClick={() => runExport("pdf")} disabled={!!exporting} className="flex items-center gap-1.5 border border-border-soft hover:border-brass/40 disabled:opacity-60 text-[12px] text-text rounded-[3px] px-3 py-1.5 transition-colors">
-            {exporting === "pdf" ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />} Export PDF
+          <button onClick={openExportModal} disabled={!!exporting} className="flex items-center gap-1.5 border border-border-soft hover:border-brass/40 disabled:opacity-60 text-[12px] text-text rounded-[3px] px-3 py-1.5 transition-colors">
+            {exporting ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />} Export Ledger
           </button>
         </div>
       </div>
-      {exportError && <div className="bg-rust/10 border border-rust/30 text-rust-soft text-[12px] rounded-[3px] px-3 py-2.5">{exportError}</div>}
+      {exportError && !exportModalOpen && <div className="bg-rust/10 border border-rust/30 text-rust-soft text-[12px] rounded-[3px] px-3 py-2.5">{exportError}</div>}
 
       <div className="border border-border-soft bg-surface rounded-[3px] overflow-hidden">
         <table className="w-full text-left text-[12.5px]">
@@ -1750,6 +1765,43 @@ function AuditPanel() {
       </div>
 
       <PaginationBar total={total} perPage={perPage} offset={offset} onOffsetChange={setOffset} />
+
+      {exportModalOpen && (
+        <AnimatePresence>
+          <motion.div key="backdrop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => !exporting && setExportModalOpen(false)} className="fixed inset-0 bg-ink/70 backdrop-blur-sm z-40" />
+          <motion.div key="panel" initial={{ opacity: 0, y: 12, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 8, scale: 0.98 }} className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-full max-w-sm bg-surface border border-border-soft rounded-[4px] p-6">
+            <div className="flex items-start justify-between mb-4">
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-text-faint">Audit Logs</p>
+                <h2 className="font-display text-lg font-semibold text-text">Export Ledger</h2>
+              </div>
+              <button onClick={() => !exporting && setExportModalOpen(false)} className="text-text-faint hover:text-text transition-colors"><X size={16} /></button>
+            </div>
+            <div className="flex flex-col gap-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="mb-1 block text-[12px] font-medium text-text-muted">From</label>
+                  <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="w-full bg-ink-soft border border-border-soft rounded-[3px] px-3 py-2 text-[13px] text-text focus:border-brass/50 focus:outline-none" />
+                </div>
+                <div>
+                  <label className="mb-1 block text-[12px] font-medium text-text-muted">To</label>
+                  <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="w-full bg-ink-soft border border-border-soft rounded-[3px] px-3 py-2 text-[13px] text-text focus:border-brass/50 focus:outline-none" />
+                </div>
+              </div>
+              <p className="text-[11px] text-text-faint">Leave either field blank for no start/end limit. Exports the full ledger by default.</p>
+              {exportError && <div className="bg-rust/10 border border-rust/30 text-rust-soft text-[12px] rounded-[3px] px-3 py-2.5">{exportError}</div>}
+              <div className="flex gap-3 pt-1">
+                <button onClick={() => runExport("csv")} disabled={!!exporting} className="flex-1 flex items-center justify-center gap-1.5 border border-border-soft hover:border-brass/40 disabled:opacity-60 text-[13px] font-semibold text-text rounded-[3px] py-2.5 transition-colors">
+                  {exporting === "csv" ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />} .CSV
+                </button>
+                <button onClick={() => runExport("pdf")} disabled={!!exporting} className="flex-1 flex items-center justify-center gap-1.5 bg-brass hover:bg-brass-soft disabled:opacity-60 text-[13px] font-semibold text-ink rounded-[3px] py-2.5 transition-colors">
+                  {exporting === "pdf" ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />} .PDF
+                </button>
+              </div>
+            </div>
+          </motion.div>
+        </AnimatePresence>
+      )}
     </div>
   );
 }

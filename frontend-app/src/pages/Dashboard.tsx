@@ -22,6 +22,7 @@ export function Dashboard() {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [checkouts, setCheckouts] = useState<Checkout[]>([]);
   const [myItems, setMyItems] = useState<MyItem[]>([]);
+  const [myItemsLoaded, setMyItemsLoaded] = useState(false);
   const { user, demo, canSeeStock } = useAuth();
   const { theme } = useTheme();
   const chart = CHART_COLORS[theme];
@@ -45,7 +46,9 @@ export function Dashboard() {
     if (privileged) {
       api.getCheckouts(privileged).then(setCheckouts).catch((err) => console.error("Failed to load checkouts:", err));
     } else {
-      myItemsApi.list().then((d) => setMyItems(d.assigned_items)).catch(() => setMyItems([]));
+      myItemsApi.list()
+        .then((d) => { setMyItems(d.assigned_items); setMyItemsLoaded(true); })
+        .catch(() => { setMyItems([]); setMyItemsLoaded(true); });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [privileged]);
@@ -64,6 +67,31 @@ export function Dashboard() {
         .sort((a, b) => new Date(a.due_date).getTime() - new Date(b.due_date).getTime())
         .slice(0, 5);
 
+  // Own-custody total (sum of quantity across every item currently
+  // checked out to this person, from GET /users/me/items) -- stands in
+  // for the "Total pooled units" card when the signed-in role can't see
+  // org-wide stock (see canSeeStock's docstring in lib/roles.ts): that
+  // card sources total_assets from GET /assets' total_quantity, which the
+  // backend omits entirely for a Staff/Customer session (asset_service.py's
+  // _serialize_asset_type()), so it always read 0 there even when this
+  // person plainly has items checked out -- the bug being fixed here.
+  const myCheckedOutTotal = myItems.reduce((sum, i) => sum + i.quantity, 0);
+
+  // Same fix, applied to "Fleet by category" below: stats.categories is
+  // built server-side from GET /assets' total_quantity too (see
+  // lib/api.ts's loadStats()), so it's just as empty for a Staff/Customer
+  // session. Group this person's OWN items by asset_category instead --
+  // same "—" fallback the CSV/PDF export already uses for an uncategorized
+  // pool (services/user_service.py's export helpers).
+  const myCategoryCounts: { name: string; count: number }[] = (() => {
+    const byCategory = new Map<string, number>();
+    for (const i of myItems) {
+      const key = i.asset_category ?? "Uncategorized";
+      byCategory.set(key, (byCategory.get(key) ?? 0) + i.quantity);
+    }
+    return Array.from(byCategory, ([name, count]) => ({ name, count }));
+  })();
+
   return (
     <div>
       <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }} className="mb-6">
@@ -72,15 +100,26 @@ export function Dashboard() {
         <p className="text-text-muted text-sm mt-1">Here's what the ledger looks like this morning.</p>
       </motion.div>
 
-      {/* "Available now" and "Low stock pools" both surface real-time stock
-          levels -- gated behind canSeeStock the same way the Quotation
-          Catalog already gates available_quantity/status for a Staff/
-          Customer session (see lib/roles.ts's canSeeStock()). Grid columns
-          adapt to however many cards actually render so a Staff/Customer
-          session without the flag doesn't end up with lopsided empty
-          space. */}
+      {/* "Total pooled units", "Available now", and "Low stock pools" are
+          all org-wide STOCK numbers -- gated behind canSeeStock the same
+          way the Quotation Catalog already gates available_quantity/status
+          for a Staff/Customer session (see lib/roles.ts's canSeeStock()).
+          GET /assets omits total_quantity/available_quantity entirely for
+          that role (asset_service.py's _serialize_asset_type()), so
+          "Total pooled units" always read a misleading 0 there -- even
+          for someone who plainly has items checked out -- instead of
+          reflecting a number they were never allowed to see in the first
+          place. It's swapped for that person's OWN checked-out total
+          (from GET /users/me/items, open to everyone) so the card always
+          shows something true. Grid columns adapt to however many cards
+          actually render so a Staff/Customer session without the flag
+          doesn't end up with lopsided empty space. */}
       <div className={`grid grid-cols-2 gap-3 mb-6 ${canSeeStock ? "md:grid-cols-4" : "md:grid-cols-2"}`}>
-        <StatCard index={0} label="Total pooled units" value={stats?.total_assets ?? "—"} icon={Boxes} accent="sky" hint="Across all categories" />
+        {canSeeStock ? (
+          <StatCard index={0} label="Total pooled units" value={stats?.total_assets ?? "—"} icon={Boxes} accent="sky" hint="Across all categories" />
+        ) : (
+          <StatCard index={0} label="Your checked-out items" value={myItemsLoaded ? myCheckedOutTotal : "—"} icon={PackageCheck} accent="sky" hint="Currently in your custody" />
+        )}
         {canSeeStock && (
           <StatCard index={1} label="Available now" value={stats?.available ?? "—"} icon={PackageCheck} accent="moss" hint="Ready to check out" />
         )}
@@ -99,8 +138,8 @@ export function Dashboard() {
         >
           <div className="flex items-center justify-between mb-4">
             <div>
-              <h2 className="font-display text-[15px] font-medium text-text">Checkout activity</h2>
-              <p className="text-[11px] text-text-faint mt-0.5">Last 14 days</p>
+              <h2 className="font-display text-[15px] font-medium text-text">{privileged ? "Checkout activity" : "Your checkout activity"}</h2>
+              <p className="text-[11px] text-text-faint mt-0.5">Last 14 days{privileged ? "" : " · your items only"}</p>
             </div>
             <div className="flex items-center gap-3 text-[11px] text-text-muted">
               <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-brass inline-block" />Checkouts</span>
@@ -187,28 +226,30 @@ export function Dashboard() {
         </motion.div>
       </div>
 
-      <motion.div
-        initial={{ opacity: 0, y: 10 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.45, delay: 0.28 }}
-        className="border border-border-soft bg-surface rounded-[3px] p-5 mt-4"
-      >
-        <h2 className="font-display text-[15px] font-medium text-text mb-4">Fleet by category</h2>
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-          {stats?.categories.map((c, i) => (
-            <motion.div
-              key={c.name}
-              initial={{ opacity: 0, scale: 0.96 }}
-              animate={{ opacity: 1, scale: 1 }}
-              transition={{ duration: 0.3, delay: 0.3 + i * 0.04 }}
-              className="border border-border-soft rounded-[3px] p-3"
-            >
-              <p className="text-[11px] text-text-muted truncate">{c.name}</p>
-              <p className="font-mono text-lg text-text mt-1">{c.count}</p>
-            </motion.div>
-          ))}
-        </div>
-      </motion.div>
+      {(canSeeStock || myCategoryCounts.length > 0) && (
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.45, delay: 0.28 }}
+          className="border border-border-soft bg-surface rounded-[3px] p-5 mt-4"
+        >
+          <h2 className="font-display text-[15px] font-medium text-text mb-4">{canSeeStock ? "Fleet by category" : "Your items by category"}</h2>
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+            {(canSeeStock ? stats?.categories ?? [] : myCategoryCounts).map((c, i) => (
+              <motion.div
+                key={c.name}
+                initial={{ opacity: 0, scale: 0.96 }}
+                animate={{ opacity: 1, scale: 1 }}
+                transition={{ duration: 0.3, delay: 0.3 + i * 0.04 }}
+                className="border border-border-soft rounded-[3px] p-3"
+              >
+                <p className="text-[11px] text-text-muted truncate">{c.name}</p>
+                <p className="font-mono text-lg text-text mt-1">{c.count}</p>
+              </motion.div>
+            ))}
+          </div>
+        </motion.div>
+      )}
     </div>
   );
 }

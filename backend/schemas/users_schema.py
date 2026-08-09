@@ -45,6 +45,7 @@ class UserUpdateRequest(BaseModel):
     username: Optional[str] = None
     email: Optional[str] = None
     phone_number: Optional[str] = None
+    company: Optional[str] = None
 
     # A field that IS present must not be an empty/whitespace-only string --
     # that would silently blank out someone's name/username/email, which is
@@ -57,9 +58,9 @@ class UserUpdateRequest(BaseModel):
             raise ValueError("This field cannot be blank.")
         return value.strip() if value is not None else value
 
-    # phone_number IS nullable on the model -- an explicit empty string
-    # clears it, same as OutsiderUpdateRequest's email/phone_number/company.
-    @field_validator("phone_number")
+    # phone_number/company ARE nullable -- an explicit empty string clears
+    # them, same as OutsiderUpdateRequest's email/phone_number/company.
+    @field_validator("phone_number", "company")
     @classmethod
     def _strip_phone(cls, value: Optional[str]) -> Optional[str]:
         return value.strip() if value is not None else value

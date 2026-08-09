@@ -3,7 +3,7 @@ import { motion } from "framer-motion";
 import { UserRound, KeyRound, ShieldCheck, Download, Check } from "lucide-react";
 import { profileApi, ApiError } from "../lib/api";
 import { useAuth } from "../lib/useAuth";
-import { isFullAdmin, isTrueSuperAdmin } from "../lib/roles";
+import { isTrueSuperAdmin } from "../lib/roles";
 import type { ProfileDetail } from "../lib/types";
 
 function errMsg(err: unknown, fallback: string): string {
@@ -68,19 +68,20 @@ function ChangePasswordCard({ userId }: { userId: number }) {
   );
 }
 
-// Available to every role on the backend (PATCH /auth/me is deliberately
-// self-only, see services/auth_service.py's update_identity() docstring),
-// but the legacy admin.html only ever surfaced it for the Super Admin's own
-// identity section -- every other role's name/email/username can instead
-// be fixed by a Super Admin OR a plain Admin via the User Directory's Edit
-// action. Mirrored here for BOTH full-admin tiers (not just the root
-// account) since a plain Admin has that same "nobody above me to fix it"
-// gap for their OWN row -- another Admin can edit them, but self-service
-// is still worth having, same as the Super Admin gets it.
+// Shown for EVERY role, same as legacy admin.html/manager.html/staff.html/
+// customer.html's #profileIdentitySection (see that markup's comment in
+// e.g. customer.html): PATCH /auth/me (backend/services/auth_service.py's
+// update_identity()) is generic self-service and was never actually
+// role-restricted on the backend. Every role gets this exact same
+// self-service path here, on top of an Admin/Super Admin still being able
+// to fix a DIFFERENT account's name/email/username via the User
+// Directory's Edit action.
 function UpdateIdentityCard({ profile, onUpdated }: { profile: ProfileDetail; onUpdated: (p: ProfileDetail) => void }) {
   const [name, setName] = useState(profile.name);
   const [email, setEmail] = useState(profile.email);
   const [username, setUsername] = useState(profile.username || "");
+  const [phoneNumber, setPhoneNumber] = useState(profile.phone_number || "");
+  const [company, setCompany] = useState(profile.company || "");
   const [password, setPassword] = useState("");
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -90,7 +91,7 @@ function UpdateIdentityCard({ profile, onUpdated }: { profile: ProfileDetail; on
     setMsg(null);
     setSubmitting(true);
     try {
-      const res = await profileApi.updateIdentity(name.trim(), email.trim(), username.trim(), password);
+      const res = await profileApi.updateIdentity(name.trim(), email.trim(), username.trim(), password, phoneNumber.trim(), company.trim());
       onUpdated(res);
       setMsg({ text: res.message || "Profile updated successfully.", ok: true });
       setPassword("");
@@ -104,8 +105,8 @@ function UpdateIdentityCard({ profile, onUpdated }: { profile: ProfileDetail; on
   return (
     <div className="border border-border-soft bg-surface rounded-[3px] p-5">
       <div className="flex items-start gap-3 mb-4">
-        <div className="w-9 h-9 rounded-full bg-sky/10 flex items-center justify-center shrink-0">
-          <UserRound size={16} className="text-sky" />
+        <div className="w-9 h-9 rounded-full bg-brass/10 flex items-center justify-center shrink-0">
+          <UserRound size={16} className="text-brass-soft" />
         </div>
         <div>
           <h2 className="font-display text-[15px] font-medium text-text">Account details</h2>
@@ -116,8 +117,10 @@ function UpdateIdentityCard({ profile, onUpdated }: { profile: ProfileDetail; on
         <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Name" className="bg-ink-soft border border-border-soft rounded-[3px] px-3 py-2.5 text-[13px] text-text placeholder:text-text-faint focus:border-brass/50 focus:outline-none transition-colors" />
         <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" className="bg-ink-soft border border-border-soft rounded-[3px] px-3 py-2.5 text-[13px] text-text placeholder:text-text-faint focus:border-brass/50 focus:outline-none transition-colors" />
         <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="Username" className="bg-ink-soft border border-border-soft rounded-[3px] px-3 py-2.5 text-[13px] text-text placeholder:text-text-faint focus:border-brass/50 focus:outline-none transition-colors" />
+        <input type="tel" autoComplete="tel" value={phoneNumber} onChange={(e) => setPhoneNumber(e.target.value)} placeholder="Phone number" className="bg-ink-soft border border-border-soft rounded-[3px] px-3 py-2.5 text-[13px] text-text placeholder:text-text-faint focus:border-brass/50 focus:outline-none transition-colors" />
+        <input value={company} onChange={(e) => setCompany(e.target.value)} placeholder="Company" className="bg-ink-soft border border-border-soft rounded-[3px] px-3 py-2.5 text-[13px] text-text placeholder:text-text-faint focus:border-brass/50 focus:outline-none transition-colors" />
         <input type="password" required autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Current password" className="bg-ink-soft border border-border-soft rounded-[3px] px-3 py-2.5 text-[13px] text-text placeholder:text-text-faint focus:border-brass/50 focus:outline-none transition-colors" />
-        <button type="submit" disabled={submitting} className="bg-sky/90 hover:bg-sky disabled:opacity-60 text-white font-medium text-[13px] rounded-[3px] py-2.5 transition-colors">
+        <button type="submit" disabled={submitting} className="bg-brass hover:bg-brass-soft disabled:opacity-60 text-ink font-medium text-[13px] rounded-[3px] py-2.5 transition-colors">
           {submitting ? "Saving…" : "Save changes"}
         </button>
         {msg && <FieldMessage text={msg.text} ok={msg.ok} />}
@@ -125,6 +128,7 @@ function UpdateIdentityCard({ profile, onUpdated }: { profile: ProfileDetail; on
     </div>
   );
 }
+
 
 function RecoveryCodesCard() {
   const [password, setPassword] = useState("");
@@ -223,8 +227,8 @@ export function Profile() {
       </motion.div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 max-w-3xl">
+        {profile && <UpdateIdentityCard profile={profile} onUpdated={setProfile} />}
         {profile && <ChangePasswordCard userId={profile.id} />}
-        {profile && isFullAdmin(user?.role) && <UpdateIdentityCard profile={profile} onUpdated={setProfile} />}
         {/* 2FA is Super-Admin-only end to end (see services/auth_service.py's
             login() -- only role == SUPER_ADMIN_ROLE ever gets an mfa_required/
             mfa_setup_required challenge in the first place), and

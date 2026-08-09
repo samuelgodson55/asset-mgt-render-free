@@ -61,13 +61,22 @@ def get_deleted_users(
 
 
 @router.get("/me/items")
-def get_my_assigned_items(db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
+def get_my_assigned_items(
+    limit: int = Query(user_service.DEFAULT_LIMIT, ge=1, le=user_service.MAX_LIMIT, description="Max rows to return"),
+    offset: int = Query(0, ge=0, description="Rows to skip (for paging through My Items)"),
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
     """
     Self-service: lets ANY logged-in account (staff, customer, manager,
     super_admin) see their own checked-out items, without needing elevated
-    privileges. Powers staff.html and customer.html.
+    privileges. Powers staff.html and customer.html's "My Items" table,
+    with the same true server-side `limit`/`offset` pagination as GET
+    /assets and GET /users (default `limit` is generous enough that
+    callers which don't care about paging -- the Notification Bell,
+    Dashboard, and the CSV/PDF export -- keep seeing everything).
     """
-    return user_service.get_my_assigned_items(db, user)
+    return user_service.get_my_assigned_items(db, user, limit, offset)
 
 
 @router.get("/me/items/export")
