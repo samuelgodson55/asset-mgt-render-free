@@ -1,12 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { auth, quotationsApi, type AuthUser } from "./api";
+import { auth, quotationsApi, DEMO_FLAG_KEY, type AuthUser } from "./api";
 import { canSeeStock as computeCanSeeStock } from "./roles";
 import { AuthContext, type MfaChallenge } from "./auth-context";
-
-// Session-scoped (not localStorage) so closing the tab drops back to a
-// real sign-in prompt next time, rather than a demo choice persisting
-// indefinitely.
-const DEMO_FLAG_KEY = "ledger:demo-mode";
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);

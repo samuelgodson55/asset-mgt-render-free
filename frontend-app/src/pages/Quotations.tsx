@@ -78,8 +78,8 @@ export function Quotations() {
   const [assigning, setAssigning] = useState(false);
   const [assignMessage, setAssignMessage] = useState<string | null>(null);
 
-  const refreshCart = () => quotationsApi.myCart().then(setCart);
-  const refreshHistory = () => quotationsApi.myHistory().then(setHistory);
+  const refreshCart = () => quotationsApi.myCart().then(setCart).catch((err) => setError(errMsg(err, "Couldn't refresh your cart.")));
+  const refreshHistory = () => quotationsApi.myHistory().then(setHistory).catch((err) => setError(errMsg(err, "Couldn't refresh your order history.")));
 
   useEffect(() => {
     let cancelled = false;
@@ -101,6 +101,9 @@ export function Quotations() {
     quotationsApi.catalogPage(catalogPerPage, catalogOffset, search).then((res) => {
       setCatalog(res.items);
       setCatalogTotal(res.total);
+      setCatalogLoading(false);
+    }).catch((err) => {
+      setError(errMsg(err, "Couldn't load the Asset Catalog."));
       setCatalogLoading(false);
     });
   };

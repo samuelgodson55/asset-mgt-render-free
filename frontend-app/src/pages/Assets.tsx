@@ -37,12 +37,17 @@ export function Assets() {
   const [dispatching, setDispatching] = useState<{ id: number; name: string; available_quantity: number } | null>(null);
   const [creating, setCreating] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const refresh = () => {
     setLoading(true);
     assetsApi.list(perPage, offset, search).then((res) => {
+      setError(null);
       setAssets(res.items);
       setTotal(res.total);
+      setLoading(false);
+    }).catch((err) => {
+      setError(err instanceof Error ? err.message : "Couldn't load the asset inventory.");
       setLoading(false);
     });
   };
@@ -97,6 +102,12 @@ export function Assets() {
           )}
         </div>
       </motion.div>
+
+      {error && (
+        <div className="mb-4 rounded-[3px] border border-rust/30 bg-rust/10 px-3 py-2.5 text-[12px] text-rust-soft">
+          {error}
+        </div>
+      )}
 
       <div className="flex items-center gap-2 mb-5 flex-wrap">
         <SlidersHorizontal size={13} className="text-text-faint" />

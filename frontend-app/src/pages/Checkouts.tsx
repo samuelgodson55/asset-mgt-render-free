@@ -65,10 +65,10 @@ export function Checkouts() {
   const [tab, setTab] = useState<(typeof tabs)[number]>("All");
   const [denying, setDenying] = useState<ExtensionRequest | null>(null);
 
-  const refreshExtensions = () => api.getExtensionRequests().then(setExtensions);
+  const refreshExtensions = () => api.getExtensionRequests().then(setExtensions).catch((err) => console.error("Failed to load extension requests:", err));
 
   useEffect(() => {
-    api.getCheckouts(true).then(setCheckouts);
+    api.getCheckouts(true).then(setCheckouts).catch((err) => console.error("Failed to load checkouts:", err));
     refreshExtensions();
   }, []);
 

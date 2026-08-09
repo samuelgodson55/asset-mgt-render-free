@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { quotationsApi, formatPrice, setCurrencyCode, ApiError } from "./api";
+import { quotationsApi, formatPrice, setCurrencyCode, ApiError, DEMO_FLAG_KEY } from "./api";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -18,6 +18,7 @@ describe("quotationsApi", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    sessionStorage.removeItem(DEMO_FLAG_KEY);
   });
 
   it("addToCart posts the asset/quantity/date range to /quotations/items", async () => {
@@ -70,7 +71,18 @@ describe("quotationsApi", () => {
     expect(String(url)).toContain("search=acme%20corp");
   });
 
-  it("myCart falls back to demo data when the backend is unreachable", async () => {
+  it("myCart rejects (does NOT fall back to demo data) for a real session when the backend is unreachable", async () => {
+    // No demo flag set here -- this is the real-account path. Silently
+    // substituting the bundled demo cart for a real, signed-in session's
+    // cart on a network failure is exactly the bug this test used to
+    // assert as correct; it must now surface the failure instead.
+    fetchMock.mockRejectedValueOnce(new TypeError("network error"));
+
+    await expect(quotationsApi.myCart()).rejects.toThrow("network error");
+  });
+
+  it("myCart falls back to demo data only in genuine demo mode", async () => {
+    sessionStorage.setItem(DEMO_FLAG_KEY, "1");
     fetchMock.mockRejectedValueOnce(new TypeError("network error"));
 
     const cart = await quotationsApi.myCart();

@@ -446,10 +446,15 @@ function DigestRecipients() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    digestApi.list().then((e) => {
-      setEmails(e);
-      setLoading(false);
-    });
+    digestApi.list()
+      .then((e) => {
+        setEmails(e);
+        setLoading(false);
+      })
+      .catch((err) => {
+        console.error("Failed to load digest recipients:", err);
+        setLoading(false);
+      });
   }, []);
 
   const save = async (next: string[], successMessage: string) => {
@@ -536,10 +541,15 @@ function SystemBackupsPanel() {
 
   const refresh = async () => {
     setLoadingList(true);
-    const [s, list] = await Promise.all([backupApi.status(), backupApi.list()]);
-    setStatus(s);
-    setBackups(list);
-    setLoadingList(false);
+    try {
+      const [s, list] = await Promise.all([backupApi.status(), backupApi.list()]);
+      setStatus(s);
+      setBackups(list);
+    } catch (err) {
+      console.error("Failed to load backup status/list:", err);
+    } finally {
+      setLoadingList(false);
+    }
   };
 
   useEffect(() => {
@@ -1794,8 +1804,12 @@ function FulfillmentPanel({ onCheckedOut }: { onCheckedOut: () => void }) {
   const refresh = () => {
     setLoading(true);
     quotationsApi.fulfillmentQueue().then((items) => {
+      setError(null);
       setRows(items);
       setShortfall({});
+      setLoading(false);
+    }).catch((err) => {
+      setError(errMsg(err, "Couldn't load the fulfillment queue."));
       setLoading(false);
     });
   };
@@ -2015,14 +2029,20 @@ function QuotesPanel() {
   const refresh = () => {
     setLoading(true);
     quotationsApi.list(perPage, offset, search).then((res) => {
+      setError(null);
       setRows(res.items);
       setTotal(res.total);
+      setLoading(false);
+    }).catch((err) => {
+      setError(errMsg(err, "Couldn't load quotations."));
       setLoading(false);
     });
   };
 
   useEffect(refresh, [offset, perPage, search]);
-  useEffect(() => { quotationsApi.catalog().then(setCatalog); }, []);
+  useEffect(() => {
+    quotationsApi.catalog().then(setCatalog).catch((err) => console.error("Failed to load catalog:", err));
+  }, []);
 
   const handlePerPageChange = (n: number) => {
     setPerPage(n);

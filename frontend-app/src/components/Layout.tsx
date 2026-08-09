@@ -75,10 +75,15 @@ export function Layout() {
   }, []);
 
   useEffect(() => {
-    api.getNotifications(privileged).then((n) => {
-      setUnread(n.filter((x) => !x.read).length);
-      setLive(api.isLive());
-    });
+    api.getNotifications(privileged)
+      .then((n) => {
+        setUnread(n.filter((x) => !x.read).length);
+        setLive(api.isLive());
+      })
+      .catch((err) => {
+        console.error("Failed to load notifications:", err);
+        setLive(api.isLive());
+      });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

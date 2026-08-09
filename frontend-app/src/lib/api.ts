@@ -13,6 +13,16 @@ import type { AssetType, Checkout, ExtensionRequest, NotificationItem, Dashboard
 // README.md).
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "/api").replace(/\/$/, "");
 
+// Session-scoped (not localStorage) so closing the tab drops back to a
+// real sign-in prompt next time, rather than a demo choice persisting
+// indefinitely. Shared with lib/auth.tsx (the only other place that reads
+// or sets it) so the two files can never drift onto two different keys.
+export const DEMO_FLAG_KEY = "ledger:demo-mode";
+
+function isDemoMode(): boolean {
+  return sessionStorage.getItem(DEMO_FLAG_KEY) === "1";
+}
+
 // Tracks whether the most recent real request actually reached the
 // backend, purely to drive the "Live" / "Demo data" indicator in
 // Layout.tsx -- it never gates whether a request is attempted (a 403 on
@@ -101,14 +111,49 @@ async function rawFetchMultipart<T = unknown>(path: string, formData: FormData, 
   return (await res.json()) as T;
 }
 
-/** Runs a real loader; on any failure (network down, 401, 403, ...) falls back to demo data so the UI stays fully explorable. */
+/**
+ * Runs a real loader. In genuine demo mode (no backend session at all --
+ * see DEMO_FLAG_KEY / continueAsDemo() in lib/auth.tsx) any failure falls
+ * back to the bundled demo dataset so the UI stays fully explorable
+ * without a backend.
+ *
+ * For a REAL signed-in account, `fallback` is never used: a failure (network
+ * drop, 401 from an expired session, a 500, anything) is re-thrown instead.
+ * The whole point of tryLoad's fallback is a self-contained demo experience
+ * -- silently substituting fabricated demo data into a real account's view
+ * on a transient backend hiccup would be far worse than an empty/error
+ * state, since the person has no way to tell the numbers/rows in front of
+ * them aren't real. Demo data and real backend data must never merge.
+ */
 async function tryLoad<T>(loader: () => Promise<T>, fallback: T): Promise<T> {
   try {
     const data = await loader();
     backendReachable = true;
     return data;
-  } catch {
+  } catch (err) {
+    if (isDemoMode()) {
+      backendReachable = false;
+      return fallback;
+    }
     backendReachable = false;
+    throw err;
+  }
+}
+
+/**
+ * Like tryLoad, but for genuinely non-sensitive, non-demo UI defaults only
+ * (today: just GET /config/public's currency/site-name/stock-visibility
+ * flag). Always falls back on failure, demo mode or not -- unlike tryLoad,
+ * this never substitutes fabricated business data (assets, checkouts,
+ * quotations, ...) for a real account, it only keeps app chrome (the
+ * login page, the navbar brand) rendering sensibly if the very first
+ * request of the session can't reach the backend, before demo/real-login
+ * has even been decided.
+ */
+async function tryLoadPublicDefault<T>(loader: () => Promise<T>, fallback: T): Promise<T> {
+  try {
+    return await loader();
+  } catch {
     return fallback;
   }
 }
@@ -796,10 +841,11 @@ export const assetsApi = {
 // ---------------------------------------------------------------------------
 
 export const quotationsApi = {
-  // Fallback only ever applies in pure offline/demo mode (no backend
-  // reachable at all) -- the mock dataset it pairs with already shows full
-  // stock everywhere, so defaulting true here is consistent, not a leak.
-  publicConfig: () => tryLoad(() => rawFetch<PublicConfig>("/config/public"), { currency_code: "NGN", site_name: "Ledger", show_stock_to_staff_customer: true }),
+  // Deliberately NOT tryLoad -- see tryLoadPublicDefault's own docstring
+  // just above: this is a safe UI default (currency/site name), never a
+  // fabricated demo dataset, and it needs to fall back even for a real
+  // account since it's fetched before login/demo mode is known.
+  publicConfig: () => tryLoadPublicDefault(() => rawFetch<PublicConfig>("/config/public"), { currency_code: "NGN", site_name: "Ledger", show_stock_to_staff_customer: true }),
   // Omitting limit/offset/search returns the WHOLE active catalog in one
   // response (backend default -- see services/quotation_service.py's
   // list_catalog()), which is what every full-catalog consumer still

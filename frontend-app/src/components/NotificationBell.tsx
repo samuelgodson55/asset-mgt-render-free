@@ -118,9 +118,9 @@ export function NotificationBell() {
       extensionsApi.myDecisions(10).then((items) => setDecisions(items.filter((d) => !dismissed.has(d.id)))).catch(() => setDecisions([])),
     ];
     if (privileged) {
-      tasks.push(alertsApi.overdue(5).then(setOverdue));
-      tasks.push(alertsApi.dueSoon(5).then(setDueSoon));
-      tasks.push(extensionsApi.listPending().then((items) => setExtensions(items.filter((e) => e.status === "pending"))));
+      tasks.push(alertsApi.overdue(5).then(setOverdue).catch((err) => { console.error("Failed to load overdue alerts:", err); setOverdue({ items: [], total: 0 }); }));
+      tasks.push(alertsApi.dueSoon(5).then(setDueSoon).catch((err) => { console.error("Failed to load due-soon alerts:", err); setDueSoon({ items: [], total: 0 }); }));
+      tasks.push(extensionsApi.listPending().then((items) => setExtensions(items.filter((e) => e.status === "pending"))).catch((err) => { console.error("Failed to load pending extension requests:", err); setExtensions([]); }));
     } else {
       setOverdue({ items: [], total: 0 });
       setDueSoon({ items: [], total: 0 });

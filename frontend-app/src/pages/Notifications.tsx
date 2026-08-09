@@ -23,7 +23,7 @@ export function Notifications() {
   const privileged = demo || isPrivileged(user?.role);
 
   useEffect(() => {
-    api.getNotifications(privileged).then(setItems);
+    api.getNotifications(privileged).then(setItems).catch((err) => console.error("Failed to load notifications:", err));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [privileged]);
 

@@ -35,9 +35,15 @@ export function Dashboard() {
   const privileged = demo || isPrivileged(user?.role);
 
   useEffect(() => {
-    api.getStats(privileged).then(setStats);
+    // On a real account, api.getStats()/getCheckouts() now throw (rather
+    // than silently returning demo data) if the backend request fails --
+    // see lib/api.ts's tryLoad() docstring. Catch here so a transient
+    // failure just leaves the dashboard on its loading/empty state
+    // instead of an unhandled rejection; it never falls back to
+    // fabricated numbers.
+    api.getStats(privileged).then(setStats).catch((err) => console.error("Failed to load dashboard stats:", err));
     if (privileged) {
-      api.getCheckouts(privileged).then(setCheckouts);
+      api.getCheckouts(privileged).then(setCheckouts).catch((err) => console.error("Failed to load checkouts:", err));
     } else {
       myItemsApi.list().then((d) => setMyItems(d.assigned_items)).catch(() => setMyItems([]));
     }
