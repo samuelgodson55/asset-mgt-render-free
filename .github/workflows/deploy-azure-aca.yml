@@ -432,11 +432,36 @@ jobs:
             echo "::warning::image_tag '$IMAGE_TAG' doesn't look like a v*.*.* version tag -- continuing anyway (useful for hotfix/manual tags), but double check this is intentional."
           fi
 
+      # Needed now (wasn't before) -- this job runs aca-blue-green.sh's
+      # `reap` subcommand out of .github/scripts/ below, same reason
+      # `deploy` already checks out the repo.
+      - uses: actions/checkout@v4
+
       - uses: azure/login@v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # BUG FIX / INCIDENT RESPONSE: `deploy` (below) already reaps
+      # orphaned revisions before its own rollout, but `migrate` runs
+      # BEFORE `deploy` in this pipeline -- a fix that only reaps inside
+      # `deploy` reaps too late to help `alembic upgrade head` itself,
+      # which is exactly the failure this step exists to prevent. A
+      # revision stuck ACTIVE at 0% traffic from a previous failed/
+      # interrupted deploy holds its own DB connection pool open
+      # regardless of which job is running; on a small Postgres SKU (e.g.
+      # Standard_B1ms, max_connections ~50) a handful of these is enough
+      # to leave nothing for alembic's own connection, which then fails
+      # with a plain "Migration status: Failed" and no more specific
+      # detail in this job's own log (the real Postgres-side error only
+      # shows up in the migrate CONTAINER's logs -- see "Dump migration
+      # job logs (on failure)" below). Reaping here, before the migration
+      # even starts, is what actually protects it.
+      - name: Reap any orphaned revisions before running migrations
+        run: |
+          bash .github/scripts/aca-blue-green.sh reap backend "$RESOURCE_GROUP" 20
+          bash .github/scripts/aca-blue-green.sh reap frontend "$RESOURCE_GROUP" 20
 
       - name: Point the migrate job at the new backend image
         run: |

@@ -96,9 +96,13 @@ ALLOWED_ONLY_IN_COMPOSE = {
         # database.py's adaptive DB-pool sizing explicit-override knob --
         # both compose files set this because they run worker/beat as
         # separate always-on processes (docker-compose.vm.yml also briefly
-        # doubles up backend during blue-green), which the ACA path's
-        # BACKEND_MAX_REPLICAS-based derivation doesn't need to account for
-        # (see config.py's DB_EXPECTED_PROCESSES docstring).
+        # doubles up backend during blue-green). main.bicep's backendApp
+        # now ALSO sets this explicitly (see that container's own env
+        # comment -- it derives an equivalent doubled value from
+        # backendMaxReplicas instead of a hand-picked number), so this key
+        # is no longer compose-only in practice; left allow-listed here
+        # regardless since the two sides' VALUES are expected to differ
+        # (this script only diffs which KEYS exist, not their values).
         "DB_EXPECTED_PROCESSES",
         # How many uvicorn worker processes backend/start.sh launches --
         # ACA has no equivalent bicep param for this (Container Apps'
@@ -155,10 +159,15 @@ ALLOWED_ONLY_IN_BICEP = {
         # entry instead of leaving it allow-listed.
         "CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER",
         # database.py's adaptive DB-pool sizing replica-derived input --
-        # only meaningful where DB_EXPECTED_PROCESSES (compose-only, see
-        # that key's own entry in ALLOWED_ONLY_IN_COMPOSE above) is left
-        # unset, which is exactly the ACA/bicep case (config.py's
-        # BACKEND_MAX_REPLICAS docstring).
+        # bicep now ALSO sets DB_EXPECTED_PROCESSES explicitly (see that
+        # container's own env comment: it doubles the naive
+        # backendMaxReplicas-derived guess to account for blue-green's
+        # normal old+new revision overlap during every rollout), which
+        # wins outright over this one at runtime (config.py's own
+        # documented precedence). BACKEND_MAX_REPLICAS stays bicep-only
+        # regardless -- it's still what DB_EXPECTED_PROCESSES itself is
+        # derived FROM in main.bicep, just no longer the value
+        # database.py reads directly.
         "BACKEND_MAX_REPLICAS",
     },
     "frontend": {
