@@ -438,6 +438,21 @@ cmd_reap() {
   # 6m40s for gate 1), so a still-legitimately-in-progress rollout is never
   # touched, only things that have been sitting at 0% for far longer than
   # any real rollout takes.
+  #
+  # HARD SAFETY RULE (added after an incident where this reaped an app's
+  # only live revision): trafficWeight==0 is NOT reliable proof a revision
+  # is idle. If an app's traffic is being routed via Azure's implicit
+  # "latest revision" rule instead of an explicit named weight -- which is
+  # exactly what a `Deploy Infra` run can reset it to -- the single active
+  # revision can report trafficWeight: 0 in the API even while it is the
+  # one actually serving 100% of real traffic. The "older than
+  # grace-minutes" check does NOT protect against this: a long-lived
+  # revision sitting under implicit routing is, if anything, the most
+  # likely one to look old. So on top of the traffic/age checks above,
+  # NEVER deactivate a revision if it is the app's ONLY active revision,
+  # full stop -- regardless of what trafficWeight or age say. An app with
+  # exactly one active revision has nothing else to fail over to; reaping
+  # it is always wrong, no matter how it got flagged.
   [ "$#" -ge 2 ] || usage
   local app="$1" rg="$2" grace_minutes="${3:-20}"
   local grace_seconds=$((grace_minutes * 60))
@@ -445,6 +460,14 @@ cmd_reap() {
   now_epoch=$(date -u +%s)
 
   echo "Scanning '$app' for orphaned revisions (active, 0% traffic, older than ${grace_minutes}m)..."
+
+  local active_count
+  active_count=$(az containerapp revision list --name "$app" --resource-group "$rg" \
+    --query "length([?properties.active])" -o tsv 2>/dev/null)
+  case "$active_count" in
+    ''|*[!0-9]*) active_count=0 ;;
+  esac
+
   local rows
   rows=$(az containerapp revision list --name "$app" --resource-group "$rg" \
     --query "[?properties.active && properties.trafficWeight==\`0\`].{name:name, created:properties.createdTime, health:properties.healthState}" \
@@ -458,6 +481,13 @@ cmd_reap() {
   local reaped=0 skipped=0 failed=0
   while IFS=$'\t' read -r rev created health; do
     [ -z "$rev" ] && continue
+
+    if [ "$active_count" -le 1 ]; then
+      echo "  Skipping $rev -- it is the ONLY active revision for '$app' (active_count=$active_count). Reporting trafficWeight: 0 is not trusted for a sole active revision -- it may still be serving 100% of live traffic via Azure's implicit 'latest revision' rule. Never reaping an app's only active revision, regardless of traffic weight or age."
+      skipped=$((skipped + 1))
+      continue
+    fi
+
     local created_epoch age_seconds age_minutes
     created_epoch=$(date -u -d "$created" +%s 2>/dev/null || echo 0)
     if [ "$created_epoch" -eq 0 ]; then
