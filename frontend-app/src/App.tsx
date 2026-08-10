@@ -7,6 +7,7 @@ import { AuthProvider } from "./lib/auth";
 import { useAuth } from "./lib/useAuth";
 import { ThemeProvider } from "./lib/theme";
 import { CustodyProvider } from "./lib/custodyContext";
+import { QuoteDetailProvider } from "./lib/quoteDetailContext";
 import { isFullAdmin, isPrivileged } from "./lib/roles";
 
 // Every authenticated page is loaded on demand (React.lazy + Vite's
@@ -76,7 +77,9 @@ export default function App() {
               element={
                 <RequireAuth>
                   <CustodyProvider>
-                    <Layout />
+                    <QuoteDetailProvider>
+                      <Layout />
+                    </QuoteDetailProvider>
                   </CustodyProvider>
                 </RequireAuth>
               }

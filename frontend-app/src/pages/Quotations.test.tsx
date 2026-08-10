@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import userEvent from "@testing-library/user-event";
 import { Quotations } from "./Quotations";
 import type { CatalogAsset, QuotationCartOrDetail, QuotationListRow } from "../lib/types";
@@ -67,6 +68,18 @@ const HISTORY: QuotationListRow[] = [
   { id: 9, reference_number: "QT-000009", status: "submitted", submitted_at: "2026-08-01T10:00:00Z", item_count: 2, total: 596 },
 ];
 
+// Quotations.tsx now reads/writes a `?quotation=` deep-link param (see
+// its own useSearchParams effect), so every render needs a Router
+// ancestor -- same requirement react-router's own useSearchParams has
+// always had, just not previously exercised by this component.
+function renderQuotations() {
+  return render(
+    <MemoryRouter initialEntries={["/quotations"]}>
+      <Quotations />
+    </MemoryRouter>
+  );
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   useAuthMock.mockReturnValue({
@@ -82,7 +95,7 @@ beforeEach(() => {
 
 describe("<Quotations />", () => {
   it("loads and renders the catalog with an empty order", async () => {
-    render(<Quotations />);
+    renderQuotations();
 
     expect(await screen.findByText("Motorola APX 8000")).toBeInTheDocument();
     expect(screen.getByText("Vortex Diamondback HD")).toBeInTheDocument();
@@ -92,7 +105,7 @@ describe("<Quotations />", () => {
   it("adds a catalog item to the order and shows it in My Order", async () => {
     const user = userEvent.setup();
     quotationsApi.addToCart.mockResolvedValue(cartWithOneItem());
-    render(<Quotations />);
+    renderQuotations();
 
     const row = (await screen.findByText("Motorola APX 8000")).closest('[data-testid="catalog-row"]') as HTMLElement;
     await user.click(within(row).getByRole("button", { name: /add/i }));
@@ -104,7 +117,7 @@ describe("<Quotations />", () => {
 
   it("blocks adding to the order when the due date is before the start date", async () => {
     const user = userEvent.setup();
-    render(<Quotations />);
+    renderQuotations();
 
     const row = (await screen.findByText("Motorola APX 8000")).closest('[data-testid="catalog-row"]') as HTMLElement;
     const dateInputs = within(row).getAllByDisplayValue(/\d{4}-\d{2}-\d{2}/) as HTMLInputElement[];
@@ -122,7 +135,7 @@ describe("<Quotations />", () => {
 
   it("switches to My Quotes and shows submitted quotation history", async () => {
     const user = userEvent.setup();
-    render(<Quotations />);
+    renderQuotations();
 
     await screen.findByText("Motorola APX 8000");
     await user.click(screen.getByRole("button", { name: /my quotes/i }));
@@ -143,7 +156,7 @@ describe("<Quotations />", () => {
       vat_amount: 0,
       total: 0,
     });
-    render(<Quotations />);
+    renderQuotations();
 
     await screen.findByText("Motorola APX 8000");
     await user.click(screen.getByRole("button", { name: /my quotes/i }));
@@ -157,7 +170,7 @@ describe("<Quotations />", () => {
     const user = userEvent.setup();
     quotationsApi.myCart.mockResolvedValue(cartWithOneItem());
     quotationsApi.submitCart.mockResolvedValue({ ...EMPTY_CART, reference_number: "QT-000010" });
-    render(<Quotations />);
+    renderQuotations();
 
     const submitBtn = await screen.findByRole("button", { name: /submit quotation/i });
     await user.click(submitBtn);
@@ -168,7 +181,7 @@ describe("<Quotations />", () => {
 
   it("fetches the catalog server-side with pagination params, and re-fetches on search/rows-per-page change", async () => {
     const user = userEvent.setup();
-    render(<Quotations />);
+    renderQuotations();
 
     await screen.findByText("Motorola APX 8000");
     expect(quotationsApi.catalogPage).toHaveBeenCalledWith(5, 0, "");
@@ -181,7 +194,7 @@ describe("<Quotations />", () => {
   });
 
   it("does not show an Assign Quote button for a plain customer/staff account", async () => {
-    render(<Quotations />);
+    renderQuotations();
 
     await screen.findByText("Motorola APX 8000");
     expect(screen.queryByRole("button", { name: /assign quote/i })).not.toBeInTheDocument();
@@ -196,7 +209,7 @@ describe("<Quotations />", () => {
     quotationsApi.myCart.mockResolvedValue({ ...cartWithOneItem(), id: 42 });
     usersApi.list.mockResolvedValue({ items: [{ id: 7, name: "Casey Customer", email: "casey@example.com", role: "customer" }], total: 1, limit: 8, offset: 0 });
     quotationsApi.assign.mockResolvedValue({ ...cartWithOneItem(), id: 42 });
-    render(<Quotations />);
+    renderQuotations();
 
     const assignBtn = await screen.findByRole("button", { name: /assign quote/i });
     await user.click(assignBtn);

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Bell } from "lucide-react";
 import { useNavigate } from "react-router-dom";
-import { alertsApi, extensionsApi, myItemsApi } from "../lib/api";
+import { alertsApi, extensionsApi, myItemsApi, quotationsApi } from "../lib/api";
 import { useAuth } from "../lib/useAuth";
 import { isPrivileged } from "../lib/roles";
 import { readDismissedSet } from "../lib/notificationDismissals";
@@ -30,12 +30,13 @@ export function NotificationBell() {
     const dismissed = readDismissedSet();
 
     const run = async () => {
-      const [myItemsRes, decisions, overdue, dueSoon, extensions] = await Promise.all([
+      const [myItemsRes, decisions, overdue, dueSoon, extensions, quotationNotifications] = await Promise.all([
         myItemsApi.list().catch(() => ({ assigned_items: [] })),
         extensionsApi.myDecisions(10).catch(() => []),
         privileged ? alertsApi.overdue(5) : Promise.resolve({ items: [], total: 0 }),
         privileged ? alertsApi.dueSoon(5) : Promise.resolve({ items: [], total: 0 }),
         privileged ? extensionsApi.listPending().catch(() => []) : Promise.resolve([]),
+        quotationsApi.myNotifications(),
       ]);
       if (cancelled) return;
 
@@ -45,8 +46,9 @@ export function NotificationBell() {
       const myPending = items.filter((i) => i.pending_extension).length;
       const undismissedDecisions = decisions.filter((d) => !dismissed.has(d.id)).length;
       const pendingExtensions = extensions.filter((e) => e.status === "pending").length;
+      const unreadQuotationNotifications = quotationNotifications.filter((n) => !n.read_at).length;
 
-      setCount(overdue.total + dueSoon.total + pendingExtensions + myOverdue + myDueSoon + myPending + undismissedDecisions);
+      setCount(overdue.total + dueSoon.total + pendingExtensions + myOverdue + myDueSoon + myPending + undismissedDecisions + unreadQuotationNotifications);
     };
 
     run();

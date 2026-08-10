@@ -68,6 +68,7 @@ from schemas.quotations_schema import (
     QuotationDiscountUpdateRequest,
 )
 import services.export_service as export_service
+import services.notification_service as notification_service
 from services.stock import recalculate_asset_stock
 from services.search_utils import apply_search_filter
 
@@ -103,6 +104,62 @@ MAX_LIST_LIMIT = 100
 MY_HISTORY_MAX_ROWS = 2000
 
 
+# -----------------------------------------------------------------------------
+# IN-APP NOTIFICATIONS (Quotation assigned / changed) -- see models.py's
+# QuotationNotification docstring for the full "why a separate table"
+# rationale. This is the ONE place that writes to that table; every
+# admin-facing mutation below that should notify someone calls this
+# helper right alongside the AuditLog row it already writes for the same
+# action, rather than each mutation reimplementing "who's the recipient,
+# and should they be notified" on its own.
+# -----------------------------------------------------------------------------
+def _notify_quotation_recipient(db: Session, quotation: "models.Quotation", actor: dict, kind: str, message: str) -> None:
+    """
+    Creates an in-app QuotationNotification (and best-effort emails it --
+    see services/notification_service.py's send_email(), which is
+    fail-soft and never raises) for whoever a Quotation currently belongs
+    to, IF that's a real linked user other than the person making the
+    change right now.
+
+    Recipient resolution mirrors bulk_checkout_quotation()'s own "who
+    does this quote belong to" logic: `assigned_to_id` when the quote has
+    been explicitly assigned to a linked user, else falling back to
+    `user_id` (the original requester) for a personal self-submitted
+    request. Deliberately silent (no-op) when:
+      - the quote is assigned to an Ad-Hoc/unlinked Outsider instead
+        (`assigned_outsider_id`) -- no login, nothing to notify in-app,
+      - there's no resolved recipient at all (an admin-created quote
+        that's still fully unassigned), or
+      - the resolved recipient IS the actor -- an Admin/Manager
+        assigning or editing their own quote shouldn't notify themselves.
+    """
+    if quotation.assigned_to_id:
+        recipient_id = quotation.assigned_to_id
+    elif not quotation.assigned_outsider_id:
+        recipient_id = quotation.user_id
+    else:
+        return  # Assigned to an Ad-Hoc Outsider -- no in-app recipient.
+
+    if not recipient_id or recipient_id == int(actor["sub"]):
+        return
+
+    recipient = db.query(models.User).filter(models.User.id == recipient_id, ~models.User.is_deleted).first()
+    if not recipient:
+        return
+
+    db.add(models.QuotationNotification(
+        quotation_id=quotation.id, recipient_user_id=recipient.id,
+        kind=kind, message=message, created_by=actor.get("email"),
+    ))
+    # Best-effort email alongside the in-app row -- send_email() itself
+    # already no-ops quietly when NOTIFICATIONS_ENABLED is off or the
+    # recipient has no usable address, so no extra guard is needed here.
+    # `_display_reference()` (not the raw column) since this can fire for
+    # a still-draft quote assigned before Submit -- see `_display_reference()`'s
+    # own docstring.
+    notification_service.send_email(recipient.email, f"Quotation {_display_reference(quotation)}", message)
+
+
 def _money(value: Decimal) -> float:
     return float(value.quantize(TWO_PLACES, rounding=ROUND_HALF_UP))
 
@@ -129,6 +186,21 @@ def _reference_number(quotation_id: int) -> str:
     (already-unique) primary key rather than a separate counter, so it's
     guaranteed unique for free and never needs its own sequence table."""
     return f"QT-{quotation_id:06d}"
+
+
+def _display_reference(quotation: "models.Quotation") -> str:
+    """Same human-shareable "QT-000001" shape as `_reference_number()`,
+    but safe to call on a still-draft Quotation whose `reference_number`
+    column hasn't been persisted yet (that only happens at Submit -- see
+    submit_my_quotation()/admin_create_quotation()). `_reference_number()`
+    is purely a deterministic function of the id, so it's always safe to
+    recompute rather than fall back to the literal string "None" -- which
+    is what an f-string over the raw (still-null) column produces.
+    Needed because assign_quotation() is deliberately allowed to run on
+    an Admin/Manager's own still-draft cart (see its `is_own_draft` case)
+    and messages/audit details built at that point would otherwise read
+    "Quotation None was assigned to you..."."""
+    return quotation.reference_number or _reference_number(quotation.id)
 
 
 def _user_brief(user: Optional["models.User"]) -> Optional[dict]:
@@ -649,7 +721,22 @@ def submit_my_quotation(db: Session, user: dict) -> dict:
     # assignment to anyone else -- a personal request always stays
     # assigned to the person who made it (see that function's own
     # docstring for the full reasoning).
-    quotation.assigned_to_id = int(user["sub"])
+    #
+    # SKIPPED when the quote already has an assignee -- an Admin/Manager
+    # is allowed to assign their own still-building cart to a user before
+    # ever hitting Submit (assign_quotation()'s `is_own_draft` branch,
+    # driven by the Quotations page's "Assign Quote" action). Previously
+    # this line unconditionally overwrote that pre-submission assignment
+    # back to the submitter, silently discarding it: the assignee got a
+    # "was assigned to you" notification, but the quote itself came back
+    # assigned to whoever submitted it, so it never actually showed up on
+    # the assignee's "My Quotes" tab (and re-opening it from that
+    # notification 404'd, since the assignee wasn't the requester either)
+    # until an Admin/Manager noticed and reassigned it a second time from
+    # the Quotes tab. Only fall back to self-assignment when nobody
+    # (linked user OR Ad-Hoc outsider) is already assigned.
+    if not quotation.assigned_to_id and not quotation.assigned_outsider_id:
+        quotation.assigned_to_id = int(user["sub"])
     db.add(models.AuditLog(
         operator=user["email"], action="QUOTATION_SUBMITTED", target_type="Quotation", target_id=quotation.id,
         details=f"Submitted Quotation {quotation.reference_number} for review/assignment.",
@@ -809,6 +896,10 @@ def admin_add_item(db: Session, actor: dict, quotation_id: int, payload: Quotati
         operator=actor["email"], action="QUOTATION_ITEM_ADDED", target_type="Quotation", target_id=quotation.id,
         details=f"Added/updated {asset.name} (qty {payload.quantity}) on Quotation {quotation.reference_number}.",
     ))
+    _notify_quotation_recipient(
+        db, quotation, actor, kind="updated",
+        message=f"{actor['email']} added/updated {asset.name} (qty {payload.quantity}) on Quotation {quotation.reference_number}.",
+    )
     db.commit()
     db.refresh(quotation)
     return _serialize_quotation(db, quotation, include_admin_fields=True, reveal_sourcing=True)
@@ -827,6 +918,10 @@ def admin_update_item_quantity(db: Session, actor: dict, quotation_id: int, item
         operator=actor["email"], action="QUOTATION_ITEM_UPDATED", target_type="Quotation", target_id=quotation.id,
         details=f"Set quantity to {payload.quantity} on Quotation {quotation.reference_number}, line {item_id}.",
     ))
+    _notify_quotation_recipient(
+        db, quotation, actor, kind="updated",
+        message=f"{actor['email']} changed a line's quantity to {payload.quantity} on Quotation {quotation.reference_number}.",
+    )
     db.commit()
     return _serialize_quotation(db, quotation, include_admin_fields=True, reveal_sourcing=True)
 
@@ -844,6 +939,10 @@ def admin_remove_item(db: Session, actor: dict, quotation_id: int, item_id: int)
         operator=actor["email"], action="QUOTATION_ITEM_REMOVED", target_type="Quotation", target_id=quotation.id,
         details=f"Removed line {item_id} from Quotation {quotation.reference_number}.",
     ))
+    _notify_quotation_recipient(
+        db, quotation, actor, kind="updated",
+        message=f"{actor['email']} removed a line from Quotation {quotation.reference_number}.",
+    )
     db.commit()
     return _serialize_quotation(db, quotation, include_admin_fields=True, reveal_sourcing=True)
 
@@ -903,6 +1002,10 @@ def update_quotation_meta(db: Session, actor: dict, quotation_id: int, payload: 
         operator=actor["email"], action="QUOTATION_NOTES_UPDATED", target_type="Quotation", target_id=quotation.id,
         details=f"Updated notes on Quotation {quotation.reference_number}.",
     ))
+    _notify_quotation_recipient(
+        db, quotation, actor, kind="updated",
+        message=f"{actor['email']} updated the notes on Quotation {quotation.reference_number}.",
+    )
     db.commit()
     return _serialize_quotation(db, quotation, include_admin_fields=True, reveal_sourcing=True)
 
@@ -920,6 +1023,10 @@ def update_quotation_discount(db: Session, actor: dict, quotation_id: int, paylo
         operator=actor["email"], action="QUOTATION_DISCOUNT_UPDATED", target_type="Quotation", target_id=quotation.id,
         details=f"Changed discount from {previous}% to {payload.discount_percent}% on Quotation {quotation.reference_number}.",
     ))
+    _notify_quotation_recipient(
+        db, quotation, actor, kind="updated",
+        message=f"{actor['email']} changed the discount on Quotation {quotation.reference_number} to {payload.discount_percent}%.",
+    )
     db.commit()
     return _serialize_quotation(db, quotation, include_admin_fields=True, reveal_sourcing=True)
 
@@ -1048,8 +1155,19 @@ def assign_quotation(db: Session, actor: dict, quotation_id: int, payload: Quota
 
     db.add(models.AuditLog(
         operator=actor["email"], action="QUOTATION_ASSIGNED", target_type="Quotation", target_id=quotation.id,
-        details=f"Assigned Quotation {quotation.reference_number} to {target_name}.",
+        details=f"Assigned Quotation {_display_reference(quotation)} to {target_name}.",
     ))
+    # Assignment is the clearest "you now have a reason to look at this"
+    # moment in the whole lifecycle -- notify whoever it just landed on
+    # (if that's a real linked user other than the actor themselves; see
+    # _notify_quotation_recipient()'s own docstring for the exact rules).
+    # `_display_reference()` (not the raw column) because this can fire
+    # on a still-draft cart (`is_own_draft` above), whose `reference_number`
+    # isn't set until Submit.
+    _notify_quotation_recipient(
+        db, quotation, actor, kind="assigned",
+        message=f"Quotation {_display_reference(quotation)} was assigned to you by {actor['email']}.",
+    )
     db.commit()
     db.refresh(quotation)
     return _serialize_quotation(db, quotation, include_admin_fields=True, reveal_sourcing=True)
@@ -1097,6 +1215,10 @@ def approve_quotation(db: Session, actor: dict, quotation_id: int) -> dict:
                 "edits by the requester/assignee; still adjustable by an Admin/Manager until it's checked "
                 "out via the Fulfillment Drawer.",
     ))
+    _notify_quotation_recipient(
+        db, quotation, actor, kind="updated",
+        message=f"Quotation {quotation.reference_number} was approved and is ready for pickup.",
+    )
     db.commit()
     db.refresh(quotation)
     return _serialize_quotation(db, quotation, include_admin_fields=True, reveal_sourcing=True)
@@ -1580,3 +1702,70 @@ def export_my_quotation_pdf_by_id(db: Session, user: dict, quotation_id: int):
     requester = data.get("requester")
     requester_name = requester["name"] if requester else user["name"]
     return _build_quotation_pdf(data, requester_name)
+
+
+# -----------------------------------------------------------------------------
+# Self-service read/dismiss for the notifications _notify_quotation_recipient()
+# above writes -- powers the "Quotation updates" section of the
+# Notification Bell / Notifications page, exactly parallel to
+# services/extension_service.py's list_my_recent_extension_decisions().
+# -----------------------------------------------------------------------------
+QUOTATION_NOTIFICATIONS_MAX_ROWS = 50
+
+
+def list_my_quotation_notifications(db: Session, user: dict, limit: int = 20) -> dict:
+    """Every QuotationNotification addressed to the caller, newest first --
+    read and unread alike (the frontend distinguishes via `read_at`,
+    same as it already does for the bell's unread badge count)."""
+    rows = (
+        db.query(models.QuotationNotification)
+        .options(joinedload(models.QuotationNotification.quotation))
+        .filter(models.QuotationNotification.recipient_user_id == int(user["sub"]))
+        .order_by(models.QuotationNotification.created_at.desc())
+        .limit(min(limit, QUOTATION_NOTIFICATIONS_MAX_ROWS))
+        .all()
+    )
+    return {
+        "items": [
+            {
+                "id": r.id,
+                "quotation_id": r.quotation_id,
+                # `_display_reference()` (not the raw column) since a
+                # notification can be for a still-draft quote assigned
+                # before Submit (see assign_quotation()'s `is_own_draft`
+                # case) -- the raw `reference_number` column is null
+                # until Submit, which used to surface here as a literal
+                # "None" instead of the eventual "QT-00000N".
+                "reference_number": _display_reference(r.quotation) if r.quotation else None,
+                "kind": r.kind,
+                "message": r.message,
+                "created_by": r.created_by,
+                "created_at": r.created_at.isoformat(),
+                "read_at": r.read_at.isoformat() if r.read_at else None,
+            }
+            for r in rows
+        ],
+    }
+
+
+def mark_quotation_notifications_read(db: Session, user: dict, notification_ids: list[int]) -> dict:
+    """Stamps `read_at` on the given notifications -- ONLY ones addressed
+    to the caller; any id belonging to someone else is silently ignored
+    rather than erroring, since a stale/tampered id list here can't leak
+    or alter anyone else's data either way (see the `.filter()` below)."""
+    if not notification_ids:
+        return {"updated": 0}
+    rows = (
+        db.query(models.QuotationNotification)
+        .filter(
+            models.QuotationNotification.id.in_(notification_ids),
+            models.QuotationNotification.recipient_user_id == int(user["sub"]),
+            models.QuotationNotification.read_at.is_(None),
+        )
+        .all()
+    )
+    now = models.utc_now()
+    for row in rows:
+        row.read_at = now
+    db.commit()
+    return {"updated": len(rows)}

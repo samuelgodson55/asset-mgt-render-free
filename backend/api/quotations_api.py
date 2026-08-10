@@ -19,7 +19,7 @@ from schemas.quotations_schema import (
     QuotationItemCreate, QuotationItemQuantityUpdate, VatUpdateRequest,
     QuotationAssignRequest, QuotationMetaUpdate, QuotationCreateRequest,
     QuotationOutsourcedItemCreate, QuotationCheckoutRequest,
-    QuotationDiscountUpdateRequest,
+    QuotationDiscountUpdateRequest, QuotationNotificationsReadRequest,
 )
 import services.quotation_service as quotation_service
 
@@ -71,6 +71,19 @@ def get_my_quotation_history(db: Session = Depends(get_db), user: dict = Depends
     """Every Quotation the caller has formally submitted -- still editable (qty/remove) below
     while a given one is \"submitted\" (unapproved); an Admin/Manager owns edits from Approved on."""
     return quotation_service.list_my_submitted_quotations(db, user)
+
+
+@router.get("/quotations/me/notifications")
+def get_my_quotation_notifications(limit: int = Query(20, ge=1, le=quotation_service.QUOTATION_NOTIFICATIONS_MAX_ROWS), db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
+    """Self-service: every in-app notification (assigned/updated) addressed to the caller,
+    newest first -- powers the Notification Bell / Notifications page's "Quotation updates" section."""
+    return quotation_service.list_my_quotation_notifications(db, user, limit=limit)
+
+
+@router.post("/quotations/me/notifications/read")
+def mark_my_quotation_notifications_read(payload: QuotationNotificationsReadRequest, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
+    """Self-service: marks the given notification ids (only ones addressed to the caller) as read."""
+    return quotation_service.mark_quotation_notifications_read(db, user, payload.notification_ids)
 
 
 @router.get("/quotations/me/{quotation_id}")

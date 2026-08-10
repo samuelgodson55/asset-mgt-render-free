@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { motion } from "framer-motion";
 import { ShoppingCart, Trash2, Loader2, Search, Send, History, UserPlus } from "lucide-react";
 import { quotationsApi, usersApi, formatPrice, formatDate, setCurrencyCode, ApiError } from "../lib/api";
@@ -63,6 +64,23 @@ export function Quotations() {
   const [submitting, setSubmitting] = useState(false);
   const [tab, setTab] = useState<"order" | "history">("order");
   const [openQuoteId, setOpenQuoteId] = useState<number | null>(null);
+  // Deep-link support (?quotation=<id>) -- lets the Notification Bell's
+  // "Quotation updates" click-through (see Notifications.tsx) open the
+  // right quote's detail drawer straight away, same "?extend=<id>"
+  // pattern MyItems.tsx already uses for its own notification
+  // click-through. Read once the id is actually available to open
+  // against (no data dependency here -- QuoteDetailDrawer fetches its
+  // own detail by id), then stripped from the URL so a refresh doesn't
+  // re-open it.
+  const [searchParams, setSearchParams] = useSearchParams();
+  useEffect(() => {
+    const raw = searchParams.get("quotation");
+    if (!raw) return;
+    const id = Number(raw);
+    if (Number.isFinite(id)) setOpenQuoteId(id);
+    setSearchParams((prev) => { const next = new URLSearchParams(prev); next.delete("quotation"); return next; }, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Full, unpaginated catalog -- kept separate from the paginated `catalog`
   // state above purely to feed QuoteDetailDrawer's "Add another asset"

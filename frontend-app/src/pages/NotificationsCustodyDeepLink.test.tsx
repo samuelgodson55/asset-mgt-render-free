@@ -7,6 +7,7 @@ import { Notifications } from "./Notifications";
 import { CustodyProvider } from "../lib/custodyContext";
 import { useCustody } from "../lib/useCustody";
 import { CustodyDrawer } from "../components/CustodyDrawer";
+import { QuoteDetailProvider } from "../lib/quoteDetailContext";
 import type { AuthUser, Checkout } from "../lib/api";
 
 // =============================================================================
@@ -96,9 +97,11 @@ function renderFromNotifications() {
     <StrictMode>
       <MemoryRouter initialEntries={["/notifications"]}>
         <CustodyProvider>
-          <Routes>
-            <Route path="/notifications" element={<Harness />} />
-          </Routes>
+          <QuoteDetailProvider>
+            <Routes>
+              <Route path="/notifications" element={<Harness />} />
+            </Routes>
+          </QuoteDetailProvider>
         </CustodyProvider>
       </MemoryRouter>
     </StrictMode>

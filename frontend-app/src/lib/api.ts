@@ -1,5 +1,5 @@
 import { mockAssets, mockCheckouts, mockExtensions, mockNotifications, mockStats, mockBackups, mockBackupStatus, mockDigestRecipients, mockCatalog, mockQuotationCart } from "./mock";
-import type { AssetType, Checkout, ExtensionRequest, NotificationItem, DashboardStats, BackupEntry, BackupStatus, RestoreResult, ImportResult, MyItem, ProfileDetail, UserRow, OutsiderRow, CustodyItem, AuditLogEntry, PublicConfig, CatalogAsset, QuotationCartOrDetail, QuotationListRow, FulfillmentQueueRow, QuotationOutsourcedItemCreate, QuotationOutsourceShortfallItem, AssetDetails, DeletedAssetRow, DeletedUserRow, RosterUser, BulkExtendResult, MyExtensionDecision } from "./types";
+import type { AssetType, Checkout, ExtensionRequest, NotificationItem, DashboardStats, BackupEntry, BackupStatus, RestoreResult, ImportResult, MyItem, ProfileDetail, UserRow, OutsiderRow, CustodyItem, AuditLogEntry, PublicConfig, CatalogAsset, QuotationCartOrDetail, QuotationListRow, FulfillmentQueueRow, QuotationOutsourcedItemCreate, QuotationOutsourceShortfallItem, AssetDetails, DeletedAssetRow, DeletedUserRow, RosterUser, BulkExtendResult, MyExtensionDecision, QuotationNotification } from "./types";
 
 
 // Points at the FastAPI backend. In production this app is built with
@@ -953,6 +953,20 @@ export const quotationsApi = {
     rawFetch<QuotationCartOrDetail>(`/quotations/me/${quotationId}/items/${itemId}`, { method: "PUT", body: JSON.stringify({ quantity }) }),
   removeMyQuoteItem: (quotationId: number, itemId: number) =>
     rawFetch<QuotationCartOrDetail>(`/quotations/me/${quotationId}/items/${itemId}`, { method: "DELETE" }),
+
+  // ---- self-service: in-app "Quotation updates" notifications ----
+  // (assigned/updated alerts -- see lib/types.ts's QuotationNotification
+  // and backend/services/quotation_service.py's
+  // _notify_quotation_recipient()). Fails soft to an empty list, same as
+  // every other alert feed the Notification Bell polls, so a transient
+  // error here never breaks the bell's overall unread count.
+  myNotifications: () =>
+    tryLoad(async () => (await rawFetch<{ items: QuotationNotification[] }>("/quotations/me/notifications")).items, []),
+  markNotificationsRead: (notificationIds: number[]) =>
+    rawFetch<{ updated: number }>("/quotations/me/notifications/read", {
+      method: "POST",
+      body: JSON.stringify({ notification_ids: notificationIds }),
+    }),
   addMyQuoteItem: (quotationId: number, assetId: number, quantity: number, startDate: string, dueDate: string) =>
     rawFetch<QuotationCartOrDetail>(`/quotations/me/${quotationId}/items`, {
       method: "POST",

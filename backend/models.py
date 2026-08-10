@@ -950,6 +950,65 @@ class QuotationOutsourcedItem(Base):
     added_by = relationship("User", foreign_keys=[added_by_id])
 
 
+class QuotationNotification(Base):
+    """
+    One in-app, self-service notification about a Quotation, for the
+    person it's actually FOR to see -- mirrors ExtensionRequest's
+    "decided" side (see list_my_recent_extension_decisions() in
+    services/extension_service.py) but for the Quotation lifecycle
+    instead: assignment and every Admin/Manager-made change afterward.
+
+    WHY A SEPARATE TABLE RATHER THAN READING AuditLog DIRECTLY
+    ------------------------------------------------------------
+    AuditLog already records every one of these actions (QUOTATION_
+    ASSIGNED, QUOTATION_DISCOUNT_UPDATED, etc.), but it's an operator-
+    centric ledger -- "who did what", with no recipient, no per-person
+    read state, and no cheap way to ask "what should THIS user see on
+    their bell icon" without scanning and re-deriving intent from free-
+    text `details` strings. This table is the recipient-facing
+    complement: one row per (quotation, notify-worthy change), written
+    by the SAME service calls that already write the AuditLog row for
+    that action, with an explicit `recipient_user_id` to query against.
+
+    Only ever created for a LINKED user recipient (`recipient_user_id`),
+    same as ExtensionRequest's decision-alert feed -- an Ad-Hoc/unlinked
+    Outsider has no login and nothing to show a notification on.
+
+    Deliberately NOT created when `recipient_user_id` is the same person
+    who made the change (an Admin/Manager assigning or editing their OWN
+    quote shouldn't notify themselves), and only for a submitted/
+    approved/fulfilled Quotation someone else now needs to know about --
+    see services/quotation_service.py's `_notify_quotation_recipient()`,
+    the one place that writes to this table.
+
+    `read_at` is a real server-side column (unlike the extension-decision
+    alert's client-only localStorage dismissal) so "already seen" follows
+    the account across devices/browsers, not just the one that dismissed
+    it -- more consistent behavior for something that can arrive by email
+    too (see services/notification_service.py's send_email(), which this
+    same helper also calls).
+    """
+    __tablename__ = "quotation_notifications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    quotation_id = Column(Integer, ForeignKey("quotations.id"), nullable=False)
+    recipient_user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+
+    # "assigned" | "updated" -- what kind of event this is, mirroring the
+    # Extension Request "approved"/"denied" split closely enough for the
+    # frontend to pick a consistent icon/color per kind (see
+    # components/StatusPill.tsx's existing "pending"/"approved" colors).
+    kind = Column(String, nullable=False)
+    message = Column(String, nullable=False)
+
+    created_by = Column(String, nullable=True)  # email of the Admin/Manager who made the change
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False, index=True)
+    read_at = Column(DateTime(timezone=True), nullable=True)
+
+    quotation = relationship("Quotation")
+    recipient = relationship("User", foreign_keys=[recipient_user_id])
+
+
 class RecoveryCode(Base):
     """
     2FA backup/recovery codes -- see models.py's User.totp_enabled

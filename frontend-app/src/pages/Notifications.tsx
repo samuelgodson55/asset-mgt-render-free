@@ -2,12 +2,13 @@ import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { X } from "lucide-react";
 import { useNavigate } from "react-router-dom";
-import { alertsApi, extensionsApi, myItemsApi, formatDate } from "../lib/api";
+import { alertsApi, extensionsApi, myItemsApi, quotationsApi, formatDate } from "../lib/api";
 import { useAuth } from "../lib/useAuth";
 import { isPrivileged } from "../lib/roles";
 import { readDismissedSet, dismissDecisionIds } from "../lib/notificationDismissals";
 import { useCustody } from "../lib/useCustody";
-import type { Checkout, ExtensionRequest, MyExtensionDecision, MyItem } from "../lib/types";
+import { useQuoteDetail } from "../lib/useQuoteDetail";
+import type { Checkout, ExtensionRequest, MyExtensionDecision, MyItem, QuotationNotification } from "../lib/types";
 
 // =============================================================================
 // pages/Notifications.tsx
@@ -32,7 +33,11 @@ import type { Checkout, ExtensionRequest, MyExtensionDecision, MyItem } from "..
 // components/custody.js's openCustodyModal(), rather than routing through
 // /admin or /manager's own tab state. A personal Overdue/Due Soon row still
 // navigates to /my-items with `?extend=<checkout_id>`, which opens the
-// Request Extension modal directly for that item.
+// Request Extension modal directly for that item. A "Quotation updates" row
+// opens the shared "My Quote Detail" drawer the same way the Custody Ledger
+// does, via QuoteDetailProvider (see lib/quoteDetailContext.tsx) -- also no
+// navigation, so it works the same whether or not Quotations.tsx happens to
+// already be mounted.
 // =============================================================================
 
 interface PersonGroup {
@@ -87,6 +92,7 @@ export function Notifications() {
   const { user, demo } = useAuth();
   const navigate = useNavigate();
   const { openCustody: openCustodyDrawer } = useCustody();
+  const { openQuoteDetail } = useQuoteDetail();
 
   const [loading, setLoading] = useState(true);
   const [overdue, setOverdue] = useState<{ items: Checkout[]; total: number }>({ items: [], total: 0 });
@@ -94,6 +100,7 @@ export function Notifications() {
   const [extensions, setExtensions] = useState<ExtensionRequest[]>([]);
   const [myItems, setMyItems] = useState<MyItem[]>([]);
   const [decisions, setDecisions] = useState<MyExtensionDecision[]>([]);
+  const [quotationNotifications, setQuotationNotifications] = useState<QuotationNotification[]>([]);
 
   const privileged = demo || isPrivileged(user?.role);
 
@@ -103,6 +110,7 @@ export function Notifications() {
     const tasks: Promise<void>[] = [
       myItemsApi.list().then((d) => setMyItems(d.assigned_items)).catch(() => setMyItems([])),
       extensionsApi.myDecisions(10).then((items) => setDecisions(items.filter((d) => !dismissed.has(d.id)))).catch(() => setDecisions([])),
+      quotationsApi.myNotifications().then(setQuotationNotifications).catch(() => setQuotationNotifications([])),
     ];
     if (privileged) {
       tasks.push(alertsApi.overdue(20).then(setOverdue).catch((err) => { console.error("Failed to load overdue alerts:", err); setOverdue({ items: [], total: 0 }); }));
@@ -123,7 +131,7 @@ export function Notifications() {
   const myPending = myItems.filter((i) => i.pending_extension);
 
   const totalCount =
-    overdue.total + dueSoon.total + extensions.length + myOverdue.length + myDueSoon.length + myPending.length + decisions.length;
+    overdue.total + dueSoon.total + extensions.length + myOverdue.length + myDueSoon.length + myPending.length + decisions.length + quotationNotifications.length;
 
   const openCustody = (entityId: number | null, entityType: "user" | "outsider" | null, name: string) => {
     if (entityId == null || !entityType) return;
@@ -137,6 +145,18 @@ export function Notifications() {
   const dismissDecision = (id: number) => {
     dismissDecisionIds([id]);
     setDecisions((prev) => prev.filter((d) => d.id !== id));
+  };
+
+  // Marks it read server-side (so the bell's unread count drops -- see
+  // NotificationBell.tsx, which counts `!read_at`) and opens that quote
+  // straight away in the shared "My Quote Detail" drawer via
+  // QuoteDetailProvider (see lib/quoteDetailContext.tsx) -- no
+  // navigation, same "one shared modal, opened by id" shape as this
+  // page's Custody Ledger click-through just above.
+  const openQuotationNotification = (n: QuotationNotification) => {
+    quotationsApi.markNotificationsRead([n.id]).catch(() => {});
+    setQuotationNotifications((prev) => prev.map((item) => (item.id === n.id ? { ...item, read_at: new Date().toISOString() } : item)));
+    openQuoteDetail(n.quotation_id);
   };
 
   const overdueGroups = groupByPerson(overdue.items.map((c) => ({ entity_id: c.entity_id, entity_type: c.entity_type, name: c.checked_out_to })));
@@ -219,6 +239,29 @@ export function Notifications() {
               {myPending.map((item) => (
                 <li key={item.checkout_id} className="px-2 py-2 text-[12.5px] text-text">
                   {item.asset_name} <span className="text-text-faint">· awaiting a decision</span>
+                </li>
+              ))}
+            </ul>
+          </SectionCard>
+        )}
+
+        {!loading && quotationNotifications.length > 0 && (
+          <SectionCard title={`Quotation updates (${quotationNotifications.length})`}>
+            <ul className="flex flex-col divide-y divide-border-soft">
+              {quotationNotifications.map((n) => (
+                <li
+                  key={n.id}
+                  onClick={() => openQuotationNotification(n)}
+                  className="flex items-start justify-between gap-3 px-2 py-2 rounded-[2px] cursor-pointer hover:bg-surface-raised transition-colors"
+                >
+                  <div className="min-w-0">
+                    <p className="text-[12.5px] leading-snug">
+                      {!n.read_at && <span className="inline-block w-1.5 h-1.5 rounded-full bg-brass mr-1.5 align-middle" />}
+                      <span className={n.read_at ? "text-text-muted" : "text-text"}>{n.message}</span>
+                    </p>
+                    {n.reference_number && <p className="text-[11px] text-text-faint font-mono mt-0.5">{n.reference_number}</p>}
+                  </div>
+                  <span className="shrink-0 text-[11.5px] font-semibold text-sky">View →</span>
                 </li>
               ))}
             </ul>

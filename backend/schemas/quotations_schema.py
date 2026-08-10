@@ -221,3 +221,13 @@ class QuotationCreateRequest(BaseModel):
         if self.assignee_type == "outsider" and not self.outsider_id and (not self.outsider_name or not (self.outsider_email or self.outsider_phone)):
             raise ValueError("outsider_id, or outsider_name plus at least one of outsider_email/outsider_phone, are required when assignee_type is \"outsider\".")
         return self
+
+
+class QuotationNotificationsReadRequest(BaseModel):
+    """Body for POST /quotations/me/notifications/read -- ids of the
+    caller's own QuotationNotification rows to stamp as read. Any id not
+    actually addressed to the caller is silently ignored server-side
+    (see services/quotation_service.py's mark_quotation_notifications_read())
+    rather than validated here, since that check needs the database."""
+
+    notification_ids: list[int] = Field(default_factory=list)

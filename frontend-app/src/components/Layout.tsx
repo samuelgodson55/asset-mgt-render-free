@@ -9,6 +9,9 @@ import { ThemeToggle } from "./ThemeToggle";
 import { NotificationBell } from "./NotificationBell";
 import { CustodyDrawer } from "./CustodyDrawer";
 import { useCustody } from "../lib/useCustody";
+import { QuoteDetailDrawer } from "./QuoteDetailDrawer";
+import { useQuoteDetail } from "../lib/useQuoteDetail";
+import type { CatalogAsset } from "../lib/types";
 
 // "Checkouts" (system-wide overdue/due-soon + extension-request review) is
 // deliberately left out of this base list -- it's built entirely on top of
@@ -78,7 +81,22 @@ export function Layout() {
   // Custody Ledger drawer with a plain function call -- no navigation, no
   // tab state, no deep-link parsing. See lib/custodyContext.tsx.
   const { target: custodyTarget, closeCustody } = useCustody();
+  // Same shared-drawer shape as Custody Ledger above, for the Notification
+  // Bell's "Quotation updates" click-through (see lib/quoteDetailContext.tsx's
+  // own docstring for why this replaced the old ?quotation=<id> navigation).
+  const { quotationId: quoteDetailId, closeQuoteDetail } = useQuoteDetail();
+  const [quoteCatalog, setQuoteCatalog] = useState<CatalogAsset[]>([]);
   const location = useLocation();
+
+  // The catalog only feeds the drawer's "Add another asset" typeahead, so
+  // it's fetched lazily -- the first time the shared drawer is actually
+  // opened from somewhere other than the Quotations page itself (which
+  // already fetches and passes its own copy for its local drawer
+  // instance) -- rather than on every authenticated page load.
+  useEffect(() => {
+    if (quoteDetailId == null || quoteCatalog.length > 0) return;
+    quotationsApi.catalog().then(setQuoteCatalog).catch(() => {});
+  }, [quoteDetailId, quoteCatalog.length]);
 
   // Below `lg` the sidebar becomes an off-canvas drawer -- close it
   // automatically whenever the route changes so a tap on a nav link
@@ -344,6 +362,7 @@ export function Layout() {
       </div>
 
       <CustodyDrawer target={custodyTarget} onClose={closeCustody} />
+      <QuoteDetailDrawer mode="self" quotationId={quoteDetailId} catalog={quoteCatalog} onClose={closeQuoteDetail} />
     </div>
   );
 }

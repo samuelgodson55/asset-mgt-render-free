@@ -465,3 +465,159 @@ def test_manager_can_assign_own_draft_cart_to_a_user_before_submitting(as_admin,
     body = assign_response.json()
     assert body["status"] == "draft"
     assert body["assigned_to"]["id"] == customer_id
+
+
+# ---------------------------------------------------------------------------
+# 7b) REGRESSION: submitting a cart that was already assigned (test 7
+#     above) must NOT silently reassign it back to the submitter.
+#     submit_my_quotation() used to unconditionally set
+#     `assigned_to_id = <submitter>` on every submit, discarding whatever
+#     assignment a Manager/Admin had already made to their own
+#     still-draft cart via "Assign Quote" -- the assignee got a "was
+#     assigned to you" notification for a quote that then never actually
+#     showed up on their "My Quotes" list, and reopening it via that
+#     notification 404'd, until an Admin/Manager noticed and reassigned
+#     it a SECOND time from the Quotes tab. Also covers the pre-submit
+#     notification/reference-number text itself, which used to render
+#     the literal string "None" (the still-null `reference_number`
+#     column) instead of the eventual "QT-00000N".
+# ---------------------------------------------------------------------------
+def test_assigning_own_draft_cart_then_submitting_preserves_the_assignment(as_admin, as_manager, as_customer):
+    admin_client, admin_headers = as_admin
+    manager_client, manager_headers = as_manager
+    customer_client, customer_headers = as_customer
+
+    asset_id = _create_pool(admin_client, admin_headers, "Field Recorder", total_quantity=3, price=25.00)
+    cart = _add_to_cart(manager_client, manager_headers, asset_id, quantity=1, start_date=TODAY, due_date=TODAY)
+    cart_id = cart["id"]
+
+    customer_id = customer_client.get("/api/auth/me", headers=customer_headers).json()["id"]
+
+    # Assign the still-draft cart to the customer BEFORE submitting.
+    assign_response = manager_client.post(
+        f"/api/quotations/{cart_id}/assign", headers=manager_headers,
+        json={"assignee_type": "user", "user_id": customer_id},
+    )
+    assert assign_response.status_code == 200, assign_response.text
+    assert assign_response.json()["assigned_to"]["id"] == customer_id
+
+    # The pre-submission assignment notification must use the
+    # deterministic "QT-00000N" reference, never the literal "None".
+    pre_submit = customer_client.get("/api/quotations/me/notifications", headers=customer_headers).json()
+    assert len(pre_submit["items"]) == 1
+    assert "None" not in pre_submit["items"][0]["message"]
+    assert pre_submit["items"][0]["reference_number"] == f"QT-{cart_id:06d}"
+
+    # --- SUBMIT: must NOT silently reassign back to the manager.
+    submitted = manager_client.post("/api/quotations/submit", headers=manager_headers)
+    assert submitted.status_code == 200, submitted.text
+    submitted_body = submitted.json()
+    assert submitted_body["id"] == cart_id
+    assert submitted_body["status"] == "submitted"
+    assert submitted_body["assigned_to"]["id"] == customer_id
+
+    # The customer can now see it on their own "My Quotes" list...
+    customer_history = customer_client.get("/api/quotations/me/history", headers=customer_headers).json()
+    assert any(q["id"] == cart_id for q in customer_history["items"])
+
+    # ...and can open its full detail directly -- the "View ->" click-
+    # through this used to 404 on, because the reset assignment meant
+    # the customer was neither the requester nor the assignee anymore.
+    customer_detail = customer_client.get(f"/api/quotations/me/{cart_id}", headers=customer_headers)
+    assert customer_detail.status_code == 200, customer_detail.text
+    assert customer_detail.json()["assigned_to"]["id"] == customer_id
+
+
+def test_submitting_an_unassigned_cart_still_self_assigns(as_admin, as_staff):
+    """The auto-self-assign-on-submit behavior (the common, no
+    Admin/Manager pre-assignment case) must still work exactly as
+    before -- only the "already assigned to someone else" case changes
+    (see test_assigning_own_draft_cart_then_submitting_preserves_the_assignment
+    above)."""
+    admin_client, admin_headers = as_admin
+    staff_client, staff_headers = as_staff
+    staff_id = staff_client.get("/api/auth/me", headers=staff_headers).json()["id"]
+
+    asset_id = _create_pool(admin_client, admin_headers, "Boom Mic", total_quantity=3, price=15.00)
+    _add_to_cart(staff_client, staff_headers, asset_id, quantity=1, start_date=TODAY, due_date=TODAY)
+
+    submitted = staff_client.post("/api/quotations/submit", headers=staff_headers)
+    assert submitted.status_code == 200, submitted.text
+    assert submitted.json()["assigned_to"]["id"] == staff_id
+
+
+# ---------------------------------------------------------------------------
+# 8) In-app notifications: assigning a Quotation to a user notifies them,
+#    a subsequent Admin/Manager change (discount) notifies them again, and
+#    a Manager notifying THEMSELVES (assigning/editing their own quote)
+#    never happens -- see services/quotation_service.py's
+#    _notify_quotation_recipient().
+# ---------------------------------------------------------------------------
+def test_assigning_and_then_editing_a_quotation_notifies_the_recipient(as_admin, as_manager, as_customer):
+    admin_client, admin_headers = as_admin
+    manager_client, manager_headers = as_manager
+    customer_client, customer_headers = as_customer
+
+    asset_id = _create_pool(admin_client, admin_headers, "Drone", total_quantity=4, price=75.00)
+    cart = _add_to_cart(manager_client, manager_headers, asset_id, quantity=1, start_date=TODAY, due_date=TODAY)
+    submitted = manager_client.post("/api/quotations/submit", headers=manager_headers).json()
+    quotation_id = submitted["id"]
+
+    customer_id = customer_client.get("/api/auth/me", headers=customer_headers).json()["id"]
+
+    # Before assignment: no notifications for the customer yet.
+    before = customer_client.get("/api/quotations/me/notifications", headers=customer_headers)
+    assert before.status_code == 200, before.text
+    assert before.json()["items"] == []
+
+    assign_response = manager_client.post(
+        f"/api/quotations/{quotation_id}/assign", headers=manager_headers,
+        json={"assignee_type": "user", "user_id": customer_id},
+    )
+    assert assign_response.status_code == 200, assign_response.text
+
+    after_assign = customer_client.get("/api/quotations/me/notifications", headers=customer_headers).json()
+    assert len(after_assign["items"]) == 1
+    assert after_assign["items"][0]["kind"] == "assigned"
+    assert after_assign["items"][0]["reference_number"] == submitted["reference_number"]
+    assert after_assign["items"][0]["read_at"] is None
+
+    # A subsequent admin-side change (discount) adds a SECOND notification
+    # for the same recipient, without disturbing the first.
+    discount_response = manager_client.put(
+        f"/api/quotations/{quotation_id}/discount", headers=manager_headers, json={"discount_percent": 10},
+    )
+    assert discount_response.status_code == 200, discount_response.text
+
+    after_discount = customer_client.get("/api/quotations/me/notifications", headers=customer_headers).json()
+    assert len(after_discount["items"]) == 2
+    assert {item["kind"] for item in after_discount["items"]} == {"assigned", "updated"}
+
+    # Marking them read is scoped to the caller and is idempotent-safe.
+    ids = [item["id"] for item in after_discount["items"]]
+    mark_response = customer_client.post(
+        "/api/quotations/me/notifications/read", headers=customer_headers, json={"notification_ids": ids},
+    )
+    assert mark_response.status_code == 200, mark_response.text
+    assert mark_response.json()["updated"] == 2
+
+    after_read = customer_client.get("/api/quotations/me/notifications", headers=customer_headers).json()
+    assert all(item["read_at"] is not None for item in after_read["items"])
+
+
+def test_manager_editing_their_own_assigned_quotation_does_not_self_notify(as_admin, as_manager):
+    admin_client, admin_headers = as_admin
+    manager_client, manager_headers = as_manager
+
+    asset_id = _create_pool(admin_client, admin_headers, "Tripod Kit", total_quantity=3, price=20.00)
+    cart = _add_to_cart(manager_client, manager_headers, asset_id, quantity=1, start_date=TODAY, due_date=TODAY)
+    submitted = manager_client.post("/api/quotations/submit", headers=manager_headers).json()
+
+    # A Manager's own submitted quote (no explicit assignment yet) falls
+    # back to `user_id`, which IS the manager themselves -- editing it
+    # should never create a notification addressed to themselves.
+    manager_client.put(
+        f"/api/quotations/{submitted['id']}/discount", headers=manager_headers, json={"discount_percent": 5},
+    )
+    own_notifications = manager_client.get("/api/quotations/me/notifications", headers=manager_headers).json()
+    assert own_notifications["items"] == []

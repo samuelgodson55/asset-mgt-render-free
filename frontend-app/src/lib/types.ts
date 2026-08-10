@@ -127,6 +127,22 @@ export interface MyExtensionDecision {
   decided_at: string | null;
 }
 
+// Self-service feed: GET /quotations/me/notifications -- "assigned"/
+// "updated" alerts about the caller's own Quotations, written by
+// backend/services/quotation_service.py's _notify_quotation_recipient()
+// whenever an Admin/Manager assigns or changes a quote that belongs to
+// this person. See lib/api.ts's quotationsApi.myNotifications().
+export interface QuotationNotification {
+  id: number;
+  quotation_id: number;
+  reference_number: string | null;
+  kind: "assigned" | "updated";
+  message: string;
+  created_by: string | null;
+  created_at: string;
+  read_at: string | null;
+}
+
 export interface NotificationItem {
   id: number;
   title: string;

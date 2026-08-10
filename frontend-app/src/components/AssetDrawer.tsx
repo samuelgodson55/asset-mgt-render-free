@@ -506,9 +506,30 @@ export function AssetDrawer({
             animate={{ x: 0 }}
             exit={{ x: "100%" }}
             transition={{ type: "spring", stiffness: 320, damping: 34 }}
-            className="fixed top-0 right-0 h-screen w-full max-w-md bg-surface border-l border-border-soft z-50 overflow-y-auto"
+            // MOBILE FIX: this was `h-screen` (100vh) -- on a mobile browser
+            // whose address bar shows/hides as the page scrolls (notably
+            // Chrome/Firefox for Android and iOS Safari), 100vh is measured
+            // against the LARGEST possible viewport, so a `fixed`-positioned
+            // panel sized off it renders taller than what's actually visible
+            // once that chrome is on screen. The panel's own overflow-y-auto
+            // never gets a chance to reveal the extra bottom content (here,
+            // the "Isolated units" section and its "Log isolated unit" form)
+            // because the panel's bottom edge is already off past the real
+            // viewport -- reads as "can't scroll to the end" even though
+            // scrolling itself works fine. `top-0 bottom-0` instead anchors
+            // both edges to the fixed containing block, which every major
+            // mobile browser sizes against the CURRENT visual viewport, not
+            // the largest one -- same fix already applied to Layout.tsx's
+            // sidebar, and the pattern CustodyDrawer.tsx/QuoteDetailDrawer.tsx
+            // already used correctly (this was the one drawer that still had
+            // the bug).
+            className="fixed right-0 top-0 bottom-0 z-50 w-full max-w-md bg-surface border-l border-border-soft overflow-y-auto"
           >
-            <div className="p-6">
+            {/* Bottom safe-area padding so the last control (the "Log
+                isolated unit" button) never sits flush against a mobile
+                browser's own bottom toolbar -- same env(safe-area-inset-*)
+                pattern Layout.tsx's sidebar already uses. */}
+            <div className="p-6" style={{ paddingBottom: "max(1.5rem, env(safe-area-inset-bottom))" }}>
               <div className="flex items-start justify-between">
                 <div>
                   <p className="font-mono text-[11px] tracking-widest text-brass-soft">POOL-{String(asset.id).padStart(4, "0")}</p>
