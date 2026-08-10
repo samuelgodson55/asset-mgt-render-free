@@ -6,7 +6,7 @@ import { alertsApi, extensionsApi, myItemsApi, formatDate } from "../lib/api";
 import { useAuth } from "../lib/useAuth";
 import { isPrivileged } from "../lib/roles";
 import { readDismissedSet, dismissDecisionIds } from "../lib/notificationDismissals";
-import { useCustody } from "../lib/custodyContext";
+import { useCustody } from "../lib/useCustody";
 import type { Checkout, ExtensionRequest, MyExtensionDecision, MyItem } from "../lib/types";
 
 // =============================================================================

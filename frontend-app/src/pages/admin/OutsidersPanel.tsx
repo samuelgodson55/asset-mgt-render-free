@@ -7,7 +7,7 @@ import { Pencil, ArrowRightLeft, Trash2 } from "lucide-react";
 import { outsidersApi } from "../../lib/api";
 import type { OutsiderRow } from "../../lib/types";
 import { isFullAdmin } from "../../lib/roles";
-import { useCustody } from "../../lib/custodyContext";
+import { useCustody } from "../../lib/useCustody";
 import { ExportButtons } from "../../components/ExportButtons";
 import { PaginationBar, RowsPerPageSelect } from "../../components/PaginationBar";
 import { DEFAULT_PAGE_SIZE } from "../../lib/pagination";

@@ -7,7 +7,7 @@ import type { Checkout, ExtensionRequest } from "../lib/types";
 import { StatusPill } from "../components/StatusPill";
 import { PaginationBar, RowsPerPageSelect } from "../components/PaginationBar";
 import { DEFAULT_PAGE_SIZE } from "../lib/pagination";
-import { useCustody } from "../lib/custodyContext";
+import { useCustody } from "../lib/useCustody";
 
 const tabs = ["All", "Overdue", "Due Soon", "Active"] as const;
 

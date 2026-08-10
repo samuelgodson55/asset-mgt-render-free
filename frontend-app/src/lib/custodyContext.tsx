@@ -1,4 +1,5 @@
-import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
+import { CustodyContext, type CustodyContextValue, type CustodyTarget } from "./custody-context";
 
 // =============================================================================
 // lib/custodyContext.tsx
@@ -21,17 +22,17 @@ import { createContext, useContext, useMemo, useState, type ReactNode } from "re
 // This context ports that same shape to the React app: one drawer, owned
 // above the router's page content (see Layout.tsx), that any page can open
 // with a plain function call.
+//
+// The context/types themselves live in lib/custody-context.ts and the hook
+// in lib/useCustody.ts -- this file exports ONLY the <CustodyProvider>
+// component so React Fast Refresh can reliably hot-reload it (Fast Refresh
+// requires a component-only file; mixing in a hook/context export here
+// used to trip oxlint's react/only-export-components warning and meant an
+// edit to this file could silently fall back to a full page reload instead
+// of a fast in-place swap). Same three-file split lib/auth-context.ts +
+// lib/auth.tsx + lib/useAuth.ts and lib/theme-context.ts + lib/theme.tsx +
+// lib/useTheme.ts already use.
 // =============================================================================
-
-export type CustodyTarget = { type: "user" | "outsider"; id: number; name: string } | null;
-
-interface CustodyContextValue {
-  target: CustodyTarget;
-  openCustody: (type: "user" | "outsider", id: number, name: string) => void;
-  closeCustody: () => void;
-}
-
-const CustodyContext = createContext<CustodyContextValue | null>(null);
 
 export function CustodyProvider({ children }: { children: ReactNode }) {
   const [target, setTarget] = useState<CustodyTarget>(null);
@@ -44,10 +45,4 @@ export function CustodyProvider({ children }: { children: ReactNode }) {
     [target]
   );
   return <CustodyContext.Provider value={value}>{children}</CustodyContext.Provider>;
-}
-
-export function useCustody(): CustodyContextValue {
-  const ctx = useContext(CustodyContext);
-  if (!ctx) throw new Error("useCustody() must be called within a <CustodyProvider>.");
-  return ctx;
 }

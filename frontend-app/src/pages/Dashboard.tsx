@@ -10,7 +10,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../lib/useAuth";
 import { useTheme } from "../lib/useTheme";
 import { isPrivileged } from "../lib/roles";
-import { useCustody } from "../lib/custodyContext";
+import { useCustody } from "../lib/useCustody";
 
 // recharts needs literal color strings (SVG attrs, not the app's CSS
 // custom properties), so the two palettes are mirrored here by hand.

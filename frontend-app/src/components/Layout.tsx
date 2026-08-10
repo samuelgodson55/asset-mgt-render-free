@@ -1,14 +1,14 @@
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import { LayoutGrid, Boxes, ClipboardList, Bell, Search, LogOut, ShieldCheck, PackageCheck, FileText, Menu, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { api, quotationsApi, setCurrencyCode } from "../lib/api";
 import { useAuth } from "../lib/useAuth";
 import { isPrivileged } from "../lib/roles";
 import { ThemeToggle } from "./ThemeToggle";
 import { NotificationBell } from "./NotificationBell";
 import { CustodyDrawer } from "./CustodyDrawer";
-import { useCustody } from "../lib/custodyContext";
+import { useCustody } from "../lib/useCustody";
 
 // "Checkouts" (system-wide overdue/due-soon + extension-request review) is
 // deliberately left out of this base list -- it's built entirely on top of
@@ -28,6 +28,23 @@ const nav: { to: string; label: string; icon: typeof LayoutGrid; end?: boolean }
 ];
 
 const checkoutsNavItem: (typeof nav)[number] = { to: "/checkouts", label: "Checkouts", icon: ClipboardList };
+
+// Shown only for the brief window a lazy-loaded route's own JS chunk is
+// still downloading/parsing (typically well under a second on any normal
+// connection, and not shown at all once the browser has cached that
+// chunk from a previous visit) -- deliberately quiet/minimal rather than
+// a full skeleton, since the page underneath renders its own real loading
+// state (spinners, "Loading…" table rows, etc.) a moment later anyway.
+function PageLoadingFallback() {
+  return (
+    <div className="flex items-center justify-center py-24">
+      <span className="relative flex h-2 w-2">
+        <span className="absolute inline-flex h-full w-full rounded-full bg-brass opacity-60 animate-ping" />
+        <span className="relative inline-flex rounded-full h-2 w-2 bg-brass" />
+      </span>
+    </div>
+  );
+}
 
 function initials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -304,17 +321,25 @@ export function Layout() {
         </header>
 
         <main className="flex-1 px-4 sm:px-6 py-6 max-w-[1400px] w-full mx-auto">
-          <AnimatePresence mode="wait">
-            <motion.div
-              key={location.pathname}
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -6 }}
-              transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
-            >
-              <Outlet />
-            </motion.div>
-          </AnimatePresence>
+          {/* Page components are React.lazy()'d (see App.tsx) so this is a
+              real Suspense boundary, not just decoration -- the sidebar/
+              header above stay mounted and interactive while a route's
+              chunk downloads; only this content area shows the fallback,
+              same as the loading state any of these pages already show
+              while their own data fetch resolves. */}
+          <Suspense fallback={<PageLoadingFallback />}>
+            <AnimatePresence mode="wait">
+              <motion.div
+                key={location.pathname}
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -6 }}
+                transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
+              >
+                <Outlet />
+              </motion.div>
+            </AnimatePresence>
+          </Suspense>
         </main>
       </div>
 

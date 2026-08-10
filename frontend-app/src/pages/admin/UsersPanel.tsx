@@ -10,7 +10,7 @@ import { Plus, KeyRound, Pencil, UserMinus, Trash2 } from "lucide-react";
 import { usersApi } from "../../lib/api";
 import type { UserRow } from "../../lib/types";
 import { isFullAdmin, canManageUserRole } from "../../lib/roles";
-import { useCustody } from "../../lib/custodyContext";
+import { useCustody } from "../../lib/useCustody";
 import { ExportButtons } from "../../components/ExportButtons";
 import { PaginationBar, RowsPerPageSelect } from "../../components/PaginationBar";
 import { DEFAULT_PAGE_SIZE } from "../../lib/pagination";

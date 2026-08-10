@@ -1,20 +1,42 @@
+import { lazy } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import type { ReactNode } from "react";
 import { Layout } from "./components/Layout";
-import { Dashboard } from "./pages/Dashboard";
-import { Assets } from "./pages/Assets";
-import { Checkouts } from "./pages/Checkouts";
-import { Notifications } from "./pages/Notifications";
-import { Admin, Manager } from "./pages/Admin";
-import { MyItems } from "./pages/MyItems";
-import { Quotations } from "./pages/Quotations";
-import { Profile } from "./pages/Profile";
 import { Login } from "./pages/Login";
 import { AuthProvider } from "./lib/auth";
 import { useAuth } from "./lib/useAuth";
 import { ThemeProvider } from "./lib/theme";
 import { CustodyProvider } from "./lib/custodyContext";
 import { isFullAdmin, isPrivileged } from "./lib/roles";
+
+// Every authenticated page is loaded on demand (React.lazy + Vite's
+// automatic code-splitting) instead of all landing in one ~1MB bundle
+// that has to be downloaded and parsed before ANYTHING renders -- Vite's
+// own build output was flagging exactly this ("Some chunks are larger
+// than 500 kB after minification"). This has an outsized effect for two
+// groups in particular:
+//   - Dashboard is the only page that imports `recharts` (a genuinely
+//     heavy charting library) -- lazy-loading it means that weight is no
+//     longer forced onto EVERY page load, only whoever actually opens
+//     the Overview.
+//   - Admin/Manager alone pull in every panel under pages/admin/ (Users,
+//     Outsiders, Quotes, System Backups, Settings, Audit, Deleted
+//     Assets/Users, Inventory Import -- over 130KB of source) purely to
+//     render two role-gated routes a Staff/Customer session can never
+//     even reach. Splitting them out means that code no longer ships to
+//     -- or has to be parsed by -- a browser that will never load them.
+// Login stays eager: it's the very first screen an unauthenticated
+// visitor sees, so deferring it would only add a blank-then-flash delay
+// with nothing to show for it.
+const Dashboard = lazy(() => import("./pages/Dashboard").then((m) => ({ default: m.Dashboard })));
+const Assets = lazy(() => import("./pages/Assets").then((m) => ({ default: m.Assets })));
+const Checkouts = lazy(() => import("./pages/Checkouts").then((m) => ({ default: m.Checkouts })));
+const Notifications = lazy(() => import("./pages/Notifications").then((m) => ({ default: m.Notifications })));
+const Admin = lazy(() => import("./pages/Admin").then((m) => ({ default: m.Admin })));
+const Manager = lazy(() => import("./pages/Admin").then((m) => ({ default: m.Manager })));
+const MyItems = lazy(() => import("./pages/MyItems").then((m) => ({ default: m.MyItems })));
+const Quotations = lazy(() => import("./pages/Quotations").then((m) => ({ default: m.Quotations })));
+const Profile = lazy(() => import("./pages/Profile").then((m) => ({ default: m.Profile })));
 
 function RequireAuth({ children }: { children: ReactNode }) {
   const { user, loading, demo } = useAuth();
