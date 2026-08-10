@@ -545,6 +545,30 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      # BUG FIX / INCIDENT RESPONSE: a rollout that fails its health gate is
+      # supposed to self-clean via aca-blue-green.sh's own deactivate call,
+      # but that call needs a still-valid Azure login -- and a single gate-1
+      # wait alone can run up to 400s, well past how long an OIDC-exchanged
+      # token stays usable here (see "Re-authenticate" steps below for the
+      # same observation). When that cleanup call itself fails, the bad
+      # revision is left ACTIVE at 0% traffic forever -- invisible in the
+      # UI's "healthy vs not" sense, but still a live replica holding its
+      # own DB connection pool open. Several of these accumulating across
+      # separate failed runs is exactly what exhausted the target Postgres
+      # server's connection budget in this incident (FATAL: "remaining
+      # connection slots are reserved for roles with the SUPERUSER
+      # attribute"). Running this at the START of every deploy -- before
+      # touching anything else -- means any leak from a PREVIOUS run (this
+      # one or a colleague's) gets cleaned up automatically before it can
+      # compound further, rather than requiring someone to notice and clean
+      # it up by hand. 20-minute grace window: comfortably longer than any
+      # legitimate in-progress rollout this script itself would produce, so
+      # this can never touch a revision that's still genuinely mid-deploy.
+      - name: Reap any orphaned revisions left over from a previous failed/interrupted deploy
+        run: |
+          bash .github/scripts/aca-blue-green.sh reap backend "$RESOURCE_GROUP" 20
+          bash .github/scripts/aca-blue-green.sh reap frontend "$RESOURCE_GROUP" 20
+
       - name: Snapshot currently-live images (for the summary + manual-rollback reference)
         id: previous
         # BUG FIX (unrelated to blue-green): this used to be
@@ -659,6 +683,24 @@ jobs:
           bash .github/scripts/aca-blue-green.sh rollout \
             backend "$RESOURCE_GROUP" "$BACKEND_IMAGE:$IMAGE_TAG" \
             "$CANARY_STEPS" "$STEP_WAIT" false
+
+      # BUG FIX: `backend_rollout` alone (gate 1 wait up to 400s, plus a
+      # five-step gate 3 traffic ramp on production, each step re-checked)
+      # can comfortably run past the ~5-minute window this workflow's own
+      # "Re-authenticate" steps already document as this OIDC login's
+      # observed usable lifetime. Without a fresh login here, `frontend`'s
+      # OWN rollout -- including its self-cleanup `deactivate` call on a
+      # failed gate -- silently runs against an expired token, which is
+      # the exact mechanism that left several `backend` revisions
+      # permanently stuck ACTIVE (and leaking DB connections) in this
+      # incident. Cheap to always re-run, harmless if the previous login
+      # was still valid.
+      - name: Re-authenticate before the frontend rollout (backend's may have run long)
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       # Only runs if `backend_rollout` succeeded (GitHub Actions' default:
       # a step with no `if:` is skipped once an earlier step in the same

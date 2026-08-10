@@ -1,0 +1,110 @@
+# .github/workflows/reap-stuck-revisions.yml
+# -----------------------------------------------------------------------------
+# INCIDENT RESPONSE: a blue-green rollout (.github/scripts/aca-blue-green.sh,
+# run from deploy-azure-aca.yml) that fails its health gate is supposed to
+# self-clean by deactivating the bad revision -- but that cleanup call needs
+# a still-valid Azure login, and a single gate-1 wait can run long enough
+# (up to ~400s) to outlast this workflow's OIDC-exchanged token (see
+# deploy-azure-aca.yml's own "Re-authenticate" step comments for the same
+# observation). When that cleanup call itself fails, the bad revision is
+# left ACTIVE at 0% traffic -- invisible in "is it healthy" terms, but still
+# a live replica holding its own DB connection pool open. Several of these
+# accumulating across separate failed/interrupted deploys is exactly what
+# exhausted a target Postgres server's connection budget in one real
+# incident here (FATAL: "remaining connection slots are reserved for roles
+# with the SUPERUSER attribute") -- see aca-blue-green.sh's `reap`
+# subcommand and deploy-azure-aca.yml's own "Reap any orphaned revisions"
+# step for the two other layers of this same fix.
+#
+# THIS workflow is the layer that doesn't depend on a deploy ever
+# happening again: deploy-azure-aca.yml only reaps at the START of its
+# NEXT run, so if deploys are infrequent (or the next one is a while off),
+# a leak from today sits there burning connections until someone notices
+# the app degrading. Running this on a schedule closes that gap -- it's the
+# same `reap` subcommand, just triggered by a clock instead of a deploy.
+#
+# WHEN TO RUN THIS BY HAND: right now, if you're looking at a Postgres
+# "remaining connection slots" error, or the Container Apps "Revisions and
+# replicas" blade shows any Active revisions stuck in "Activating" for
+# more than ~20 minutes with 0% traffic. workflow_dispatch below runs the
+# exact same check/cleanup this schedule does, immediately, for one
+# environment.
+# -----------------------------------------------------------------------------
+name: Reap orphaned ACA revisions
+
+on:
+  schedule:
+    # Every 30 minutes. Cheap (a handful of read-only `az` calls plus,
+    # usually, nothing to do) and each run is independent/idempotent --
+    # safe to run this often, and short enough that a leak never has more
+    # than ~30 minutes to sit before being cleaned up automatically.
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Which environment to reap. "both" (the default, and what the schedule itself runs) checks staging AND production in the same run -- they use separate resource groups/credentials, so there is no cross-environment risk in doing both every time.'
+        required: true
+        type: choice
+        options: [both, staging, production]
+        default: both
+      grace_minutes:
+        description: 'How old (minutes, by createdTime) an active/0%-traffic revision must be before it is treated as orphaned rather than "possibly mid-rollout right now." Default 20 is comfortably above the longest single gate wait aca-blue-green.sh itself uses (400s) -- lower this only for a manual, time-boxed cleanup where you are certain nothing is actually mid-deploy.'
+        required: false
+        type: string
+        default: '20'
+
+concurrency:
+  # Never run this concurrently with itself OR with an actual deploy --
+  # reaping while aca-blue-green.sh is mid-rollout on the SAME app would
+  # race its own 0%-traffic incoming revision (still well inside the grace
+  # window normally, but there's no reason to risk it). Reuses the exact
+  # same group name deploy-azure-aca.yml uses per environment, so GitHub
+  # serializes the two against each other automatically.
+  group: deploy-aca-${{ (inputs.environment == 'staging' && 'staging') || 'production' }}
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  reap:
+    name: Reap ${{ matrix.environment }}
+    runs-on: ubuntu-latest
+    strategy:
+      # Both environments on the schedule trigger (matrix input isn't
+      # available there, so this can't read `inputs.*` -- `fromJSON` below
+      # falls back to both whenever this ISN'T a workflow_dispatch run, or
+      # when workflow_dispatch left the default "both" in place).
+      matrix:
+        environment: ${{ fromJSON( (github.event_name == 'workflow_dispatch' && inputs.environment != 'both') && format('["{0}"]', inputs.environment) || '["staging","production"]' ) }}
+      fail-fast: false
+    environment: ${{ matrix.environment }}
+    env:
+      RESOURCE_GROUP: ${{ matrix.environment == 'production' && secrets.PROD_RESOURCE_GROUP || secrets.STAGING_RESOURCE_GROUP }}
+      GRACE_MINUTES: ${{ (github.event_name == 'workflow_dispatch' && inputs.grace_minutes) || '20' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Reap orphaned backend/frontend revisions
+        id: reap
+        run: |
+          FAILED=0
+          bash .github/scripts/aca-blue-green.sh reap backend "$RESOURCE_GROUP" "$GRACE_MINUTES" || FAILED=1
+          bash .github/scripts/aca-blue-green.sh reap frontend "$RESOURCE_GROUP" "$GRACE_MINUTES" || FAILED=1
+          if [ "$FAILED" -eq 1 ]; then
+            echo "::error::At least one orphaned revision could not be deactivated automatically for '${{ matrix.environment }}' -- see the log above for which one, and deactivate it by hand (az containerapp revision deactivate --name <app> --resource-group $RESOURCE_GROUP --revision <name>) or via the Portal's Revisions and replicas blade. Until it's cleared it continues holding its own DB connection pool open."
+            exit 1
+          fi
+
+      - name: Current revision status (for the run log either way)
+        if: always()
+        run: |
+          bash .github/scripts/aca-blue-green.sh status backend "$RESOURCE_GROUP"
+          bash .github/scripts/aca-blue-green.sh status frontend "$RESOURCE_GROUP"

@@ -69,6 +69,7 @@ Usage:
   $SCRIPT_NAME finalize <app> <resource-group> <active-revision>
   $SCRIPT_NAME rollback <app> <resource-group> <active-revision> <incoming-revision>
   $SCRIPT_NAME status   <app> <resource-group> [--watch]
+  $SCRIPT_NAME reap     <app> <resource-group> [grace-minutes]
 
   app                 Container App name, e.g. "backend" or "frontend"
   resource-group      Azure resource group containing it
@@ -94,6 +95,12 @@ Usage:
                        shifting real traffic through \`frontend\`'s reverse
                        proxy in the run's later steps is what actually
                        exercises it end to end.
+  grace-minutes       For 'reap': how old (by createdTime) an active,
+                       0%-traffic revision must be before it's considered
+                       orphaned rather than "maybe mid-rollout right now."
+                       Default 20 -- comfortably above the longest single
+                       gate wait this script itself uses (400s), so a
+                       genuinely in-flight rollout is never touched.
 EOF
   exit 1
 }
@@ -150,6 +157,47 @@ wait_for_revision_healthy() {
     sleep 10
   done
   echo "  $rev did not become Healthy within $((max_tries * 10))s"
+  return 1
+}
+
+deactivate_or_warn() {
+  # $1 app  $2 rg  $3 revision  $4 context-label (for the warning text)
+  #
+  # BUG FIX: every call site that rolls back a bad revision used to run
+  # `az containerapp revision deactivate ... >/dev/null 2>&1` with no
+  # exit-code check at all -- success and failure looked identical in the
+  # log. That silently left "failed" revisions ACTIVE and still holding
+  # their own DB connection pool open indefinitely, which is exactly what
+  # accumulated across several separate deploy attempts and exhausted the
+  # target Postgres server's connection budget (see incident notes: repo
+  # README "Stuck 'Activating' revisions / DB connection exhaustion").
+  # The single most common way this actually fails: azure/login's OIDC
+  # token is only good for a few minutes (see deploy-azure-aca.yml's own
+  # comment on this), and a single gate-1 wait alone can run up to 400s --
+  # so a token that was fine when this script started can easily be
+  # expired by the time a failure is detected deep into a rollout. This
+  # doesn't fix that expiry (deploy-azure-aca.yml does, via periodic
+  # re-login -- see its own comments), but it DOES make a failed cleanup
+  # loud and visible instead of a silent, permanent leak: one retry after
+  # a short pause (covers a transient blip), then a `::error::` annotation
+  # and a non-zero return so the caller/CI run surfaces it, rather than
+  # reporting overall success while a zombie revision keeps burning
+  # connections. `reap` (below) is the backstop for when even this fails.
+  local app="$1" rg="$2" rev="$3" context="${4:-cleanup}"
+  if az containerapp revision deactivate --name "$app" --resource-group "$rg" --revision "$rev" 2>/tmp/deactivate-err.$$; then
+    echo "  Deactivated $rev ($context)."
+    rm -f /tmp/deactivate-err.$$
+    return 0
+  fi
+  echo "  First deactivate attempt for $rev ($context) failed -- retrying once in 5s: $(tail -c 300 /tmp/deactivate-err.$$ 2>/dev/null)"
+  sleep 5
+  if az containerapp revision deactivate --name "$app" --resource-group "$rg" --revision "$rev" 2>>/tmp/deactivate-err.$$; then
+    echo "  Deactivated $rev ($context) on retry."
+    rm -f /tmp/deactivate-err.$$
+    return 0
+  fi
+  echo "::error::Could not deactivate $rev ($context) after 2 attempts -- it is LIKELY STILL ACTIVE and holding its own DB connection pool open. Run '$SCRIPT_NAME reap $app $rg' (or the scheduled reap-stuck-revisions.yml workflow) to clean this up, or deactivate it by hand: az containerapp revision deactivate --name $app --resource-group $rg --revision $rev"
+  rm -f /tmp/deactivate-err.$$
   return 1
 }
 
@@ -267,7 +315,7 @@ cmd_rollout() {
        "$status_script" "${app}-gate1-waiting"; then
     echo "Incoming revision failed its own health checks before receiving any traffic -- rolling back."
     record_check "gate1-readiness" "fail" "$incoming_rev did not become Healthy"
-    az containerapp revision deactivate --name "$app" --resource-group "$rg" --revision "$incoming_rev" >/dev/null 2>&1
+    deactivate_or_warn "$app" "$rg" "$incoming_rev" "gate1 rollback"
     { echo "active_revision=$active_rev"; echo "incoming_revision=$incoming_rev"; echo "skipped=false"; } >> "$GH_OUT"
     return 1
   fi
@@ -290,7 +338,7 @@ cmd_rollout() {
        || ! curl_check "https://$incoming_fqdn/api/auth/me" "incoming revision /api/auth/me (through backend proxy)"; then
       echo "Incoming revision failed a direct smoke test on its own slot -- rolling back."
       record_check "gate2-direct-smoke-test" "fail" "https://$incoming_fqdn/ or /api/auth/me did not return 200/401"
-      az containerapp revision deactivate --name "$app" --resource-group "$rg" --revision "$incoming_rev" >/dev/null 2>&1
+      deactivate_or_warn "$app" "$rg" "$incoming_rev" "gate2 rollback"
       { echo "active_revision=$active_rev"; echo "incoming_revision=$incoming_rev"; echo "skipped=false"; } >> "$GH_OUT"
       return 1
     fi
@@ -328,7 +376,7 @@ cmd_rollout() {
       record_check "gate3-traffic-${step}pct" "fail" "$incoming_rev degraded at ${step}% traffic"
       az containerapp ingress traffic set --name "$app" --resource-group "$rg" \
         --revision-weight "${active_rev}=100" "${incoming_rev}=0" >/dev/null 2>&1
-      az containerapp revision deactivate --name "$app" --resource-group "$rg" --revision "$incoming_rev" >/dev/null 2>&1
+      deactivate_or_warn "$app" "$rg" "$incoming_rev" "gate3 rollback"
       { echo "active_revision=$active_rev"; echo "incoming_revision=$incoming_rev"; echo "skipped=false"; } >> "$GH_OUT"
       return 1
     fi
@@ -348,7 +396,7 @@ cmd_finalize() {
     return 0
   fi
   echo "Spinning down the old (formerly 'green') slot: deactivating $active_rev (already at 0% traffic)."
-  az containerapp revision deactivate --name "$app" --resource-group "$rg" --revision "$active_rev"
+  deactivate_or_warn "$app" "$rg" "$active_rev" "finalize"
 }
 
 cmd_rollback() {
@@ -361,7 +409,79 @@ cmd_rollback() {
   echo "Rolling back '$app': ${active_rev}=100% / ${incoming_rev}=0%, then deactivating $incoming_rev."
   az containerapp ingress traffic set --name "$app" --resource-group "$rg" \
     --revision-weight "${active_rev}=100" "${incoming_rev}=0" || return 1
-  az containerapp revision deactivate --name "$app" --resource-group "$rg" --revision "$incoming_rev" || true
+  deactivate_or_warn "$app" "$rg" "$incoming_rev" "manual rollback"
+}
+
+cmd_reap() {
+  # $1 app  $2 rg  $3 grace-minutes (optional, default 20)
+  #
+  # SELF-HEALING BACKSTOP for exactly the failure mode this incident hit:
+  # a revision that got left ACTIVE at 0% traffic because its own cleanup
+  # deactivate() call failed (see deactivate_or_warn() above) or the whole
+  # job got killed/cancelled mid-rollout before cleanup ever ran. Those
+  # revisions cost nothing in traffic (0% weight, nothing routes to them)
+  # but they ARE still live replicas each holding open their own DB
+  # connection pool -- on a small Postgres SKU (e.g. Standard_B1ms,
+  # max_connections ~50) a handful of these accumulating over even a few
+  # days is enough to exhaust the server's entire non-superuser connection
+  # budget, which is what actually happened here (see the FATAL:
+  # "remaining connection slots are reserved for roles with the SUPERUSER
+  # attribute" error this was written in response to).
+  #
+  # Deliberately narrow criteria for what counts as "safe to reap" --
+  # active=true AND trafficWeight==0 AND older than grace-minutes. A
+  # revision genuinely mid-rollout is ALWAYS either the currently-live one
+  # (100% traffic, never touched) or the brand-new incoming one (created
+  # seconds/minutes ago, well inside the grace window) -- this can never
+  # mistake either for an orphan. grace-minutes defaults to 20, comfortably
+  # above the longest single gate wait this script itself uses (400s /
+  # 6m40s for gate 1), so a still-legitimately-in-progress rollout is never
+  # touched, only things that have been sitting at 0% for far longer than
+  # any real rollout takes.
+  [ "$#" -ge 2 ] || usage
+  local app="$1" rg="$2" grace_minutes="${3:-20}"
+  local grace_seconds=$((grace_minutes * 60))
+  local now_epoch
+  now_epoch=$(date -u +%s)
+
+  echo "Scanning '$app' for orphaned revisions (active, 0% traffic, older than ${grace_minutes}m)..."
+  local rows
+  rows=$(az containerapp revision list --name "$app" --resource-group "$rg" \
+    --query "[?properties.active && properties.trafficWeight==\`0\`].{name:name, created:properties.createdTime, health:properties.healthState}" \
+    -o tsv 2>/dev/null)
+
+  if [ -z "$rows" ]; then
+    echo "  Nothing at 0% traffic for '$app' -- nothing to reap."
+    return 0
+  fi
+
+  local reaped=0 skipped=0 failed=0
+  while IFS=$'\t' read -r rev created health; do
+    [ -z "$rev" ] && continue
+    local created_epoch age_seconds age_minutes
+    created_epoch=$(date -u -d "$created" +%s 2>/dev/null || echo 0)
+    if [ "$created_epoch" -eq 0 ]; then
+      echo "  Skipping $rev -- couldn't parse createdTime '$created', not touching it."
+      skipped=$((skipped + 1))
+      continue
+    fi
+    age_seconds=$((now_epoch - created_epoch))
+    age_minutes=$((age_seconds / 60))
+    if [ "$age_seconds" -lt "$grace_seconds" ]; then
+      echo "  Skipping $rev (health=$health, age=${age_minutes}m) -- inside the ${grace_minutes}m grace window, may be an in-progress rollout."
+      skipped=$((skipped + 1))
+      continue
+    fi
+    echo "  $rev (health=$health, age=${age_minutes}m, 0% traffic) looks orphaned -- deactivating."
+    if deactivate_or_warn "$app" "$rg" "$rev" "reap"; then
+      reaped=$((reaped + 1))
+    else
+      failed=$((failed + 1))
+    fi
+  done <<< "$rows"
+
+  echo "Reap complete for '$app': $reaped deactivated, $skipped skipped (too new), $failed failed."
+  [ "$failed" -eq 0 ]
 }
 
 cmd_status() {
@@ -392,5 +512,6 @@ case "$subcommand" in
   finalize) cmd_finalize "$@" ;;
   rollback) cmd_rollback "$@" ;;
   status)   cmd_status "$@" ;;
+  reap)     cmd_reap "$@" ;;
   *) usage ;;
 esac
