@@ -7,6 +7,15 @@ const config = {
   due_soon: { label: "Due soon", dot: "bg-brass", text: "text-brass-soft" },
   returned: { label: "Returned", dot: "bg-moss", text: "text-moss-soft" },
   pending: { label: "Pending", dot: "bg-brass", text: "text-brass-soft" },
+  // Quotation lifecycle (draft is never shown as a pill -- see
+  // pages/Quotations.tsx/components/QuoteDetailDrawer.tsx): submitted ->
+  // approved -> fulfilled, the same wording a customer/staff requester
+  // actually sees on their own quote, matching pages/admin/QuotesPanel.tsx's
+  // labels so the status reads identically whether an Admin/Manager or the
+  // requester themselves is looking at it.
+  submitted: { label: "Pending Review", dot: "bg-brass", text: "text-brass-soft" },
+  approved: { label: "Approved", dot: "bg-moss", text: "text-moss-soft" },
+  fulfilled: { label: "Fulfilled", dot: "bg-sky", text: "text-sky" },
 } as const;
 
 export function StatusPill({ status }: { status: keyof typeof config }) {

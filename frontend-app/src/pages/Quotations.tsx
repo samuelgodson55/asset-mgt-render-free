@@ -21,10 +21,16 @@ function errMsg(err: unknown, fallback: string): string {
 
 const today = () => new Date().toISOString().slice(0, 10);
 
+// Real quote lifecycle wording -- submitted -> approved -> fulfilled --
+// shown verbatim rather than recycled checkout-style labels (this used to
+// render "Active"/"Pending"/"Returned", borrowed from the checkout status
+// pill, which described a physical loan's state, not a quote's -- confusing
+// for a customer/staff requester reading their own "My Quotes" list). See
+// components/StatusPill.tsx's submitted/approved/fulfilled entries.
 function statusPillFor(status: string) {
-  if (status === "approved") return <StatusPill status="active" />;
-  if (status === "fulfilled") return <StatusPill status="returned" />;
-  return <StatusPill status="pending" />;
+  if (status === "approved") return <StatusPill status="approved" />;
+  if (status === "fulfilled") return <StatusPill status="fulfilled" />;
+  return <StatusPill status="submitted" />;
 }
 
 /** One catalog row's Qty/Start/Due draft, keyed by asset id -- mirrors the

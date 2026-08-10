@@ -5,6 +5,7 @@ import { Suspense, useEffect, useState } from "react";
 import { api, quotationsApi, setCurrencyCode } from "../lib/api";
 import { useAuth } from "../lib/useAuth";
 import { isPrivileged } from "../lib/roles";
+import { useNotificationCount } from "../lib/useNotificationCount";
 import { ThemeToggle } from "./ThemeToggle";
 import { NotificationBell } from "./NotificationBell";
 import { CustodyDrawer } from "./CustodyDrawer";
@@ -57,7 +58,6 @@ function initials(name: string): string {
 }
 
 export function Layout() {
-  const [unread, setUnread] = useState(0);
   const [live, setLive] = useState(false);
   const [navOpen, setNavOpen] = useState(false);
   const [headerSearch, setHeaderSearch] = useState("");
@@ -148,18 +148,24 @@ export function Layout() {
     quotationsApi.publicConfig().then((config) => setCurrencyCode(config.currency_code));
   }, []);
 
+  // This call's own result no longer feeds the sidebar badge (see `unread`
+  // below) -- it's kept purely so lib/api.ts's tryLoad() records whether
+  // the backend actually responded, which is what the "Live — connected to
+  // backend" / "Demo data" indicator in the header reflects.
   useEffect(() => {
     api.getNotifications(privileged)
-      .then((n) => {
-        setUnread(n.filter((x) => !x.read).length);
-        setLive(api.isLive());
-      })
+      .then(() => setLive(api.isLive()))
       .catch((err) => {
         console.error("Failed to load notifications:", err);
         setLive(api.isLive());
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Same shared calculation as the header Bell badge (components/
+  // NotificationBell.tsx) -- see lib/useNotificationCount.ts for why this
+  // used to show a different number here than in the bell.
+  const unread = useNotificationCount(privileged);
 
   return (
     <div className="min-h-dvh flex bg-ink">

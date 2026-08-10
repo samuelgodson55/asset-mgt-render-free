@@ -12,16 +12,21 @@ function errMsg(err: unknown, fallback: string): string {
   return fallback;
 }
 
+// Real quote lifecycle wording -- submitted -> approved -> fulfilled --
+// same reasoning as pages/Quotations.tsx's own statusPillFor(): this used
+// to recycle the checkout status pill's "Active"/"Returned"/"Pending"
+// labels, which describe a physical loan, not a quote. See
+// components/StatusPill.tsx's submitted/approved/fulfilled entries.
 function statusPillFor(status: string | undefined) {
   switch (status) {
     case "approved":
-      return <StatusPill status="active" />;
+      return <StatusPill status="approved" />;
     case "fulfilled":
-      return <StatusPill status="returned" />;
+      return <StatusPill status="fulfilled" />;
     case "submitted":
-      return <StatusPill status="pending" />;
+      return <StatusPill status="submitted" />;
     default:
-      return <StatusPill status="pending" />;
+      return <StatusPill status="submitted" />;
   }
 }
 
@@ -461,9 +466,19 @@ export function QuoteDetailDrawer({
                       <div className="min-w-0">
                         <p className="text-[13px] text-text font-medium truncate">
                           {li.asset_name}
-                          {li.is_outsourced && (
+                          {/* Whether a line was sourced from inventory or
+                              outsourced to an external vendor is internal
+                              fulfillment detail -- a customer/staff
+                              requester doesn't need (and shouldn't see) the
+                              sourcing explanation, just the item, qty, and
+                              price they asked for. Matches the legacy
+                              frontend's self-service quote view (js/
+                              components/quotation.js's renderMyQuoteDetail()),
+                              which deliberately omits this badge entirely
+                              rather than just hiding the vendor name. */}
+                          {mode === "admin" && li.is_outsourced && (
                             <span className="ml-1.5 inline-flex items-center rounded-full bg-brass/15 px-1.5 py-0.5 text-[10px] font-medium text-brass-soft">
-                              Outsourced{mode === "admin" && li.sourced_from ? ` · ${li.sourced_from}` : ""}
+                              Outsourced{li.sourced_from ? ` · ${li.sourced_from}` : ""}
                             </span>
                           )}
                         </p>
