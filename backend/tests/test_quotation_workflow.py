@@ -559,7 +559,7 @@ def test_assigning_and_then_editing_a_quotation_notifies_the_recipient(as_admin,
     customer_client, customer_headers = as_customer
 
     asset_id = _create_pool(admin_client, admin_headers, "Drone", total_quantity=4, price=75.00)
-    cart = _add_to_cart(manager_client, manager_headers, asset_id, quantity=1, start_date=TODAY, due_date=TODAY)
+    _add_to_cart(manager_client, manager_headers, asset_id, quantity=1, start_date=TODAY, due_date=TODAY)
     submitted = manager_client.post("/api/quotations/submit", headers=manager_headers).json()
     quotation_id = submitted["id"]
 
@@ -610,7 +610,7 @@ def test_manager_editing_their_own_assigned_quotation_does_not_self_notify(as_ad
     manager_client, manager_headers = as_manager
 
     asset_id = _create_pool(admin_client, admin_headers, "Tripod Kit", total_quantity=3, price=20.00)
-    cart = _add_to_cart(manager_client, manager_headers, asset_id, quantity=1, start_date=TODAY, due_date=TODAY)
+    _add_to_cart(manager_client, manager_headers, asset_id, quantity=1, start_date=TODAY, due_date=TODAY)
     submitted = manager_client.post("/api/quotations/submit", headers=manager_headers).json()
 
     # A Manager's own submitted quote (no explicit assignment yet) falls
