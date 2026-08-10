@@ -4,22 +4,28 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { Notifications } from "./Notifications";
-import { Admin } from "./Admin";
+import { CustodyProvider, useCustody } from "../lib/custodyContext";
+import { CustodyDrawer } from "../components/CustodyDrawer";
 import type { AuthUser, Checkout } from "../lib/api";
 
 // =============================================================================
 // pages/NotificationsCustodyDeepLink.test.tsx
 // -----------------------------------------------------------------------------
-// Covers the full click-through described in Notifications.tsx's own
+// Covers the click-through described in Notifications.tsx's own
 // "CLICK-THROUGH" comment: tapping "View ->" on a grouped Overdue/Due
-// Soon/Extension Requests row should navigate straight into that person's
-// Custody Ledger on the Admin page -- the correct directory tab (User vs
-// Ad-Hoc), with the drawer already open, not just the bare directory list.
+// Soon/Extension Requests row should open that person's Custody Ledger
+// drawer directly (the correct target -- User vs Ad-Hoc, by id), via the
+// shared CustodyProvider (lib/custodyContext.tsx) -- with NO navigation
+// away from Notifications required, matching legacy
+// components/custody.js's openCustodyModal(): one shared modal, opened by
+// id+type from wherever the click happened, never routed through a
+// page/tab.
 //
-// Rendered under <StrictMode>, same as src/main.tsx wraps the real app in,
-// since React's dev-mode double-invocation of effects on mount is exactly
-// the kind of thing that can silently break a deep-link effect keyed off
-// an unmemoized object identity (see Admin.tsx's deepLinkTarget).
+// This used to route through /admin?custody=type:id&name=... and rely on
+// Admin.tsx forcing the right directory tab open, then a deep-link effect
+// inside whichever panel matched -- a chain that landed on the right tab
+// but could silently fail to actually open the drawer. Rendered under
+// <StrictMode>, same as src/main.tsx wraps the real app in.
 // =============================================================================
 
 const { useAuthMock, outsiderDueSoonCheckout, userOverdueCheckout } = vi.hoisted(() => ({
@@ -61,28 +67,38 @@ vi.mock("../lib/api", async () => {
     },
     usersApi: {
       ...actual.usersApi,
-      list: vi.fn().mockResolvedValue({ items: [], total: 0, limit: 20, offset: 0 }),
       items: vi.fn().mockResolvedValue({ assigned_items: [] }),
     },
     outsidersApi: {
       ...actual.outsidersApi,
-      list: vi.fn().mockResolvedValue({ items: [], total: 0, limit: 20, offset: 0 }),
       items: vi.fn().mockResolvedValue({ assigned_items: [] }),
     },
-    quotationsApi: { ...actual.quotationsApi, list: vi.fn().mockResolvedValue({ items: [], total: 0, limit: 20, offset: 0 }), catalog: vi.fn().mockResolvedValue([]), fulfillmentQueue: vi.fn().mockResolvedValue([]) },
-    auditApi: { ...actual.auditApi, list: vi.fn().mockResolvedValue({ items: [], total: 0, limit: 20, offset: 0 }) },
   };
 });
+
+// Same shape as Layout.tsx: the drawer lives above the routed page,
+// driven by the shared CustodyProvider, so the test tree mirrors exactly
+// how the real app wires this up.
+function Harness() {
+  const { target, closeCustody } = useCustody();
+  return (
+    <>
+      <Notifications />
+      <CustodyDrawer target={target} onClose={closeCustody} />
+    </>
+  );
+}
 
 function renderFromNotifications() {
   useAuthMock.mockReturnValue({ user: { name: "Admin", email: "a@a.com", role: "admin" } satisfies AuthUser, demo: false });
   return render(
     <StrictMode>
       <MemoryRouter initialEntries={["/notifications"]}>
-        <Routes>
-          <Route path="/notifications" element={<Notifications />} />
-          <Route path="/admin" element={<Admin />} />
-        </Routes>
+        <CustodyProvider>
+          <Routes>
+            <Route path="/notifications" element={<Harness />} />
+          </Routes>
+        </CustodyProvider>
       </MemoryRouter>
     </StrictMode>
   );
@@ -91,7 +107,7 @@ function renderFromNotifications() {
 beforeEach(() => vi.clearAllMocks());
 
 describe("Notifications 'View ->' click-through opens the right Custody Ledger", () => {
-  it("an Ad-Hoc Outsider's Due Soon row opens the Ad-Hoc Directory's drawer, not the default User Directory", async () => {
+  it("an Ad-Hoc Outsider's Due Soon row opens the drawer for that outsider, with no navigation away from Notifications", async () => {
     const user = userEvent.setup();
     renderFromNotifications();
 
@@ -99,14 +115,13 @@ describe("Notifications 'View ->' click-through opens the right Custody Ledger",
     expect(row).not.toBeNull();
     await user.click(row!);
 
-    await screen.findByRole("heading", { name: "Admin" });
-    await waitFor(() => expect(screen.getByText("Ad-Hoc Directory")).toHaveClass("bg-brass/15"));
-    expect(screen.getByText("User Directory")).not.toHaveClass("bg-brass/15");
+    // Still on Notifications -- no page/tab navigation involved.
+    await screen.findByRole("heading", { name: "Notifications" });
     await waitFor(() => expect(screen.getByText("Custody ledger")).toBeInTheDocument());
     expect(screen.getByRole("heading", { name: "Samuel Jude Godson (No Company)" })).toBeInTheDocument();
   });
 
-  it("a linked User's Overdue row opens the User Directory's drawer", async () => {
+  it("a linked User's Overdue row opens the drawer for that user, with no navigation away from Notifications", async () => {
     const user = userEvent.setup();
     renderFromNotifications();
 
@@ -114,8 +129,7 @@ describe("Notifications 'View ->' click-through opens the right Custody Ledger",
     expect(row).not.toBeNull();
     await user.click(row!);
 
-    await screen.findByRole("heading", { name: "Admin" });
-    await waitFor(() => expect(screen.getByText("User Directory")).toHaveClass("bg-brass/15"));
+    await screen.findByRole("heading", { name: "Notifications" });
     await waitFor(() => expect(screen.getByText("Custody ledger")).toBeInTheDocument());
     expect(screen.getByRole("heading", { name: "T. Okafor" })).toBeInTheDocument();
   });

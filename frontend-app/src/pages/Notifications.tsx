@@ -6,6 +6,7 @@ import { alertsApi, extensionsApi, myItemsApi, formatDate } from "../lib/api";
 import { useAuth } from "../lib/useAuth";
 import { isPrivileged } from "../lib/roles";
 import { readDismissedSet, dismissDecisionIds } from "../lib/notificationDismissals";
+import { useCustody } from "../lib/custodyContext";
 import type { Checkout, ExtensionRequest, MyExtensionDecision, MyItem } from "../lib/types";
 
 // =============================================================================
@@ -25,12 +26,13 @@ import type { Checkout, ExtensionRequest, MyExtensionDecision, MyItem } from "..
 // since any signed-in account can have its own checked-out items.
 //
 // CLICK-THROUGH ("View ->" / "Request extension ->"): a grouped admin-facing
-// row navigates straight into that person's Custody Ledger via a
-// `?custody=type:id&name=...` query param on /admin or /manager (see
-// pages/Admin.tsx's AdminOrManagerPage, which reads it and opens the
-// drawer). A personal Overdue/Due Soon row navigates to /my-items with
-// `?extend=<checkout_id>`, which opens the Request Extension modal directly
-// for that item.
+// row opens that person's Custody Ledger directly via the shared
+// CustodyProvider (see lib/custodyContext.tsx) -- no navigation, same
+// "one shared modal, opened by id+type" shape as legacy
+// components/custody.js's openCustodyModal(), rather than routing through
+// /admin or /manager's own tab state. A personal Overdue/Due Soon row still
+// navigates to /my-items with `?extend=<checkout_id>`, which opens the
+// Request Extension modal directly for that item.
 // =============================================================================
 
 interface PersonGroup {
@@ -84,6 +86,7 @@ function GroupedRow({ group, color, suffix, onClick }: { group: PersonGroup; col
 export function Notifications() {
   const { user, demo } = useAuth();
   const navigate = useNavigate();
+  const { openCustody: openCustodyDrawer } = useCustody();
 
   const [loading, setLoading] = useState(true);
   const [overdue, setOverdue] = useState<{ items: Checkout[]; total: number }>({ items: [], total: 0 });
@@ -93,7 +96,6 @@ export function Notifications() {
   const [decisions, setDecisions] = useState<MyExtensionDecision[]>([]);
 
   const privileged = demo || isPrivileged(user?.role);
-  const adminBase = user?.role === "manager" ? "/manager" : "/admin";
 
   const refresh = () => {
     setLoading(true);
@@ -125,7 +127,7 @@ export function Notifications() {
 
   const openCustody = (entityId: number | null, entityType: "user" | "outsider" | null, name: string) => {
     if (entityId == null || !entityType) return;
-    navigate(`${adminBase}?custody=${entityType}:${entityId}&name=${encodeURIComponent(name)}`);
+    openCustodyDrawer(entityType, entityId, name);
   };
 
   const openExtensionRequest = (item: MyItem) => {

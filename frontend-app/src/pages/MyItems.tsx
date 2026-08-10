@@ -8,6 +8,13 @@ import { ExportButtons } from "../components/ExportButtons";
 import { PaginationBar, RowsPerPageSelect } from "../components/PaginationBar";
 import { DEFAULT_PAGE_SIZE } from "../lib/pagination";
 
+const filterTabs = ["all", "overdue", "due_soon"] as const;
+const filterLabels: Record<(typeof filterTabs)[number], string> = {
+  all: "All",
+  overdue: "Overdue",
+  due_soon: "Due soon",
+};
+
 function errMsg(err: unknown, fallback: string): string {
   if (err instanceof ApiError) return err.message;
   if (err instanceof Error && err.message) return err.message;
@@ -106,6 +113,29 @@ export function MyItems() {
   const [selected, setSelected] = useState<MyItem | null>(null);
   const [sentMsg, setSentMsg] = useState<string | null>(null);
   const [searchParams, setSearchParams] = useSearchParams();
+  // Deep-link support (?filter=overdue|due_soon) -- lets the Dashboard's
+  // "Your overdue items" StatCard land straight on the narrowed view
+  // instead of the full, unfiltered list of everything checked out to
+  // this person. Client-side only, same as Checkouts.tsx's tab filter --
+  // there's no filter param on GET /users/me/items.
+  const initialFilter = filterTabs.find((f) => f === searchParams.get("filter")) ?? "all";
+  const [filter, setFilter] = useState<(typeof filterTabs)[number]>(initialFilter);
+
+  const changeFilter = (f: (typeof filterTabs)[number]) => {
+    setFilter(f);
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (f === "all") next.delete("filter");
+      else next.set("filter", f);
+      return next;
+    }, { replace: true });
+  };
+
+  const visibleItems = items.filter((i) => {
+    if (filter === "overdue") return i.overdue;
+    if (filter === "due_soon") return i.due_soon && !i.overdue;
+    return true;
+  });
 
   // TRUE server-side pagination (same `limit`/`offset` pattern as the
   // Asset Inventory table -- see pages/Assets.tsx) -- every page turn or
@@ -168,6 +198,23 @@ export function MyItems() {
 
       {sentMsg && <div className="max-w-xl bg-moss/10 border border-moss/30 text-moss-soft text-[13px] rounded-[3px] px-4 py-3 mb-4">{sentMsg}</div>}
 
+      <div className="flex items-center gap-1 mb-4 border-b border-border-soft">
+        {filterTabs.map((f) => (
+          <button
+            key={f}
+            onClick={() => changeFilter(f)}
+            className={`relative px-3 py-2 text-[12.5px] font-medium transition-colors ${
+              filter === f ? "text-text" : "text-text-muted hover:text-text"
+            }`}
+          >
+            {filterLabels[f]}
+            {filter === f && (
+              <motion.div layoutId="my-items-tab" className="absolute left-0 right-0 -bottom-px h-[2px] bg-brass" transition={{ type: "spring", stiffness: 500, damping: 40 }} />
+            )}
+          </button>
+        ))}
+      </div>
+
       <div className="border border-border-soft bg-surface rounded-[3px] overflow-hidden">
         <div className="overflow-x-auto">
         <table className="w-full text-left text-[12.5px]">
@@ -186,7 +233,10 @@ export function MyItems() {
             {!loading && items.length === 0 && (
               <tr><td colSpan={6} className="px-5 py-8 text-center text-text-faint">You have no items currently checked out.</td></tr>
             )}
-            {items.map((item) => (
+            {!loading && items.length > 0 && visibleItems.length === 0 && (
+              <tr><td colSpan={6} className="px-5 py-8 text-center text-text-faint">Nothing in this view.</td></tr>
+            )}
+            {visibleItems.map((item) => (
               <tr key={item.checkout_id}>
                 <td className="px-5 py-3">
                   <p className="text-text font-medium flex items-center gap-2"><PackageCheck size={13} className="text-moss-soft shrink-0" />{item.asset_name}</p>

@@ -21,7 +21,6 @@ import {
   DatabaseBackup,
 } from "lucide-react";
 import { useAuth } from "../lib/useAuth";
-import { useSearchParams } from "react-router-dom";
 import { isFullAdmin, isTrueSuperAdmin, isPrivileged } from "../lib/roles";
 import { InventoryImportPanel } from "./admin/InventoryImportPanel";
 import { SystemBackupsPanel } from "./admin/SystemBackupsPanel";
@@ -54,27 +53,11 @@ export function Manager() {
 function AdminOrManagerPage({ variant }: { variant: "admin" | "manager" }) {
   const { user, demo } = useAuth();
   const isManager = variant === "manager";
-  const [searchParams, setSearchParams] = useSearchParams();
 
-  // ?custody=user:5&name=Jane -- deep link from the Notifications page
-  // (see pages/Notifications.tsx's openCustody()). Parsed once per
-  // navigation; the query string is cleared right after the target panel
-  // consumes it so switching tabs or refreshing doesn't reopen the drawer.
-  const custodyParam = searchParams.get("custody");
-  const custodyName = searchParams.get("name") ?? "";
-  const [custodyType, custodyIdRaw] = custodyParam ? custodyParam.split(":") : [null, null];
-  const custodyId = custodyIdRaw ? Number(custodyIdRaw) : null;
-  // Memoized on the actual id/name values (not recreated as a fresh object
-  // every render) -- UsersPanel/OutsidersPanel key their "open the drawer"
-  // effect off this object's IDENTITY, not its contents, so an unmemoized
-  // literal here would re-fire that effect (and re-clear the URL) on every
-  // unrelated re-render of this page while the deep link is still pending,
-  // instead of exactly once per actual ?custody= link.
-  const deepLinkTarget = useMemo(
-    () => (custodyId != null && !Number.isNaN(custodyId) ? { id: custodyId, name: custodyName } : null),
-    [custodyId, custodyName]
-  );
-  const clearCustodyParam = () => setSearchParams((prev) => { const next = new URLSearchParams(prev); next.delete("custody"); next.delete("name"); return next; }, { replace: true });
+  // The Custody Ledger drawer (Notifications' "View ->" click-through, and
+  // each panel's own "Custody" button) is owned above this page entirely --
+  // see lib/custodyContext.tsx -- so opening it no longer needs a
+  // ?custody= deep-link query param, tab-forcing, or any state here at all.
   // The Manager page never offers Inventory Import or System Backups --
   // same as manager.html never having those sections at all, regardless
   // of who's actually viewing it -- while the Admin page keeps gating
@@ -128,13 +111,6 @@ function AdminOrManagerPage({ variant }: { variant: "admin" | "manager" }) {
     if (!tabs.some((t) => t.key === tab)) setTab(tabs[0]?.key ?? null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tabs]);
-  // A deep link from the Notification Bell forces the matching directory
-  // tab open, regardless of whatever tab was showing before.
-  useEffect(() => {
-    if (custodyType === "outsider") setTab("outsiders");
-    else if (custodyType === "user") setTab("users");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [custodyType, custodyId]);
 
   return (
     <div>
@@ -186,8 +162,6 @@ function AdminOrManagerPage({ variant }: { variant: "admin" | "manager" }) {
               canCreate={canCreateAccounts}
               actorRole={user?.role}
               demo={demo}
-              openCustody={custodyType === "user" ? deepLinkTarget : null}
-              onOpenedCustody={clearCustodyParam}
             />
           )}
           {tab === "outsiders" && canDirectory && (
@@ -195,8 +169,6 @@ function AdminOrManagerPage({ variant }: { variant: "admin" | "manager" }) {
               canManage={canDirectory}
               actorRole={user?.role}
               demo={demo}
-              openCustody={custodyType === "outsider" ? deepLinkTarget : null}
-              onOpenedCustody={clearCustodyParam}
             />
           )}
           {tab === "quotes" && canDirectory && <QuotesPanel />}

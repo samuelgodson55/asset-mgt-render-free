@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Search, SlidersHorizontal, Plus, Download } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
 import { assetsApi } from "../lib/api";
 import type { AssetType } from "../lib/types";
 import { useAuth } from "../lib/useAuth";
@@ -13,8 +14,24 @@ import { AssetExportModal } from "../components/AssetExportModal";
 import { PaginationBar, RowsPerPageSelect } from "../components/PaginationBar";
 import { DEFAULT_PAGE_SIZE } from "../lib/pagination";
 
+const STATUS_TABS: { key: "all" | AssetType["status"]; label: string }[] = [
+  { key: "all", label: "Any status" },
+  { key: "available", label: "In stock" },
+  { key: "low", label: "Low" },
+  { key: "out", label: "Out" },
+];
+
 export function Assets() {
   const { user, demo, canSeeStock } = useAuth();
+  // Deep-link support (?category=&status=&search=) -- lets a StatCard on
+  // the Dashboard, the header search bar, or a bookmarked/shared link land
+  // straight on the filtered view it promised instead of dumping the
+  // person on the unfiltered inventory and making them redo the filtering
+  // by hand. Read once on mount; every filter change below keeps the URL
+  // in sync afterward so the address bar always reflects what's on screen
+  // (shareable + survives a refresh), the same "efficient site" pattern
+  // GitHub/Linear-style filtered list views use.
+  const [searchParams, setSearchParams] = useSearchParams();
   // Every asset-management route (create/edit/delete/restore/checkin/
   // exception/import -- see api/assets_api.py) is require_super_admin,
   // which treats Super Admin and a plain Admin account identically (see
@@ -28,8 +45,11 @@ export function Assets() {
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
   const [perPage, setPerPage] = useState(DEFAULT_PAGE_SIZE);
-  const [search, setSearch] = useState("");
-  const [category, setCategory] = useState<string>("All");
+  const [search, setSearch] = useState(() => searchParams.get("search") ?? "");
+  const [category, setCategory] = useState<string>(() => searchParams.get("category") ?? "All");
+  const [status, setStatus] = useState<(typeof STATUS_TABS)[number]["key"]>(
+    () => (searchParams.get("status") as (typeof STATUS_TABS)[number]["key"]) || "all"
+  );
   const [categories, setCategories] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -68,11 +88,49 @@ export function Assets() {
       .catch(() => setCategories([]));
   }, []);
 
-  // Category is a client-side narrowing of the current server-fetched page
-  // (there's no `category=` query param on GET /assets) -- same "All" pill
-  // behavior as before, just applied on top of the search-narrowed,
-  // paginated slice rather than a full client-downloaded snapshot.
-  const filtered = category === "All" ? assets : assets.filter((a) => (a.category ?? "Uncategorized") === category);
+  // Category/status are client-side narrowings of the current server-fetched
+  // page (there's no `category=`/`status=` query param on GET /assets) --
+  // same "All" pill behavior as before, just applied on top of the
+  // search-narrowed, paginated slice rather than a full client-downloaded
+  // snapshot.
+  const filtered = assets
+    .filter((a) => category === "All" || (a.category ?? "Uncategorized") === category)
+    .filter((a) => status === "all" || a.status === status);
+
+  // Pill/tab clicks (and the search box) update both local state and the
+  // URL together, so the address bar always mirrors what's currently on
+  // screen -- a StatCard, a bookmark, or hitting "back" all land on the
+  // exact same filtered view rather than the unfiltered default.
+  const changeCategory = (c: string) => {
+    setCategory(c);
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (c === "All") next.delete("category");
+      else next.set("category", c);
+      return next;
+    }, { replace: true });
+  };
+
+  const changeStatus = (s: (typeof STATUS_TABS)[number]["key"]) => {
+    setStatus(s);
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (s === "all") next.delete("status");
+      else next.set("status", s);
+      return next;
+    }, { replace: true });
+  };
+
+  const changeSearch = (q: string) => {
+    setOffset(0);
+    setSearch(q);
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (!q) next.delete("search");
+      else next.set("search", q);
+      return next;
+    }, { replace: true });
+  };
 
   return (
     <div>
@@ -86,7 +144,7 @@ export function Assets() {
             <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-faint" />
             <input
               value={search}
-              onChange={(e) => { setOffset(0); setSearch(e.target.value); }}
+              onChange={(e) => changeSearch(e.target.value)}
               placeholder="Search by name…"
               className="w-full bg-surface border border-border-soft rounded-[3px] pl-8 pr-3 py-2 text-[12.5px] text-text placeholder:text-text-faint focus:border-brass/50 focus:outline-none transition-colors"
             />
@@ -109,12 +167,12 @@ export function Assets() {
         </div>
       )}
 
-      <div className="flex items-center gap-2 mb-5 flex-wrap">
+      <div className="flex items-center gap-2 mb-3 flex-wrap">
         <SlidersHorizontal size={13} className="text-text-faint" />
         {["All", ...categories].map((c) => (
           <button
             key={c}
-            onClick={() => setCategory(c)}
+            onClick={() => changeCategory(c)}
             className={`px-2.5 py-1 rounded-full text-[11.5px] border transition-colors ${
               category === c
                 ? "bg-brass/15 border-brass/40 text-brass-soft"
@@ -125,6 +183,25 @@ export function Assets() {
           </button>
         ))}
       </div>
+
+      {canSeeStock && (
+        <div className="flex items-center gap-2 mb-5 flex-wrap">
+          <span className="w-[13px]" />
+          {STATUS_TABS.map((s) => (
+            <button
+              key={s.key}
+              onClick={() => changeStatus(s.key)}
+              className={`px-2.5 py-1 rounded-full text-[11.5px] border transition-colors ${
+                status === s.key
+                  ? "bg-sky/15 border-sky/40 text-sky"
+                  : "border-border-soft text-text-muted hover:text-text hover:border-border"
+              }`}
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
         <AnimatePresence mode="popLayout">
@@ -138,7 +215,7 @@ export function Assets() {
         <div className="text-center py-20 text-text-faint text-sm">No assets match that filter. Try a different tag or category.</div>
       )}
 
-      {category === "All" && (
+      {category === "All" && status === "all" && (
         <div className="mt-5">
           <PaginationBar total={total} perPage={perPage} offset={offset} onOffsetChange={setOffset} />
         </div>

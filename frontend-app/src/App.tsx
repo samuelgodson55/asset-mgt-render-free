@@ -13,6 +13,7 @@ import { Login } from "./pages/Login";
 import { AuthProvider } from "./lib/auth";
 import { useAuth } from "./lib/useAuth";
 import { ThemeProvider } from "./lib/theme";
+import { CustodyProvider } from "./lib/custodyContext";
 import { isFullAdmin, isPrivileged } from "./lib/roles";
 
 function RequireAuth({ children }: { children: ReactNode }) {
@@ -52,7 +53,9 @@ export default function App() {
             <Route
               element={
                 <RequireAuth>
-                  <Layout />
+                  <CustodyProvider>
+                    <Layout />
+                  </CustodyProvider>
                 </RequireAuth>
               }
             >

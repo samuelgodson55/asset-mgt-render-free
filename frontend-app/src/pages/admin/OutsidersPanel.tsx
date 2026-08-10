@@ -7,7 +7,7 @@ import { Pencil, ArrowRightLeft, Trash2 } from "lucide-react";
 import { outsidersApi } from "../../lib/api";
 import type { OutsiderRow } from "../../lib/types";
 import { isFullAdmin } from "../../lib/roles";
-import { CustodyDrawer } from "../../components/CustodyDrawer";
+import { useCustody } from "../../lib/custodyContext";
 import { ExportButtons } from "../../components/ExportButtons";
 import { PaginationBar, RowsPerPageSelect } from "../../components/PaginationBar";
 import { DEFAULT_PAGE_SIZE } from "../../lib/pagination";
@@ -118,14 +118,10 @@ export function OutsidersPanel({
   canManage,
   actorRole,
   demo,
-  openCustody: deepLinkCustody,
-  onOpenedCustody,
 }: {
   canManage: boolean;
   actorRole: string | undefined | null;
   demo: boolean;
-  openCustody?: { id: number; name: string } | null;
-  onOpenedCustody?: () => void;
 }) {
   const [rows, setRows] = useState<OutsiderRow[]>([]);
   const [total, setTotal] = useState(0);
@@ -133,22 +129,16 @@ export function OutsidersPanel({
   const [perPage, setPerPage] = useState(DEFAULT_PAGE_SIZE);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
-  const [custody, setCustody] = useState<{ type: "user" | "outsider"; id: number; name: string } | null>(null);
   const [editing, setEditing] = useState<OutsiderRow | null>(null);
   const [converting, setConverting] = useState<OutsiderRow | null>(null);
+  // Custody Ledger drawer is shared app-wide -- see lib/custodyContext.tsx
+  // and UsersPanel.tsx's matching comment.
+  const { openCustody } = useCustody();
 
   // Same Manager role ceiling as UsersPanel's createRoleOptions above --
   // mirrors manager.html's "Convert to user" role select and
   // services/outsider_service.py's convert_outsider_to_user().
   const convertRoleOptions = demo || isFullAdmin(actorRole) ? ROLE_OPTIONS : ["staff", "customer"];
-
-  useEffect(() => {
-    if (deepLinkCustody) {
-      setCustody({ type: "outsider", id: deepLinkCustody.id, name: deepLinkCustody.name });
-      onOpenedCustody?.();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [deepLinkCustody]);
 
   const refresh = () => {
     setLoading(true);
@@ -206,7 +196,7 @@ export function OutsidersPanel({
                 <td className="hidden sm:table-cell px-5 py-3 font-mono text-text-muted">{o.outstanding_items}</td>
                 <td className="px-5 py-3 text-right">
                   <div className="flex items-center justify-end gap-1.5">
-                    <button onClick={() => setCustody({ type: "outsider", id: o.id, name: o.name })} className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-sky/50 hover:text-sky transition-colors">Custody</button>
+                    <button onClick={() => openCustody("outsider", o.id, o.name)} className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-sky/50 hover:text-sky transition-colors">Custody</button>
                     {canManage && <button onClick={() => setEditing(o)} title="Edit" className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-brass/50 hover:text-brass-soft transition-colors"><Pencil size={11} /></button>}
                     {canManage && <button onClick={() => setConverting(o)} title="Convert to user" className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-moss/50 hover:text-moss-soft transition-colors"><ArrowRightLeft size={11} /></button>}
                     {canManage && <button onClick={() => remove(o)} title="Delete" className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-rust/50 hover:text-rust-soft transition-colors"><Trash2 size={11} /></button>}
@@ -220,7 +210,6 @@ export function OutsidersPanel({
 
       <PaginationBar total={total} perPage={perPage} offset={offset} onOffsetChange={setOffset} />
 
-      <CustodyDrawer target={custody} onClose={() => setCustody(null)} />
       <EditOutsiderModal target={editing} onClose={() => setEditing(null)} onDone={() => { setEditing(null); refresh(); }} />
       <ConvertOutsiderModal target={converting} onClose={() => setConverting(null)} onDone={() => { setConverting(null); refresh(); }} roleOptions={convertRoleOptions} />
     </div>

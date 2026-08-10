@@ -10,7 +10,7 @@ import { Plus, KeyRound, Pencil, UserMinus, Trash2 } from "lucide-react";
 import { usersApi } from "../../lib/api";
 import type { UserRow } from "../../lib/types";
 import { isFullAdmin, canManageUserRole } from "../../lib/roles";
-import { CustodyDrawer } from "../../components/CustodyDrawer";
+import { useCustody } from "../../lib/custodyContext";
 import { ExportButtons } from "../../components/ExportButtons";
 import { PaginationBar, RowsPerPageSelect } from "../../components/PaginationBar";
 import { DEFAULT_PAGE_SIZE } from "../../lib/pagination";
@@ -216,8 +216,6 @@ export function UsersPanel({
   canCreate,
   actorRole,
   demo,
-  openCustody: deepLinkCustody,
-  onOpenedCustody,
 }: {
   /** Super Admin/Admin only -- gates Reset Password and Delete Profile,
    * both require_super_admin on the backend with no Manager exception. */
@@ -228,8 +226,6 @@ export function UsersPanel({
   canCreate: boolean;
   actorRole: string | undefined | null;
   demo: boolean;
-  openCustody?: { id: number; name: string } | null;
-  onOpenedCustody?: () => void;
 }) {
   const [rows, setRows] = useState<UserRow[]>([]);
   const [total, setTotal] = useState(0);
@@ -241,7 +237,11 @@ export function UsersPanel({
   const [resetting, setResetting] = useState<UserRow | null>(null);
   const [editing, setEditing] = useState<UserRow | null>(null);
   const [revoking, setRevoking] = useState<UserRow | null>(null);
-  const [custody, setCustody] = useState<{ type: "user" | "outsider"; id: number; name: string } | null>(null);
+  // Custody Ledger drawer is now shared app-wide (see lib/custodyContext.tsx)
+  // so the Notification Bell's "View ->" click-through can open it without
+  // navigating here first -- this panel's own "Custody" button just opens
+  // the same shared drawer instead of owning its own local copy.
+  const { openCustody } = useCustody();
 
   // Edit / Revoke Access per row: full admins act on anyone; a Manager
   // only on a "staff"/"customer" row -- mirrors services/user_service.py's
@@ -255,17 +255,6 @@ export function UsersPanel({
   // Manager/Admin option, and services/user_service.py's own enforcement
   // of the same limit.
   const createRoleOptions = demo || isFullAdmin(actorRole) ? ROLE_OPTIONS : ["staff", "customer"];
-
-  // Deep link from the Notification Bell (?custody=user:ID&name=...) --
-  // opens the Custody Ledger drawer straight away, same click-through as
-  // legacy notifications.js's data-action="open-custody" rows.
-  useEffect(() => {
-    if (deepLinkCustody) {
-      setCustody({ type: "user", id: deepLinkCustody.id, name: deepLinkCustody.name });
-      onOpenedCustody?.();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [deepLinkCustody]);
 
   const refresh = () => {
     setLoading(true);
@@ -330,7 +319,7 @@ export function UsersPanel({
                 <td className="hidden sm:table-cell px-5 py-3 font-mono text-text-muted">{u.checkout_count}</td>
                 <td className="px-5 py-3 text-right">
                   <div className="flex items-center justify-end gap-1.5 flex-wrap">
-                    <button onClick={() => setCustody({ type: "user", id: u.id, name: u.name })} className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-sky/50 hover:text-sky transition-colors">Custody</button>
+                    <button onClick={() => openCustody("user", u.id, u.name)} className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-sky/50 hover:text-sky transition-colors">Custody</button>
                     {canEditRow(u.role) && <button onClick={() => setEditing(u)} title="Edit" className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-brass/50 hover:text-brass-soft transition-colors"><Pencil size={11} /></button>}
                     {canManage && <button onClick={() => setResetting(u)} title="Reset password" className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-brass/50 hover:text-brass-soft transition-colors"><KeyRound size={11} /></button>}
                     {canEditRow(u.role) && <button onClick={() => setRevoking(u)} title="Revoke access (convert to Ad-Hoc)" className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-rust/50 hover:text-rust-soft transition-colors"><UserMinus size={11} /></button>}
@@ -349,7 +338,6 @@ export function UsersPanel({
       <ResetPasswordModal target={resetting} onClose={() => setResetting(null)} onDone={() => { setResetting(null); alert("Password reset."); }} />
       <EditUserModal target={editing} onClose={() => setEditing(null)} onDone={() => { setEditing(null); refresh(); }} />
       <RevokeUserModal target={revoking} onClose={() => setRevoking(null)} onDone={() => { setRevoking(null); refresh(); }} />
-      <CustodyDrawer target={custody} onClose={() => setCustody(null)} />
     </div>
   );
 }

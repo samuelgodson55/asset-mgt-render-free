@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { Admin, Manager } from "./Admin";
+import { CustodyProvider } from "../lib/custodyContext";
 import type { AuthUser } from "../lib/api";
 
 const { useAuthMock } = vi.hoisted(() => ({ useAuthMock: vi.fn() }));
@@ -26,7 +27,9 @@ function renderPage(Page: typeof Admin | typeof Manager, role: string) {
   });
   return render(
     <MemoryRouter>
-      <Page />
+      <CustodyProvider>
+        <Page />
+      </CustodyProvider>
     </MemoryRouter>
   );
 }

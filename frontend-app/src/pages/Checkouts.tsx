@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { X, Send } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
 import { api, extensionsApi, getDueSoonReminderDays, relativeTime, formatDate } from "../lib/api";
 import type { Checkout, ExtensionRequest } from "../lib/types";
 import { StatusPill } from "../components/StatusPill";
 import { PaginationBar, RowsPerPageSelect } from "../components/PaginationBar";
 import { DEFAULT_PAGE_SIZE } from "../lib/pagination";
+import { useCustody } from "../lib/custodyContext";
 
 const tabs = ["All", "Overdue", "Due Soon", "Active"] as const;
 
@@ -64,8 +66,18 @@ function DenyReasonModal({ request, onClose, onDenied }: { request: ExtensionReq
 export function Checkouts() {
   const [checkouts, setCheckouts] = useState<Checkout[]>([]);
   const [extensions, setExtensions] = useState<ExtensionRequest[]>([]);
-  const [tab, setTab] = useState<(typeof tabs)[number]>("All");
+  // Deep-link support (?tab=Overdue etc.) -- lets the Dashboard's "Overdue
+  // returns" StatCard (and any other link into this page) land straight on
+  // the filtered tab it promised instead of the unfiltered "All" list.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const initialTab = tabs.find((t) => t === searchParams.get("tab")) ?? "All";
+  const [tab, setTab] = useState<(typeof tabs)[number]>(initialTab);
   const [denying, setDenying] = useState<ExtensionRequest | null>(null);
+  // Same click-through the Notification Bell's grouped rows and legacy
+  // custody.js's openCustodyModal() use: a checkout row IS a person
+  // holding something, so clicking it should jump straight to that
+  // person's Custody Ledger rather than going nowhere.
+  const { openCustody } = useCustody();
   // Client-side pagination over the already-loaded (and tab-filtered) list
   // below -- GET /checkouts is fetched once, up to `limit=500`, the same
   // way it always has been (see loadCheckouts() in lib/api.ts), so this
@@ -120,6 +132,12 @@ export function Checkouts() {
   const changeTab = (t: (typeof tabs)[number]) => {
     setTab(t);
     setOffset(0);
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (t === "All") next.delete("tab");
+      else next.set("tab", t);
+      return next;
+    }, { replace: true });
   };
   const handlePerPageChange = (n: number) => {
     setPerPage(n);
@@ -178,13 +196,19 @@ export function Checkouts() {
               <span className="w-16 text-right">Status</span>
             </div>
             <div className="divide-y divide-border-soft">
-              {paged.map((c, i) => (
+              {paged.map((c, i) => {
+                const clickable = c.entity_id != null;
+                return (
                 <motion.div
                   key={c.id}
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
                   transition={{ duration: 0.3, delay: i * 0.03 }}
-                  className="grid grid-cols-[1fr_auto_auto] gap-3 px-4 py-3 hover:bg-surface-raised transition-colors"
+                  onClick={clickable ? () => openCustody(c.entity_type ?? "user", c.entity_id as number, c.checked_out_to) : undefined}
+                  role={clickable ? "button" : undefined}
+                  tabIndex={clickable ? 0 : undefined}
+                  title={clickable ? `View ${c.checked_out_to}'s Custody Ledger` : undefined}
+                  className={`grid grid-cols-[1fr_auto_auto] gap-3 px-4 py-3 hover:bg-surface-raised transition-colors ${clickable ? "cursor-pointer" : ""}`}
                 >
                   <div className="min-w-0">
                     <p className="text-[13px] text-text truncate">{c.asset_name}</p>
@@ -204,7 +228,8 @@ export function Checkouts() {
                     <StatusPill status={c.due_soon ? "due_soon" : c.status === "overdue" ? "overdue" : "active"} />
                   </div>
                 </motion.div>
-              ))}
+                );
+              })}
               {filtered.length === 0 && <p className="text-center text-text-faint text-[12px] py-10">No checkouts in this view.</p>}
             </div>
           </div>

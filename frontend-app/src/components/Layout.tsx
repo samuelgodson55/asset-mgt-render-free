@@ -7,6 +7,8 @@ import { useAuth } from "../lib/useAuth";
 import { isPrivileged } from "../lib/roles";
 import { ThemeToggle } from "./ThemeToggle";
 import { NotificationBell } from "./NotificationBell";
+import { CustodyDrawer } from "./CustodyDrawer";
+import { useCustody } from "../lib/custodyContext";
 
 // "Checkouts" (system-wide overdue/due-soon + extension-request review) is
 // deliberately left out of this base list -- it's built entirely on top of
@@ -38,8 +40,27 @@ export function Layout() {
   const [unread, setUnread] = useState(0);
   const [live, setLive] = useState(false);
   const [navOpen, setNavOpen] = useState(false);
+  const [headerSearch, setHeaderSearch] = useState("");
   const { user, demo, logout } = useAuth();
   const navigate = useNavigate();
+
+  // Header search was purely decorative (a placeholder with no handler) --
+  // Enter now jumps to the Inventory grid pre-filtered to the typed text,
+  // same "type, hit enter, land on filtered results" pattern as GitHub's
+  // or Linear's top-bar search. Assets.tsx reads the ?search= param back
+  // out on mount (see its useState initializers) so this is a real
+  // deep-link, not just a client-side scroll-to.
+  const submitHeaderSearch = () => {
+    const q = headerSearch.trim();
+    if (!q) return;
+    navigate(`/assets?search=${encodeURIComponent(q)}`);
+    setHeaderSearch("");
+  };
+  // Owned here, above every routed page, so ANY page (Notifications' "View
+  // ->" rows, a directory row, an extension request) can open the same
+  // Custody Ledger drawer with a plain function call -- no navigation, no
+  // tab state, no deep-link parsing. See lib/custodyContext.tsx.
+  const { target: custodyTarget, closeCustody } = useCustody();
   const location = useLocation();
 
   // Below `lg` the sidebar becomes an off-canvas drawer -- close it
@@ -246,13 +267,21 @@ export function Layout() {
             <div className="relative w-full max-w-xs hidden sm:block">
               <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-faint" />
               <input
-                placeholder="Search inventory, tags, people…"
+                value={headerSearch}
+                onChange={(e) => setHeaderSearch(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") submitHeaderSearch(); }}
+                placeholder="Search inventory, tags…"
                 className="w-full bg-surface border border-border-soft rounded-[3px] pl-8 pr-3 py-1.5 text-[12.5px] text-text placeholder:text-text-faint focus:border-brass/50 focus:outline-none transition-colors"
               />
             </div>
+            {/* Below `sm` there's no room for the search box itself, so
+                the icon just jumps straight to Inventory, which has its
+                own search field front and center -- better than a tap
+                that visibly does nothing. */}
             <button
+              onClick={() => navigate("/assets")}
               className="sm:hidden shrink-0 p-1.5 rounded-[3px] text-text-muted hover:text-text hover:bg-surface transition-colors"
-              aria-label="Search"
+              aria-label="Search inventory"
             >
               <Search size={16} />
             </button>
@@ -288,6 +317,8 @@ export function Layout() {
           </AnimatePresence>
         </main>
       </div>
+
+      <CustodyDrawer target={custodyTarget} onClose={closeCustody} />
     </div>
   );
 }

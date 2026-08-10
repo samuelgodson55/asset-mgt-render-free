@@ -6,10 +6,11 @@ import { api, myItemsApi, relativeTime, formatDate } from "../lib/api";
 import { StatCard } from "../components/StatCard";
 import { StatusPill } from "../components/StatusPill";
 import type { Checkout, DashboardStats, MyItem } from "../lib/types";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../lib/useAuth";
 import { useTheme } from "../lib/useTheme";
 import { isPrivileged } from "../lib/roles";
+import { useCustody } from "../lib/custodyContext";
 
 // recharts needs literal color strings (SVG attrs, not the app's CSS
 // custom properties), so the two palettes are mirrored here by hand.
@@ -25,6 +26,12 @@ export function Dashboard() {
   const [myItemsLoaded, setMyItemsLoaded] = useState(false);
   const { user, demo, canSeeStock } = useAuth();
   const { theme } = useTheme();
+  const navigate = useNavigate();
+  // Same click-through the Notification Bell's grouped rows and
+  // Checkouts.tsx's rows now use: a "Needs attention" row IS a person
+  // holding something overdue/due-soon, so clicking it should jump
+  // straight to their Custody Ledger rather than going nowhere.
+  const { openCustody } = useCustody();
   const chart = CHART_COLORS[theme];
   const firstName = user?.name?.trim().split(/\s+/)[0];
   // Overdue/due-soon checkouts (system-wide) and the extension-request
@@ -116,16 +123,24 @@ export function Dashboard() {
           doesn't end up with lopsided empty space. */}
       <div className={`grid grid-cols-2 gap-3 mb-6 ${canSeeStock ? "md:grid-cols-4" : "md:grid-cols-2"}`}>
         {canSeeStock ? (
-          <StatCard index={0} label="Total pooled units" value={stats?.total_assets ?? "—"} icon={Boxes} accent="sky" hint="Across all categories" />
+          <StatCard index={0} label="Total pooled units" value={stats?.total_assets ?? "—"} icon={Boxes} accent="sky" hint="Across all categories" to="/assets" />
         ) : (
-          <StatCard index={0} label="Your checked-out items" value={myItemsLoaded ? myCheckedOutTotal : "—"} icon={PackageCheck} accent="sky" hint="Currently in your custody" />
+          <StatCard index={0} label="Your checked-out items" value={myItemsLoaded ? myCheckedOutTotal : "—"} icon={PackageCheck} accent="sky" hint="Currently in your custody" to="/my-items" />
         )}
         {canSeeStock && (
-          <StatCard index={1} label="Available now" value={stats?.available ?? "—"} icon={PackageCheck} accent="moss" hint="Ready to check out" />
+          <StatCard index={1} label="Available now" value={stats?.available ?? "—"} icon={PackageCheck} accent="moss" hint="Ready to check out" to="/assets?status=available" />
         )}
-        <StatCard index={2} label={privileged ? "Overdue returns" : "Your overdue items"} value={stats?.overdue ?? "—"} icon={AlarmClockOff} accent="rust" hint={privileged ? "Needs follow-up" : "Return these first"} />
+        <StatCard
+          index={2}
+          label={privileged ? "Overdue returns" : "Your overdue items"}
+          value={stats?.overdue ?? "—"}
+          icon={AlarmClockOff}
+          accent="rust"
+          hint={privileged ? "Needs follow-up" : "Return these first"}
+          to={privileged ? "/checkouts?tab=Overdue" : "/my-items?filter=overdue"}
+        />
         {canSeeStock && (
-          <StatCard index={3} label="Low stock pools" value={stats?.low_stock ?? "—"} icon={TrendingDown} accent="brass" hint="Below 25% available" />
+          <StatCard index={3} label="Low stock pools" value={stats?.low_stock ?? "—"} icon={TrendingDown} accent="brass" hint="Below 25% available" to="/assets?status=low" />
         )}
       </div>
 
@@ -193,24 +208,40 @@ export function Dashboard() {
           {privileged ? (
             <div className="flex flex-col divide-y divide-border-soft">
               {attention.length === 0 && <p className="text-[12px] text-text-faint py-6 text-center">Nothing overdue. Ledger's clean.</p>}
-              {attention.map((c) => (
-                <div key={c.id} className="py-2.5 flex items-center justify-between gap-3">
-                  <div className="min-w-0">
-                    <p className="text-[12.5px] text-text truncate">{c.asset_name}</p>
-                    <p className="text-[11px] text-text-faint font-mono truncate">{c.tag} · {c.checked_out_to}</p>
-                  </div>
-                  <div className="text-right shrink-0">
-                    <StatusPill status={c.status === "overdue" ? "overdue" : "active"} />
-                    <p className="text-[10px] text-text-faint mt-0.5">{relativeTime(c.due_at)}</p>
-                  </div>
-                </div>
-              ))}
+              {attention.map((c) => {
+                const clickable = c.entity_id != null;
+                return (
+                  <button
+                    key={c.id}
+                    onClick={clickable ? () => openCustody(c.entity_type ?? "user", c.entity_id as number, c.checked_out_to) : undefined}
+                    disabled={!clickable}
+                    title={clickable ? `View ${c.checked_out_to}'s Custody Ledger` : undefined}
+                    className={`w-full py-2.5 flex items-center justify-between gap-3 text-left rounded-[3px] transition-colors -mx-1.5 px-1.5 ${
+                      clickable ? "hover:bg-surface-raised cursor-pointer" : "cursor-default"
+                    }`}
+                  >
+                    <div className="min-w-0">
+                      <p className="text-[12.5px] text-text truncate">{c.asset_name}</p>
+                      <p className="text-[11px] text-text-faint font-mono truncate">{c.tag} · {c.checked_out_to}</p>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <StatusPill status={c.status === "overdue" ? "overdue" : "active"} />
+                      <p className="text-[10px] text-text-faint mt-0.5">{relativeTime(c.due_at)}</p>
+                    </div>
+                  </button>
+                );
+              })}
             </div>
           ) : (
             <div className="flex flex-col divide-y divide-border-soft">
               {myAttention.length === 0 && <p className="text-[12px] text-text-faint py-6 text-center">Nothing of yours is overdue or due soon.</p>}
               {myAttention.map((i) => (
-                <div key={i.checkout_id} className="py-2.5 flex items-center justify-between gap-3">
+                <button
+                  key={i.checkout_id}
+                  onClick={() => navigate(`/my-items?filter=${i.overdue ? "overdue" : "due_soon"}`)}
+                  title="Go to My Items"
+                  className="w-full py-2.5 flex items-center justify-between gap-3 text-left rounded-[3px] hover:bg-surface-raised transition-colors cursor-pointer -mx-1.5 px-1.5"
+                >
                   <div className="min-w-0">
                     <p className="text-[12.5px] text-text truncate">{i.asset_name}</p>
                     <p className="text-[11px] text-text-faint font-mono truncate">qty {i.quantity}</p>
@@ -219,7 +250,7 @@ export function Dashboard() {
                     <StatusPill status={i.overdue ? "overdue" : "active"} />
                     <p className="text-[10px] text-text-faint mt-0.5">{relativeTime(i.due_date)}</p>
                   </div>
-                </div>
+                </button>
               ))}
             </div>
           )}
@@ -235,18 +266,35 @@ export function Dashboard() {
         >
           <h2 className="font-display text-[15px] font-medium text-text mb-4">{canSeeStock ? "Fleet by category" : "Your items by category"}</h2>
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-            {(canSeeStock ? stats?.categories ?? [] : myCategoryCounts).map((c, i) => (
-              <motion.div
-                key={c.name}
-                initial={{ opacity: 0, scale: 0.96 }}
-                animate={{ opacity: 1, scale: 1 }}
-                transition={{ duration: 0.3, delay: 0.3 + i * 0.04 }}
-                className="border border-border-soft rounded-[3px] p-3"
-              >
-                <p className="text-[11px] text-text-muted truncate">{c.name}</p>
-                <p className="font-mono text-lg text-text mt-1">{c.count}</p>
-              </motion.div>
-            ))}
+            {(canSeeStock ? stats?.categories ?? [] : myCategoryCounts).map((c, i) =>
+              canSeeStock ? (
+                <motion.div
+                  key={c.name}
+                  initial={{ opacity: 0, scale: 0.96 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  transition={{ duration: 0.3, delay: 0.3 + i * 0.04 }}
+                >
+                  <Link
+                    to={`/assets?category=${encodeURIComponent(c.name)}`}
+                    className="group block border border-border-soft rounded-[3px] p-3 hover:border-brass/40 hover:bg-surface-raised transition-colors"
+                  >
+                    <p className="text-[11px] text-text-muted truncate group-hover:text-text-faint">{c.name}</p>
+                    <p className="font-mono text-lg text-text mt-1">{c.count}</p>
+                  </Link>
+                </motion.div>
+              ) : (
+                <motion.div
+                  key={c.name}
+                  initial={{ opacity: 0, scale: 0.96 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  transition={{ duration: 0.3, delay: 0.3 + i * 0.04 }}
+                  className="border border-border-soft rounded-[3px] p-3"
+                >
+                  <p className="text-[11px] text-text-muted truncate">{c.name}</p>
+                  <p className="font-mono text-lg text-text mt-1">{c.count}</p>
+                </motion.div>
+              )
+            )}
           </div>
         </motion.div>
       )}
