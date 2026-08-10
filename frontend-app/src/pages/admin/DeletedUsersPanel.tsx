@@ -13,8 +13,6 @@ import { DEFAULT_PAGE_SIZE } from "../../lib/pagination";
 import { ErrorBanner } from "../../components/ui/ErrorBanner";
 import { SearchInput } from "../../components/ui/SearchInput";
 import { TableShell, TableHead, TablePlaceholderRow } from "../../components/ui/TableShell";
-import { RowDetailsModal, MobileRowChevron } from "../../components/ui/RowDetails";
-import { mobileRowClass } from "../../components/ui/rowInteractionStyles";
 import { errMsg, formatWhen } from "./sharedHelpers";
 
 export function DeletedUsersPanel() {
@@ -26,7 +24,6 @@ export function DeletedUsersPanel() {
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [detailsRow, setDetailsRow] = useState<DeletedUserRow | null>(null);
 
   const refresh = () => {
     setLoading(true);
@@ -74,13 +71,6 @@ export function DeletedUsersPanel() {
     }
   };
 
-  const renderActions = (u: DeletedUserRow) => (
-    <div className="flex items-center justify-end gap-1.5 flex-wrap">
-      <button onClick={() => { setDetailsRow(null); restore(u); }} disabled={busyId === u.id} className="rounded-md border border-moss/40 px-2 py-1 text-[11px] font-medium text-moss-soft hover:bg-moss/10 disabled:opacity-50 transition-colors">Restore</button>
-      <button onClick={() => { setDetailsRow(null); purge(u); }} disabled={busyId === u.id} className="rounded-md border border-rust/40 px-2 py-1 text-[11px] font-medium text-rust-soft hover:bg-rust/10 disabled:opacity-50 transition-colors">Purge</button>
-    </div>
-  );
-
   return (
     <div className="flex flex-col gap-4">
       <div className="flex items-center gap-2 flex-wrap">
@@ -102,20 +92,18 @@ export function DeletedUsersPanel() {
             {loading && <TablePlaceholderRow columns={4}>Loading…</TablePlaceholderRow>}
             {!loading && rows.length === 0 && <TablePlaceholderRow columns={4}>No deleted accounts.</TablePlaceholderRow>}
             {rows.map((u) => (
-              <tr key={u.id} onClick={() => setDetailsRow(u)} className={mobileRowClass()}>
+              <tr key={u.id}>
                 <td className="px-5 py-3">
-                  <div className="flex items-center gap-2">
-                    <div>
-                      <p className="text-text font-medium">{u.name}</p>
-                      <p className="text-[11px] text-text-faint">{u.email}</p>
-                    </div>
-                    <MobileRowChevron />
-                  </div>
+                  <p className="text-text font-medium">{u.name}</p>
+                  <p className="text-[11px] text-text-faint">{u.email}</p>
                 </td>
                 <td className="hidden sm:table-cell px-5 py-3 text-text-muted capitalize">{u.role.replace("_", " ")}</td>
                 <td className="hidden sm:table-cell px-5 py-3 text-text-muted">{u.deleted_at ? formatWhen(u.deleted_at) : "—"}</td>
-                <td className="hidden sm:table-cell px-5 py-3 text-right" onClick={(e) => e.stopPropagation()}>
-                  {renderActions(u)}
+                <td className="px-5 py-3 text-right">
+                  <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                    <button onClick={() => restore(u)} disabled={busyId === u.id} className="rounded-md border border-moss/40 px-2 py-1 text-[11px] font-medium text-moss-soft hover:bg-moss/10 disabled:opacity-50 transition-colors">Restore</button>
+                    <button onClick={() => purge(u)} disabled={busyId === u.id} className="rounded-md border border-rust/40 px-2 py-1 text-[11px] font-medium text-rust-soft hover:bg-rust/10 disabled:opacity-50 transition-colors">Purge</button>
+                  </div>
                 </td>
               </tr>
             ))}
@@ -124,18 +112,6 @@ export function DeletedUsersPanel() {
       </TableShell>
 
       <PaginationBar total={total} perPage={perPage} offset={offset} onOffsetChange={setOffset} />
-      {detailsRow && (
-        <RowDetailsModal
-          title={detailsRow.name}
-          subtitle={detailsRow.email}
-          onClose={() => setDetailsRow(null)}
-          fields={[
-            { label: "Privilege tier", value: <span className="capitalize">{detailsRow.role.replace("_", " ")}</span> },
-            { label: "Deleted on", value: detailsRow.deleted_at ? formatWhen(detailsRow.deleted_at) : "—" },
-            { label: "", value: renderActions(detailsRow) },
-          ]}
-        />
-      )}
     </div>
   );
 }

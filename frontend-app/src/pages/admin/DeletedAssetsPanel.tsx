@@ -13,8 +13,6 @@ import { DEFAULT_PAGE_SIZE } from "../../lib/pagination";
 import { ErrorBanner } from "../../components/ui/ErrorBanner";
 import { SearchInput } from "../../components/ui/SearchInput";
 import { TableShell, TableHead, TablePlaceholderRow } from "../../components/ui/TableShell";
-import { RowDetailsModal, MobileRowChevron } from "../../components/ui/RowDetails";
-import { mobileRowClass } from "../../components/ui/rowInteractionStyles";
 import { errMsg, formatWhen } from "./sharedHelpers";
 
 export function DeletedAssetsPanel() {
@@ -26,7 +24,6 @@ export function DeletedAssetsPanel() {
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [detailsRow, setDetailsRow] = useState<DeletedAssetRow | null>(null);
 
   const refresh = () => {
     setLoading(true);
@@ -74,13 +71,6 @@ export function DeletedAssetsPanel() {
     }
   };
 
-  const renderActions = (a: DeletedAssetRow) => (
-    <div className="flex items-center justify-end gap-1.5 flex-wrap">
-      <button onClick={() => { setDetailsRow(null); restore(a); }} disabled={busyId === a.id} className="rounded-md border border-moss/40 px-2 py-1 text-[11px] font-medium text-moss-soft hover:bg-moss/10 disabled:opacity-50 transition-colors">Restore</button>
-      <button onClick={() => { setDetailsRow(null); purge(a); }} disabled={busyId === a.id} className="rounded-md border border-rust/40 px-2 py-1 text-[11px] font-medium text-rust-soft hover:bg-rust/10 disabled:opacity-50 transition-colors">Purge</button>
-    </div>
-  );
-
   return (
     <div className="flex flex-col gap-4">
       <div className="flex items-center gap-2 flex-wrap">
@@ -102,20 +92,18 @@ export function DeletedAssetsPanel() {
             {loading && <TablePlaceholderRow columns={4}>Loading…</TablePlaceholderRow>}
             {!loading && rows.length === 0 && <TablePlaceholderRow columns={4}>No deleted asset pools.</TablePlaceholderRow>}
             {rows.map((a) => (
-              <tr key={a.id} onClick={() => setDetailsRow(a)} className={mobileRowClass()}>
+              <tr key={a.id}>
                 <td className="px-5 py-3">
-                  <div className="flex items-center gap-2">
-                    <div>
-                      <p className="text-text font-medium">{a.name}</p>
-                      <p className="text-[11px] text-text-faint font-mono">POOL-{String(a.id).padStart(4, "0")}{a.category ? ` · ${a.category}` : ""}</p>
-                    </div>
-                    <MobileRowChevron />
-                  </div>
+                  <p className="text-text font-medium">{a.name}</p>
+                  <p className="text-[11px] text-text-faint font-mono">POOL-{String(a.id).padStart(4, "0")}{a.category ? ` · ${a.category}` : ""}</p>
                 </td>
                 <td className="hidden sm:table-cell px-5 py-3 font-mono text-text-muted">{a.total_quantity}</td>
                 <td className="hidden sm:table-cell px-5 py-3 text-text-muted">{a.deleted_at ? formatWhen(a.deleted_at) : "—"}</td>
-                <td className="hidden sm:table-cell px-5 py-3 text-right" onClick={(e) => e.stopPropagation()}>
-                  {renderActions(a)}
+                <td className="px-5 py-3 text-right">
+                  <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                    <button onClick={() => restore(a)} disabled={busyId === a.id} className="rounded-md border border-moss/40 px-2 py-1 text-[11px] font-medium text-moss-soft hover:bg-moss/10 disabled:opacity-50 transition-colors">Restore</button>
+                    <button onClick={() => purge(a)} disabled={busyId === a.id} className="rounded-md border border-rust/40 px-2 py-1 text-[11px] font-medium text-rust-soft hover:bg-rust/10 disabled:opacity-50 transition-colors">Purge</button>
+                  </div>
                 </td>
               </tr>
             ))}
@@ -124,18 +112,6 @@ export function DeletedAssetsPanel() {
       </TableShell>
 
       <PaginationBar total={total} perPage={perPage} offset={offset} onOffsetChange={setOffset} />
-      {detailsRow && (
-        <RowDetailsModal
-          title={detailsRow.name}
-          subtitle={`POOL-${String(detailsRow.id).padStart(4, "0")}${detailsRow.category ? ` · ${detailsRow.category}` : ""}`}
-          onClose={() => setDetailsRow(null)}
-          fields={[
-            { label: "Total qty", value: detailsRow.total_quantity },
-            { label: "Deleted on", value: detailsRow.deleted_at ? formatWhen(detailsRow.deleted_at) : "—" },
-            { label: "", value: renderActions(detailsRow) },
-          ]}
-        />
-      )}
     </div>
   );
 }

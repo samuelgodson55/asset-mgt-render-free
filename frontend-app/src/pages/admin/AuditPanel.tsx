@@ -11,8 +11,6 @@ import { DEFAULT_PAGE_SIZE } from "../../lib/pagination";
 import { Modal } from "../../components/ui/Modal";
 import { ErrorBanner } from "../../components/ui/ErrorBanner";
 import { TableShell, TableHead, TablePlaceholderRow } from "../../components/ui/TableShell";
-import { RowDetailsModal, MobileRowChevron } from "../../components/ui/RowDetails";
-import { mobileRowClass } from "../../components/ui/rowInteractionStyles";
 import { errMsg } from "./sharedHelpers";
 
 export function AuditPanel() {
@@ -26,7 +24,6 @@ export function AuditPanel() {
   const [endDate, setEndDate] = useState("");
   const [exporting, setExporting] = useState<"csv" | "pdf" | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
-  const [detailsRow, setDetailsRow] = useState<AuditLogEntry | null>(null);
 
   useEffect(() => {
     setLoading(true);
@@ -107,14 +104,9 @@ export function AuditPanel() {
             {loading && <TablePlaceholderRow columns={4}>Loading…</TablePlaceholderRow>}
             {!loading && rows.length === 0 && <TablePlaceholderRow columns={4}>No entries.</TablePlaceholderRow>}
             {rows.map((r) => (
-              <tr key={r.id} onClick={() => setDetailsRow(r)} className={mobileRowClass()}>
+              <tr key={r.id}>
                 <td className="px-5 py-3 font-mono text-text-muted whitespace-nowrap">{new Date(r.timestamp).toLocaleString()}</td>
-                <td className="px-5 py-3 text-text-muted">
-                  <div className="flex items-center gap-2">
-                    <span>{r.operator}</span>
-                    <MobileRowChevron />
-                  </div>
-                </td>
+                <td className="px-5 py-3 text-text-muted">{r.operator}</td>
                 <td className="hidden sm:table-cell px-5 py-3 text-text font-medium">{r.action}</td>
                 <td className="hidden sm:table-cell px-5 py-3 text-text-muted">{r.details}</td>
               </tr>
@@ -124,18 +116,6 @@ export function AuditPanel() {
       </TableShell>
 
       <PaginationBar total={total} perPage={perPage} offset={offset} onOffsetChange={setOffset} />
-      {detailsRow && (
-        <RowDetailsModal
-          title="Log entry"
-          subtitle={new Date(detailsRow.timestamp).toLocaleString()}
-          onClose={() => setDetailsRow(null)}
-          fields={[
-            { label: "Operator", value: detailsRow.operator },
-            { label: "Action", value: detailsRow.action },
-            { label: "", value: <p className="text-[12.5px] text-text-muted">{detailsRow.details}</p> },
-          ]}
-        />
-      )}
 
       {exportModalOpen && (
         <Modal onClose={() => !exporting && setExportModalOpen(false)}>

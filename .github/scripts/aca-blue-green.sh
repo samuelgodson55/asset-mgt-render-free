@@ -428,46 +428,62 @@ cmd_reap() {
   # "remaining connection slots are reserved for roles with the SUPERUSER
   # attribute" error this was written in response to).
   #
-  # Deliberately narrow criteria for what counts as "safe to reap" --
-  # active=true AND trafficWeight==0 AND older than grace-minutes. A
-  # revision genuinely mid-rollout is ALWAYS either the currently-live one
-  # (100% traffic, never touched) or the brand-new incoming one (created
-  # seconds/minutes ago, well inside the grace window) -- this can never
-  # mistake either for an orphan. grace-minutes defaults to 20, comfortably
-  # above the longest single gate wait this script itself uses (400s /
-  # 6m40s for gate 1), so a still-legitimately-in-progress rollout is never
-  # touched, only things that have been sitting at 0% for far longer than
-  # any real rollout takes.
+  # BUG FIX -- CAUSED A REAL PRODUCTION OUTAGE: the original version here
+  # trusted `properties.trafficWeight == 0` alone as "safe to deactivate."
+  # That's WRONG whenever an app's ingress is routed via the "latest
+  # revision" rule (`ingress.traffic: [{ latestRevision: true, weight: 100
+  # }]` -- main.bicep's own baseline shape) rather than an explicit
+  # per-revision named weight (which aca-blue-green.sh only sets WHILE a
+  # rollout is actively running, via `ingress traffic set
+  # --revision-weight <name>=<pct>`) -- e.g. right after a fresh
+  # infra-deploy.yml run re-applies that baseline `ingress.traffic` rule
+  # and resets any previous explicit pinning. In that shape, Azure can
+  # report a revision's OWN `trafficWeight` as 0 even though it is the
+  # ONE AND ONLY active revision actually serving 100% of real traffic via
+  # the latestRevision flag -- reaping it takes the app fully down (Azure
+  # then serves its own "This Container App is stopped or does not
+  # exist" 404 for every request). This happened for real here.
   #
-  # HARD SAFETY RULE (added after an incident where this reaped an app's
-  # only live revision): trafficWeight==0 is NOT reliable proof a revision
-  # is idle. If an app's traffic is being routed via Azure's implicit
-  # "latest revision" rule instead of an explicit named weight -- which is
-  # exactly what a `Deploy Infra` run can reset it to -- the single active
-  # revision can report trafficWeight: 0 in the API even while it is the
-  # one actually serving 100% of real traffic. The "older than
-  # grace-minutes" check does NOT protect against this: a long-lived
-  # revision sitting under implicit routing is, if anything, the most
-  # likely one to look old. So on top of the traffic/age checks above,
-  # NEVER deactivate a revision if it is the app's ONLY active revision,
-  # full stop -- regardless of what trafficWeight or age say. An app with
-  # exactly one active revision has nothing else to fail over to; reaping
-  # it is always wrong, no matter how it got flagged.
+  # Two independent, hard safety rules now, BOTH required before anything
+  # is touched -- the first is the one that actually matters and is not
+  # negotiable regardless of any traffic-weight reading:
+  #   1. NEVER reap when it would leave FEWER THAN TWO active revisions
+  #      total for this app. A lone active revision is -- unconditionally,
+  #      regardless of what its own trafficWeight reports -- the thing
+  #      currently serving this app's traffic. There is no metadata this
+  #      script can read that makes it safe to deactivate an app's only
+  #      active revision.
+  #   2. Among apps that DO have 2+ active revisions (the only shape a
+  #      genuine leftover "green" can exist in -- a stuck old revision
+  #      sitting alongside the new live one), never touch the
+  #      MOST RECENTLY CREATED active revision (protects a rollout's
+  #      brand-new incoming revision even if it hasn't received traffic
+  #      yet) or anything younger than grace-minutes (protects a rollout
+  #      still legitimately in progress -- grace-minutes defaults to 20,
+  #      comfortably above the longest single gate wait this script uses,
+  #      400s/6m40s for gate 1).
   [ "$#" -ge 2 ] || usage
   local app="$1" rg="$2" grace_minutes="${3:-20}"
   local grace_seconds=$((grace_minutes * 60))
   local now_epoch
   now_epoch=$(date -u +%s)
 
-  echo "Scanning '$app' for orphaned revisions (active, 0% traffic, older than ${grace_minutes}m)..."
+  local active_rows active_count newest_rev
+  active_rows=$(az containerapp revision list --name "$app" --resource-group "$rg" \
+    --query "[?properties.active].{name:name, created:properties.createdTime}" -o tsv 2>/dev/null)
+  active_count=$(printf '%s\n' "$active_rows" | grep -c . || true)
 
-  local active_count
-  active_count=$(az containerapp revision list --name "$app" --resource-group "$rg" \
-    --query "length([?properties.active])" -o tsv 2>/dev/null)
-  case "$active_count" in
-    ''|*[!0-9]*) active_count=0 ;;
-  esac
+  if [ "$active_count" -le 1 ]; then
+    echo "'$app' has $active_count active revision(s) -- never reaping when 2+ don't exist (that revision, whatever its reported traffic weight, is what's actually serving this app). Nothing to do."
+    return 0
+  fi
 
+  # Sort by createdTime desc, first line is the newest -- excluded below
+  # unconditionally, on top of the grace-minutes age check, as a second
+  # independent guard against ever touching a brand-new incoming revision.
+  newest_rev=$(printf '%s\n' "$active_rows" | sort -t $'\t' -k2 -r | head -n1 | cut -f1)
+
+  echo "Scanning '$app' for orphaned revisions ($active_count active total; considering all but the newest, '$newest_rev', and anything younger than ${grace_minutes}m)..."
   local rows
   rows=$(az containerapp revision list --name "$app" --resource-group "$rg" \
     --query "[?properties.active && properties.trafficWeight==\`0\`].{name:name, created:properties.createdTime, health:properties.healthState}" \
@@ -481,13 +497,11 @@ cmd_reap() {
   local reaped=0 skipped=0 failed=0
   while IFS=$'\t' read -r rev created health; do
     [ -z "$rev" ] && continue
-
-    if [ "$active_count" -le 1 ]; then
-      echo "  Skipping $rev -- it is the ONLY active revision for '$app' (active_count=$active_count). Reporting trafficWeight: 0 is not trusted for a sole active revision -- it may still be serving 100% of live traffic via Azure's implicit 'latest revision' rule. Never reaping an app's only active revision, regardless of traffic weight or age."
+    if [ "$rev" = "$newest_rev" ]; then
+      echo "  Skipping $rev -- this is the newest active revision for '$app', never reaped regardless of traffic weight."
       skipped=$((skipped + 1))
       continue
     fi
-
     local created_epoch age_seconds age_minutes
     created_epoch=$(date -u -d "$created" +%s 2>/dev/null || echo 0)
     if [ "$created_epoch" -eq 0 ]; then

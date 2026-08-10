@@ -16,8 +16,6 @@ import { DEFAULT_PAGE_SIZE } from "../../lib/pagination";
 import { ErrorBanner } from "../../components/ui/ErrorBanner";
 import { SearchInput } from "../../components/ui/SearchInput";
 import { TableShell, TableHead, TablePlaceholderRow } from "../../components/ui/TableShell";
-import { RowDetailsModal, MobileRowChevron } from "../../components/ui/RowDetails";
-import { mobileRowClass } from "../../components/ui/rowInteractionStyles";
 import { errMsg } from "./sharedHelpers";
 
 function statusBadgeClasses(status: string): string {
@@ -282,7 +280,6 @@ export function QuotesPanel() {
   const [approvingId, setApprovingId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [fulfillmentTick, setFulfillmentTick] = useState(0);
-  const [detailsRow, setDetailsRow] = useState<QuotationListRow | null>(null);
 
   const refresh = () => {
     setLoading(true);
@@ -321,23 +318,6 @@ export function QuotesPanel() {
     }
   };
 
-  const renderActions = (q: QuotationListRow) => (
-    <div className="flex items-center justify-end gap-1.5 flex-wrap">
-      {q.status === "submitted" && (
-        <button
-          onClick={() => { setDetailsRow(null); approve(q); }}
-          disabled={approvingId === q.id}
-          className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-moss/50 hover:text-moss-soft transition-colors disabled:opacity-50"
-        >
-          Approve
-        </button>
-      )}
-      <button onClick={() => { setDetailsRow(null); setOpenQuoteId(q.id); }} className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-brass/50 hover:text-brass-soft transition-colors">
-        {q.locked ? "View" : "View / Adjust"}
-      </button>
-    </div>
-  );
-
   return (
     <div className="flex flex-col gap-4">
       {error && <ErrorBanner>{error}</ErrorBanner>}
@@ -362,15 +342,10 @@ export function QuotesPanel() {
                 {loading && <TablePlaceholderRow columns={5}>Loading…</TablePlaceholderRow>}
                 {!loading && rows.length === 0 && <TablePlaceholderRow columns={5}>No submitted quotes yet.</TablePlaceholderRow>}
                 {rows.map((q) => (
-                  <tr key={q.id} onClick={() => setDetailsRow(q)} className={mobileRowClass()}>
+                  <tr key={q.id}>
                     <td className="px-5 py-3">
-                      <div className="flex items-center gap-2">
-                        <div>
-                          <p className="font-mono text-text font-medium">{q.reference_number}</p>
-                          <p className="text-[11px] text-text-faint sm:hidden">{formatDate(q.submitted_at)} · {q.item_count} item(s)</p>
-                        </div>
-                        <MobileRowChevron />
-                      </div>
+                      <p className="font-mono text-text font-medium">{q.reference_number}</p>
+                      <p className="text-[11px] text-text-faint sm:hidden">{formatDate(q.submitted_at)} · {q.item_count} item(s)</p>
                     </td>
                     <td className="hidden sm:table-cell px-5 py-3">
                       <p className="text-text-muted">{q.requester ? q.requester.name : "—"}</p>
@@ -380,8 +355,21 @@ export function QuotesPanel() {
                       <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${statusBadgeClasses(q.status)}`}>{statusLabel(q.status)}</span>
                     </td>
                     <td className="px-5 py-3 text-right font-mono text-text-muted">{formatPrice(q.total)}</td>
-                    <td className="hidden sm:table-cell px-5 py-3 text-right" onClick={(e) => e.stopPropagation()}>
-                      {renderActions(q)}
+                    <td className="px-5 py-3 text-right">
+                      <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                        {q.status === "submitted" && (
+                          <button
+                            onClick={() => approve(q)}
+                            disabled={approvingId === q.id}
+                            className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-moss/50 hover:text-moss-soft transition-colors disabled:opacity-50"
+                          >
+                            Approve
+                          </button>
+                        )}
+                        <button onClick={() => setOpenQuoteId(q.id)} className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-brass/50 hover:text-brass-soft transition-colors">
+                          {q.locked ? "View" : "View / Adjust"}
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -390,19 +378,6 @@ export function QuotesPanel() {
           </TableShell>
 
           <PaginationBar total={total} perPage={perPage} offset={offset} onOffsetChange={setOffset} />
-          {detailsRow && (
-            <RowDetailsModal
-              title={detailsRow.reference_number}
-              subtitle={`${formatDate(detailsRow.submitted_at)} · ${detailsRow.item_count} item(s)`}
-              onClose={() => setDetailsRow(null)}
-              fields={[
-                { label: "Requester", value: detailsRow.requester ? `${detailsRow.requester.name} (${detailsRow.requester.email})` : "—" },
-                { label: "Status", value: <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${statusBadgeClasses(detailsRow.status)}`}>{statusLabel(detailsRow.status)}</span> },
-                { label: "Total", value: formatPrice(detailsRow.total) },
-                { label: "", value: renderActions(detailsRow) },
-              ]}
-            />
-          )}
         </div>
 
         <FulfillmentPanel key={fulfillmentTick} onCheckedOut={refresh} />

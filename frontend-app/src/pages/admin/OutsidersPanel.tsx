@@ -15,8 +15,6 @@ import { Modal, ModalHeader } from "../../components/ui/Modal";
 import { ErrorBanner } from "../../components/ui/ErrorBanner";
 import { SearchInput } from "../../components/ui/SearchInput";
 import { TableShell, TableHead, TablePlaceholderRow } from "../../components/ui/TableShell";
-import { RowDetailsModal, MobileRowChevron } from "../../components/ui/RowDetails";
-import { mobileRowClass } from "../../components/ui/rowInteractionStyles";
 import { formInputClass } from "../../components/ui/formStyles";
 import { AlertDots } from "./shared";
 import { errMsg, ROLE_OPTIONS } from "./sharedHelpers";
@@ -133,7 +131,6 @@ export function OutsidersPanel({
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<OutsiderRow | null>(null);
   const [converting, setConverting] = useState<OutsiderRow | null>(null);
-  const [detailsRow, setDetailsRow] = useState<OutsiderRow | null>(null);
   // Custody Ledger drawer is shared app-wide -- see lib/custodyContext.tsx
   // and UsersPanel.tsx's matching comment.
   const { openCustody } = useCustody();
@@ -165,15 +162,6 @@ export function OutsidersPanel({
     refresh();
   };
 
-  const renderActions = (o: OutsiderRow) => (
-    <div className="flex items-center justify-end gap-1.5">
-      <button onClick={() => { setDetailsRow(null); openCustody("outsider", o.id, o.name); }} className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-sky/50 hover:text-sky transition-colors">Custody</button>
-      {canManage && <button onClick={() => { setDetailsRow(null); setEditing(o); }} title="Edit" className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-brass/50 hover:text-brass-soft transition-colors"><Pencil size={11} /></button>}
-      {canManage && <button onClick={() => { setDetailsRow(null); setConverting(o); }} title="Convert to user" className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-moss/50 hover:text-moss-soft transition-colors"><ArrowRightLeft size={11} /></button>}
-      {canManage && <button onClick={() => { setDetailsRow(null); remove(o); }} title="Delete" className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-rust/50 hover:text-rust-soft transition-colors"><Trash2 size={11} /></button>}
-    </div>
-  );
-
   return (
     <div className="flex flex-col gap-4">
       <div className="flex items-center gap-2 flex-wrap">
@@ -199,20 +187,20 @@ export function OutsidersPanel({
             {loading && <TablePlaceholderRow columns={4}>Loading…</TablePlaceholderRow>}
             {!loading && rows.length === 0 && <TablePlaceholderRow columns={4}>No ad-hoc profiles match.</TablePlaceholderRow>}
             {rows.map((o) => (
-              <tr key={o.id} onClick={() => setDetailsRow(o)} className={mobileRowClass()}>
+              <tr key={o.id}>
                 <td className="px-5 py-3">
-                  <div className="flex items-center gap-2">
-                    <div>
-                      <p className="text-text font-medium flex items-center">{o.name}<AlertDots alerts={o.alerts} /></p>
-                      <p className="text-[11px] text-text-faint">{o.email || "—"}</p>
-                    </div>
-                    <MobileRowChevron />
-                  </div>
+                  <p className="text-text font-medium flex items-center">{o.name}<AlertDots alerts={o.alerts} /></p>
+                  <p className="text-[11px] text-text-faint">{o.email || "—"}</p>
                 </td>
                 <td className="hidden sm:table-cell px-5 py-3 text-text-muted">{o.company || "—"}</td>
                 <td className="hidden sm:table-cell px-5 py-3 font-mono text-text-muted">{o.outstanding_items}</td>
-                <td className="hidden sm:table-cell px-5 py-3 text-right" onClick={(e) => e.stopPropagation()}>
-                  {renderActions(o)}
+                <td className="px-5 py-3 text-right">
+                  <div className="flex items-center justify-end gap-1.5">
+                    <button onClick={() => openCustody("outsider", o.id, o.name)} className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-sky/50 hover:text-sky transition-colors">Custody</button>
+                    {canManage && <button onClick={() => setEditing(o)} title="Edit" className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-brass/50 hover:text-brass-soft transition-colors"><Pencil size={11} /></button>}
+                    {canManage && <button onClick={() => setConverting(o)} title="Convert to user" className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-moss/50 hover:text-moss-soft transition-colors"><ArrowRightLeft size={11} /></button>}
+                    {canManage && <button onClick={() => remove(o)} title="Delete" className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-rust/50 hover:text-rust-soft transition-colors"><Trash2 size={11} /></button>}
+                  </div>
                 </td>
               </tr>
             ))}
@@ -224,18 +212,6 @@ export function OutsidersPanel({
 
       <EditOutsiderModal target={editing} onClose={() => setEditing(null)} onDone={() => { setEditing(null); refresh(); }} />
       <ConvertOutsiderModal target={converting} onClose={() => setConverting(null)} onDone={() => { setConverting(null); refresh(); }} roleOptions={convertRoleOptions} />
-      {detailsRow && (
-        <RowDetailsModal
-          title={detailsRow.name}
-          subtitle={detailsRow.email || undefined}
-          onClose={() => setDetailsRow(null)}
-          fields={[
-            { label: "Company", value: detailsRow.company || "—" },
-            { label: "Custody", value: detailsRow.outstanding_items },
-            { label: "", value: renderActions(detailsRow) },
-          ]}
-        />
-      )}
     </div>
   );
 }
