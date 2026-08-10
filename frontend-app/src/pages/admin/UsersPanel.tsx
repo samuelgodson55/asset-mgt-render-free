@@ -18,6 +18,8 @@ import { Modal, ModalHeader } from "../../components/ui/Modal";
 import { ErrorBanner } from "../../components/ui/ErrorBanner";
 import { SearchInput } from "../../components/ui/SearchInput";
 import { TableShell, TableHead, TablePlaceholderRow } from "../../components/ui/TableShell";
+import { RowDetailsModal, MobileRowChevron } from "../../components/ui/RowDetails";
+import { mobileRowClass } from "../../components/ui/rowInteractionStyles";
 import { formInputClass } from "../../components/ui/formStyles";
 import { AlertDots } from "./shared";
 import { errMsg, ROLE_OPTIONS } from "./sharedHelpers";
@@ -237,6 +239,10 @@ export function UsersPanel({
   const [resetting, setResetting] = useState<UserRow | null>(null);
   const [editing, setEditing] = useState<UserRow | null>(null);
   const [revoking, setRevoking] = useState<UserRow | null>(null);
+  // Mobile-only "row details" popup (see components/ui/RowDetails.tsx) --
+  // holds whichever row's Role/Custody/Actions the user tapped open below
+  // `sm`, where those columns are hidden from the table itself.
+  const [detailsRow, setDetailsRow] = useState<UserRow | null>(null);
   // Custody Ledger drawer is now shared app-wide (see lib/custodyContext.tsx)
   // so the Notification Bell's "View ->" click-through can open it without
   // navigating here first -- this panel's own "Custody" button just opens
@@ -278,6 +284,21 @@ export function UsersPanel({
     refresh();
   };
 
+  // Shared between the desktop Actions column and the mobile row-details
+  // popup's Actions block, so the two never drift apart. Closing the
+  // details popup first is a no-op when it's already closed (desktop),
+  // and avoids stacking it behind whichever modal the button just opened
+  // (mobile).
+  const renderActions = (u: UserRow) => (
+    <div className="flex items-center justify-end gap-1.5 flex-wrap">
+      <button onClick={() => { setDetailsRow(null); openCustody("user", u.id, u.name); }} className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-sky/50 hover:text-sky transition-colors">Custody</button>
+      {canEditRow(u.role) && <button onClick={() => { setDetailsRow(null); setEditing(u); }} title="Edit" className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-brass/50 hover:text-brass-soft transition-colors"><Pencil size={11} /></button>}
+      {canManage && <button onClick={() => { setDetailsRow(null); setResetting(u); }} title="Reset password" className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-brass/50 hover:text-brass-soft transition-colors"><KeyRound size={11} /></button>}
+      {canEditRow(u.role) && <button onClick={() => { setDetailsRow(null); setRevoking(u); }} title="Revoke access (convert to Ad-Hoc)" className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-rust/50 hover:text-rust-soft transition-colors"><UserMinus size={11} /></button>}
+      {canManage && <button onClick={() => { setDetailsRow(null); remove(u); }} title="Delete" className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-rust/50 hover:text-rust-soft transition-colors"><Trash2 size={11} /></button>}
+    </div>
+  );
+
   return (
     <div className="flex flex-col gap-4">
       <div className="flex items-center gap-2 flex-wrap">
@@ -310,21 +331,20 @@ export function UsersPanel({
             {loading && <TablePlaceholderRow columns={4}>Loading…</TablePlaceholderRow>}
             {!loading && rows.length === 0 && <TablePlaceholderRow columns={4}>No accounts match.</TablePlaceholderRow>}
             {rows.map((u) => (
-              <tr key={u.id}>
+              <tr key={u.id} onClick={() => setDetailsRow(u)} className={mobileRowClass()}>
                 <td className="px-5 py-3">
-                  <p className="text-text font-medium flex items-center">{u.name}<AlertDots alerts={u.alerts} /></p>
-                  <p className="text-[11px] text-text-faint">{u.email}</p>
+                  <div className="flex items-center gap-2">
+                    <div>
+                      <p className="text-text font-medium flex items-center">{u.name}<AlertDots alerts={u.alerts} /></p>
+                      <p className="text-[11px] text-text-faint">{u.email}</p>
+                    </div>
+                    <MobileRowChevron />
+                  </div>
                 </td>
                 <td className="hidden sm:table-cell px-5 py-3 text-text-muted capitalize">{u.role.replace("_", " ")}{u.department_role ? ` · ${u.department_role}` : ""}</td>
                 <td className="hidden sm:table-cell px-5 py-3 font-mono text-text-muted">{u.checkout_count}</td>
-                <td className="px-5 py-3 text-right">
-                  <div className="flex items-center justify-end gap-1.5 flex-wrap">
-                    <button onClick={() => openCustody("user", u.id, u.name)} className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-sky/50 hover:text-sky transition-colors">Custody</button>
-                    {canEditRow(u.role) && <button onClick={() => setEditing(u)} title="Edit" className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-brass/50 hover:text-brass-soft transition-colors"><Pencil size={11} /></button>}
-                    {canManage && <button onClick={() => setResetting(u)} title="Reset password" className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-brass/50 hover:text-brass-soft transition-colors"><KeyRound size={11} /></button>}
-                    {canEditRow(u.role) && <button onClick={() => setRevoking(u)} title="Revoke access (convert to Ad-Hoc)" className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-rust/50 hover:text-rust-soft transition-colors"><UserMinus size={11} /></button>}
-                    {canManage && <button onClick={() => remove(u)} title="Delete" className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-rust/50 hover:text-rust-soft transition-colors"><Trash2 size={11} /></button>}
-                  </div>
+                <td className="hidden sm:table-cell px-5 py-3 text-right" onClick={(e) => e.stopPropagation()}>
+                  {renderActions(u)}
                 </td>
               </tr>
             ))}
@@ -338,6 +358,18 @@ export function UsersPanel({
       <ResetPasswordModal target={resetting} onClose={() => setResetting(null)} onDone={() => { setResetting(null); alert("Password reset."); }} />
       <EditUserModal target={editing} onClose={() => setEditing(null)} onDone={() => { setEditing(null); refresh(); }} />
       <RevokeUserModal target={revoking} onClose={() => setRevoking(null)} onDone={() => { setRevoking(null); refresh(); }} />
+      {detailsRow && (
+        <RowDetailsModal
+          title={detailsRow.name}
+          subtitle={detailsRow.email}
+          onClose={() => setDetailsRow(null)}
+          fields={[
+            { label: "Privilege tier", value: <span className="capitalize">{detailsRow.role.replace("_", " ")}{detailsRow.department_role ? ` · ${detailsRow.department_role}` : ""}</span> },
+            { label: "Custody", value: `${detailsRow.checkout_count} item${detailsRow.checkout_count === 1 ? "" : "s"} checked out` },
+            { label: "", value: renderActions(detailsRow) },
+          ]}
+        />
+      )}
     </div>
   );
 }

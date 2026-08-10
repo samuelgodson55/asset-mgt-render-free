@@ -4,7 +4,7 @@ import { useNavigate } from "react-router-dom";
 import { alertsApi, extensionsApi, myItemsApi, quotationsApi } from "../lib/api";
 import { useAuth } from "../lib/useAuth";
 import { isPrivileged } from "../lib/roles";
-import { readDismissedSet } from "../lib/notificationDismissals";
+import { readDismissedSet, readDismissedQuotationNotificationSet } from "../lib/notificationDismissals";
 
 // =============================================================================
 // components/NotificationBell.tsx
@@ -28,6 +28,7 @@ export function NotificationBell() {
   useEffect(() => {
     let cancelled = false;
     const dismissed = readDismissedSet();
+    const dismissedQuotationNotifications = readDismissedQuotationNotificationSet();
 
     const run = async () => {
       const [myItemsRes, decisions, overdue, dueSoon, extensions, quotationNotifications] = await Promise.all([
@@ -46,7 +47,9 @@ export function NotificationBell() {
       const myPending = items.filter((i) => i.pending_extension).length;
       const undismissedDecisions = decisions.filter((d) => !dismissed.has(d.id)).length;
       const pendingExtensions = extensions.filter((e) => e.status === "pending").length;
-      const unreadQuotationNotifications = quotationNotifications.filter((n) => !n.read_at).length;
+      const unreadQuotationNotifications = quotationNotifications.filter(
+        (n) => !n.read_at && !dismissedQuotationNotifications.has(n.id),
+      ).length;
 
       setCount(overdue.total + dueSoon.total + pendingExtensions + myOverdue + myDueSoon + myPending + undismissedDecisions + unreadQuotationNotifications);
     };

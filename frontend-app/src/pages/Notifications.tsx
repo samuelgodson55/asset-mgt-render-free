@@ -5,7 +5,12 @@ import { useNavigate } from "react-router-dom";
 import { alertsApi, extensionsApi, myItemsApi, quotationsApi, formatDate } from "../lib/api";
 import { useAuth } from "../lib/useAuth";
 import { isPrivileged } from "../lib/roles";
-import { readDismissedSet, dismissDecisionIds } from "../lib/notificationDismissals";
+import {
+  readDismissedSet,
+  dismissDecisionIds,
+  readDismissedQuotationNotificationSet,
+  dismissQuotationNotificationIds,
+} from "../lib/notificationDismissals";
 import { useCustody } from "../lib/useCustody";
 import { useQuoteDetail } from "../lib/useQuoteDetail";
 import type { Checkout, ExtensionRequest, MyExtensionDecision, MyItem, QuotationNotification } from "../lib/types";
@@ -107,10 +112,13 @@ export function Notifications() {
   const refresh = () => {
     setLoading(true);
     const dismissed = readDismissedSet();
+    const dismissedQuotationNotifications = readDismissedQuotationNotificationSet();
     const tasks: Promise<void>[] = [
       myItemsApi.list().then((d) => setMyItems(d.assigned_items)).catch(() => setMyItems([])),
       extensionsApi.myDecisions(10).then((items) => setDecisions(items.filter((d) => !dismissed.has(d.id)))).catch(() => setDecisions([])),
-      quotationsApi.myNotifications().then(setQuotationNotifications).catch(() => setQuotationNotifications([])),
+      quotationsApi.myNotifications()
+        .then((items) => setQuotationNotifications(items.filter((n) => !dismissedQuotationNotifications.has(n.id))))
+        .catch(() => setQuotationNotifications([])),
     ];
     if (privileged) {
       tasks.push(alertsApi.overdue(20).then(setOverdue).catch((err) => { console.error("Failed to load overdue alerts:", err); setOverdue({ items: [], total: 0 }); }));
@@ -145,6 +153,17 @@ export function Notifications() {
   const dismissDecision = (id: number) => {
     dismissDecisionIds([id]);
     setDecisions((prev) => prev.filter((d) => d.id !== id));
+  };
+
+  // Client-side only, same as dismissDecision() above -- there's no
+  // server-side "delete" for a QuotationNotification (only `read_at`), so
+  // a dismissed row just gets remembered in localStorage and filtered out
+  // on future loads (see notificationDismissals.ts). Stops propagation so
+  // clicking the X doesn't also trigger the row's openQuotationNotification.
+  const dismissQuotationNotification = (id: number, e: React.MouseEvent) => {
+    e.stopPropagation();
+    dismissQuotationNotificationIds([id]);
+    setQuotationNotifications((prev) => prev.filter((n) => n.id !== id));
   };
 
   // Marks it read server-side (so the bell's unread count drops -- see
@@ -261,7 +280,16 @@ export function Notifications() {
                     </p>
                     {n.reference_number && <p className="text-[11px] text-text-faint font-mono mt-0.5">{n.reference_number}</p>}
                   </div>
-                  <span className="shrink-0 text-[11.5px] font-semibold text-sky">View →</span>
+                  <span className="shrink-0 flex items-center gap-2.5">
+                    <span className="text-[11.5px] font-semibold text-sky">View →</span>
+                    <button
+                      onClick={(e) => dismissQuotationNotification(n.id, e)}
+                      title="Dismiss"
+                      className="text-text-faint hover:text-text transition-colors"
+                    >
+                      <X size={13} />
+                    </button>
+                  </span>
                 </li>
               ))}
             </ul>
