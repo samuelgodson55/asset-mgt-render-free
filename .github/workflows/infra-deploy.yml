@@ -277,6 +277,43 @@ jobs:
             echo "::notice::No existing managed certificate found for '${{ vars.CUSTOM_DOMAIN }}' yet -- frontend will deploy on its default *.azurecontainerapps.io FQDN this run. Provision the certificate for this domain (Portal 'Add custom domain' wizard, or 'az containerapp env certificate create' / 'hostname bind'), then re-run this workflow to bind it going forward."
           fi
 
+      # BLUE-GREEN SAFETY: this workflow is infrastructure/configuration
+      # management, not an application release. Container Apps in Multiple
+      # revision mode use ingress traffic as application-scope state. A full
+      # Bicep PUT currently contains the baseline `latestRevision: true`
+      # traffic rule, which can overwrite the explicit revision pin created
+      # by aca-blue-green.sh. Snapshot the live routing BEFORE Bicep and
+      # restore it immediately AFTER. This means an infra refresh cannot
+      # silently move production traffic to an infra-created revision or
+      # leave the next blue-green deploy with the wrong "active" revision.
+      - name: Snapshot current ACA traffic before infra deployment
+        id: traffic_before
+        run: |
+          mkdir -p "$RUNNER_TEMP/aca-traffic"
+          for APP in backend frontend; do
+            az containerapp show --name "$APP" --resource-group "$RESOURCE_GROUP" \
+              --query "properties.configuration.ingress.traffic" -o json \
+              > "$RUNNER_TEMP/aca-traffic/${APP}.json" 2>/dev/null || echo '[]' > "$RUNNER_TEMP/aca-traffic/${APP}.json"
+
+            LIVE_REV=$(az containerapp show --name "$APP" --resource-group "$RESOURCE_GROUP" \
+              --query "properties.configuration.ingress.traffic[?revisionName && weight > \`0\`].revisionName | [0]" \
+              -o tsv 2>/dev/null || true)
+
+            if [ -z "$LIVE_REV" ]; then
+              LIVE_REV=$(az containerapp revision list --name "$APP" --resource-group "$RESOURCE_GROUP" \
+                --query "sort_by([?properties.active], &properties.createdTime)[-1].name" \
+                -o tsv 2>/dev/null || true)
+            fi
+
+            az containerapp revision list --name "$APP" --resource-group "$RESOURCE_GROUP" \
+              --query "[?properties.active].name" -o tsv 2>/dev/null \
+              > "$RUNNER_TEMP/aca-traffic/${APP}-active-before.txt" || true
+
+            echo "${APP}_live_revision=${LIVE_REV}" >> "$GITHUB_OUTPUT"
+            echo "${APP}: preserving live revision '${LIVE_REV:-<none>}'"
+            cat "$RUNNER_TEMP/aca-traffic/${APP}.json"
+          done
+
       - name: Deploy Bicep
         run: |
           az deployment group create \
@@ -346,6 +383,79 @@ jobs:
               otelExporterOtlpHeaders="${{ secrets.OTEL_EXPORTER_OTLP_HEADERS }}" \
               otelTracesSampleRatio="${{ vars.OTEL_TRACES_SAMPLE_RATIO || '1.0' }}" \
               otelAzureMonitorEnabled=${{ vars.OTEL_AZURE_MONITOR_ENABLED == 'true' }}
+
+      # Restore the exact pre-infra traffic target. If the snapshot used
+      # explicit revision weights (the normal blue-green production state),
+      # restore those weights. If it used latestRevision=true (first-ever
+      # deployment / legacy state), restore the exact revision that was live
+      # before Bicep rather than blindly keeping whatever Bicep made newest.
+      # This is intentionally done AFTER Bicep has completed and before this
+      # workflow exits, so the subsequent Deploy to ACA starts from the same
+      # known-good traffic topology it had before the infra refresh.
+      - name: Restore ACA traffic after infra deployment
+        if: always()
+        run: |
+          restore_traffic() {
+            local app="$1" snapshot="$RUNNER_TEMP/aca-traffic/${1}.json" fallback_rev="$2"
+            [ -f "$snapshot" ] || { echo "::warning::No traffic snapshot for $app; leaving Azure's current routing unchanged."; return 0; }
+
+            mapfile -t weights < <(jq -r '.[] | select(.revisionName != null and (.weight // 0) > 0) | "\(.revisionName)=\(.weight)"' "$snapshot")
+            if [ "${#weights[@]}" -gt 0 ]; then
+              echo "Restoring explicit traffic for $app: ${weights[*]}"
+              local args=()
+              for weight in "${weights[@]}"; do
+                args+=(--revision-weight "$weight")
+              done
+              az containerapp ingress traffic set --name "$app" --resource-group "$RESOURCE_GROUP" "${args[@]}"
+              return $?
+            fi
+
+            if [ -n "$fallback_rev" ]; then
+              echo "Restoring $app to its pre-infra live revision: $fallback_rev (100%)"
+              az containerapp ingress traffic set --name "$app" --resource-group "$RESOURCE_GROUP" \
+                --revision-weight "${fallback_rev}=100"
+              return $?
+            fi
+
+            echo "$app had no established traffic target before infra deployment (first provisioning); leaving the baseline routing in place."
+          }
+
+          restore_traffic backend "${{ steps.traffic_before.outputs.backend_live_revision }}"
+          restore_traffic frontend "${{ steps.traffic_before.outputs.frontend_live_revision }}"
+
+      # Bicep can legitimately create a revision when a value under
+      # `properties.template` changes. That revision is NOT the application
+      # release; Deploy to ACA owns application revisions. Once the original
+      # traffic target is restored, any NEW infra-only revision with 0% traffic
+      # is safe to deactivate. This prevents an infra refresh immediately
+      # followed by an ACA deploy from leaving a third active slot around,
+      # while still allowing the next ACA deployment to inherit the latest
+      # template/secrets state. Never touch a revision that existed before
+      # this infra run, and never touch anything carrying traffic.
+      - name: Deactivate infra-only zero-traffic revisions
+        if: ${{ success() }}
+        run: |
+          cleanup_new_zero_traffic() {
+            local app="$1"
+            local before="$RUNNER_TEMP/aca-traffic/${app}-active-before.txt"
+            [ -f "$before" ] || return 0
+
+            mapfile -t new_zero < <(az containerapp revision list --name "$app" --resource-group "$RESOURCE_GROUP" \
+              --query "[?properties.active && properties.trafficWeight == \`0\`].name" -o tsv)
+
+            for rev in "${new_zero[@]}"; do
+              [ -z "$rev" ] && continue
+              if grep -Fxq "$rev" "$before"; then
+                continue
+              fi
+              echo "Deactivating infra-created zero-traffic revision $app/$rev"
+              az containerapp revision deactivate --name "$app" --resource-group "$RESOURCE_GROUP" --revision "$rev" || \
+                echo "::warning::Could not deactivate infra-created revision $app/$rev; it remains at 0% traffic."
+            done
+          }
+
+          cleanup_new_zero_traffic backend
+          cleanup_new_zero_traffic frontend
 
       - name: Show outputs
         run: |

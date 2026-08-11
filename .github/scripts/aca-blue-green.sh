@@ -249,9 +249,22 @@ cmd_rollout() {
     "$status_script" check "${app}-$1" "$2" "$3" 2>/dev/null || true
   }
 
+  # Resolve the revision that is ACTUALLY serving traffic. After an infra
+  # Bicep deployment there may temporarily be more than one active revision.
+  # In Multiple mode, choosing the first active revision is unsafe because
+  # Azure does not guarantee that list order matches the live traffic target.
+  # Prefer an explicit named traffic weight; fall back to latestRevision only
+  # when the app is using that default routing mode.
   local active_rev
-  active_rev=$(az containerapp revision list --name "$app" --resource-group "$rg" \
-              --query "[?properties.active] | [0].name" -o tsv 2>/dev/null)
+  active_rev=$(az containerapp show --name "$app" --resource-group "$rg" \
+              --query "properties.configuration.ingress.traffic[?revisionName && weight > \`0\`].revisionName | [0]" \
+              -o tsv 2>/dev/null)
+
+  if [ -z "$active_rev" ]; then
+    active_rev=$(az containerapp revision list --name "$app" --resource-group "$rg" \
+                --query "sort_by([?properties.active], &properties.createdTime)[-1].name" \
+                -o tsv 2>/dev/null)
+  fi
 
   if [ -z "$active_rev" ]; then
     # Brand-new app, nothing live yet -- there is no "green" slot to
