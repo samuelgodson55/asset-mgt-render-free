@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   ArrowRight, ArrowLeft, Lock, AlertCircle, ShieldCheck, KeyRound, Download, Check, ScanLine, Boxes, Radar,
-  ClipboardList, MailCheck,
+  ClipboardList, MailCheck, Eye, EyeOff,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import QRCode from "qrcode";
@@ -93,6 +93,7 @@ function LoginForm({
 }) {
   const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const { login } = useAuth();
@@ -140,14 +141,25 @@ function LoginForm({
               Forgot password?
             </button>
           </div>
-          <input
-            type="password"
-            autoComplete="current-password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            placeholder="••••••••"
-            className="w-full mt-1.5 bg-ink-soft border border-border-soft rounded-[4px] px-3.5 py-3 text-[13.5px] text-text placeholder:text-text-faint focus:border-brass focus:ring-2 focus:ring-brass/15 focus:outline-none transition-all"
-          />
+          <div className="relative mt-1.5">
+            <input
+              type={showPassword ? "text" : "password"}
+              autoComplete="current-password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="••••••••"
+              className="w-full bg-ink-soft border border-border-soft rounded-[4px] px-3.5 pr-11 py-3 text-[13.5px] text-text placeholder:text-text-faint focus:border-brass focus:ring-2 focus:ring-brass/15 focus:outline-none transition-all"
+            />
+            <button
+              type="button"
+              onClick={() => setShowPassword((visible) => !visible)}
+              aria-label={showPassword ? "Hide password" : "Show password"}
+              title={showPassword ? "Hide password" : "Show password"}
+              className="absolute right-1 top-1/2 -translate-y-1/2 flex h-9 w-9 items-center justify-center rounded-[3px] text-text-faint hover:text-text hover:bg-surface active:bg-surface transition-colors"
+            >
+              {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+            </button>
+          </div>
         </label>
 
         {error && <ErrorBanner message={error} />}

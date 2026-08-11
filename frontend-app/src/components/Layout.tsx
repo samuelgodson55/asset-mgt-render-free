@@ -69,6 +69,7 @@ export function Layout() {
   const [headerSearch, setHeaderSearch] = useState("");
   const [searchBusy, setSearchBusy] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
+  const [mobileSearchOpen, setMobileSearchOpen] = useState(false);
   const { user, demo, logout } = useAuth();
   const navigate = useNavigate();
 
@@ -100,6 +101,7 @@ export function Layout() {
     if (target.kind === "asset") {
       navigate(`/assets?search=${encodeURIComponent(target.query)}`);
       setHeaderSearch("");
+      setMobileSearchOpen(false);
       return;
     }
 
@@ -159,6 +161,7 @@ export function Layout() {
         }
       }
       setHeaderSearch("");
+      setMobileSearchOpen(false);
     } catch {
       setSearchError("Search failed — try again.");
     } finally {
@@ -408,16 +411,18 @@ export function Layout() {
                 </div>
               )}
             </div>
-            {/* Below `sm` there's no room for the search box itself, so
-                the icon just jumps straight to Inventory, which has its
-                own search field front and center -- better than a tap
-                that visibly does nothing. */}
+            {/* Below `sm` the full search field is replaced by a touch-sized
+                button that opens the same global search flow in a modal. */}
             <button
-              onClick={() => navigate("/assets")}
-              className="sm:hidden shrink-0 p-1.5 rounded-[3px] text-text-muted hover:text-text hover:bg-surface transition-colors"
-              aria-label="Search inventory"
+              type="button"
+              onClick={() => {
+                setSearchError(null);
+                setMobileSearchOpen(true);
+              }}
+              className="sm:hidden shrink-0 flex items-center justify-center h-10 w-10 -ml-1 rounded-[3px] text-text-muted hover:text-text hover:bg-surface active:bg-surface transition-colors"
+              aria-label="Open search"
             >
-              <Search size={16} />
+              <Search size={17} />
             </button>
           </div>
           <div className="flex items-center gap-2 sm:gap-4 shrink-0">
@@ -436,6 +441,66 @@ export function Layout() {
             <ThemeToggle />
           </div>
         </header>
+
+        <AnimatePresence>
+          {mobileSearchOpen && (
+            <motion.div
+              className="sm:hidden fixed inset-0 z-50 bg-ink/70 backdrop-blur-sm"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onMouseDown={(e) => {
+                if (e.target === e.currentTarget) setMobileSearchOpen(false);
+              }}
+            >
+              <motion.div
+                role="dialog"
+                aria-modal="true"
+                aria-label="Search inventory"
+                className="border-b border-border-soft bg-ink shadow-[0_16px_40px_-20px_rgba(0,0,0,0.65)] px-4 pb-4"
+                style={{ paddingTop: "calc(0.75rem + env(safe-area-inset-top))" }}
+                initial={{ y: -24, opacity: 0 }}
+                animate={{ y: 0, opacity: 1 }}
+                exit={{ y: -24, opacity: 0 }}
+                transition={{ duration: 0.2 }}
+              >
+                <div className="flex items-center gap-2">
+                  <div className="relative flex-1">
+                    <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-faint" />
+                    <input
+                      autoFocus
+                      value={headerSearch}
+                      onChange={(e) => {
+                        setHeaderSearch(e.target.value);
+                        if (searchError) setSearchError(null);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") submitHeaderSearch();
+                        if (e.key === "Escape") setMobileSearchOpen(false);
+                      }}
+                      disabled={searchBusy}
+                      placeholder="Search inventory, CO-code, QT-number…"
+                      className="w-full bg-surface border border-border-soft rounded-[4px] pl-9 pr-3 py-3 text-[13px] text-text placeholder:text-text-faint focus:border-brass/50 focus:outline-none transition-colors disabled:opacity-70"
+                    />
+                    {searchError && (
+                      <div className="absolute left-0 right-0 top-full mt-1 bg-surface border border-rust/30 text-rust-soft text-[11px] rounded-[3px] px-2.5 py-2 z-10 shadow-lg">
+                        {searchError}
+                      </div>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setMobileSearchOpen(false)}
+                    aria-label="Close search"
+                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[3px] text-text-muted hover:text-text hover:bg-surface active:bg-surface transition-colors"
+                  >
+                    <X size={18} />
+                  </button>
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         <main className="flex-1 px-4 sm:px-6 py-6 max-w-[1400px] w-full mx-auto">
           {/* Page components are React.lazy()'d (see App.tsx) so this is a

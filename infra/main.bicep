@@ -235,20 +235,17 @@ param dueSoonDigestHoursUtc string = '8'
 @description('Whether the individual "your item is overdue/due soon" reminder also goes to the checkout\'s own holder, in addition to the admin/manager digest. Matches .env.example\'s SEND_INDIVIDUAL_HOLDER_REMINDERS.')
 param sendIndividualHolderReminders bool = true
 
-@description('How many hours a `pending` ExtensionRequest can go without a Manager/Admin/Super Admin decision before the SLA-nudge digest escalates it. Matches .env.example\'s EXTENSION_REQUEST_SLA_HOURS.')
-param extensionRequestSlaHours int = 24
-
-@description('How many hours a `submitted` Quotation can go without an Admin/Manager decision before the SLA-nudge digest escalates it. Matches .env.example\'s QUOTATION_SLA_HOURS.')
-param quotationSlaHours int = 24
-
-@description('How often, in minutes, the worker checks both pending-approval queues for anything past its SLA threshold. Matches .env.example\'s APPROVAL_SLA_CHECK_INTERVAL_MINUTES.')
+@description('How many hours a pending ExtensionRequest can wait for a Manager/Admin decision before the SLA escalation task sends a reminder. Matches .env.example\'s EXTENSION_REQUEST_SLA_HOURS.')
+param extensionRequestSlaHours string = '24'
+@description('How many hours a submitted Quotation can wait for approval before the SLA escalation task sends a reminder. Matches .env.example\'s QUOTATION_SLA_HOURS.')
+param quotationSlaHours string = '24'
+@description('How often, in minutes, the embedded worker checks pending ExtensionRequest and Quotation queues for SLA breaches. Matches .env.example\'s APPROVAL_SLA_CHECK_INTERVAL_MINUTES.')
 param approvalSlaCheckIntervalMinutes int = 60
-
-@description('Once a pending request/quote has been escalated, how many hours before it is eligible to be escalated again if still undecided. Matches .env.example\'s APPROVAL_SLA_ESCALATION_REPEAT_HOURS.')
-param approvalSlaEscalationRepeatHours int = 24
-
-@description('Whether a Quotation\'s own recipient gets emailed on every change (line items, notes, discount, assignment, approval, fulfillment), on top of the in-app bell notification which is always created regardless. Matches .env.example\'s SEND_QUOTATION_RECIPIENT_EMAILS.')
+@description('How many hours after an SLA escalation before the same still-pending item can be escalated again. Matches .env.example\'s APPROVAL_SLA_ESCALATION_REPEAT_HOURS.')
+param approvalSlaEscalationRepeatHours string = '24'
+@description('Whether quotation changes also send email notifications to the quotation recipient, in addition to the in-app notification. Matches .env.example\'s SEND_QUOTATION_RECIPIENT_EMAILS.')
 param sendQuotationRecipientEmails bool = true
+
 
 @description('IANA timezone name (e.g. "Africa/Lagos") used to render CSV/PDF export timestamps -- data itself is always stored as UTC. Matches .env.example\'s DISPLAY_TIMEZONE.')
 param displayTimezone string = 'Africa/Lagos'
@@ -926,45 +923,6 @@ var appInsightsConnectionString = otelAzureMonitorEnabled ? appInsights.properti
 // apply_environment_defaults()).
 var runtimeEnvironment = environmentName == 'prod' ? 'production' : 'development'
 
-// BUG FIX / INCIDENT RESPONSE: database.py's adaptive connection-pool
-// sizing (_compute_pool_sizing()) derives its worst-case "how many
-// DB-connecting processes can exist at once" purely from
-// backendMaxReplicas x processes-per-replica -- correct for a STEADY
-// STATE with exactly one live `backend` revision, but this Container Apps
-// layout does blue-green rollouts (.github/scripts/aca-blue-green.sh)
-// that deliberately run the OLD ("green") revision at full traffic AND
-// the NEW ("blue") revision side by side for the entire rollout -- the
-// old one isn't deactivated until well after the new one is proven
-// healthy (see that script's own top-of-file comment). That means the
-// REAL worst-case replica fan-out during every single deploy is up to
-// TWICE backendMaxReplicas, not once -- docker-compose.vm.yml already
-// documents and accounts for this exact class of doubling for its own
-// blue/green container pair via an explicit DB_EXPECTED_PROCESSES (see
-// its own comment), but this Container Apps path previously only ever
-// passed BACKEND_MAX_REPLICAS through un-doubled, leaving pool sizing
-// account for exactly ONE revision's worth of replicas. On a small
-// Postgres SKU (Standard_B1ms, the default -- max_connections ~50) that
-// left literally zero headroom during a normal, successful rollout: the
-// derived per-process budget already used the ENTIRE available
-// connection budget across just one revision's replicas, so anything
-// else needing a connection at the same moment (the `migrate` job's own
-// `alembic upgrade head`, a stray orphaned revision from a previous
-// failed deploy -- see aca-blue-green.sh's `reap` subcommand -- or
-// simply a second revision briefly existing mid-rollout) had nothing left
-// and failed with Postgres's own "remaining connection slots are
-// reserved for roles with the SUPERUSER attribute".
-//
-// Explicit DB_EXPECTED_PROCESSES below (backend/config.py's own
-// documented escape hatch for exactly this "replica-derived guess doesn't
-// fit this topology" case) makes the doubling permanent and self-updating
-// with backendMaxReplicas, instead of a number to remember to keep in
-// sync by hand. backendProcessesPerReplica mirrors sharedEnv/this
-// container's own current settings (UVICORN_WORKERS left unset -> 1,
-// RUN_EMBEDDED_WORKER=true -> +1) -- update this if either ever changes.
-var backendProcessesPerReplica = 2
-var backendConcurrentRevisionsDuringRollout = 2
-var backendExpectedProcesses = backendMaxReplicas * backendProcessesPerReplica * backendConcurrentRevisionsDuringRollout
-
 var sharedEnv = [
   { name: 'ENVIRONMENT', value: runtimeEnvironment }
   { name: 'EXPORT_RESULT_DIR', value: '/app/export_results' }
@@ -995,10 +953,10 @@ var sharedEnv = [
   { name: 'DUE_SOON_REMINDER_DAYS', value: string(dueSoonReminderDays) }
   { name: 'DUE_SOON_DIGEST_HOURS_UTC', value: dueSoonDigestHoursUtc }
   { name: 'SEND_INDIVIDUAL_HOLDER_REMINDERS', value: string(sendIndividualHolderReminders) }
-  { name: 'EXTENSION_REQUEST_SLA_HOURS', value: string(extensionRequestSlaHours) }
-  { name: 'QUOTATION_SLA_HOURS', value: string(quotationSlaHours) }
+  { name: 'EXTENSION_REQUEST_SLA_HOURS', value: extensionRequestSlaHours }
+  { name: 'QUOTATION_SLA_HOURS', value: quotationSlaHours }
   { name: 'APPROVAL_SLA_CHECK_INTERVAL_MINUTES', value: string(approvalSlaCheckIntervalMinutes) }
-  { name: 'APPROVAL_SLA_ESCALATION_REPEAT_HOURS', value: string(approvalSlaEscalationRepeatHours) }
+  { name: 'APPROVAL_SLA_ESCALATION_REPEAT_HOURS', value: approvalSlaEscalationRepeatHours }
   { name: 'SEND_QUOTATION_RECIPIENT_EMAILS', value: string(sendQuotationRecipientEmails) }
   { name: 'DISPLAY_TIMEZONE', value: displayTimezone }
   { name: 'CURRENCY_CODE', value: currencyCode }
@@ -1130,19 +1088,12 @@ resource backendApp 'Microsoft.App/containerApps@2024-03-01' = {
             // Lets database.py's adaptive connection-pool sizing
             // (_compute_pool_sizing(), see that module) know the actual
             // worst-case replica fan-out it needs to divide the target
-            // Postgres server's connection budget across. BUG FIX: this
-            // used to be BACKEND_MAX_REPLICAS alone (the un-doubled
-            // count), which doesn't account for blue-green's normal
-            // old+new revision overlap during every rollout -- see
-            // backendExpectedProcesses's own comment above for the full
-            // reasoning. DB_EXPECTED_PROCESSES (backend/config.py's own
-            // documented override) now wins outright over the
-            // BACKEND_MAX_REPLICAS-derived guess, so pool sizing is
-            // correctly doubled without a separate code change -- it
-            // still self-adjusts automatically if backendMaxReplicas is
-            // ever changed, since both are derived from the same param.
+            // Postgres server's connection budget across, straight from
+            // this same `backendMaxReplicas` param below -- so the two
+            // can never silently drift apart, and pool sizing keeps
+            // itself correct automatically if this param is ever
+            // changed, with no matching code/config edit required.
             { name: 'BACKEND_MAX_REPLICAS', value: string(backendMaxReplicas) }
-            { name: 'DB_EXPECTED_PROCESSES', value: string(backendExpectedProcesses) }
           ])
           volumeMounts: [
             { volumeName: 'backup-data', mountPath: '/app/backups' }
