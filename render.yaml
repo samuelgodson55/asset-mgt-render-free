@@ -132,16 +132,12 @@ services:
       # relying on a separate nginx service -- see top-of-file comment.
       - key: SERVE_FRONTEND
         value: true
-      # WHICH frontend to serve: "legacy" (default -- the multi-page
-      # static site) or "react" (the "Ledger" SPA). Dockerfile.render
-      # bakes BOTH into this image unconditionally, so flipping this to
-      # "react" and letting Render redeploy (a restart, not a rebuild --
-      # nothing about the image itself changes) is all it takes to switch
-      # -- no build-arg plumbing needed, since Render's Blueprint spec has
-      # no field for passing one through at all. See
-      # backend/config.py's FRONTEND_VARIANT docstring for the full
-      # reasoning, and this file's own top-of-file Dockerfile.render
-      # comment.
+      # FRONTEND SELECTOR: change ONLY the value below.
+      # Allowed values:
+      #   legacy = classic multi-page frontend
+      #   react  = React "Ledger" SPA
+      # Both builds are already in the image, so switching this value does
+      # not require a new Docker build; Render redeploys the existing build.
       - key: FRONTEND_VARIANT
         value: legacy
       # Launch `celery -A celery_app worker -B` as a background process

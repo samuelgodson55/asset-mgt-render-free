@@ -33,6 +33,16 @@
 #     uvicorn even gets a chance to start serving requests.
 # =============================================================================
 
+case "${FRONTEND_VARIANT:-legacy}" in
+    legacy|react)
+        echo "render-start.sh: FRONTEND_VARIANT=${FRONTEND_VARIANT:-legacy}"
+        ;;
+    *)
+        echo "render-start.sh: ERROR: FRONTEND_VARIANT must be 'legacy' or 'react'; got '${FRONTEND_VARIANT}'" >&2
+        exit 1
+        ;;
+esac
+
 if [ "$RUN_EMBEDDED_WORKER" = "true" ]; then
     # BUG FIX (Render free-tier cold start): this worker and uvicorn below
     # share ONE free instance's 0.1 CPU. Previously this ran at normal

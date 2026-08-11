@@ -28,6 +28,11 @@
 # section for the full picture, including this approach's tradeoffs
 # (everything spins down and restarts together, no horizontal scaling).
 #
+# FRONTEND SELECTOR (runtime, no rebuild required):
+#   FRONTEND_VARIANT=legacy  -> classic multi-page frontend
+#   FRONTEND_VARIANT=react   -> React "Ledger" SPA
+# render.yaml exposes this as the single value to change.
+#
 # CHOOSING A FRONTEND: LEGACY vs. REACT
 # Unlike frontend/Dockerfile (the multi-service image, which builds
 # EXACTLY ONE of the two frontends per image via `--target`), this image
