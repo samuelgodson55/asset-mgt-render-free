@@ -3312,9 +3312,10 @@ scan, a Gitleaks secret scan, frontend build/rendering tests, an nginx
 config job that renders `nginx/default.conf.template`, `nginx -t`s it,
 then actually boots it and curls every clean-URL/redirect/static-asset
 path (see `nginx/test-config.sh`), image build + Trivy scan, and
-`infra/main.bicep` validation — runs on every push/PR, and
-is also invoked as a reusable `workflow_call` by every deploy workflow
-below; coverage isn't 100% of the app yet, see [Suggested Future
+`infra/main.bicep` validation — runs on every push/PR, can also be started
+manually from **Actions → CI → Run workflow**, and is also invoked as a
+reusable `workflow_call` by every deploy workflow below; coverage isn't
+100% of the app yet, see [Suggested Future
 Features](#suggested-future-features) for what's still missing),
 [`deploy-azure-aca.yml`](.github/workflows/deploy-azure-aca.yml)
 (manual `workflow_dispatch` ONLY -- pick `staging` or `production` -- no
@@ -3375,6 +3376,24 @@ All of these already follow the same rule, which is what makes any of this genui
 > same release the code stops using them, both create a window where
 > requests fail — see [Database & Migrations](#database--migrations-alembic)
 > for how this project's Alembic setup fits in.
+
+### Running CI manually from GitHub
+
+CI still runs automatically on pushes and pull requests, but you can now
+run the same validation pipeline on demand without making a commit.
+
+1. Open the repository on GitHub and go to **Actions**.
+2. Select **CI**.
+3. Click **Run workflow**.
+4. Select the branch or commit you want to validate.
+5. Leave **Run infra/main.bicep validation too** enabled unless you are
+   deliberately testing only application code.
+6. Click **Run workflow**.
+
+A manual CI run does not deploy anything, push Docker images, change Azure
+resources, or require Azure credentials. It deliberately treats the
+repository as fully changed, so the complete validation suite runs rather
+than being skipped by the changed-path optimization.
 
 ### Azure Container Apps (the primary production target)
 

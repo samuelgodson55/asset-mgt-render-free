@@ -14,6 +14,10 @@ further down, not preserved in place) the next time a tag is pushed. Notes
 above the marker are yours to keep.
 
 <!-- release-notes-insertion-point -->
+## Unreleased
+- CI can now be started manually from GitHub Actions in addition to push,
+  pull request, and reusable workflow triggers.
+- Updated CI/deployment documentation to reflect the current workflow model.
 
 ## [v1.0.6] - 2026-08-05
 - fix:multi requests fixed again low network (94cec8b)

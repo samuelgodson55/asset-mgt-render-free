@@ -44,6 +44,7 @@ test shape as the Container Apps path above.
 
 ## Table of Contents
 
+- [Running CI Manually From GitHub](#running-ci-manually-from-github)
 - [Before You Deploy: Safety Checklist](#before-you-deploy-safety-checklist)
 - [Production Setup](#production-setup)
 - [Load Balancing & Scaling For Peak Use](#load-balancing--scaling-for-peak-use)
@@ -58,6 +59,23 @@ test shape as the Container Apps path above.
 - **[Post-Deployment: SMTP, Google Drive backups, custom domain →](POST_DEPLOYMENT.md)**
 
 ---
+
+## Running CI Manually From GitHub
+
+The CI workflow is not limited to branch pushes and pull requests. It also
+supports an on-demand run from GitHub Actions.
+
+1. Open **GitHub → Actions → CI**.
+2. Click **Run workflow**.
+3. Choose the branch or commit to validate.
+4. Keep **Run infra/main.bicep validation too** enabled unless you
+   intentionally want to skip the ACA Bicep validation.
+5. Start the workflow.
+
+The manual run performs the full CI validation suite. It does **not** deploy
+to Azure or publish Docker images. This is useful after changing workflow
+files, documentation, configuration, tests, or infrastructure when you want
+a clean CI result without creating a throwaway commit.
 
 ## Before You Deploy: Safety Checklist
 

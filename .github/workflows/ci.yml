@@ -1,6 +1,7 @@
 # .github/workflows/ci.yml
 # -----------------------------------------------------------------------------
-# Runs on every push and PR, to every branch -- the fast, no-deploy gate that
+# Runs on every push and PR, to every branch, and can also be started manually
+# from the GitHub Actions tab -- the fast, no-deploy gate that
 # has to pass before anything is even eligible for the Azure deploy workflows
 # (deploy-azure-aca.yml's/deploy-azure-vm.yml's fresh-build paths,
 # release.yml on `git tag v*.*.*`). Nothing here talks to Azure or requires
@@ -20,6 +21,13 @@ on:
     branches: ['**']
   pull_request:
     branches: [main, develop]
+  workflow_dispatch:
+    inputs:
+      check_infra:
+        description: 'Run infra/main.bicep validation too'
+        required: false
+        type: boolean
+        default: true
   workflow_call:
     inputs:
       check_infra:
