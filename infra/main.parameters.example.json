@@ -2,36 +2,113 @@
   "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
   "contentVersion": "1.0.0.0",
   "parameters": {
-    "environmentName": { "value": "prod" },
-    "appBaseName": { "value": "snipeit-lite" },
-    "dockerHubBackendImage": { "value": "REPLACE_ME_yourdockerhubusername/snipeit-lite-backend" },
-    "dockerHubFrontendImage": { "value": "REPLACE_ME_yourdockerhubusername/snipeit-lite-frontend" },
-    "initialImageTag": { "value": "latest" },
-    "dockerHubUsername": { "value": "" },
-    "dockerHubToken": { "value": "" },
-    "postgresUsername": { "value": "snipeit" },
-    "postgresPassword": { "value": "REPLACE_ME_OR_PASS_VIA_CLI" },
-    "postgresSkuName": { "value": "Standard_B1ms" },
-    "postgresSkuTier": { "value": "Burstable" },
-    "postgresStorageGb": { "value": 32 },
-    "postgresVersion": { "value": "16" },
-    "postgresBackupRetentionDays": { "value": 7 },
-    "postgresGeoRedundantBackup": { "value": false },
-    "postgresAdminClientIp": { "value": "" },
-    "redisPassword": { "value": "REPLACE_ME_OR_PASS_VIA_CLI" },
-    "jwtSecretKey": { "value": "REPLACE_ME_OR_PASS_VIA_CLI" },
-    "rootAdminBootstrapPassword": { "value": "" },
-    "customDomain": { "value": "" },
-    "customDomainCertificateId": { "value": "" },
-    "backendMinReplicas": { "value": 0 },
-    "backendMaxReplicas": { "value": 3 },
-    "frontendMinReplicas": { "value": 0 },
-    "frontendMaxReplicas": { "value": 3 },
-    "notificationsEnabled": { "value": false },
-    "emailProvider": { "value": "smtp" },
-    "brevoApiKey": { "value": "" },
-    "resendApiKey": { "value": "" },
-    "enableApiDocs": { "value": false },
-    "alertEmailAddress": { "value": "" }
+    "environmentName": {
+      "value": "prod"
+    },
+    "appBaseName": {
+      "value": "snipeit-lite"
+    },
+    "dockerHubBackendImage": {
+      "value": "REPLACE_ME_yourdockerhubusername/snipeit-lite-backend"
+    },
+    "dockerHubFrontendImage": {
+      "value": "REPLACE_ME_yourdockerhubusername/snipeit-lite-frontend"
+    },
+    "initialImageTag": {
+      "value": "latest"
+    },
+    "dockerHubUsername": {
+      "value": ""
+    },
+    "dockerHubToken": {
+      "value": ""
+    },
+    "postgresUsername": {
+      "value": "snipeit"
+    },
+    "postgresPassword": {
+      "value": "REPLACE_ME_OR_PASS_VIA_CLI"
+    },
+    "postgresSkuName": {
+      "value": "Standard_B1ms"
+    },
+    "postgresSkuTier": {
+      "value": "Burstable"
+    },
+    "postgresStorageGb": {
+      "value": 32
+    },
+    "postgresVersion": {
+      "value": "16"
+    },
+    "postgresBackupRetentionDays": {
+      "value": 7
+    },
+    "postgresGeoRedundantBackup": {
+      "value": false
+    },
+    "postgresAdminClientIp": {
+      "value": ""
+    },
+    "redisPassword": {
+      "value": "REPLACE_ME_OR_PASS_VIA_CLI"
+    },
+    "jwtSecretKey": {
+      "value": "REPLACE_ME_OR_PASS_VIA_CLI"
+    },
+    "rootAdminBootstrapPassword": {
+      "value": ""
+    },
+    "customDomain": {
+      "value": ""
+    },
+    "customDomainCertificateId": {
+      "value": ""
+    },
+    "backendMinReplicas": {
+      "value": 0
+    },
+    "backendMaxReplicas": {
+      "value": 3
+    },
+    "frontendMinReplicas": {
+      "value": 0
+    },
+    "frontendMaxReplicas": {
+      "value": 3
+    },
+    "notificationsEnabled": {
+      "value": false
+    },
+    "extensionRequestSlaHours": {
+      "value": "24"
+    },
+    "quotationSlaHours": {
+      "value": "24"
+    },
+    "approvalSlaCheckIntervalMinutes": {
+      "value": 60
+    },
+    "approvalSlaEscalationRepeatHours": {
+      "value": "24"
+    },
+    "sendQuotationRecipientEmails": {
+      "value": true
+    },
+    "emailProvider": {
+      "value": "smtp"
+    },
+    "brevoApiKey": {
+      "value": ""
+    },
+    "resendApiKey": {
+      "value": ""
+    },
+    "enableApiDocs": {
+      "value": false
+    },
+    "alertEmailAddress": {
+      "value": ""
+    }
   }
 }
