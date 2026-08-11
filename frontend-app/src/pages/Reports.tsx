@@ -82,7 +82,8 @@ export function Reports() {
     utilization: r.utilization_rate !== null ? Math.round(r.utilization_rate * 1000) / 10 : 0,
   }));
 
-  const totalSpend = (data?.spend.by_category ?? []).reduce((s, r) => s + r.total_spend, 0);
+  const totalRevenue = data?.revenue.total_revenue ?? 0;
+  const revenueByDepartment = data?.revenue.by_department ?? [];
 
   return (
     <div>
@@ -137,7 +138,7 @@ export function Reports() {
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
         <StatCard index={0} label="Overdue right now" value={data?.overdue.total_overdue_now ?? "—"} icon={AlarmClockOff} accent="rust" hint="Active checkouts past due" to="/checkouts?tab=Overdue" />
-        <StatCard index={1} label="Checked-out value" value={formatPrice(totalSpend)} icon={Wallet} accent="moss" hint={`${data?.spend.priced_checkout_count ?? 0} priced checkouts`} />
+        <StatCard index={1} label="Rental revenue" value={formatPrice(totalRevenue)} icon={Wallet} accent="moss" hint={`${data?.revenue.fulfilled_quotation_count ?? 0} fulfilled quotes`} />
         <StatCard index={2} label="Avg. submit → fulfill" value={hours(data?.quotation_turnaround.avg_submit_to_fulfill_hours ?? null)} icon={Clock3} accent="sky" hint={`${data?.quotation_turnaround.sample_size_submit_to_fulfill ?? 0} completed quotes`} />
         <StatCard index={3} label="Highest utilization" value={pct(data?.utilization_by_asset_type[0]?.utilization_rate ?? null)} icon={Gauge} accent="brass" hint={data?.utilization_by_asset_type[0]?.name ?? "—"} />
       </div>
@@ -261,38 +262,56 @@ export function Reports() {
         </motion.div>
       </div>
 
-      {/* Spend by category / department */}
-      <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.45, delay: 0.25 }} className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <div className="border border-border-soft bg-surface rounded-[3px] p-5">
-          <h2 className="font-display text-[15px] font-medium text-text mb-3">Spend by category</h2>
-          <div className="flex flex-col divide-y divide-border-soft">
-            {(data?.spend.by_category.length ?? 0) === 0 && <p className="text-[12px] text-text-faint py-6 text-center">Nothing priced in this window.</p>}
-            {data?.spend.by_category.map((row) => (
-              <div key={row.category} className="flex items-center justify-between py-2 text-[12.5px]">
-                <div>
-                  <p className="text-text">{row.category}</p>
-                  <p className="text-text-faint text-[10.5px]">{row.item_count} unit(s)</p>
-                </div>
-                <span className="font-mono text-text">{formatPrice(row.total_spend)}</span>
-              </div>
-            ))}
+      {/* Rental revenue by asset department */}
+      <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.45, delay: 0.25 }} className="border border-border-soft bg-surface rounded-[3px] p-5">
+        <div className="mb-4 flex items-start justify-between gap-3 flex-wrap">
+          <div>
+            <h2 className="font-display text-[15px] font-medium text-text">Rental revenue by asset department</h2>
+            <p className="text-[11px] text-text-faint mt-0.5">Fulfilled quotation revenue grouped by the department assigned to each asset pool</p>
+          </div>
+          <div className="text-right">
+            <p className="text-[10px] uppercase tracking-wider text-text-faint">Total revenue</p>
+            <p className="font-mono text-lg text-text">{formatPrice(totalRevenue)}</p>
           </div>
         </div>
-        <div className="border border-border-soft bg-surface rounded-[3px] p-5">
-          <h2 className="font-display text-[15px] font-medium text-text mb-3">Spend by department</h2>
-          <div className="flex flex-col divide-y divide-border-soft">
-            {(data?.spend.by_department.length ?? 0) === 0 && <p className="text-[12px] text-text-faint py-6 text-center">Nothing priced in this window.</p>}
-            {data?.spend.by_department.map((row) => (
-              <div key={row.department} className="flex items-center justify-between py-2 text-[12.5px]">
-                <div>
-                  <p className="text-text">{row.department}</p>
-                  <p className="text-text-faint text-[10.5px]">{row.item_count} unit(s)</p>
-                </div>
-                <span className="font-mono text-text">{formatPrice(row.total_spend)}</span>
-              </div>
-            ))}
-          </div>
-        </div>
+
+        {revenueByDepartment.length > 0 && (
+          <ResponsiveContainer width="100%" height={260}>
+            <BarChart data={revenueByDepartment.slice(0, 10)} margin={{ left: -10, right: 10 }}>
+              <CartesianGrid stroke={chart.grid} vertical={false} />
+              <XAxis dataKey="department" stroke={chart.axis} tick={{ fontSize: 10, fontFamily: "IBM Plex Mono" }} axisLine={false} tickLine={false} interval={0} angle={-20} textAnchor="end" height={55} />
+              <YAxis stroke={chart.axis} tick={{ fontSize: 10, fontFamily: "IBM Plex Mono" }} axisLine={false} tickLine={false} width={48} />
+              <Tooltip contentStyle={{ background: chart.tooltipBg, border: `1px solid ${chart.tooltipBorder}`, borderRadius: 3, fontSize: 12 }} labelStyle={{ color: chart.axis }} formatter={(v) => [formatPrice(Number(v)), "Revenue"]} />
+              <Bar dataKey="total_revenue" fill={chart.moss} radius={[3, 3, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        )}
+
+        <TableShell>
+          <table className="w-full text-[12.5px]">
+            <TableHead>
+              <th className="text-left px-4 py-2.5 font-medium">Asset department</th>
+              <th className="text-right px-4 py-2.5 font-medium">Revenue</th>
+              <th className="text-right px-4 py-2.5 font-medium">Units rented</th>
+              <th className="text-right px-4 py-2.5 font-medium">Quotes</th>
+            </TableHead>
+            <tbody className="divide-y divide-border-soft">
+              {revenueByDepartment.length === 0 && <TablePlaceholderRow columns={4}>No fulfilled rental revenue in this window.</TablePlaceholderRow>}
+              {revenueByDepartment.map((row) => (
+                <tr key={row.department}>
+                  <td className="px-4 py-2.5 text-text">{row.department}</td>
+                  <td className="px-4 py-2.5 text-right font-mono text-text">{formatPrice(row.total_revenue)}</td>
+                  <td className="px-4 py-2.5 text-right font-mono text-text-muted">{row.item_count}</td>
+                  <td className="px-4 py-2.5 text-right font-mono text-text-muted">{row.quotation_count}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </TableShell>
+
+        {(data?.revenue.unassigned_line_count ?? 0) > 0 && (
+          <p className="text-[11px] text-text-faint mt-3">{data?.revenue.unassigned_line_count} priced rental line(s) are not assigned to an asset department yet.</p>
+        )}
       </motion.div>
     </div>
   );

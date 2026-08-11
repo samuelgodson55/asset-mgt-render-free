@@ -11,7 +11,7 @@ def test_admin_can_create_and_view_asset_pool(as_admin):
     client, headers = as_admin
     create = client.post(
         "/api/assets", headers=headers,
-        json={"name": "Test Laptop Pool", "total_quantity": 10, "category": "Engineering", "price": 999.5},
+        json={"name": "Test Laptop Pool", "total_quantity": 10, "category": "Engineering", "department": "Camera", "price": 999.5},
     )
     assert create.status_code == 200, create.text
     asset_id = create.json()["id"]
@@ -23,7 +23,25 @@ def test_admin_can_create_and_view_asset_pool(as_admin):
     assert body["total_quantity"] == 10
     assert body["available_quantity"] == 10
     assert body["category"] == "Engineering"
+    assert body["department"] == "Camera"
     assert body["price"] == 999.5
+
+
+def test_admin_can_edit_asset_department_without_changing_category(as_admin):
+    client, headers = as_admin
+    create = client.post(
+        "/api/assets", headers=headers,
+        json={"name": "Department Edit Pool", "total_quantity": 3, "category": "Production", "department": "Camera"},
+    )
+    assert create.status_code == 200
+    asset_id = create.json()["id"]
+
+    response = client.put(f"/api/assets/{asset_id}/department", headers=headers, json={"department": "Grip"})
+    assert response.status_code == 200
+
+    details = client.get(f"/api/assets/{asset_id}/details", headers=headers).json()
+    assert details["category"] == "Production"
+    assert details["department"] == "Grip"
 
 
 def test_staff_cannot_create_asset_pool(as_staff):

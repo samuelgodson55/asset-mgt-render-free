@@ -6,12 +6,13 @@ only wants a single slice:
   GET /reports/utilization
   GET /reports/overdue-trend
   GET /reports/spend
+  GET /reports/revenue
   GET /reports/quotation-turnaround
 
 Manager/Admin/Super-Admin-only (require_privileged_role -- same gate as
-GET /audit-logs) business-metrics view: utilization by asset type,
-overdue trends, spend by category/department, and quotation approval
-turnaround time. Deliberately separate from OpenTelemetry tracing
+GET /audit-logs) business-metrics view: utilization by asset type, overdue trends, rental
+revenue by asset department, legacy spend breakdowns, and quotation
+approval turnaround time. Deliberately separate from OpenTelemetry tracing
 (telemetry.py) -- this answers "how is the fleet being used", not "why
 was this request slow". See services/reports_service.py's module
 docstring for the full reasoning and exactly how each figure is derived.
@@ -76,6 +77,16 @@ def get_spend(
     user: dict = Depends(require_privileged_role),
 ):
     return reports_service.get_spend_breakdown(db, start_date, end_date)
+
+
+@router.get("/revenue")
+def get_revenue(
+    start_date: Optional[datetime.date] = Query(None),
+    end_date: Optional[datetime.date] = Query(None),
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_privileged_role),
+):
+    return reports_service.get_revenue_by_asset_department(db, start_date, end_date)
 
 
 @router.get("/quotation-turnaround")

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { classifyGlobalSearch } from "./globalSearch";
+import { classifyGlobalSearch } from "../../src/lib/globalSearch";
 
 // =============================================================================
 // lib/globalSearch.test.ts

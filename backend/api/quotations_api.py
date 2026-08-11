@@ -19,7 +19,7 @@ from schemas.quotations_schema import (
     QuotationItemCreate, QuotationItemQuantityUpdate, VatUpdateRequest,
     QuotationAssignRequest, QuotationMetaUpdate, QuotationCreateRequest,
     QuotationOutsourcedItemCreate, QuotationCheckoutRequest,
-    QuotationDiscountUpdateRequest, QuotationNotificationsReadRequest,
+    QuotationDiscountUpdateRequest, QuotationNotificationsReadRequest, QuotationPaidRequest,
 )
 import services.quotation_service as quotation_service
 
@@ -179,10 +179,10 @@ def create_quotation(payload: QuotationCreateRequest, db: Session = Depends(get_
 
 
 @router.delete("/quotations/{quotation_id}")
-def delete_quotation(quotation_id: int, db: Session = Depends(get_db), user: dict = Depends(require_super_admin)):
-    """Admin/Super Admin-only (stricter than every other Quotes-tab action above,
-    which only need require_privileged_role) -- permanently deletes a submitted or
-    approved Quotation. Refused once a Quotation is fulfilled, same as any other edit."""
+def delete_quotation(quotation_id: int, db: Session = Depends(get_db), user: dict = Depends(require_privileged_role)):
+    """Admin/Manager-only: permanently deletes a submitted or approved
+    quotation. Fulfilled and paid quotations are retained for operational and
+    financial history respectively."""
     return quotation_service.delete_quotation(db, user, quotation_id)
 
 
@@ -256,6 +256,12 @@ def approve_quotation(quotation_id: int, db: Session = Depends(get_db), user: di
     """Admin/Manager-only: flips a submitted Quotation to \"approved\" -- the green
     Ready for Pickup badge -- and locks it against further item/notes/assignment edits."""
     return quotation_service.approve_quotation(db, user, quotation_id)
+
+
+@router.post("/quotations/{quotation_id}/paid")
+def mark_quotation_paid(quotation_id: int, payload: QuotationPaidRequest, db: Session = Depends(get_db), user: dict = Depends(require_privileged_role)):
+    """Admin/Manager-only: records payment for a fulfilled quotation and moves it to terminal `paid`."""
+    return quotation_service.mark_quotation_paid(db, user, quotation_id, payload)
 
 
 @router.post("/quotations/{quotation_id}/checkout")

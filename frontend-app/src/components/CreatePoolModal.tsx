@@ -13,6 +13,7 @@ export function CreatePoolModal({ open, onClose, onCreated }: { open: boolean; o
   const [name, setName] = useState("");
   const [qty, setQty] = useState("1");
   const [category, setCategory] = useState("");
+  const [department, setDepartment] = useState("");
   const [price, setPrice] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -22,6 +23,7 @@ export function CreatePoolModal({ open, onClose, onCreated }: { open: boolean; o
       setName("");
       setQty("1");
       setCategory("");
+      setDepartment("");
       setPrice("");
       setError(null);
     }
@@ -38,6 +40,7 @@ export function CreatePoolModal({ open, onClose, onCreated }: { open: boolean; o
         name,
         total_quantity: parseInt(qty, 10) || 0,
         category: category.trim() || null,
+        department: department.trim() || null,
         price: price.trim() ? Number(price.trim()) : null,
       });
       onCreated();
@@ -68,6 +71,15 @@ export function CreatePoolModal({ open, onClose, onCreated }: { open: boolean; o
           <input required value={name} onChange={(e) => setName(e.target.value)} placeholder="Pool name (e.g. Dell Latitude 5440)" className={inputClass} />
           <input required type="number" min={0} value={qty} onChange={(e) => setQty(e.target.value)} placeholder="Initial total quantity" className={inputClass} />
           <input value={category} onChange={(e) => setCategory(e.target.value)} placeholder="Category (optional)" className={inputClass} />
+          <input list="asset-departments" value={department} onChange={(e) => setDepartment(e.target.value)} placeholder="Department (e.g. Camera, Lighting, Grip)" className={inputClass} />
+          <datalist id="asset-departments">
+            <option value="Camera" />
+            <option value="Lighting" />
+            <option value="Grip" />
+            <option value="Audio" />
+            <option value="Power" />
+            <option value="Production" />
+          </datalist>
           <input type="number" min={0} step="0.01" value={price} onChange={(e) => setPrice(e.target.value)} placeholder="Unit price (optional)" className={inputClass} />
           {error && <div className="bg-rust/10 border border-rust/30 text-rust-soft text-[12px] rounded-[3px] px-3 py-2.5">{error}</div>}
           <button type="submit" disabled={submitting} className="flex items-center justify-center gap-1.5 bg-brass hover:bg-brass-soft disabled:opacity-60 text-ink font-medium text-[13px] rounded-[3px] py-2.5 transition-colors">

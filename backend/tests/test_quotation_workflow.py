@@ -115,7 +115,7 @@ def test_full_quotation_lifecycle_draft_to_fulfilled(as_admin, as_staff, as_mana
     approved_body = approved.json()
     assert approved_body["status"] == "approved"
     assert approved_body["approved_at"] is not None
-    assert approved_body["locked"] is False  # only "fulfilled" locks it
+    assert approved_body["locked"] is False  # only "paid" locks it
 
     # Still untouched at approved -- stock only ever moves at fulfillment.
     assert _available_quantity(admin_client, admin_headers, asset_id) == 10
@@ -126,7 +126,7 @@ def test_full_quotation_lifecycle_draft_to_fulfilled(as_admin, as_staff, as_mana
     fulfilled_body = fulfilled.json()
     assert fulfilled_body["status"] == "fulfilled"
     assert fulfilled_body["fulfilled_at"] is not None
-    assert fulfilled_body["locked"] is True
+    assert fulfilled_body["locked"] is False  # fulfilled remains editable to Admin/Manager until paid
     assert len(fulfilled_body["checkout_ids"]) == 1
 
     # Stock finally moves -- exactly by the quantity on the line, no more.
@@ -789,3 +789,93 @@ def test_send_quotation_recipient_emails_gate_on_sends_email_alongside_in_app(as
     notifications = customer_client.get("/api/quotations/me/notifications", headers=customer_headers).json()
     assert len(notifications["items"]) == 1
 
+
+
+def test_manager_can_delete_submitted_and_approved_quotations(as_admin, as_staff, as_manager):
+    admin_client, admin_headers = as_admin
+    staff_client, staff_headers = as_staff
+    manager_client, manager_headers = as_manager
+
+    # Submitted quote: Manager is explicitly allowed to delete it.
+    asset_id = _create_pool(admin_client, admin_headers, "Manager Delete Submitted", total_quantity=2, price=20.00)
+    _add_to_cart(staff_client, staff_headers, asset_id, 1, TODAY, TODAY)
+    submitted = staff_client.post("/api/quotations/submit", headers=staff_headers).json()
+    quotation_id = submitted["id"]
+    response = manager_client.delete(f"/api/quotations/{quotation_id}", headers=manager_headers)
+    assert response.status_code == 200, response.text
+
+    # Approved quote: Manager can also delete it before physical fulfillment.
+    _add_to_cart(staff_client, staff_headers, asset_id, 1, TODAY, TODAY)
+    submitted = staff_client.post("/api/quotations/submit", headers=staff_headers).json()
+    quotation_id = submitted["id"]
+    approved = manager_client.post(f"/api/quotations/{quotation_id}/approve", headers=manager_headers)
+    assert approved.status_code == 200, approved.text
+    response = manager_client.delete(f"/api/quotations/{quotation_id}", headers=manager_headers)
+    assert response.status_code == 200, response.text
+
+
+def test_fulfilled_quotation_can_be_edited_then_marked_paid_and_locked(as_admin, as_staff, as_manager):
+    admin_client, admin_headers = as_admin
+    staff_client, staff_headers = as_staff
+    manager_client, manager_headers = as_manager
+
+    asset_id = _create_pool(admin_client, admin_headers, "Paid Workflow Asset", total_quantity=5, price=50.00)
+    _add_to_cart(staff_client, staff_headers, asset_id, 1, TODAY, TODAY)
+    submitted = staff_client.post("/api/quotations/submit", headers=staff_headers).json()
+    quotation_id = submitted["id"]
+    assert manager_client.post(f"/api/quotations/{quotation_id}/approve", headers=manager_headers).status_code == 200
+    fulfilled = manager_client.post(f"/api/quotations/{quotation_id}/checkout", headers=manager_headers, json={})
+    assert fulfilled.status_code == 200, fulfilled.text
+    assert fulfilled.json()["status"] == "fulfilled"
+    assert fulfilled.json()["locked"] is False
+
+    # Operational correction is allowed after fulfillment and before payment.
+    edited = manager_client.put(
+        f"/api/quotations/{quotation_id}",
+        headers=manager_headers,
+        json={"notes": "Corrected fulfillment note"},
+    )
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["notes"] == "Corrected fulfillment note"
+
+    paid = manager_client.post(
+        f"/api/quotations/{quotation_id}/paid",
+        headers=manager_headers,
+        json={"payment_method": "bank_transfer", "payment_reference": "TRX-PAID-001"},
+    )
+    assert paid.status_code == 200, paid.text
+    paid_body = paid.json()
+    assert paid_body["status"] == "paid"
+    assert paid_body["locked"] is True
+    assert paid_body["payment_method"] == "bank_transfer"
+    assert paid_body["payment_reference"] == "TRX-PAID-001"
+    assert paid_body["paid_at"] is not None
+
+    # Paid is terminal: neither operational edits nor deletion are permitted.
+    locked_edit = manager_client.put(
+        f"/api/quotations/{quotation_id}",
+        headers=manager_headers,
+        json={"notes": "Should not change"},
+    )
+    assert locked_edit.status_code == 400
+
+    locked_delete = manager_client.delete(f"/api/quotations/{quotation_id}", headers=manager_headers)
+    assert locked_delete.status_code == 400
+
+
+def test_paid_cannot_be_set_before_fulfillment(as_staff, as_manager, as_admin):
+    admin_client, admin_headers = as_admin
+    staff_client, staff_headers = as_staff
+    manager_client, manager_headers = as_manager
+
+    asset_id = _create_pool(admin_client, admin_headers, "Paid Before Fulfillment", total_quantity=2, price=25.00)
+    _add_to_cart(staff_client, staff_headers, asset_id, 1, TODAY, TODAY)
+    submitted = staff_client.post("/api/quotations/submit", headers=staff_headers).json()
+    quotation_id = submitted["id"]
+    response = manager_client.post(
+        f"/api/quotations/{quotation_id}/paid",
+        headers=manager_headers,
+        json={"payment_method": "cash"},
+    )
+    assert response.status_code == 400
+    assert "fulfilled" in response.json()["detail"].lower()

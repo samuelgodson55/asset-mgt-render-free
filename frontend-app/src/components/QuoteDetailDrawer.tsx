@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { X, Loader2, Trash2, Plus, Search, UserPlus } from "lucide-react";
+import { X, Loader2, Trash2, Plus, Search, UserPlus, CheckCircle2, CreditCard } from "lucide-react";
 import { quotationsApi, usersApi, outsidersApi, formatPrice, formatDate, ApiError } from "../lib/api";
 import type { QuotationCartOrDetail, CatalogAsset, UserRow, OutsiderRow } from "../lib/types";
 import { StatusPill } from "./StatusPill";
@@ -23,6 +23,8 @@ function statusPillFor(status: string | undefined) {
       return <StatusPill status="approved" />;
     case "fulfilled":
       return <StatusPill status="fulfilled" />;
+    case "paid":
+      return <StatusPill status="paid" />;
     case "submitted":
       return <StatusPill status="submitted" />;
     default:
@@ -61,6 +63,9 @@ export function QuoteDetailDrawer({
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [notes, setNotes] = useState("");
   const [discount, setDiscount] = useState("0");
+  const [paymentMethod, setPaymentMethod] = useState("bank_transfer");
+  const [paymentReference, setPaymentReference] = useState("");
+  const [paymentConfirmed, setPaymentConfirmed] = useState(false);
   const [assetQuery, setAssetQuery] = useState("");
   const [selectedAssetId, setSelectedAssetId] = useState<number | null>(null);
   const [addQty, setAddQty] = useState("1");
@@ -105,6 +110,9 @@ export function QuoteDetailDrawer({
       setData(detail);
       setNotes(detail.notes ?? "");
       setDiscount(String(detail.discount_percent ?? 0));
+    setPaymentMethod(detail.payment_method ?? "bank_transfer");
+    setPaymentReference(detail.payment_reference ?? "");
+    setPaymentConfirmed(false);
     } catch (err) {
       setError(errMsg(err, "Couldn't load this quotation."));
     } finally {
@@ -119,6 +127,9 @@ export function QuoteDetailDrawer({
     setAddQty("1");
     setAddStart(today());
     setAddDue(today());
+    setPaymentMethod("bank_transfer");
+    setPaymentReference("");
+    setPaymentConfirmed(false);
     setAddMode("catalog");
     setOutName(""); setOutDescription(""); setOutPrice(""); setOutQty("1"); setOutSourcedFrom("");
     setOutStart(today()); setOutDue(today());
@@ -147,10 +158,9 @@ export function QuoteDetailDrawer({
 
   if (quotationId == null) return null;
 
-  // Self-service is only ever editable while "submitted" (unapproved);
-  // Admin/Manager stays editable through "approved" too, only locked
-  // once "fulfilled" -- see backend's _get_own_editable_quotation() vs
-  // _ensure_admin_editable().
+  // Self-service is only ever editable while "submitted". Admin/Manager
+  // can make operational corrections through "fulfilled". A paid quote is
+  // terminal and immutable. The backend enforces the same rule.
   const editable = mode === "self" ? data?.status === "submitted" : !data?.locked;
 
   const withBusy = async (key: string, fn: () => Promise<void>) => {
@@ -288,6 +298,16 @@ export function QuoteDetailDrawer({
   const approve = () => {
     if (!quotationId) return;
     withBusy("approve", async () => setData(await quotationsApi.approve(quotationId)));
+  };
+
+  const markPaid = () => {
+    if (!quotationId || data?.status !== "fulfilled") return;
+    if (!paymentConfirmed) { setError("Confirm that payment has been received before marking this quotation as paid."); return; }
+    if (!paymentMethod) { setError("Select a payment method."); return; }
+    withBusy("paid", async () => {
+      setData(await quotationsApi.markPaid(quotationId, paymentMethod, paymentReference.trim() || null));
+      setPaymentConfirmed(false);
+    });
   };
 
   const remove = () => {
@@ -452,7 +472,11 @@ export function QuoteDetailDrawer({
 
             {!editable && (
               <div className="border border-border-soft bg-ink-soft text-text-faint text-[12px] rounded-[3px] px-3 py-2.5 mb-4">
-                {data.status === "fulfilled" ? `Fulfilled ${data.fulfilled_at ? formatDate(data.fulfilled_at) : ""} — this quote is now history and can no longer be edited.` : "This quote can no longer be edited from here."}
+                {data.status === "paid"
+                  ? `Paid ${data.paid_at ? formatDate(data.paid_at) : ""} — this quotation is locked as a financial record.`
+                  : mode === "self" && data.status === "fulfilled"
+                    ? `Fulfilled ${data.fulfilled_at ? formatDate(data.fulfilled_at) : ""}.`
+                    : "This quote can no longer be edited from here."}
               </div>
             )}
 
@@ -647,6 +671,50 @@ export function QuoteDetailDrawer({
               </div>
             )}
 
+            {mode === "admin" && data.status === "fulfilled" && (
+              <div className="border border-moss/30 bg-moss/5 rounded-[4px] p-3.5 mb-4">
+                <div className="flex items-start gap-2 mb-3">
+                  <CreditCard size={15} className="text-moss-soft mt-0.5 shrink-0" />
+                  <div>
+                    <p className="text-[12.5px] font-medium text-text">Record payment</p>
+                    <p className="text-[11px] text-text-faint mt-0.5">Payment is the final step. Once marked paid, this quotation becomes read-only.</p>
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-2.5">
+                  <label className="text-[11px] text-text-faint">
+                    Payment method
+                    <select value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value)} className="w-full mt-1 rounded-[3px] border border-border-soft bg-ink-soft px-2 py-1.5 text-[12px] text-text focus:border-brass/50 focus:outline-none">
+                      <option value="bank_transfer">Bank transfer</option>
+                      <option value="card">Card</option>
+                      <option value="pos">POS</option>
+                      <option value="cash">Cash</option>
+                      <option value="other">Other</option>
+                    </select>
+                  </label>
+                  <label className="text-[11px] text-text-faint">
+                    Payment reference <span className="normal-case">(optional)</span>
+                    <input value={paymentReference} onChange={(e) => setPaymentReference(e.target.value)} placeholder="Transfer ID / receipt no." className="w-full mt-1 rounded-[3px] border border-border-soft bg-ink-soft px-2 py-1.5 text-[12px] text-text placeholder:text-text-faint focus:border-brass/50 focus:outline-none" />
+                  </label>
+                </div>
+                <label className="flex items-start gap-2 text-[11.5px] text-text-muted mb-3 cursor-pointer">
+                  <input type="checkbox" checked={paymentConfirmed} onChange={(e) => setPaymentConfirmed(e.target.checked)} className="mt-0.5" />
+                  <span>I confirm the customer payment has been received and verified.</span>
+                </label>
+                <button onClick={markPaid} disabled={!paymentConfirmed || busyKey === "paid"} className="w-full flex items-center justify-center gap-1.5 bg-moss/15 hover:bg-moss/25 disabled:opacity-50 text-moss-soft text-[12px] font-medium rounded-[3px] py-2 transition-colors">
+                  {busyKey === "paid" ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle2 size={13} />}
+                  {busyKey === "paid" ? "Recording payment…" : "Mark as paid"}
+                </button>
+              </div>
+            )}
+
+            {mode === "admin" && data.status === "paid" && (
+              <div className="border border-moss/30 bg-moss/5 rounded-[4px] p-3 mb-4">
+                <div className="flex items-center gap-2 text-[12px] text-moss-soft"><CheckCircle2 size={14} /> Payment recorded</div>
+                <p className="text-[11px] text-text-faint mt-1.5">{data.paid_at ? `Paid ${formatDate(data.paid_at)}` : "Paid"}{data.payment_method ? ` · ${data.payment_method.replace("_", " ")}` : ""}{data.payment_reference ? ` · ${data.payment_reference}` : ""}</p>
+                {data.paid_by?.name && <p className="text-[10.5px] text-text-faint mt-1">Recorded by {data.paid_by.name}</p>}
+              </div>
+            )}
+
             <div className="border-t border-border-soft pt-3 mb-4 flex flex-col gap-1.5 text-[12.5px]">
               <div className="flex justify-between text-text-muted"><span>Subtotal</span><span className="font-mono">{formatPrice(data.subtotal)}</span></div>
               {!!data.discount_percent && (
@@ -663,7 +731,7 @@ export function QuoteDetailDrawer({
                     {busyKey === "approve" ? "Approving…" : "Approve"}
                   </button>
                 )}
-                {!data.locked && (
+                {(data.status === "submitted" || data.status === "approved") && (
                   <button onClick={remove} disabled={busyKey === "delete"} className="flex-1 bg-rust/10 hover:bg-rust/20 disabled:opacity-60 text-rust-soft text-[12.5px] font-medium rounded-[3px] py-2 transition-colors">
                     {busyKey === "delete" ? "Deleting…" : "Delete quotation"}
                   </button>

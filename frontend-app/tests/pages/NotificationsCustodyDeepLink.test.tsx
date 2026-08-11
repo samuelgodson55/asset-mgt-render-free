@@ -3,12 +3,12 @@ import { StrictMode } from "react";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
-import { Notifications } from "./Notifications";
-import { CustodyProvider } from "../lib/custodyContext";
-import { useCustody } from "../lib/useCustody";
-import { CustodyDrawer } from "../components/CustodyDrawer";
-import { QuoteDetailProvider } from "../lib/quoteDetailContext";
-import type { AuthUser, Checkout } from "../lib/api";
+import { Notifications } from "../../src/pages/Notifications";
+import { CustodyProvider } from "../../src/lib/custodyContext";
+import { useCustody } from "../../src/lib/useCustody";
+import { CustodyDrawer } from "../../src/components/CustodyDrawer";
+import { QuoteDetailProvider } from "../../src/lib/quoteDetailContext";
+import type { AuthUser, Checkout } from "../../src/lib/api";
 
 // =============================================================================
 // pages/NotificationsCustodyDeepLink.test.tsx
@@ -54,10 +54,10 @@ const { useAuthMock, outsiderDueSoonCheckout, userOverdueCheckout } = vi.hoisted
   } as unknown as Checkout,
 }));
 
-vi.mock("../lib/useAuth", () => ({ useAuth: useAuthMock }));
+vi.mock("../../src/lib/useAuth", () => ({ useAuth: useAuthMock }));
 
-vi.mock("../lib/api", async () => {
-  const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
+vi.mock("../../src/lib/api", async () => {
+  const actual = await vi.importActual<typeof import("../../src/lib/api")>("../../src/lib/api");
   return {
     ...actual,
     myItemsApi: { ...actual.myItemsApi, list: vi.fn().mockResolvedValue({ assigned_items: [] }) },

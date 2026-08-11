@@ -190,6 +190,15 @@ class AssetType(Base):
     # export_assets_inventory() / list_asset_categories()).
     category = Column(String, nullable=True)
 
+    # --- Department (OPTIONAL) -----------------------------------------
+    # The production/equipment department this pool belongs to, e.g.
+    # "Camera", "Lighting", "Grip", "Audio", or "Power". This is kept
+    # separate from `category`: category remains the existing descriptive
+    # grouping used by inventory filters, while department is the business
+    # dimension used by rental-revenue reporting. It is descriptive only
+    # and never controls access.
+    department = Column(String, nullable=True, index=True)
+
     # --- Per-unit price (OPTIONAL) ------------------------------------------
     # The per-unit purchase/replacement price of this pool's equipment (e.g.
     # 1899.00 for a MacBook Pro). Purely informational, same "descriptive,
@@ -758,7 +767,7 @@ class Quotation(Base):
     quote, plus at most one open draft).
 
     QUOTE-TO-CHECKOUT WORKFLOW (status="submitted" -> "approved" ->
-    "fulfilled"): a submitted Quotation sits in the Admin/Manager "Quotes"
+    "fulfilled" -> "paid"): a submitted Quotation sits in the Admin/Manager "Quotes"
     master queue where it can still be adjusted (items/notes/assignment)
     exactly like before. Calling quotation_service.approve_quotation()
     flips it to `status="approved"` and stamps `approved_at`/
@@ -773,10 +782,10 @@ class Quotation(Base):
     until quotation_service.bulk_checkout_quotation() -- the Fulfillment
     Drawer's "physical bulk checkout" action -- turns EVERY line item
     into a real AssetCheckout row (see AssetCheckout.quotation_id) in one
-    atomic transaction, flips this row to `status="fulfilled"`, and
-    stamps `fulfilled_at`/`fulfilled_by_id`. THAT is the point the quote
-    is truly closed -- fulfilled quotes are locked against every further
-    edit, by anyone, Admin/Manager included. Inventory stock is NEVER
+    atomic transaction, flips this row to `status="fulfilled"`, and stamps
+    `fulfilled_at`/`fulfilled_by_id`. Fulfilled quotes remain editable by
+    Admin/Manager for operational corrections. Once payment is recorded,
+    the row moves to terminal `status="paid"` and becomes immutable. Inventory stock is NEVER
     reserved or deducted at "draft", "submitted", or "approved" --
     `AssetType.available_quantity` is only ever touched at this final
     "fulfilled" step (see services/stock.py's recalculate_asset_stock()),
@@ -813,7 +822,7 @@ class Quotation(Base):
     # AUTO_INIT_DB=true) and `alembic upgrade head` (production) produced two
     # different schemas. Also genuinely useful here: the Quotation Catalog
     # and Admin/Manager dashboards filter quotations by status constantly.
-    status = Column(String, default="draft", nullable=False, index=True)  # "draft" | "submitted" | "approved" | "fulfilled"
+    status = Column(String, default="draft", nullable=False, index=True)  # "draft" | "submitted" | "approved" | "fulfilled" | "paid"
     reference_number = Column(String, nullable=True, index=True, unique=True)
     submitted_at = Column(DateTime(timezone=True), nullable=True)
     assigned_to_id = Column(Integer, ForeignKey("users.id"), nullable=True)
@@ -838,6 +847,14 @@ class Quotation(Base):
     approved_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     fulfilled_at = Column(DateTime(timezone=True), nullable=True)
     fulfilled_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    # Payment is a separate terminal step after physical fulfillment. Once
+    # marked paid, the quotation becomes immutable so the financial record
+    # cannot drift after payment. Method/reference are retained for audit and
+    # reconciliation rather than relying on a bare boolean checkbox.
+    paid_at = Column(DateTime(timezone=True), nullable=True)
+    paid_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    payment_method = Column(String, nullable=True)
+    payment_reference = Column(String, nullable=True)
 
     # --- Discount (Admin/Manager-only, per-quote) ---------------------------
     # A single percentage (0-100) knocked off THIS quote's subtotal, before
@@ -849,8 +866,8 @@ class Quotation(Base):
     # deliberately sets it. Editable via update_quotation_discount() under
     # the exact same _ensure_admin_editable() lock as every other line
     # item/note/assignment edit on this quote -- i.e. right up until
-    # `status="fulfilled"`, same as "the other quote items" per the feature
-    # request. Unlike price/VAT, this IS snapshotted onto the row itself
+    # `status="paid"`, the terminal financial state. Fulfilled remains
+    # operationally editable by Admin/Manager until payment is recorded. Unlike price/VAT, this IS snapshotted onto the row itself
     # (rather than re-derived from a global setting) since it's a
     # per-quote negotiated concession, not a store-wide policy.
     discount_percent = Column(Numeric(5, 2), default=0, nullable=False)
@@ -875,6 +892,7 @@ class Quotation(Base):
     assigned_outsider = relationship("Outsider", foreign_keys=[assigned_outsider_id])
     approved_by = relationship("User", foreign_keys=[approved_by_id])
     fulfilled_by = relationship("User", foreign_keys=[fulfilled_by_id])
+    paid_by = relationship("User", foreign_keys=[paid_by_id])
     items = relationship("QuotationItem", back_populates="quotation", cascade="all, delete-orphan", order_by="QuotationItem.id")
     # Manager/Admin-only "not currently in inventory" lines -- see
     # QuotationOutsourcedItem's own docstring below for the full rationale.

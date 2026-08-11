@@ -28,9 +28,21 @@ class AssetTypeCreate(BaseModel):
     # pattern as NameUpdateRequest._validate_name below).
     category: Optional[str] = None
 
+    # Optional production/equipment department used for asset-level
+    # organization and revenue reporting (e.g. Camera, Lighting, Grip).
+    department: Optional[str] = None
+
     @field_validator("category")
     @classmethod
     def _normalize_category(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
+    @field_validator("department")
+    @classmethod
+    def _normalize_department(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
             return None
         value = value.strip()
@@ -123,6 +135,20 @@ class NameUpdateRequest(BaseModel):
         if not value:
             raise ValueError("Asset name cannot be blank.")
         return value
+
+
+class DepartmentUpdateRequest(BaseModel):
+    # Asset department is independently editable from the existing
+    # category. Clearing it is valid and stores NULL.
+    department: Optional[str] = Field(None, max_length=255)
+
+    @field_validator("department")
+    @classmethod
+    def _normalize_department(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
 
 
 class CategoryUpdateRequest(BaseModel):

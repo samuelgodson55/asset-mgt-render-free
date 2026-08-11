@@ -19,7 +19,7 @@ import models
 from config import settings
 from services.search_utils import apply_search_filter
 from models import utc_now
-from schemas.assets_schema import AssetTypeCreate, ExceptionCreate, AdvancedCheckoutRequest, QuantityUpdateRequest, NameUpdateRequest, CategoryUpdateRequest, PriceUpdateRequest
+from schemas.assets_schema import AssetTypeCreate, ExceptionCreate, AdvancedCheckoutRequest, QuantityUpdateRequest, NameUpdateRequest, CategoryUpdateRequest, DepartmentUpdateRequest, PriceUpdateRequest
 from services.stock import recalculate_asset_stock
 import services.export_service as export_service
 
@@ -70,6 +70,7 @@ def _serialize_asset_type(asset: "models.AssetType", show_stock: bool) -> dict:
         "id": asset.id,
         "name": asset.name,
         "category": asset.category,
+        "department": asset.department,
         "price": float(asset.price) if asset.price is not None else None,
         "custom_fields": asset.custom_fields,
     }
@@ -130,17 +131,19 @@ def create_asset_type(db: Session, asset: AssetTypeCreate, user: dict) -> dict:
         available_quantity=asset.total_quantity,  # no checkouts/isolations yet, so Available == Total
         custom_fields=asset.custom_fields,
         category=asset.category,
+        department=asset.department,
         price=price_value,
     )
     db.add(new_asset_type)
     db.commit()
     db.refresh(new_asset_type)
 
-    dept_log_text = f" (Category: {asset.category})" if asset.category else ""
+    category_log_text = f" (Category: {asset.category})" if asset.category else ""
+    department_log_text = f" (Department: {asset.department})" if asset.department else ""
     price_log_text = f" (Price: {export_service.format_money(price_value)})" if price_value is not None else ""
     db.add(models.AuditLog(
         operator=user["email"], action="POOL_CREATED", target_type="AssetType", target_id=new_asset_type.id,
-        details=f"Created asset category '{asset.name}' with initial quantity of {asset.total_quantity}{dept_log_text}{price_log_text}",
+        details=f"Created asset pool '{asset.name}' with initial quantity of {asset.total_quantity}{category_log_text}{department_log_text}{price_log_text}",
     ))
     db.commit()
     return {"message": "Asset type created successfully", "id": new_asset_type.id}
@@ -183,7 +186,7 @@ def list_assets(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offset: int
     offset = max(0, offset)
 
     query = db.query(models.AssetType).filter(~models.AssetType.is_deleted)
-    query = apply_search_filter(query, search, [models.AssetType.name])
+    query = apply_search_filter(query, search, [models.AssetType.name, models.AssetType.department])
 
     cat_filter = (category or "").strip()
     if cat_filter and cat_filter.lower() != "all":
@@ -334,7 +337,7 @@ def get_asset_details(db: Session, asset_id: int, user: dict) -> dict:
     db.commit()
 
     details = {
-        "asset_id": asset.id, "name": asset.name, "category": asset.category,
+        "asset_id": asset.id, "name": asset.name, "category": asset.category, "department": asset.department,
         # `float(...)` -- asset.price comes back from the DB as a
         # `decimal.Decimal` (Numeric column); cast it to a plain float here
         # so it serializes as an ordinary JSON number, same treatment as
@@ -463,6 +466,36 @@ def update_asset_category(db: Session, asset_id: int, payload: CategoryUpdateReq
     ))
     db.commit()
     return {"message": "Successfully updated category."}
+
+
+def update_asset_department(db: Session, asset_id: int, payload: DepartmentUpdateRequest, user: dict) -> dict:
+    """Update the production/equipment department without changing the existing category."""
+    asset = db.query(models.AssetType).filter(
+        models.AssetType.id == asset_id, ~models.AssetType.is_deleted
+    ).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset type not found")
+
+    old_department = asset.department
+    new_department = payload.department
+    if old_department == new_department:
+        return {"message": "Department unchanged."}
+
+    asset.department = new_department
+    if new_department:
+        change_desc = (
+            f"changed from '{old_department}' to '{new_department}'"
+            if old_department else f"set to '{new_department}'"
+        )
+    else:
+        change_desc = f"cleared (was '{old_department}')"
+
+    db.add(models.AuditLog(
+        operator=user["email"], action="POOL_DEPARTMENT_UPDATED", target_type="AssetType", target_id=asset_id,
+        details=f"Department for asset pool '{asset.name}' {change_desc}.",
+    ))
+    db.commit()
+    return {"message": "Successfully updated department."}
 
 
 def update_asset_price(db: Session, asset_id: int, payload: PriceUpdateRequest, user: dict) -> dict:
@@ -596,7 +629,7 @@ def list_deleted_assets(db: Session, limit: int = DEFAULT_LIMIT, offset: int = 0
     items = query.order_by(models.AssetType.deleted_at.desc()).offset(offset).limit(limit).all()
 
     results = [{
-        "id": a.id, "name": a.name, "category": a.category,
+        "id": a.id, "name": a.name, "category": a.category, "department": a.department,
         "total_quantity": a.total_quantity, "price": a.price,
         # TIMEZONE FIX -- see services/user_service.py's
         # get_my_assigned_items() for the full explanation of why this is
@@ -1049,6 +1082,10 @@ def import_assets_from_csv(db: Session, file: UploadFile, user: dict) -> dict:
             raw_category = (row.get("category") or "").strip()
             category = raw_category or None
 
+            # OPTIONAL "department" column -- kept separate from category.
+            raw_department = (row.get("department") or "").strip()
+            department = raw_department or None
+
             # OPTIONAL "price" column -- the per-unit purchase/replacement
             # price for this row's equipment (e.g. "1899.00"). Entirely
             # optional, same "missing column or blank cell never rejects
@@ -1115,7 +1152,7 @@ def import_assets_from_csv(db: Session, file: UploadFile, user: dict) -> dict:
                 })
                 continue
 
-            new_asset_type = models.AssetType(name=name, total_quantity=qty, available_quantity=qty, category=category, price=price)
+            new_asset_type = models.AssetType(name=name, total_quantity=qty, available_quantity=qty, category=category, department=department, price=price)
             db.add(new_asset_type)
             imported_count += 1
 
@@ -1150,7 +1187,7 @@ def import_assets_from_csv(db: Session, file: UploadFile, user: dict) -> dict:
 # Export button's dropdown of "download by category" options (plus a
 # "Download All" choice); `export_assets_inventory()` does the actual
 # CSV/PDF generation, optionally narrowed to a single category.
-_INVENTORY_EXPORT_HEADERS = ["Pool ID", "Asset Name", "Category", "Price", "Available", "Total", "Status"]
+_INVENTORY_EXPORT_HEADERS = ["Pool ID", "Asset Name", "Category", "Department", "Price", "Available", "Total", "Status"]
 
 
 def list_asset_categories(db: Session) -> dict:
@@ -1206,11 +1243,11 @@ def export_assets_inventory(db: Session, user: dict, category: Optional[str], fm
     pools = query.order_by(models.AssetType.id).all()
 
     show_stock = _can_see_stock(user)
-    headers = _INVENTORY_EXPORT_HEADERS if show_stock else _INVENTORY_EXPORT_HEADERS[:4]
+    headers = _INVENTORY_EXPORT_HEADERS if show_stock else _INVENTORY_EXPORT_HEADERS[:5]
 
     rows = []
     for p in pools:
-        row = [p.id, p.name, p.category or "—", export_service.format_money(p.price) if p.price is not None else "—"]
+        row = [p.id, p.name, p.category or "—", p.department or "—", export_service.format_money(p.price) if p.price is not None else "—"]
         if show_stock:
             row += [p.available_quantity, p.total_quantity, _inventory_status_label(p.available_quantity)]
         rows.append(row)

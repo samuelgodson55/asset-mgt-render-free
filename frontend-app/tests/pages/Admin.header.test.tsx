@@ -1,16 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { Admin, Manager } from "./Admin";
-import { CustodyProvider } from "../lib/custodyContext";
-import type { AuthUser } from "../lib/api";
+import { Admin, Manager } from "../../src/pages/Admin";
+import { CustodyProvider } from "../../src/lib/custodyContext";
+import type { AuthUser } from "../../src/lib/api";
 
 const { useAuthMock } = vi.hoisted(() => ({ useAuthMock: vi.fn() }));
 
-vi.mock("../lib/useAuth", () => ({ useAuth: useAuthMock }));
+vi.mock("../../src/lib/useAuth", () => ({ useAuth: useAuthMock }));
 
-vi.mock("../lib/api", async () => {
-  const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
+vi.mock("../../src/lib/api", async () => {
+  const actual = await vi.importActual<typeof import("../../src/lib/api")>("../../src/lib/api");
   return {
     ...actual,
     usersApi: { ...actual.usersApi, list: vi.fn().mockResolvedValue({ items: [], total: 0, limit: 20, offset: 0 }) },

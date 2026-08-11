@@ -16,6 +16,7 @@ const config = {
   submitted: { label: "Pending Review", dot: "bg-brass", text: "text-brass-soft" },
   approved: { label: "Approved", dot: "bg-moss", text: "text-moss-soft" },
   fulfilled: { label: "Fulfilled", dot: "bg-sky", text: "text-sky" },
+  paid: { label: "Paid", dot: "bg-moss", text: "text-moss-soft" },
 } as const;
 
 export function StatusPill({ status }: { status: keyof typeof config }) {

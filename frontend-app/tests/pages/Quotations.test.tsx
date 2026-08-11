@@ -2,9 +2,9 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import userEvent from "@testing-library/user-event";
-import { Quotations } from "./Quotations";
-import type { CatalogAsset, QuotationCartOrDetail, QuotationListRow } from "../lib/types";
-import type { AuthUser } from "../lib/api";
+import { Quotations } from "../../src/pages/Quotations";
+import type { CatalogAsset, QuotationCartOrDetail, QuotationListRow } from "../../src/lib/types";
+import type { AuthUser } from "../../src/lib/api";
 
 const { quotationsApi, usersApi, useAuthMock } = vi.hoisted(() => ({
   quotationsApi: {
@@ -29,16 +29,16 @@ const { quotationsApi, usersApi, useAuthMock } = vi.hoisted(() => ({
   useAuthMock: vi.fn(),
 }));
 
-vi.mock("../lib/api", async () => {
-  const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
+vi.mock("../../src/lib/api", async () => {
+  const actual = await vi.importActual<typeof import("../../src/lib/api")>("../../src/lib/api");
   return { ...actual, quotationsApi, usersApi };
 });
 
-vi.mock("../lib/useAuth", () => ({ useAuth: useAuthMock }));
+vi.mock("../../src/lib/useAuth", () => ({ useAuth: useAuthMock }));
 
 const CATALOG: CatalogAsset[] = [
-  { id: 1, name: "Motorola APX 8000", category: "Field Radios", price: 149, available_quantity: 5, status: "In Stock" },
-  { id: 2, name: "Vortex Diamondback HD", category: "Optics", price: 899, available_quantity: 0, status: "Out of Stock" },
+  { id: 1, name: "Motorola APX 8000", category: "Field Radios", department: "Audio", price: 149, available_quantity: 5, status: "In Stock" },
+  { id: 2, name: "Vortex Diamondback HD", category: "Optics", department: "Camera", price: 899, available_quantity: 0, status: "Out of Stock" },
 ];
 
 const EMPTY_CART: QuotationCartOrDetail = { items: [], subtotal: 0, vat_percent: 7.5, vat_amount: 0, total: 0 };

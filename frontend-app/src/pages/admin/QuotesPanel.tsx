@@ -22,6 +22,7 @@ import { errMsg } from "./sharedHelpers";
 function statusBadgeClasses(status: string): string {
   if (status === "approved") return "bg-moss/15 text-moss-soft";
   if (status === "fulfilled") return "bg-sky/15 text-sky";
+  if (status === "paid") return "bg-moss/15 text-moss-soft";
   if (status === "submitted") return "bg-brass/15 text-brass-soft";
   return "bg-surface-raised text-text-faint";
 }
@@ -30,6 +31,7 @@ function statusLabel(status: string): string {
   if (status === "submitted") return "Pending Review";
   if (status === "approved") return "Approved";
   if (status === "fulfilled") return "Fulfilled";
+  if (status === "paid") return "Paid";
   return status;
 }
 

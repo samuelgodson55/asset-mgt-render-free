@@ -24,6 +24,7 @@ def test_reports_requires_auth(client):
         "/api/reports/utilization",
         "/api/reports/overdue-trend",
         "/api/reports/spend",
+        "/api/reports/revenue",
         "/api/reports/quotation-turnaround",
     ]:
         response = client.get(path)
@@ -38,6 +39,7 @@ def test_reports_forbidden_for_self_service_roles(fixture_name, request):
         "/api/reports/utilization",
         "/api/reports/overdue-trend",
         "/api/reports/spend",
+        "/api/reports/revenue",
         "/api/reports/quotation-turnaround",
     ]:
         response = client.get(path, headers=headers)
@@ -59,7 +61,7 @@ def test_dashboard_shape_against_seed_data(as_manager):
     assert response.status_code == 200
     body = response.json()
 
-    assert set(body.keys()) == {"period", "utilization_by_asset_type", "overdue", "spend", "quotation_turnaround"}
+    assert set(body.keys()) == {"period", "utilization_by_asset_type", "overdue", "spend", "revenue", "quotation_turnaround"}
 
     # Utilization: one row per seeded, non-deleted asset pool, sorted
     # highest utilization first.
@@ -89,6 +91,11 @@ def test_dashboard_shape_against_seed_data(as_manager):
     dept_total = sum(r["total_spend"] for r in spend["by_department"])
     assert cat_total == pytest.approx(dept_total, rel=1e-6)
 
+    revenue = body["revenue"]
+    assert revenue["total_revenue"] >= 0
+    assert revenue["total_revenue"] == pytest.approx(sum(r["total_revenue"] for r in revenue["by_department"]), rel=1e-6)
+    assert all(r["department"] for r in revenue["by_department"])
+
     # Quotation turnaround: seeded data has no fulfilled quotations, so
     # every average is None with a zero sample size rather than a crash.
     turnaround = body["quotation_turnaround"]
@@ -103,6 +110,7 @@ def test_individual_section_endpoints_match_dashboard(as_manager):
     assert client.get("/api/reports/utilization", headers=headers).json() == dashboard["utilization_by_asset_type"]
     assert client.get("/api/reports/overdue-trend", headers=headers).json() == dashboard["overdue"]
     assert client.get("/api/reports/spend", headers=headers).json() == dashboard["spend"]
+    assert client.get("/api/reports/revenue", headers=headers).json() == dashboard["revenue"]
     assert (
         client.get("/api/reports/quotation-turnaround", headers=headers).json()
         == dashboard["quotation_turnaround"]
@@ -185,3 +193,63 @@ def test_overdue_trend_counts_active_and_late_returned_checkouts(db_session, as_
     total_trend_overdue = sum(r["overdue_count"] for r in body["trend"])
     assert total_trend_overdue >= 2  # the two "went overdue" checkouts above, at minimum
     assert body["total_overdue_now"] >= 1  # the still-active overdue checkout
+
+
+def test_revenue_report_groups_fulfilled_quote_lines_by_asset_department(db_session, as_manager):
+    import models
+
+    client, headers = as_manager
+    db = db_session
+    staff = db.query(models.User).filter(models.User.role == "staff").first()
+    asset = models.AssetType(
+        name="Revenue Camera Pool",
+        total_quantity=5,
+        available_quantity=5,
+        category="Production",
+        department="Camera",
+        price=100.00,
+    )
+    db.add(asset)
+    db.flush()
+
+    now = models.utc_now()
+    quote = models.Quotation(
+        user_id=staff.id,
+        status="fulfilled",
+        reference_number="QT-999901",
+        submitted_at=now - datetime.timedelta(days=3),
+        approved_at=now - datetime.timedelta(days=2),
+        fulfilled_at=now,
+        discount_percent=10,
+    )
+    db.add(quote)
+    db.flush()
+    db.add(models.QuotationItem(
+        quotation_id=quote.id,
+        asset_id=asset.id,
+        quantity=2,
+        start_date=(now - datetime.timedelta(days=2)).date(),
+        due_date=(now - datetime.timedelta(days=1)).date(),
+    ))
+    db.commit()
+
+    response = client.get("/api/reports/revenue", headers=headers)
+    assert response.status_code == 200
+    body = response.json()
+    camera = next(row for row in body["by_department"] if row["department"] == "Camera")
+    # 2 units × 2 rental days × ₦100, less the 10% quote discount.
+    assert camera["total_revenue"] >= 360.0
+    assert body["total_revenue"] >= 360.0
+    assert camera["item_count"] >= 2
+
+    # Moving the same fulfilled quote to terminal paid must not make earned
+    # rental revenue disappear from reporting. Revenue is recognized from
+    # fulfillment and remains reportable after payment.
+    quote.status = "paid"
+    quote.paid_at = now + datetime.timedelta(hours=1)
+    db.commit()
+    paid_response = client.get("/api/reports/revenue", headers=headers)
+    assert paid_response.status_code == 200
+    paid_body = paid_response.json()
+    paid_camera = next(row for row in paid_body["by_department"] if row["department"] == "Camera")
+    assert paid_camera["total_revenue"] >= 360.0

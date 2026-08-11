@@ -241,6 +241,7 @@ interface RawAssetType {
   id: number;
   name: string;
   category: string | null;
+  department: string | null;
   total_quantity: number;
   available_quantity: number;
   price: string | number | null;
@@ -253,6 +254,7 @@ function mapAsset(raw: RawAssetType): AssetType {
     id: raw.id,
     name: raw.name,
     category: raw.category ?? null,
+    department: raw.department ?? null,
     total_quantity: total,
     available_quantity: available,
     checked_out_quantity: Math.max(total - available, 0),
@@ -825,6 +827,8 @@ export const reportsApi = {
       () => rawFetch<ReportsDashboard>(`/reports/dashboard${qs({ start_date: startDate, end_date: endDate, category })}`),
       mockReportsDashboard
     ),
+  revenue: (startDate?: string, endDate?: string) =>
+    rawFetch<ReportsDashboard["revenue"]>(`/reports/revenue${qs({ start_date: startDate, end_date: endDate })}`),
 };
 
 // ---------------------------------------------------------------------------
@@ -885,6 +889,7 @@ export interface AssetTypeCreateRequest {
   name: string;
   total_quantity: number;
   category?: string | null;
+  department?: string | null;
   price?: number | null;
 }
 
@@ -931,6 +936,7 @@ export const assetsApi = {
   updateQuantity: (assetId: number, newTotal: number) => rawFetch<{ message?: string }>(`/assets/${assetId}/quantity`, { method: "PUT", body: JSON.stringify({ new_total: newTotal }) }),
   updateName: (assetId: number, name: string) => rawFetch<{ message?: string }>(`/assets/${assetId}/name`, { method: "PUT", body: JSON.stringify({ name }) }),
   updateCategory: (assetId: number, category: string | null) => rawFetch<{ message?: string }>(`/assets/${assetId}/category`, { method: "PUT", body: JSON.stringify({ category }) }),
+  updateDepartment: (assetId: number, department: string | null) => rawFetch<{ message?: string }>(`/assets/${assetId}/department`, { method: "PUT", body: JSON.stringify({ department }) }),
   updatePrice: (assetId: number, price: number | null) => rawFetch<{ message?: string }>(`/assets/${assetId}/price`, { method: "PUT", body: JSON.stringify({ price }) }),
   remove: (assetId: number) => rawFetch<{ message?: string }>(`/assets/${assetId}`, { method: "DELETE" }),
   restore: (assetId: number) => rawFetch<{ message?: string }>(`/assets/${assetId}/restore`, { method: "POST" }),
@@ -1042,6 +1048,8 @@ export const quotationsApi = {
   create: (payload: Record<string, unknown>) => rawFetch<QuotationCartOrDetail & { id: number }>("/quotations", { method: "POST", body: JSON.stringify(payload) }),
   remove: (quotationId: number) => rawFetch<void>(`/quotations/${quotationId}`, { method: "DELETE" }),
   approve: (quotationId: number) => rawFetch<QuotationCartOrDetail>(`/quotations/${quotationId}/approve`, { method: "POST" }),
+  markPaid: (quotationId: number, paymentMethod: string, paymentReference?: string | null) =>
+    rawFetch<QuotationCartOrDetail>(`/quotations/${quotationId}/paid`, { method: "POST", body: JSON.stringify({ payment_method: paymentMethod, payment_reference: paymentReference || null }) }),
   saveNotes: (quotationId: number, notes: string) =>
     rawFetch<QuotationCartOrDetail>(`/quotations/${quotationId}`, { method: "PUT", body: JSON.stringify({ notes: notes || null }) }),
   saveDiscount: (quotationId: number, discountPercent: number) =>

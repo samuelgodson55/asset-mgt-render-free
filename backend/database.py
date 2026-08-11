@@ -583,9 +583,9 @@ def seed_db():
         # instead of an empty "No category set" state on first boot. Same
         # reasoning for `price` -- every pool gets a realistic per-unit
         # price so the Properties Hub's price field isn't blank either.
-        laptop_pool = models.AssetType(name='MacBook Pro 14" M3 Pool', total_quantity=15, available_quantity=14, category="Engineering", price=1899.00)
-        monitor_pool = models.AssetType(name="Dell UltraSharp U2723QE Monitor", total_quantity=40, available_quantity=39, category="Engineering", price=629.99)
-        mouse_pool = models.AssetType(name="Logitech MX Master 3S", total_quantity=60, available_quantity=59, category="Operations", price=99.99)
+        laptop_pool = models.AssetType(name='MacBook Pro 14" M3 Pool', total_quantity=15, available_quantity=14, category="Engineering", department="Camera", price=1899.00)
+        monitor_pool = models.AssetType(name="Dell UltraSharp U2723QE Monitor", total_quantity=40, available_quantity=39, category="Engineering", department="Lighting", price=629.99)
+        mouse_pool = models.AssetType(name="Logitech MX Master 3S", total_quantity=60, available_quantity=59, category="Operations", department="Grip", price=99.99)
         db.add_all([laptop_pool, monitor_pool, mouse_pool])
         db.commit()
 

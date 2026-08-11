@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { quotationsApi, formatPrice, setCurrencyCode, ApiError, DEMO_FLAG_KEY } from "./api";
+import { quotationsApi, formatPrice, setCurrencyCode, ApiError, DEMO_FLAG_KEY } from "../../src/lib/api";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {

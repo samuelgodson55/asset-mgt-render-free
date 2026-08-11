@@ -21,7 +21,7 @@ function errMsg(err: unknown, fallback: string): string {
 
 const today = () => new Date().toISOString().slice(0, 10);
 
-// Real quote lifecycle wording -- submitted -> approved -> fulfilled --
+// Real quote lifecycle wording -- submitted -> approved -> fulfilled -> paid --
 // shown verbatim rather than recycled checkout-style labels (this used to
 // render "Active"/"Pending"/"Returned", borrowed from the checkout status
 // pill, which described a physical loan's state, not a quote's -- confusing
@@ -30,6 +30,7 @@ const today = () => new Date().toISOString().slice(0, 10);
 function statusPillFor(status: string) {
   if (status === "approved") return <StatusPill status="approved" />;
   if (status === "fulfilled") return <StatusPill status="fulfilled" />;
+  if (status === "paid") return <StatusPill status="paid" />;
   return <StatusPill status="submitted" />;
 }
 

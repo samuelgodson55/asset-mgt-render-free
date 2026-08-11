@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
-import { CustodyDrawer } from "./CustodyDrawer";
-import type { CustodyItem } from "../lib/types";
+import { CustodyDrawer } from "../../src/components/CustodyDrawer";
+import type { CustodyItem } from "../../src/lib/types";
 
 // =============================================================================
 // components/CustodyDrawerHighlight.test.tsx
@@ -20,8 +20,8 @@ const twoItems: CustodyItem[] = vi.hoisted(() => [
   { checkout_id: 13, asset_name: "fx6 card 960Gb", quantity: 3, outstanding: 3, due_date: "2026-08-06", due_soon: false, overdue: true },
 ]) as CustodyItem[];
 
-vi.mock("../lib/api", async () => {
-  const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
+vi.mock("../../src/lib/api", async () => {
+  const actual = await vi.importActual<typeof import("../../src/lib/api")>("../../src/lib/api");
   return {
     ...actual,
     usersApi: { ...actual.usersApi, items: vi.fn().mockResolvedValue({ assigned_items: twoItems }) },

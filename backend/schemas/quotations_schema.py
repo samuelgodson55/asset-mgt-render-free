@@ -179,7 +179,7 @@ class QuotationMetaUpdate(BaseModel):
 class QuotationDiscountUpdateRequest(BaseModel):
     """Admin/Manager-only: sets the discount percentage (0-100) applied to a
     single Quotation's subtotal, before VAT (PUT /quotations/{id}/discount).
-    Editable right up until the quote is fulfilled, exactly like the other
+    Editable right up until the quote is paid, exactly like the other
     line items on the quote -- see services/quotation_service.py's
     _ensure_admin_editable()."""
 
@@ -189,6 +189,35 @@ class QuotationDiscountUpdateRequest(BaseModel):
     @classmethod
     def _round_discount(cls, value: float) -> float:
         return round(value, 2)
+
+
+
+
+class QuotationPaidRequest(BaseModel):
+    """Admin/Manager-only: records receipt of payment for a fulfilled quotation.
+
+    Payment cannot be recorded until fulfillment is complete. A method is
+    required for reconciliation; a reference is optional because cash/other
+    payments may not have an external transaction identifier.
+    """
+
+    payment_method: str = Field(..., min_length=1, max_length=50)
+    payment_reference: Optional[str] = Field(None, max_length=200)
+    paid_at: Optional[datetime.datetime] = None
+
+    @field_validator("payment_method")
+    @classmethod
+    def _normalise_method(cls, value: str) -> str:
+        value = value.strip().lower()
+        allowed = {"bank_transfer", "card", "cash", "pos", "other"}
+        if value not in allowed:
+            raise ValueError("Payment method must be bank_transfer, card, cash, pos, or other.")
+        return value
+
+    @field_validator("payment_reference")
+    @classmethod
+    def _normalise_reference(cls, value: Optional[str]) -> Optional[str]:
+        return value.strip() if value and value.strip() else None
 
 
 class QuotationCreateRequest(BaseModel):

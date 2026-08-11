@@ -1,6 +1,7 @@
 import type { AssetType, Checkout, ExtensionRequest, NotificationItem, DashboardStats, BackupEntry, BackupStatus, CatalogAsset, QuotationCartOrDetail, ReportsDashboard } from "./types";
 
 const categories = ["Field Radios", "Optics", "Power", "Networking", "Fabrication", "Safety"];
+const assetDepartments = ["Camera", "Lighting", "Grip", "Audio", "Power", "Production"];
 
 const names: Record<string, string[]> = {
   "Field Radios": ["Motorola APX 8000", "Kenwood NX-5300", "Icom F5061D"],
@@ -27,6 +28,7 @@ export const mockAssets: AssetType[] = categories.flatMap((cat, ci) =>
       id,
       name,
       category: cat,
+      department: assetDepartments[ci],
       total_quantity: total,
       available_quantity: available,
       checked_out_quantity: checkedOut,
@@ -102,6 +104,7 @@ export const mockCatalog: CatalogAsset[] = mockAssets.map((a) => ({
   id: a.id,
   name: a.name,
   category: a.category,
+  department: a.department,
   price: a.price,
   available_quantity: a.available_quantity,
   status: a.available_quantity > 0 ? "In Stock" : "Out of Stock",
@@ -149,6 +152,7 @@ export const mockReportsDashboard: ReportsDashboard = {
       asset_type_id: a.id,
       name: a.name,
       category: a.category,
+      department: a.department,
       total_quantity: a.total_quantity,
       available_quantity: a.available_quantity,
       currently_checked_out: a.checked_out_quantity,
@@ -196,6 +200,25 @@ export const mockReportsDashboard: ReportsDashboard = {
     priced_checkout_count: mockCheckouts.length,
     unpriced_checkout_count: 0,
   },
+  revenue: (() => {
+    const byDepartment = assetDepartments.map((department) => {
+      const rows = mockAssets.filter((a) => a.department === department && a.checked_out_quantity > 0);
+      const total = rows.reduce((sum, a) => sum + (a.price ?? 0) * a.checked_out_quantity * 4.5, 0);
+      return {
+        department,
+        total_revenue: Math.round(total * 100) / 100,
+        item_count: rows.reduce((sum, a) => sum + a.checked_out_quantity, 0),
+        quotation_count: rows.length,
+      };
+    }).filter((r) => r.item_count > 0).sort((a, b) => b.total_revenue - a.total_revenue);
+    return {
+      by_department: byDepartment,
+      total_revenue: Math.round(byDepartment.reduce((sum, r) => sum + r.total_revenue, 0) * 100) / 100,
+      fulfilled_quotation_count: byDepartment.reduce((sum, r) => sum + r.quotation_count, 0),
+      priced_line_count: byDepartment.length,
+      unassigned_line_count: 0,
+    };
+  })(),
   quotation_turnaround: {
     avg_submit_to_approve_hours: 6.4,
     sample_size_submit_to_approve: 9,

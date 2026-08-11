@@ -241,6 +241,35 @@ function CategoryField({ assetId, category, onSaved }: { assetId: number; catego
   );
 }
 
+function DepartmentField({ assetId, department, onSaved }: { assetId: number; department: string | null; onSaved: () => void }) {
+  const [value, setValue] = useState(department ?? "");
+  useEffect(() => setValue(department ?? ""), [department]);
+  return (
+    <InlineField
+      label="Department"
+      icon={<Tag size={11} />}
+      display={department ?? "No department set"}
+      renderInput={() => (
+        <>
+          <input list="asset-department-options" autoFocus value={value} onChange={(e) => setValue(e.target.value)} placeholder="e.g. Camera, Lighting, Grip" className="min-w-0 flex-1 bg-ink-soft border border-border-soft rounded-[3px] px-2 py-1.5 text-[12.5px] text-text placeholder:text-text-faint focus:border-brass/50 focus:outline-none" />
+          <datalist id="asset-department-options">
+            <option value="Camera" />
+            <option value="Lighting" />
+            <option value="Grip" />
+            <option value="Audio" />
+            <option value="Power" />
+            <option value="Production" />
+          </datalist>
+        </>
+      )}
+      onSave={async () => {
+        await assetsApi.updateDepartment(assetId, value.trim() || null);
+        onSaved();
+      }}
+    />
+  );
+}
+
 function PriceField({ assetId, price, onSaved }: { assetId: number; price: number | null; onSaved: () => void }) {
   const [value, setValue] = useState(price != null ? String(price) : "");
   useEffect(() => setValue(price != null ? String(price) : ""), [price]);
@@ -547,9 +576,10 @@ export function AssetDrawer({
                 <>
                   {canManage ? (
                     <>
-                      <div className="grid grid-cols-2 gap-3 mt-6">
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-6">
                         <PriceField assetId={asset.id} price={details.price} onSaved={afterMutation} />
                         <CategoryField assetId={asset.id} category={details.category} onSaved={afterMutation} />
+                        <DepartmentField assetId={asset.id} department={details.department} onSaved={afterMutation} />
                       </div>
                       <div className="mt-3">
                         <NameField assetId={asset.id} name={details.name} onSaved={afterMutation} />
@@ -574,6 +604,12 @@ export function AssetDrawer({
                         <div className="border border-border-soft rounded-[3px] p-3">
                           <p className="text-[10px] uppercase tracking-wider text-text-faint flex items-center gap-1.5"><Tag size={11} />Category</p>
                           <p className="text-sm text-text mt-1">{details.category}</p>
+                        </div>
+                      )}
+                      {details.department && (
+                        <div className="border border-border-soft rounded-[3px] p-3">
+                          <p className="text-[10px] uppercase tracking-wider text-text-faint flex items-center gap-1.5"><Tag size={11} />Department</p>
+                          <p className="text-sm text-text mt-1">{details.department}</p>
                         </div>
                       )}
                     </div>

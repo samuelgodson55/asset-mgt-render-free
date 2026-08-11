@@ -41,6 +41,7 @@ export function AssetTag({ asset, index = 0, onSelect, showStock }: Props) {
                 {asset.name}
               </h3>
               <p className="text-xs text-text-muted mt-0.5">{asset.category ?? "Uncategorized"}</p>
+              <p className="text-[10.5px] text-brass-soft/80 mt-0.5">{asset.department ?? "No department"}</p>
             </div>
             {showStock && <StatusPill status={asset.status} />}
           </div>

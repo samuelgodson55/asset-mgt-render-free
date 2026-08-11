@@ -44,8 +44,9 @@ quote via `_ensure_admin_editable()` right up until
 `bulk_checkout_quotation()`, the Fulfillment Drawer's "physical bulk
 checkout" action, which turns every line item into a real AssetCheckout
 row in one atomic, stock-locked transaction and flips the row to
-`status="fulfilled"` -- only THEN is the quote closed for good, locked
-against edits by anyone, Admin/Manager included. Inventory stock is NEVER
+`status="fulfilled"` -- fulfilled quotes remain editable by Admin/Manager
+for operational corrections. Once payment is recorded, the quote moves to
+terminal `status="paid"` and becomes immutable. Inventory stock is NEVER
 touched at "draft"/"submitted"/"approved" -- only at that final
 fulfillment step (mirrors services/asset_service.py's checkout_advanced()
 row-locking pattern, just looped over every line of the quote instead of
@@ -65,7 +66,7 @@ from schemas.quotations_schema import (
     QuotationItemCreate, QuotationItemQuantityUpdate, VatUpdateRequest,
     QuotationAssignRequest, QuotationMetaUpdate, QuotationCreateRequest,
     QuotationOutsourcedItemCreate, QuotationOutsourceShortfallItem,
-    QuotationDiscountUpdateRequest,
+    QuotationDiscountUpdateRequest, QuotationPaidRequest,
 )
 import services.export_service as export_service
 import services.notification_service as notification_service
@@ -307,7 +308,7 @@ def list_catalog(db: Session, user: dict, limit: int = CATALOG_DEFAULT_LIMIT, of
     offset = max(0, offset)
 
     query = db.query(models.AssetType).filter(~models.AssetType.is_deleted)
-    query = apply_search_filter(query, search, [models.AssetType.name, models.AssetType.category])
+    query = apply_search_filter(query, search, [models.AssetType.name, models.AssetType.category, models.AssetType.department])
     query = query.order_by(models.AssetType.name)
     total = query.count()
     pools = query.offset(offset).limit(limit).all()
@@ -318,6 +319,7 @@ def list_catalog(db: Session, user: dict, limit: int = CATALOG_DEFAULT_LIMIT, of
             "id": p.id,
             "name": p.name,
             "category": p.category,
+            "department": p.department,
             "price": float(p.price) if p.price is not None else None,
         }
         if show_stock:
@@ -382,6 +384,7 @@ def _serialize_quotation(db: Session, quotation: models.Quotation, include_admin
             "asset_id": item.asset_id,
             "asset_name": asset.name if asset else "(deleted asset)",
             "category": asset.category if asset else None,
+            "department": asset.department if asset else None,
             "description": None,
             "unit_price": _money(unit_price),
             "quantity": item.quantity,
@@ -460,11 +463,17 @@ def _serialize_quotation(db: Session, quotation: models.Quotation, include_admin
         # only the REQUESTER/assignee's own self-service editing is cut
         # off at "approved" (see _get_own_editable_quotation() above,
         # which separately requires status == "submitted").
-        "locked": quotation.status == "fulfilled",
+        "locked": quotation.status == "paid",
         "reference_number": quotation.reference_number,
         "submitted_at": quotation.submitted_at.isoformat() if quotation.submitted_at else None,
         "approved_at": quotation.approved_at.isoformat() if quotation.approved_at else None,
         "fulfilled_at": quotation.fulfilled_at.isoformat() if quotation.fulfilled_at else None,
+        "paid_at": quotation.paid_at.isoformat() if quotation.paid_at else None,
+        # Payment method/reference are internal reconciliation details. The
+        # requester still sees the terminal Paid status and timestamp, while
+        # only privileged callers receive the reconciliation fields below.
+        "payment_method": None,
+        "payment_reference": None,
         "items": line_items,
         "subtotal": _money(subtotal),
         "discount_percent": float(discount_percent),
@@ -483,6 +492,9 @@ def _serialize_quotation(db: Session, quotation: models.Quotation, include_admin
         result["assigned_outsider"] = _outsider_brief(quotation.assigned_outsider)
         result["approved_by"] = _user_brief(quotation.approved_by)
         result["fulfilled_by"] = _user_brief(quotation.fulfilled_by)
+        result["paid_by"] = _user_brief(quotation.paid_by)
+        result["payment_method"] = quotation.payment_method
+        result["payment_reference"] = quotation.payment_reference
         # True when the requester (quotation.user) is a plain staff/customer
         # account submitting their own personal request, as opposed to an
         # Admin/Manager who built this quote on someone else's behalf (see
@@ -780,8 +792,8 @@ def _ensure_admin_editable(quotation: models.Quotation) -> None:
     are the only two actions still allowed to move a submitted/approved
     quote forward. See models.py's Quotation docstring for the full
     lifecycle."""
-    if quotation.status == "fulfilled":
-        raise HTTPException(status_code=400, detail=f"Quotation {quotation.reference_number} has already been fulfilled and can no longer be edited.")
+    if quotation.status == "paid":
+        raise HTTPException(status_code=400, detail=f"Quotation {quotation.reference_number} has been paid and can no longer be edited.")
     if quotation.status == "draft":
         # Shouldn't normally be reachable (drafts have no reference_number
         # and aren't surfaced in the Quotes tab), but guard anyway rather
@@ -790,7 +802,7 @@ def _ensure_admin_editable(quotation: models.Quotation) -> None:
 
 
 def delete_quotation(db: Session, actor: dict, quotation_id: int) -> dict:
-    """Admin/Super Admin-only: permanently deletes a submitted or approved
+    """Admin/Manager-only: permanently deletes a submitted or approved
     Quotation (and, via the model's cascade="all, delete-orphan", its line
     items and outsourced items with it). Gated by the SAME
     _ensure_admin_editable() lock as every other Admin/Manager mutation
@@ -805,8 +817,20 @@ def delete_quotation(db: Session, actor: dict, quotation_id: int) -> dict:
     NOT deps.require_privileged_role) -- a Manager can adjust a quote but
     never delete one, only a Super Admin or Admin account can."""
     quotation = _get_quotation_or_404(db, quotation_id)
-    _ensure_admin_editable(quotation)
+    if quotation.status not in ("submitted", "approved"):
+        if quotation.status == "fulfilled":
+            raise HTTPException(status_code=400, detail="A fulfilled quotation cannot be deleted because it has checkout history.")
+        if quotation.status == "paid":
+            raise HTTPException(status_code=400, detail="A paid quotation is a permanent financial record and cannot be deleted.")
+        raise HTTPException(status_code=400, detail="Only submitted or approved quotations can be deleted.")
     reference_number = quotation.reference_number
+    # Remove recipient-facing notifications first because their FK deliberately
+    # does not cascade: deleting the quote must not leave orphaned notification
+    # rows or fail at the database constraint. AuditLog remains as the durable
+    # operator history of the deletion.
+    db.query(models.QuotationNotification).filter(
+        models.QuotationNotification.quotation_id == quotation.id
+    ).delete(synchronize_session=False)
     db.delete(quotation)
     db.add(models.AuditLog(
         operator=actor["email"], action="QUOTATION_DELETED", target_type="Quotation", target_id=quotation_id,
@@ -821,7 +845,7 @@ def list_quotations(
     limit: int = DEFAULT_LIST_LIMIT, offset: int = 0,
 ) -> dict:
     """The Admin/Manager "Quotes" master queue -- every Quotation that has
-    left "draft" (submitted / approved / fulfilled), newest submission
+    left "draft" (submitted / approved / fulfilled / paid), newest submission
     first. `search` matches the reference number or the requester's
     name/email; `status` optionally narrows to exactly one of those three
     real statuses (e.g. the Quotes tab's own status filter, or the
@@ -862,6 +886,8 @@ def list_quotations(
             "locked": serialized["locked"],
             "submitted_at": serialized["submitted_at"],
             "approved_at": serialized["approved_at"],
+            "fulfilled_at": serialized["fulfilled_at"],
+            "paid_at": serialized["paid_at"],
             "requester": serialized["requester"],
             "assigned_to": serialized["assigned_to"],
             "assigned_outsider": serialized["assigned_outsider"],
@@ -1238,6 +1264,40 @@ def approve_quotation(db: Session, actor: dict, quotation_id: int) -> dict:
         db, quotation, actor, kind="updated",
         message=f"Quotation {quotation.reference_number} was approved and is ready for pickup.",
     )
+    db.commit()
+    db.refresh(quotation)
+    return _serialize_quotation(db, quotation, include_admin_fields=True, reveal_sourcing=True)
+
+
+def mark_quotation_paid(db: Session, actor: dict, quotation_id: int, payload: QuotationPaidRequest) -> dict:
+    """Record payment only after physical fulfillment. Payment is terminal and
+    deliberately cannot be reversed through the normal quotation workflow.
+    """
+    quotation = _get_quotation_or_404(db, quotation_id)
+    if quotation.status == "paid":
+        raise HTTPException(status_code=400, detail=f"Quotation {quotation.reference_number} is already marked as paid.")
+    if quotation.status != "fulfilled":
+        raise HTTPException(status_code=400, detail="Only fulfilled quotations can be marked as paid.")
+    if payload.paid_at is not None and quotation.fulfilled_at is not None:
+        paid_at = payload.paid_at
+        fulfilled_at = quotation.fulfilled_at
+        if paid_at.tzinfo is None:
+            paid_at = paid_at.replace(tzinfo=datetime.timezone.utc)
+        if fulfilled_at.tzinfo is None:
+            fulfilled_at = fulfilled_at.replace(tzinfo=datetime.timezone.utc)
+        if paid_at < fulfilled_at:
+            raise HTTPException(status_code=400, detail="Payment date cannot be earlier than the fulfillment date.")
+
+    quotation.status = "paid"
+    quotation.paid_at = payload.paid_at or models.utc_now()
+    quotation.paid_by_id = int(actor["sub"]) if actor.get("role") != "super_admin" else None
+    quotation.payment_method = payload.payment_method
+    quotation.payment_reference = payload.payment_reference
+    db.add(models.AuditLog(
+        operator=actor["email"], action="QUOTATION_PAID", target_type="Quotation", target_id=quotation.id,
+        details=f"Marked Quotation {quotation.reference_number} as paid via {payload.payment_method}."
+        + (f" Payment reference: {payload.payment_reference}." if payload.payment_reference else ""),
+    ))
     db.commit()
     db.refresh(quotation)
     return _serialize_quotation(db, quotation, include_admin_fields=True, reveal_sourcing=True)

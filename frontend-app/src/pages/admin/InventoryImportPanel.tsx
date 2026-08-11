@@ -13,10 +13,10 @@ import { ErrorBanner } from "../../components/ui/ErrorBanner";
 import { errMsg } from "./sharedHelpers";
 
 const CSV_IMPORT_TEMPLATE_ROWS = [
-  ["name", "total_quantity", "category", "price"],
-  ["Dell Latitude 5440", "10", "Engineering", "899.00"],
-  ["Logitech MX Master 3S", "25", "Engineering", "99.99"],
-  ["Herman Miller Aeron Chair", "8", "", "1395.00"],
+  ["name", "total_quantity", "category", "department", "price"],
+  ["Dell Latitude 5440", "10", "Engineering", "Camera", "899.00"],
+  ["Logitech MX Master 3S", "25", "Engineering", "Grip", "99.99"],
+  ["Herman Miller Aeron Chair", "8", "", "Production", "1395.00"],
 ];
 
 function downloadCsvTemplate() {
@@ -96,7 +96,7 @@ export function InventoryImportPanel() {
           <div>
             <h2 className="font-display text-[15px] font-medium text-text">Bulk import asset inventory</h2>
             <p className="text-[12.5px] text-text-muted mt-0.5">
-              Upload a CSV of <span className="font-mono text-[11.5px]">name, total_quantity, category, price</span> rows. Matching pool names <span className="text-text">add</span> to the existing quantity rather than replacing it.
+              Upload a CSV of <span className="font-mono text-[11.5px]">name, total_quantity, category, department, price</span> rows. Matching pool names <span className="text-text">add</span> to the existing quantity rather than replacing it.
             </p>
           </div>
         </div>
@@ -192,7 +192,8 @@ export function InventoryImportPanel() {
           {[
             ["name", "Pool name -- matches an existing pool by exact name, or creates a new one."],
             ["total_quantity", "Whole number. Added to the existing total if the pool already exists."],
-            ["category", "Optional. Leave blank to keep uncategorized."],
+            ["category", "Existing category. Preserved independently from department."],
+            ["department", "Optional asset department, e.g. Camera, Lighting, Grip."],
             ["price", "Optional unit price, e.g. 899.00."],
           ].map(([col, desc]) => (
             <div key={col} className="border-l-2 border-border-soft pl-3">

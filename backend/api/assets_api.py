@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from deps import get_current_user, require_super_admin, require_privileged_role
-from schemas.assets_schema import AssetTypeCreate, ExceptionCreate, AdvancedCheckoutRequest, QuantityUpdateRequest, NameUpdateRequest, CategoryUpdateRequest, PriceUpdateRequest
+from schemas.assets_schema import AssetTypeCreate, ExceptionCreate, AdvancedCheckoutRequest, QuantityUpdateRequest, NameUpdateRequest, CategoryUpdateRequest, DepartmentUpdateRequest, PriceUpdateRequest
 import services.asset_service as asset_service
 
 router = APIRouter(prefix="/assets", tags=["assets"])
@@ -109,6 +109,11 @@ def update_asset_name(asset_id: int, payload: NameUpdateRequest, db: Session = D
 @router.put("/{asset_id}/category")
 def update_asset_category(asset_id: int, payload: CategoryUpdateRequest, db: Session = Depends(get_db), user: dict = Depends(require_super_admin)):
     return asset_service.update_asset_category(db, asset_id, payload, user)
+
+
+@router.put("/{asset_id}/department")
+def update_asset_department(asset_id: int, payload: DepartmentUpdateRequest, db: Session = Depends(get_db), user: dict = Depends(require_super_admin)):
+    return asset_service.update_asset_department(db, asset_id, payload, user)
 
 
 @router.put("/{asset_id}/price")

@@ -2,6 +2,7 @@ export interface AssetType {
   id: number;
   name: string;
   category: string | null;
+  department: string | null;
   total_quantity: number;
   available_quantity: number;
   checked_out_quantity: number;
@@ -38,6 +39,7 @@ export interface AssetDetails {
   asset_id: number;
   name: string;
   category: string | null;
+  department: string | null;
   price: number | null;
   total_quantity: number;
   available_quantity: number;
@@ -54,6 +56,7 @@ export interface DeletedAssetRow {
   id: number;
   name: string;
   category: string | null;
+  department: string | null;
   total_quantity: number;
   price: number | null;
   deleted_at: string | null;
@@ -366,6 +369,7 @@ export interface CatalogAsset {
   id: number;
   name: string;
   category: string | null;
+  department: string | null;
   price: number | null;
   // Omitted by the backend entirely (not just zeroed) for a Staff/Customer
   // session when CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER is off -- see
@@ -403,7 +407,7 @@ export interface QuotationPartyRef {
   company?: string | null;
 }
 
-export type QuotationStatus = "draft" | "submitted" | "approved" | "fulfilled";
+export type QuotationStatus = "draft" | "submitted" | "approved" | "fulfilled" | "paid";
 
 export interface QuotationCartOrDetail {
   id?: number;
@@ -420,6 +424,10 @@ export interface QuotationCartOrDetail {
   submitted_at?: string;
   approved_at?: string;
   fulfilled_at?: string | null;
+  paid_at?: string | null;
+  payment_method?: string | null;
+  payment_reference?: string | null;
+  paid_by?: QuotationPartyRef | null;
   requester?: QuotationPartyRef;
   assigned_to?: QuotationPartyRef | null;
   assigned_outsider?: QuotationPartyRef | null;
@@ -438,6 +446,7 @@ export interface QuotationListRow {
   assigned_to?: QuotationPartyRef | null;
   assigned_outsider?: QuotationPartyRef | null;
   locked?: boolean;
+  paid_at?: string | null;
 }
 
 // ---- Admin/Manager: Fulfillment Drawer per-line shortfall splitting ----
@@ -502,6 +511,7 @@ export interface UtilizationRow {
   asset_type_id: number;
   name: string;
   category: string | null;
+  department: string | null;
   total_quantity: number;
   available_quantity: number;
   currently_checked_out: number;
@@ -543,6 +553,21 @@ export interface SpendReport {
   unpriced_checkout_count: number;
 }
 
+export interface RevenueByDepartmentRow {
+  department: string;
+  total_revenue: number;
+  item_count: number;
+  quotation_count: number;
+}
+
+export interface RevenueReport {
+  by_department: RevenueByDepartmentRow[];
+  total_revenue: number;
+  fulfilled_quotation_count: number;
+  priced_line_count: number;
+  unassigned_line_count: number;
+}
+
 export interface QuotationTurnaroundMonth {
   month: string;
   label: string;
@@ -566,6 +591,7 @@ export interface ReportsDashboard {
   utilization_by_asset_type: UtilizationRow[];
   overdue: OverdueReport;
   spend: SpendReport;
+  revenue: RevenueReport;
   quotation_turnaround: QuotationTurnaroundReport;
 }
 
