@@ -38,10 +38,11 @@ def list_assets(
     limit: int = Query(asset_service.DEFAULT_LIMIT, ge=1, le=asset_service.MAX_LIMIT, description="Max rows to return"),
     offset: int = Query(0, ge=0, description="Rows to skip (for paging through a large inventory)"),
     search: Optional[str] = Query(None, description="Case-insensitive substring match against asset pool name"),
+    category: Optional[str] = Query(None, description="Narrow to one category (exact, case-insensitive). 'Uncategorized' matches pools with no category set; omit or pass 'all' for every pool."),
     db: Session = Depends(get_db),
     user: dict = Depends(get_current_user),
 ):
-    return asset_service.list_assets(db, user, limit, offset, search)
+    return asset_service.list_assets(db, user, limit, offset, search, category)
 
 
 @router.get("/deleted")

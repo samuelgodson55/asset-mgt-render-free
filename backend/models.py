@@ -690,6 +690,22 @@ class ExtensionRequest(Base):
 
     created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
 
+    # SLA NUDGE (tasks/sla_tasks.py): when this still-`pending` request was
+    # last escalated to the notification-recipients audience (the SAME
+    # digest-recipients + ADMIN_NOTIFICATION_EMAILS list every other
+    # notification in this app uses -- see get_digest_recipient_emails())
+    # for sitting unanswered past `settings.EXTENSION_REQUEST_SLA_HOURS`.
+    # NULL until the first nudge fires. Re-checked (not just checked once)
+    # so a request that's STILL pending keeps getting re-escalated every
+    # `settings.APPROVAL_SLA_ESCALATION_REPEAT_HOURS`, rather than being
+    # nudged once and then silently forgotten -- the same "quiet source of
+    # customer frustration" this whole feature exists to close. Reset back
+    # to NULL is never needed: once `status` leaves "pending" (approved/
+    # denied), decide_extension_request() stops this row from ever
+    # matching the SLA task's query again regardless of this column's
+    # value.
+    sla_last_reminded_at = Column(DateTime(timezone=True), nullable=True)
+
     checkout = relationship("AssetCheckout", back_populates="extension_requests")
 
 
@@ -838,6 +854,21 @@ class Quotation(Base):
     # (rather than re-derived from a global setting) since it's a
     # per-quote negotiated concession, not a store-wide policy.
     discount_percent = Column(Numeric(5, 2), default=0, nullable=False)
+
+    # SLA NUDGE (tasks/sla_tasks.py): mirrors ExtensionRequest's own
+    # `sla_last_reminded_at` above -- when this still-`submitted` quote
+    # (awaiting an Admin/Manager's approve/adjust decision, see this
+    # class's own "QUOTE-TO-CHECKOUT WORKFLOW" docstring section) was
+    # last escalated for sitting unanswered past
+    # `settings.QUOTATION_SLA_HOURS`. NULL until the first nudge fires;
+    # re-checked on every SLA run so a quote that's STILL `submitted`
+    # keeps being re-escalated every
+    # `settings.APPROVAL_SLA_ESCALATION_REPEAT_HOURS` rather than being
+    # nudged once and forgotten. Never needs resetting back to NULL --
+    # once `status` moves past "submitted" (approved/fulfilled), this row
+    # stops matching the SLA task's query for good regardless of this
+    # column's value.
+    sla_last_reminded_at = Column(DateTime(timezone=True), nullable=True)
 
     user = relationship("User", foreign_keys=[user_id])
     assigned_to = relationship("User", foreign_keys=[assigned_to_id])

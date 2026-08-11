@@ -273,6 +273,39 @@ variable "display_timezone" {
   default     = "Africa/Lagos"
 }
 
+# --- Pending-approval SLA nudges (ExtensionRequest & Quotation) -----------
+# Matches .env.example's own "Pending-approval SLA nudges" block -- see
+# backend/tasks/sla_tasks.py's module docstring for the full "why".
+variable "extension_request_sla_hours" {
+  description = "How many hours a `pending` ExtensionRequest can go without a Manager/Admin/Super Admin decision before the SLA-nudge digest escalates it -- matches .env.example's EXTENSION_REQUEST_SLA_HOURS."
+  type        = string
+  default     = "24"
+}
+
+variable "quotation_sla_hours" {
+  description = "How many hours a `submitted` Quotation can go without an Admin/Manager decision before the SLA-nudge digest escalates it -- matches .env.example's QUOTATION_SLA_HOURS."
+  type        = string
+  default     = "24"
+}
+
+variable "approval_sla_check_interval_minutes" {
+  description = "How often, in minutes, the worker checks both pending-approval queues for anything past its SLA threshold -- matches .env.example's APPROVAL_SLA_CHECK_INTERVAL_MINUTES."
+  type        = string
+  default     = "60"
+}
+
+variable "approval_sla_escalation_repeat_hours" {
+  description = "Once a pending request/quote has been escalated, how many hours before it's eligible to be escalated again if still undecided -- matches .env.example's APPROVAL_SLA_ESCALATION_REPEAT_HOURS."
+  type        = string
+  default     = "24"
+}
+
+variable "send_quotation_recipient_emails" {
+  description = "Whether a Quotation's own recipient gets emailed on every change (line items, notes, discount, assignment, approval, fulfillment), on top of the in-app bell notification which is always created regardless -- matches .env.example's SEND_QUOTATION_RECIPIENT_EMAILS."
+  type        = string
+  default     = "true"
+}
+
 variable "currency_code" {
   description = "ISO 4217 currency code applied everywhere a price is shown or exported."
   type        = string

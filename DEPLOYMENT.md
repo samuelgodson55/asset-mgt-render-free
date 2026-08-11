@@ -735,6 +735,11 @@ Leave otelExporterOtlpHeaders (and otelExporterOtlpEndpoint) empty and use otelA
    | `DUE_SOON_REMINDER_DAYS` | per-environment | Optional — how many days before an asset's return date the "due soon" reminder starts. Default `2` if unset. |
    | `DUE_SOON_DIGEST_HOURS_UTC` | per-environment | Optional — comma-separated hours of day (UTC, each 0-23) the due-soon digest fires. Same syntax as `OVERDUE_DIGEST_HOURS_UTC` above. Default `8` if unset. |
    | `SEND_INDIVIDUAL_HOLDER_REMINDERS` | per-environment | Optional, string `"true"`/`"false"` — also emails the individual asset holder, not just Admins/Managers. Default `true` unless explicitly set to `"false"`. |
+   | `EXTENSION_REQUEST_SLA_HOURS` | per-environment | Optional — hours a `pending` Extension Request can go without a decision before the SLA-nudge digest escalates it. Default `24` if unset. |
+   | `QUOTATION_SLA_HOURS` | per-environment | Optional — hours a `submitted` Quotation can go without a decision before the SLA-nudge digest escalates it. Default `24` if unset. |
+   | `APPROVAL_SLA_CHECK_INTERVAL_MINUTES` | per-environment | Optional — how often (in minutes) the worker checks both queues above for anything past its SLA threshold. Default `60` if unset. |
+   | `APPROVAL_SLA_ESCALATION_REPEAT_HOURS` | per-environment | Optional — hours before an already-escalated, still-undecided row is eligible to be re-escalated. Default `24` if unset. |
+   | `SEND_QUOTATION_RECIPIENT_EMAILS` | per-environment | Optional, string `"true"`/`"false"` — whether a Quotation's own recipient gets emailed on every change (line items, notes, discount, assignment, approval, fulfillment), on top of the in-app bell notification which is always created regardless. Default `true` unless explicitly set to `"false"`. |
    | `DISPLAY_TIMEZONE` | per-environment | Optional — IANA zone (e.g. `America/New_York`) used to render timestamps in the UI, filenames, and emails. Default `Africa/Lagos` if unset. |
    | `CURRENCY_CODE` | per-environment | Optional — ISO 4217 code (e.g. `USD`) shown next to asset costs. Default `NGN` if unset. |
    | `CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER` | per-environment | Optional, string `"true"`/`"false"` — whether Staff/Customer roles see remaining stock counts in the catalog. Default `false` if unset. |

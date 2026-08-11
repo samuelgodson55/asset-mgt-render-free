@@ -61,7 +61,7 @@ export function Assets() {
 
   const refresh = () => {
     setLoading(true);
-    assetsApi.list(perPage, offset, search).then((res) => {
+    assetsApi.list(perPage, offset, search, category).then((res) => {
       setError(null);
       setAssets(res.items);
       setTotal(res.total);
@@ -72,7 +72,7 @@ export function Assets() {
     });
   };
 
-  useEffect(refresh, [offset, perPage, search]);
+  useEffect(refresh, [offset, perPage, search, category]);
 
   // Called from the "Rows per page" <select> -- always jumps back to the
   // first page on a page-size change (mirrors js/ui.js's setPerPage()).
@@ -88,20 +88,19 @@ export function Assets() {
       .catch(() => setCategories([]));
   }, []);
 
-  // Category/status are client-side narrowings of the current server-fetched
-  // page (there's no `category=`/`status=` query param on GET /assets) --
-  // same "All" pill behavior as before, just applied on top of the
-  // search-narrowed, paginated slice rather than a full client-downloaded
-  // snapshot.
-  const filtered = assets
-    .filter((a) => category === "All" || (a.category ?? "Uncategorized") === category)
-    .filter((a) => status === "all" || a.status === status);
+  // Category is now a true server-side filter (GET /assets?category=...,
+  // same pattern as `search`) -- see backend/services/asset_service.py's
+  // list_assets(). `assets` already IS the category-narrowed page, so it's
+  // rendered directly. Status has no backend equivalent yet, so it stays a
+  // client-side narrowing of the current page, same as before.
+  const filtered = assets.filter((a) => status === "all" || a.status === status);
 
   // Pill/tab clicks (and the search box) update both local state and the
   // URL together, so the address bar always mirrors what's currently on
   // screen -- a StatCard, a bookmark, or hitting "back" all land on the
   // exact same filtered view rather than the unfiltered default.
   const changeCategory = (c: string) => {
+    setOffset(0);
     setCategory(c);
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev);
@@ -215,7 +214,13 @@ export function Assets() {
         <div className="text-center py-20 text-text-faint text-sm">No assets match that filter. Try a different tag or category.</div>
       )}
 
-      {category === "All" && status === "all" && (
+      {/* Category is now server-filtered, so `total`/pagination are always
+          correct for whatever category is selected -- no need to hide the
+          bar for it anymore. Status is still a client-side narrowing of
+          the current page (see `filtered` above), so paging while a
+          status filter is active would still be misleading; the bar stays
+          hidden for that case only. */}
+      {status === "all" && (
         <div className="mt-5">
           <PaginationBar total={total} perPage={perPage} offset={offset} onOffsetChange={setOffset} />
         </div>

@@ -218,3 +218,68 @@ def test_restore_nonexistent_deleted_asset_404s(as_admin):
     client, headers = as_admin
     response = client.post("/api/assets/999999/restore", headers=headers)
     assert response.status_code == 404
+
+
+def test_list_assets_category_filter_narrows_and_totals_correctly(as_admin):
+    """
+    GET /assets?category=... should narrow both `items` and `total` to
+    pools in that category, regardless of where they fall relative to any
+    other pool already in the DB (e.g. from fixtures/other tests) --
+    exercising the fix for the client-side-only category filter that used
+    to only ever look at whatever single page was already loaded.
+    """
+    client, headers = as_admin
+    client.post("/api/assets", headers=headers, json={"name": "Cat Filter Radio A", "total_quantity": 3, "category": "Field Radios"})
+    client.post("/api/assets", headers=headers, json={"name": "Cat Filter Radio B", "total_quantity": 4, "category": "Field Radios"})
+    client.post("/api/assets", headers=headers, json={"name": "Cat Filter Optic A", "total_quantity": 2, "category": "Optics"})
+    client.post("/api/assets", headers=headers, json={"name": "Cat Filter No Category", "total_quantity": 1})
+
+    radios = client.get("/api/assets", headers=headers, params={"category": "Field Radios", "limit": 1000})
+    assert radios.status_code == 200
+    radios_body = radios.json()
+    radio_names = {a["name"] for a in radios_body["items"]}
+    assert {"Cat Filter Radio A", "Cat Filter Radio B"} <= radio_names
+    assert "Cat Filter Optic A" not in radio_names
+    assert all(a["category"] == "Field Radios" for a in radios_body["items"])
+    assert radios_body["total"] == len(radios_body["items"])
+
+    # Case-insensitive exact match, same as the export endpoint.
+    radios_lower = client.get("/api/assets", headers=headers, params={"category": "field radios", "limit": 1000})
+    assert radios_lower.json()["total"] == radios_body["total"]
+
+    # "Uncategorized" maps to category IS NULL.
+    uncategorized = client.get("/api/assets", headers=headers, params={"category": "Uncategorized", "limit": 1000})
+    uncategorized_names = {a["name"] for a in uncategorized.json()["items"]}
+    assert "Cat Filter No Category" in uncategorized_names
+    assert "Cat Filter Radio A" not in uncategorized_names
+
+    # "All" (and omitting the param) returns everything, unfiltered.
+    all_items = client.get("/api/assets", headers=headers, params={"category": "All", "limit": 1000})
+    all_names = {a["name"] for a in all_items.json()["items"]}
+    assert {"Cat Filter Radio A", "Cat Filter Radio B", "Cat Filter Optic A", "Cat Filter No Category"} <= all_names
+
+
+def test_list_assets_category_filter_composes_with_pagination(as_admin):
+    """
+    The bug being fixed: category filtering has to happen BEFORE the
+    offset/limit slice (server-side), not after (client-side) -- otherwise
+    a category's items can be scattered across many pages and a
+    small-limit request can come back empty even though matching items
+    exist elsewhere in the inventory.
+    """
+    client, headers = as_admin
+    for i in range(5):
+        client.post("/api/assets", headers=headers, json={"name": f"Paged Category Item {i}", "total_quantity": 1, "category": "Paging Test Category"})
+
+    # A limit smaller than the category's own item count must still
+    # report the correct `total` and return items on later pages via
+    # offset, never silently going blank.
+    page1 = client.get("/api/assets", headers=headers, params={"category": "Paging Test Category", "limit": 2, "offset": 0})
+    page2 = client.get("/api/assets", headers=headers, params={"category": "Paging Test Category", "limit": 2, "offset": 2})
+    page3 = client.get("/api/assets", headers=headers, params={"category": "Paging Test Category", "limit": 2, "offset": 4})
+
+    assert page1.json()["total"] == 5
+    assert page2.json()["total"] == 5
+    assert page3.json()["total"] == 5
+    all_names = {a["name"] for a in page1.json()["items"]} | {a["name"] for a in page2.json()["items"]} | {a["name"] for a in page3.json()["items"]}
+    assert all_names == {f"Paged Category Item {i}" for i in range(5)}

@@ -7,6 +7,8 @@ import { Gauge, AlarmClockOff, Wallet, Clock3, Filter } from "lucide-react";
 import { reportsApi, formatPrice } from "../lib/api";
 import { StatCard } from "../components/StatCard";
 import { TableShell, TableHead, TablePlaceholderRow } from "../components/ui/TableShell";
+import { PaginationBar, RowsPerPageSelect } from "../components/PaginationBar";
+import { DEFAULT_PAGE_SIZE } from "../lib/pagination";
 import { useTheme } from "../lib/useTheme";
 import type { ReportsDashboard } from "../lib/types";
 
@@ -34,6 +36,13 @@ export function Reports() {
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [category, setCategory] = useState("");
+  // Table is small (one row per asset type) but can still run long --
+  // /reports/dashboard returns the whole utilization list in one shot
+  // (see backend/services/reports_service.py's get_utilization_by_asset_type()),
+  // so we page it client-side the same way Checkouts.tsx pages its
+  // extension-requests list, rather than scrolling forever.
+  const [perPage, setPerPage] = useState(DEFAULT_PAGE_SIZE);
+  const [offset, setOffset] = useState(0);
   const { theme } = useTheme();
   const chart = CHART_COLORS[theme];
 
@@ -45,6 +54,20 @@ export function Reports() {
       .catch((err) => console.error("Failed to load reports dashboard:", err))
       .finally(() => setLoading(false));
   }, [startDate, endDate, category]);
+
+  // Filters changed the underlying rows -- reset back to page one so we
+  // don't strand the user on an offset past the end of the new list.
+  useEffect(() => {
+    setOffset(0);
+  }, [startDate, endDate, category]);
+
+  const handlePerPageChange = (n: number) => {
+    setPerPage(n);
+    setOffset(0);
+  };
+
+  const utilizationRows = data?.utilization_by_asset_type ?? [];
+  const pagedUtilizationRows = utilizationRows.slice(offset, offset + perPage);
 
   const categories = useMemo(() => {
     const set = new Set<string>();
@@ -121,9 +144,14 @@ export function Reports() {
 
       {/* Utilization by asset type */}
       <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.45, delay: 0.1 }} className="border border-border-soft bg-surface rounded-[3px] p-5 mb-4">
-        <div className="mb-4">
-          <h2 className="font-display text-[15px] font-medium text-text">Utilization by asset type</h2>
-          <p className="text-[11px] text-text-faint mt-0.5">Share of each pool currently checked out</p>
+        <div className="mb-4 flex items-start justify-between gap-3 flex-wrap">
+          <div>
+            <h2 className="font-display text-[15px] font-medium text-text">Utilization by asset type</h2>
+            <p className="text-[11px] text-text-faint mt-0.5">Share of each pool currently checked out</p>
+          </div>
+          {utilizationRows.length > DEFAULT_PAGE_SIZE && (
+            <RowsPerPageSelect value={perPage} onChange={handlePerPageChange} />
+          )}
         </div>
         <ResponsiveContainer width="100%" height={260}>
           <BarChart data={topUtilization} margin={{ left: -20, right: 10 }}>
@@ -150,10 +178,10 @@ export function Reports() {
             </TableHead>
             <tbody className="divide-y divide-border-soft">
               {loading && <TablePlaceholderRow columns={5}>Loading…</TablePlaceholderRow>}
-              {!loading && (data?.utilization_by_asset_type.length ?? 0) === 0 && (
+              {!loading && utilizationRows.length === 0 && (
                 <TablePlaceholderRow columns={5}>No asset pools yet.</TablePlaceholderRow>
               )}
-              {!loading && data?.utilization_by_asset_type.map((row) => (
+              {!loading && pagedUtilizationRows.map((row) => (
                 <tr key={row.asset_type_id} className="text-text">
                   <td className="px-4 py-2.5">{row.name}</td>
                   <td className="px-4 py-2.5 text-text-muted">{row.category ?? "—"}</td>
@@ -165,6 +193,11 @@ export function Reports() {
             </tbody>
           </table>
         </TableShell>
+        {!loading && utilizationRows.length > 0 && (
+          <div className="mt-3">
+            <PaginationBar total={utilizationRows.length} perPage={perPage} offset={offset} onOffsetChange={setOffset} />
+          </div>
+        )}
       </motion.div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">

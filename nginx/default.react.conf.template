@@ -15,7 +15,7 @@
 # same reverse-proxy-to-/api/, same /_deploy/ dashboard, same /docs
 # passthrough, same security headers -- the only real difference is the
 # root `location /` block: this one is a genuine SPA fallback
-# (`try_files $uri $uri/ /index.html;`) instead of the legacy site's
+# (`try_files $uri /index.html;`) instead of the legacy site's
 # multi-page "clean URL" try_files chain, and there's no ".html rewrite"
 # section at all, since a Vite build never ships bare .html pages to
 # rewrite. Kept as a fully separate file (not a shared file with `if`
@@ -156,6 +156,15 @@ server {
     gzip_vary on;
     gzip_min_length 256;
     gzip_types text/plain text/css application/javascript application/json image/svg+xml;
+    # PERFORMANCE: gzip_comp_level was never set here, which silently left
+    # nginx on its own compiled-in default of 1 -- the weakest compression
+    # level, chosen to minimize CPU cost, not payload size. 6 is nginx's
+    # own documented "good ratio/CPU tradeoff" recommendation (gzip -6):
+    # meaningfully smaller JS/CSS bundles (this is exactly the traffic
+    # gzip_types above targets) over the wire to every visitor, for a CPU
+    # cost this app's traffic pattern (small hashed JS/CSS chunks, not a
+    # sustained firehose) doesn't come close to noticing.
+    gzip_comp_level 6;
 
     # =========================================================================
     # THE REVERSE PROXY: forward every /api/* call to the FastAPI backend
@@ -573,21 +582,49 @@ server {
     # ---- the SPA itself -------------------------------------------------------
     # Everything that isn't /api/*, the docs routes, or /_deploy/ (all
     # handled above) is either a real built file or a client-side route.
-    # `try_files` tries, in order: the URI exactly as requested (so a real
-    # file like /assets/index-a1b2c3.js still resolves off disk unchanged)
-    # -- then the URI as a directory -- then, for anything else (a
-    # client-side route react-router owns, e.g. /checkouts or /assets/42,
-    # which is NOT a real file on disk), falls back to /index.html so the
-    # SPA's own router can take over and render the right page client-side
-    # instead of nginx 404ing on a URL that only React Router understands.
-    # This is the entire reason this file exists separately from
-    # nginx/default.conf.template -- the legacy multi-page site's
-    # try_files chain (real file, then "$uri.html", then a real 404) has
-    # no equivalent "no matching page is fine, hand it to the client
-    # router" fallback, and adding one there would be wrong for that site
-    # (a truly missing legacy page SHOULD 404).
+    # `try_files` tries the URI exactly as requested (so a real file like
+    # /assets/index-a1b2c3.js still resolves off disk unchanged) and, for
+    # anything else (a client-side route react-router owns, e.g.
+    # /checkouts or /assets/42, which is NOT a real file on disk), falls
+    # back to /index.html so the SPA's own router can take over and
+    # render the right page client-side instead of nginx 404ing on a URL
+    # that only React Router understands. This is the entire reason this
+    # file exists separately from nginx/default.conf.template -- the
+    # legacy multi-page site's try_files chain (real file, then
+    # "$uri.html", then a real 404) has no equivalent "no matching page
+    # is fine, hand it to the client router" fallback, and adding one
+    # there would be wrong for that site (a truly missing legacy page
+    # SHOULD 404).
+    #
+    # BUG FIX -- refreshing (or deep-linking/bookmarking) the Inventory
+    # page at "/assets" (see App.tsx's route table) returned a bare
+    # nginx 403/404 instead of the app, even though every OTHER
+    # client-side route (e.g. "/quotations", "/my-items") refreshed
+    # fine. Root cause: this used to be `try_files $uri $uri/
+    # /index.html;` -- that middle `$uri/` clause checks whether the
+    # request path exists as a real DIRECTORY on disk, and Vite's own
+    # build output (see frontend-app/vite.config.ts's default
+    # `assetsDir`) writes every hashed JS/CSS bundle into a directory
+    # that's ALSO, coincidentally, named exactly "assets/" --
+    # `dist/assets/index-a1b2c3.js` and friends. A request for the
+    # ROUTE "/assets" and a request for the DIRECTORY "/assets/" are
+    # indistinguishable to `try_files`, so it matched the real directory
+    # first, nginx's own `index index.html;` then looked for the
+    # non-existent "/assets/index.html", and returned 403/404 right
+    # there -- never reaching the third `/index.html` SPA-fallback
+    # argument at all, so React Router never got a chance to load.
+    # Dropping the `$uri/` clause entirely is the standard fix for this
+    # exact class of bug on any Vite/CRA-style SPA: this app never
+    # legitimately needs directory-listing/index resolution for
+    # anything -- its only real directory (Vite's own hashed
+    # /assets/*.js|css output) is always requested by an exact filename
+    # (matched by the first `$uri` clause above), never as a bare
+    # directory -- so removing the middle clause closes off this whole
+    # category of "a client-side route name happens to collide with a
+    # real build-output folder name" bug for good, not just for
+    # "/assets" today.
     location / {
-        try_files $uri $uri/ /index.html;
+        try_files $uri /index.html;
     }
 
     # Long-lived, effectively-forever caching for Vite's build output under

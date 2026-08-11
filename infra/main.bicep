@@ -235,6 +235,21 @@ param dueSoonDigestHoursUtc string = '8'
 @description('Whether the individual "your item is overdue/due soon" reminder also goes to the checkout\'s own holder, in addition to the admin/manager digest. Matches .env.example\'s SEND_INDIVIDUAL_HOLDER_REMINDERS.')
 param sendIndividualHolderReminders bool = true
 
+@description('How many hours a `pending` ExtensionRequest can go without a Manager/Admin/Super Admin decision before the SLA-nudge digest escalates it. Matches .env.example\\'s EXTENSION_REQUEST_SLA_HOURS.')
+param extensionRequestSlaHours int = 24
+
+@description('How many hours a `submitted` Quotation can go without an Admin/Manager decision before the SLA-nudge digest escalates it. Matches .env.example\\'s QUOTATION_SLA_HOURS.')
+param quotationSlaHours int = 24
+
+@description('How often, in minutes, the worker checks both pending-approval queues for anything past its SLA threshold. Matches .env.example\'s APPROVAL_SLA_CHECK_INTERVAL_MINUTES.')
+param approvalSlaCheckIntervalMinutes int = 60
+
+@description('Once a pending request/quote has been escalated, how many hours before it is eligible to be escalated again if still undecided. Matches .env.example\'s APPROVAL_SLA_ESCALATION_REPEAT_HOURS.')
+param approvalSlaEscalationRepeatHours int = 24
+
+@description('Whether a Quotation\'s own recipient gets emailed on every change (line items, notes, discount, assignment, approval, fulfillment), on top of the in-app bell notification which is always created regardless. Matches .env.example\'s SEND_QUOTATION_RECIPIENT_EMAILS.')
+param sendQuotationRecipientEmails bool = true
+
 @description('IANA timezone name (e.g. "Africa/Lagos") used to render CSV/PDF export timestamps -- data itself is always stored as UTC. Matches .env.example\'s DISPLAY_TIMEZONE.')
 param displayTimezone string = 'Africa/Lagos'
 
@@ -980,6 +995,11 @@ var sharedEnv = [
   { name: 'DUE_SOON_REMINDER_DAYS', value: string(dueSoonReminderDays) }
   { name: 'DUE_SOON_DIGEST_HOURS_UTC', value: dueSoonDigestHoursUtc }
   { name: 'SEND_INDIVIDUAL_HOLDER_REMINDERS', value: string(sendIndividualHolderReminders) }
+  { name: 'EXTENSION_REQUEST_SLA_HOURS', value: string(extensionRequestSlaHours) }
+  { name: 'QUOTATION_SLA_HOURS', value: string(quotationSlaHours) }
+  { name: 'APPROVAL_SLA_CHECK_INTERVAL_MINUTES', value: string(approvalSlaCheckIntervalMinutes) }
+  { name: 'APPROVAL_SLA_ESCALATION_REPEAT_HOURS', value: string(approvalSlaEscalationRepeatHours) }
+  { name: 'SEND_QUOTATION_RECIPIENT_EMAILS', value: string(sendQuotationRecipientEmails) }
   { name: 'DISPLAY_TIMEZONE', value: displayTimezone }
   { name: 'CURRENCY_CODE', value: currencyCode }
   { name: 'CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER', value: string(catalogShowStockToStaffCustomer) }

@@ -146,22 +146,31 @@ def create_asset_type(db: Session, asset: AssetTypeCreate, user: dict) -> dict:
     return {"message": "Asset type created successfully", "id": new_asset_type.id}
 
 
-def list_assets(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offset: int = 0, search: Optional[str] = None) -> dict:
+def list_assets(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offset: int = 0, search: Optional[str] = None, category: Optional[str] = None) -> dict:
     """
     Any authenticated user (admin, manager, staff, or customer) can view
     the pool list. Soft-deleted pools are excluded -- they're gone from
     active inventory even though the row is kept for historical checkouts.
 
-    PAGINATION + SEARCH (Data Quality & Usability requirement #4, extended
-    to true server-side search): `limit`/`offset` cap how many pools a
-    single request can return; `total` tells the caller the true size of
-    the (optionally search-narrowed) inventory regardless of page size.
-    `search` -- when present -- narrows the result to pools whose name
-    contains it (case-insensitive), matching the single field the Asset
-    Inventory table's search box has always searched by (see
-    js/components/assets.js). Applied and counted BEFORE the offset/limit
-    slice, so `total`/pagination always reflect the filtered set, not the
-    whole table.
+    PAGINATION + SEARCH + CATEGORY (Data Quality & Usability requirement
+    #4, extended to true server-side search/filtering): `limit`/`offset`
+    cap how many pools a single request can return; `total` tells the
+    caller the true size of the (optionally search/category-narrowed)
+    inventory regardless of page size. `search` -- when present -- narrows
+    the result to pools whose name contains it (case-insensitive),
+    matching the single field the Asset Inventory table's search box has
+    always searched by (see js/components/assets.js). `category` -- when
+    present and not "all" -- narrows to pools with an exact (case-
+    insensitive) category match; "Uncategorized" maps to `category IS
+    NULL`, mirroring the frontend's own fallback label for a pool with no
+    category set (see frontend-app/src/pages/Dashboard.tsx's
+    myCategoryCounts and frontend-app/src/pages/Assets.tsx's category
+    pills, both of which already display "Uncategorized" for that case).
+    Both filters are applied and counted BEFORE the offset/limit slice, so
+    `total`/pagination always reflect the filtered set, not the whole
+    table -- this is what lets a category tile on the Dashboard deep-link
+    into a specific, correctly-paginated slice of the inventory instead of
+    a client-side narrowing of whatever single page happened to be loaded.
 
     STOCK VISIBILITY (see _can_see_stock above): total_quantity/
     available_quantity are only included in each item when the caller is
@@ -175,6 +184,19 @@ def list_assets(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offset: int
 
     query = db.query(models.AssetType).filter(~models.AssetType.is_deleted)
     query = apply_search_filter(query, search, [models.AssetType.name])
+
+    cat_filter = (category or "").strip()
+    if cat_filter and cat_filter.lower() != "all":
+        if cat_filter.lower() == "uncategorized":
+            query = query.filter(models.AssetType.category.is_(None))
+        else:
+            # Same case-insensitive exact match as export_assets_inventory()
+            # below -- the pills that drive this are themselves populated
+            # from the exact distinct values on file (see
+            # list_asset_categories below), so this only ever needs to
+            # match one of those, not do substring search.
+            query = query.filter(func.lower(models.AssetType.category) == cat_filter.lower())
+
     query = query.order_by(models.AssetType.id)
     total = query.count()
     rows = query.offset(offset).limit(limit).all()

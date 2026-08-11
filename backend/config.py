@@ -588,6 +588,44 @@ class Settings(BaseSettings):
     # no code changes -- see tasks/notification_tasks.py.
     SEND_INDIVIDUAL_HOLDER_REMINDERS: bool = True
 
+    # --- Pending-approval SLA nudges (ExtensionRequest & Quotation) -------
+    # Both `ExtensionRequest` ("pending" -> approved/denied) and
+    # `Quotation` ("submitted" -> approved) sit in a decision queue with no
+    # automatic escalation of their own -- a Manager/Admin who never opens
+    # the Extension Requests panel or the Quotes tab could otherwise leave
+    # one unanswered indefinitely. tasks/sla_tasks.py's two Celery Beat
+    # jobs (`escalate_pending_extension_requests`/
+    # `escalate_pending_quotations`) close that gap: anything still
+    # waiting past the relevant *_SLA_HOURS setting below gets escalated
+    # to the SAME notification-recipients audience as every other alert in
+    # this app (the runtime-editable Digest Recipients list +
+    # ADMIN_NOTIFICATION_EMAILS -- see get_digest_recipient_emails()), not
+    # just left for someone to eventually notice.
+    #
+    # How many hours a `pending` ExtensionRequest can go without a
+    # Manager/Admin/Super Admin decision before it's escalated.
+    EXTENSION_REQUEST_SLA_HOURS: float = 24
+    # Same idea for a `submitted` Quotation waiting on
+    # quotation_service.approve_quotation() -- its own independent
+    # threshold, since the two queues can reasonably need different
+    # response-time expectations.
+    QUOTATION_SLA_HOURS: float = 24
+    # How often (in minutes) the worker checks both queues for anything
+    # that's crossed its SLA threshold above. A plain timedelta-since-
+    # last-tick (like AUDIT_PARTITION_CHECK_INTERVAL_HOURS), not a fixed
+    # clock time like the daily digests -- "how promptly does an
+    # escalation land after crossing the line" is the thing that matters
+    # here, not a specific time of day. Cheap and idempotent (almost
+    # always a no-op), so a fairly tight default is fine.
+    APPROVAL_SLA_CHECK_INTERVAL_MINUTES: int = 60
+    # Once a pending request/quote HAS been escalated, how long before
+    # it's eligible to be escalated again if STILL nobody has decided it
+    # (see models.py's `sla_last_reminded_at` columns) -- keeps a
+    # long-neglected item nudging repeatedly rather than firing once and
+    # going quiet, without re-sending on every single
+    # APPROVAL_SLA_CHECK_INTERVAL_MINUTES tick.
+    APPROVAL_SLA_ESCALATION_REPEAT_HOURS: float = 24
+
     # --- Equipment Quotation self-service (staff/customer asset catalog) --
     # ISO 4217 currency code applied to every price shown/exported anywhere
     # in the app (the Asset Inventory's per-unit `price`, the Quotation
@@ -628,6 +666,21 @@ class Settings(BaseSettings):
     # is completely unaffected by this flag either way -- they always see
     # full stock detail, same as today.
     CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER: bool = False
+
+    # Whether services/quotation_service.py's _notify_quotation_recipient()
+    # (line items added/changed/removed, notes/discount edits, assignment,
+    # approval, fulfillment) emails the quote's own recipient (whoever it's
+    # currently assigned to, else the original requester) on top of the
+    # in-app QuotationNotification row it always creates regardless of this
+    # setting. True (the default) preserves the original "email them every
+    # time something changes" behavior. Some customers find a message for
+    # every single line-item tweak intrusive -- set this False to keep the
+    # in-app bell notification (still visible next time they log in/open
+    # the Notification Center) while skipping the individual email per
+    # update. Independent of NOTIFICATIONS_ENABLED above -- both must be
+    # true for one of these emails to actually go out; this is the
+    # quotation-specific on/off switch layered on top of that master one.
+    SEND_QUOTATION_RECIPIENT_EMAILS: bool = True
 
     # --- Single-service (free-tier) deployment mode ------------------------
     # Render's Free instance type only supports Web Services, Postgres, and

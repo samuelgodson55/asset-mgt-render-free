@@ -38,11 +38,23 @@ router = APIRouter(prefix="/checkouts", tags=["checkouts"])
 def get_active_checkouts(
     limit: int = Query(checkout_service.DEFAULT_LIMIT, ge=1, le=checkout_service.MAX_LIMIT, description="Max rows to return"),
     offset: int = Query(0, ge=0, description="Rows to skip (for paging through a large checkout table)"),
+    status_filter: Optional[str] = Query(
+        None, alias="filter",
+        description="Optional subset to filter to server-side: 'overdue' | 'due_soon' | 'active' (not yet overdue). Omit for every active checkout (the 'All' tab).",
+    ),
     db: Session = Depends(get_db),
     user: dict = Depends(require_privileged_role),
 ):
-    """The full org-wide 'who has what' table -- every ACTIVE checkout, not just the overdue/due-soon subsets. Powers the Checkouts page's 'All' tab."""
-    return checkout_service.list_active_checkouts(db, user, limit, offset)
+    """
+    The full org-wide 'who has what' table -- every ACTIVE checkout, not
+    just the overdue/due-soon subsets, unless narrowed with `filter`.
+    Powers every tab of the Checkouts page (see
+    checkout_service.list_active_checkouts()'s `status_filter` param for
+    why this reuses that function -- with its is_overdue/is_due_soon
+    computation -- instead of delegating to list_overdue_checkouts()/
+    list_due_soon_checkouts() below, which return a different row shape).
+    """
+    return checkout_service.list_active_checkouts(db, user, limit, offset, status_filter)
 
 
 @router.post("/{checkout_id}/return")

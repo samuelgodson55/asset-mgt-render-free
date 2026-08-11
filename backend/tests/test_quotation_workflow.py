@@ -621,3 +621,173 @@ def test_manager_editing_their_own_assigned_quotation_does_not_self_notify(as_ad
     )
     own_notifications = manager_client.get("/api/quotations/me/notifications", headers=manager_headers).json()
     assert own_notifications["items"] == []
+
+
+# ---------------------------------------------------------------------------
+# Quotation notifications -- fulfillment, not-in-inventory lines, and the
+# SEND_QUOTATION_RECIPIENT_EMAILS email gate. See
+# services/quotation_service.py's _notify_quotation_recipient() docstring
+# and config.py's SEND_QUOTATION_RECIPIENT_EMAILS docstring.
+# ---------------------------------------------------------------------------
+def test_fulfillment_notifies_the_recipient(as_admin, as_manager, as_customer):
+    admin_client, admin_headers = as_admin
+    manager_client, manager_headers = as_manager
+    customer_client, customer_headers = as_customer
+
+    asset_id = _create_pool(admin_client, admin_headers, "Boom Mic", total_quantity=5, price=15.00)
+    customer_id = customer_client.get("/api/auth/me", headers=customer_headers).json()["id"]
+    _add_to_cart(customer_client, customer_headers, asset_id, quantity=1, start_date=TODAY, due_date=TODAY)
+    submitted = customer_client.post("/api/quotations/submit", headers=customer_headers).json()
+    quotation_id = submitted["id"]
+
+    approve_response = manager_client.post(f"/api/quotations/{quotation_id}/approve", headers=manager_headers)
+    assert approve_response.status_code == 200, approve_response.text
+
+    # Self-submitted -> already assigned to the customer themselves, so
+    # approving above already queued one "updated" notification. Clear the
+    # slate so the assertion below is unambiguous about what fulfillment
+    # itself adds.
+    before = customer_client.get("/api/quotations/me/notifications", headers=customer_headers).json()
+    before_ids = [item["id"] for item in before["items"]]
+    customer_client.post(
+        "/api/quotations/me/notifications/read", headers=customer_headers, json={"notification_ids": before_ids},
+    )
+
+    checkout_response = manager_client.post(f"/api/quotations/{quotation_id}/checkout", headers=manager_headers)
+    assert checkout_response.status_code == 200, checkout_response.text
+
+    after = customer_client.get("/api/quotations/me/notifications", headers=customer_headers).json()
+    new_items = [item for item in after["items"] if item["read_at"] is None]
+    assert len(new_items) == 1
+    assert new_items[0]["kind"] == "updated"
+    assert "fulfilled" in new_items[0]["message"].lower()
+    assert new_items[0]["reference_number"] == submitted["reference_number"]
+
+
+def test_adding_not_in_inventory_item_notifies_recipient_without_outsourced_wording(as_admin, as_manager, as_customer):
+    admin_client, admin_headers = as_admin
+    manager_client, manager_headers = as_manager
+    customer_client, customer_headers = as_customer
+
+    asset_id = _create_pool(admin_client, admin_headers, "Gimbal", total_quantity=2, price=30.00)
+    customer_id = customer_client.get("/api/auth/me", headers=customer_headers).json()["id"]
+    _add_to_cart(customer_client, customer_headers, asset_id, quantity=1, start_date=TODAY, due_date=TODAY)
+    submitted = customer_client.post("/api/quotations/submit", headers=customer_headers).json()
+    quotation_id = submitted["id"]
+
+    add_response = manager_client.post(
+        f"/api/quotations/{quotation_id}/outsourced-items", headers=manager_headers,
+        json={
+            "name": "Specialty Crane Arm", "unit_price": 200.0, "quantity": 1,
+            "sourced_from": "Fountain Rentals",
+            "start_date": _iso(TODAY), "due_date": _iso(TODAY),
+        },
+    )
+    assert add_response.status_code == 200, add_response.text
+
+    notifications = customer_client.get("/api/quotations/me/notifications", headers=customer_headers).json()
+    matching = [item for item in notifications["items"] if "Specialty Crane Arm" in item["message"]]
+    assert len(matching) == 1
+    message = matching[0]["message"]
+    assert matching[0]["kind"] == "updated"
+    # The customer-facing message names just the asset -- never the
+    # internal "outsourced"/"sourced from" detail (that stays in the
+    # AuditLog only, see admin_add_outsourced_item()'s own comment).
+    assert "outsourced" not in message.lower()
+    assert "sourced from" not in message.lower()
+    assert "Fountain Rentals" not in message
+
+
+def test_removing_not_in_inventory_item_still_does_not_notify(as_admin, as_manager, as_customer):
+    # Pre-existing behavior, unchanged by this feature -- only ADDING a
+    # not-in-inventory line notifies; removing one doesn't (unlike
+    # removing a regular catalog line, which does).
+    admin_client, admin_headers = as_admin
+    manager_client, manager_headers = as_manager
+    customer_client, customer_headers = as_customer
+
+    asset_id = _create_pool(admin_client, admin_headers, "Light Kit", total_quantity=2, price=10.00)
+    _add_to_cart(customer_client, customer_headers, asset_id, quantity=1, start_date=TODAY, due_date=TODAY)
+    submitted = customer_client.post("/api/quotations/submit", headers=customer_headers).json()
+    quotation_id = submitted["id"]
+
+    added = manager_client.post(
+        f"/api/quotations/{quotation_id}/outsourced-items", headers=manager_headers,
+        json={"name": "Rare Lens", "unit_price": 50.0, "quantity": 1, "start_date": _iso(TODAY), "due_date": _iso(TODAY)},
+    ).json()
+    outsourced_item_id = next(
+        li["outsourced_item_id"] for li in added["items"] if li.get("is_outsourced") and li["asset_name"] == "Rare Lens"
+    )
+
+    before = customer_client.get("/api/quotations/me/notifications", headers=customer_headers).json()
+    before_ids = [item["id"] for item in before["items"]]
+    customer_client.post(
+        "/api/quotations/me/notifications/read", headers=customer_headers, json={"notification_ids": before_ids},
+    )
+
+    # Removal itself is covered elsewhere for status-code correctness;
+    # here we only care that it does NOT add a new unread notification.
+    remove_response = manager_client.delete(
+        f"/api/quotations/{quotation_id}/outsourced-items/{outsourced_item_id}", headers=manager_headers,
+    )
+    assert remove_response.status_code == 200, remove_response.text
+
+    after = customer_client.get("/api/quotations/me/notifications", headers=customer_headers).json()
+    new_items = [item for item in after["items"] if item["read_at"] is None]
+    assert new_items == []
+
+
+def test_send_quotation_recipient_emails_gate_off_still_creates_in_app_notification(as_admin, as_manager, as_customer, monkeypatch):
+    import services.quotation_service as quotation_service
+
+    monkeypatch.setattr(quotation_service.settings, "NOTIFICATIONS_ENABLED", True)
+    monkeypatch.setattr(quotation_service.settings, "SEND_QUOTATION_RECIPIENT_EMAILS", False)
+    sent = []
+    monkeypatch.setattr(quotation_service.notification_service, "send_email", lambda *a, **kw: sent.append((a, kw)) or True)
+
+    admin_client, admin_headers = as_admin
+    manager_client, manager_headers = as_manager
+    customer_client, customer_headers = as_customer
+
+    asset_id = _create_pool(admin_client, admin_headers, "Steadicam", total_quantity=2, price=40.00)
+    _add_to_cart(customer_client, customer_headers, asset_id, quantity=1, start_date=TODAY, due_date=TODAY)
+    submitted = customer_client.post("/api/quotations/submit", headers=customer_headers).json()
+
+    discount_response = manager_client.put(
+        f"/api/quotations/{submitted['id']}/discount", headers=manager_headers, json={"discount_percent": 15},
+    )
+    assert discount_response.status_code == 200, discount_response.text
+
+    # The gate blocks the EMAIL entirely...
+    assert sent == []
+    # ...but the in-app bell notification is still created either way.
+    notifications = customer_client.get("/api/quotations/me/notifications", headers=customer_headers).json()
+    assert len(notifications["items"]) == 1
+    assert notifications["items"][0]["kind"] == "updated"
+
+
+def test_send_quotation_recipient_emails_gate_on_sends_email_alongside_in_app(as_admin, as_manager, as_customer, monkeypatch):
+    import services.quotation_service as quotation_service
+
+    monkeypatch.setattr(quotation_service.settings, "NOTIFICATIONS_ENABLED", True)
+    monkeypatch.setattr(quotation_service.settings, "SEND_QUOTATION_RECIPIENT_EMAILS", True)
+    sent = []
+    monkeypatch.setattr(quotation_service.notification_service, "send_email", lambda *a, **kw: sent.append((a, kw)) or True)
+
+    admin_client, admin_headers = as_admin
+    manager_client, manager_headers = as_manager
+    customer_client, customer_headers = as_customer
+
+    asset_id = _create_pool(admin_client, admin_headers, "Slider", total_quantity=2, price=25.00)
+    _add_to_cart(customer_client, customer_headers, asset_id, quantity=1, start_date=TODAY, due_date=TODAY)
+    submitted = customer_client.post("/api/quotations/submit", headers=customer_headers).json()
+
+    discount_response = manager_client.put(
+        f"/api/quotations/{submitted['id']}/discount", headers=manager_headers, json={"discount_percent": 15},
+    )
+    assert discount_response.status_code == 200, discount_response.text
+
+    assert len(sent) == 1
+    notifications = customer_client.get("/api/quotations/me/notifications", headers=customer_headers).json()
+    assert len(notifications["items"]) == 1
+

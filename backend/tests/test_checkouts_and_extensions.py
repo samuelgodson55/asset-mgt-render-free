@@ -327,3 +327,104 @@ def test_checkouts_list_due_soon_column_obeys_env_setting(as_admin, as_manager, 
     assert soon_item["is_due_soon"] is True
     assert soon_item["is_overdue"] is False
     assert far_item["is_due_soon"] is False
+
+
+def _seed_checkout(db_session, asset_id, staff_id, due_date, quantity=1):
+    """
+    Writes an AssetCheckout row directly (bypassing POST
+    /assets/{id}/checkout_advanced, whose _validate_due_date rejects a
+    due_date already in the past -- you can't check something out already
+    overdue) so overdue fixtures can be built the same way
+    tests/test_reports.py's test_overdue_trend_counts_active_and_late_returned_checkouts()
+    does.
+    """
+    checkout = models.AssetCheckout(
+        asset_id=asset_id, user_id=staff_id, quantity=quantity,
+        checkout_date=due_date - datetime.timedelta(days=7),
+        due_date=due_date, status="active",
+    )
+    db_session.add(checkout)
+    db_session.commit()
+    return checkout
+
+
+def test_checkouts_list_filter_param_narrows_server_side_for_each_tab(as_admin, as_manager, db_session, monkeypatch):
+    """
+    GET /checkouts?filter=overdue|due_soon|active must narrow the query
+    itself (not just something the frontend could've filtered out of the
+    unfiltered page) -- this is what lets the Checkouts page's tabs page
+    server-side (see lib/api.ts's checkoutsApi.list() and
+    services/checkout_service.py's list_active_checkouts() `status_filter`
+    param) instead of fetching every active checkout and slicing an
+    in-memory array. Proves each filter both (a) includes the checkout it
+    should and (b) excludes the ones it shouldn't, and that `total`
+    reflects the filtered count, not the unfiltered one.
+    """
+    import services.checkout_service as checkout_service
+
+    admin_client, admin_headers = as_admin
+    manager_client, manager_headers = as_manager
+    monkeypatch.setattr(checkout_service.settings, "DUE_SOON_REMINDER_DAYS", 5)
+
+    staff = db_session.query(models.User).filter(models.User.role == "staff").first()
+    now = models.utc_now()
+
+    overdue_pool = _create_pool(admin_client, admin_headers, name="Overdue Pool", total_quantity=5)
+    _seed_checkout(db_session, overdue_pool, staff.id, now - datetime.timedelta(days=3))
+
+    due_soon_pool = _create_pool(admin_client, admin_headers, name="Due Soon Pool", total_quantity=5)
+    _seed_checkout(db_session, due_soon_pool, staff.id, now + datetime.timedelta(days=2))
+
+    healthy_pool = _create_pool(admin_client, admin_headers, name="Healthy Pool", total_quantity=5)
+    _seed_checkout(db_session, healthy_pool, staff.id, now + datetime.timedelta(days=30))
+
+    def asset_ids(resp):
+        return {item["asset_id"] for item in resp["items"]}
+
+    overdue_resp = manager_client.get("/api/checkouts?filter=overdue", headers=manager_headers).json()
+    assert overdue_pool in asset_ids(overdue_resp)
+    assert due_soon_pool not in asset_ids(overdue_resp)
+    assert healthy_pool not in asset_ids(overdue_resp)
+    assert overdue_resp["total"] == len(overdue_resp["items"])
+
+    due_soon_resp = manager_client.get("/api/checkouts?filter=due_soon", headers=manager_headers).json()
+    assert due_soon_pool in asset_ids(due_soon_resp)
+    assert overdue_pool not in asset_ids(due_soon_resp)
+    assert healthy_pool not in asset_ids(due_soon_resp)
+
+    active_resp = manager_client.get("/api/checkouts?filter=active", headers=manager_headers).json()
+    assert due_soon_pool in asset_ids(active_resp)
+    assert healthy_pool in asset_ids(active_resp)
+    assert overdue_pool not in asset_ids(active_resp)
+
+    all_resp = manager_client.get("/api/checkouts", headers=manager_headers).json()
+    assert {overdue_pool, due_soon_pool, healthy_pool} <= asset_ids(all_resp)
+    assert all_resp["total"] >= overdue_resp["total"] + due_soon_resp["total"] + 1
+
+
+def test_checkouts_list_filter_paginates_correctly(as_admin, as_manager, db_session):
+    """
+    `filter` + `limit`/`offset` must compose -- the count backing
+    PaginationBar's "Showing X-Y of Z" and the actual page of rows both
+    have to agree on the SAME (filtered) subset, proving the SQL filter is
+    applied before COUNT()/OFFSET()/LIMIT() rather than as a post-fetch
+    Python slice of an already-limited page.
+    """
+    admin_client, admin_headers = as_admin
+    manager_client, manager_headers = as_manager
+
+    staff = db_session.query(models.User).filter(models.User.role == "staff").first()
+    now = models.utc_now()
+    pool = _create_pool(admin_client, admin_headers, name="Overdue Paging Pool", total_quantity=5)
+    for i in range(3):
+        _seed_checkout(db_session, pool, staff.id, now - datetime.timedelta(days=1 + i))
+
+    first_page = manager_client.get("/api/checkouts?filter=overdue&limit=2&offset=0", headers=manager_headers).json()
+    assert len(first_page["items"]) == 2
+    assert first_page["total"] >= 3
+
+    second_page = manager_client.get("/api/checkouts?filter=overdue&limit=2&offset=2", headers=manager_headers).json()
+    assert len(second_page["items"]) >= 1
+    first_ids = {i["checkout_id"] for i in first_page["items"]}
+    second_ids = {i["checkout_id"] for i in second_page["items"]}
+    assert first_ids.isdisjoint(second_ids)

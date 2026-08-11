@@ -171,6 +171,12 @@ write_files:
       OVERDUE_DIGEST_HOURS_UTC=${overdue_digest_hours_utc}
       DUE_SOON_DIGEST_HOURS_UTC=${due_soon_digest_hours_utc}
 
+      EXTENSION_REQUEST_SLA_HOURS=${extension_request_sla_hours}
+      QUOTATION_SLA_HOURS=${quotation_sla_hours}
+      APPROVAL_SLA_CHECK_INTERVAL_MINUTES=${approval_sla_check_interval_minutes}
+      APPROVAL_SLA_ESCALATION_REPEAT_HOURS=${approval_sla_escalation_repeat_hours}
+      SEND_QUOTATION_RECIPIENT_EMAILS=${send_quotation_recipient_emails}
+
       DISPLAY_TIMEZONE=${display_timezone}
       CURRENCY_CODE=${currency_code}
 

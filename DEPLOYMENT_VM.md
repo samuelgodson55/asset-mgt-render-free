@@ -569,6 +569,33 @@ same GitHub Variable → Terraform → `cloud-init.yaml` first-boot →
 (`infra-vm/variables.tf`'s `overdue_digest_hours_utc`/
 `due_soon_digest_hours_utc`).
 
+Also optional — **pending-approval SLA nudges**: `EXTENSION_REQUEST_SLA_HOURS`
+and `QUOTATION_SLA_HOURS` (both **Variables**, default `24`) — how many
+hours a `pending` Extension Request / `submitted` Quotation can go
+without a decision before the SLA-nudge digest escalates it;
+`APPROVAL_SLA_CHECK_INTERVAL_MINUTES` (**Variable**, default `60`) — how
+often (in minutes) the worker checks both queues; and
+`APPROVAL_SLA_ESCALATION_REPEAT_HOURS` (**Variable**, default `24`) —
+how long an already-escalated, still-undecided row waits before it's
+eligible to be re-escalated. See `backend/tasks/sla_tasks.py`'s module
+docstring and [Due-Date Extensions & Notifications](README.md#due-date-extensions--notifications)'s
+SLA-nudges item for the full rationale. Wired through the same GitHub
+Variable → Terraform → `cloud-init.yaml` first-boot →
+`sync-secrets-vm.yml` ongoing-sync chain as the two above
+(`infra-vm/variables.tf`'s `extension_request_sla_hours`/
+`quotation_sla_hours`/`approval_sla_check_interval_minutes`/
+`approval_sla_escalation_repeat_hours`).
+
+Also optional — `SEND_QUOTATION_RECIPIENT_EMAILS` (**Variable**, default
+`true`) — whether a Quotation's own recipient gets emailed on every
+change (line items, notes, discount, assignment, approval, fulfillment),
+on top of the in-app bell notification, which is always created
+regardless of this setting. See `services/quotation_service.py`'s
+`_notify_quotation_recipient()`. Wired through the same GitHub Variable →
+Terraform → `cloud-init.yaml` first-boot → `sync-secrets-vm.yml`
+ongoing-sync chain as the SLA-nudge settings above
+(`infra-vm/variables.tf`'s `send_quotation_recipient_emails`).
+
 Also optional — distributed tracing (OpenTelemetry, off by default; see
 `README.md`'s **Distributed Tracing** section for the full walkthrough,
 which covers this VM path via `docker-compose.vm.yml`'s opt-in `jaeger`

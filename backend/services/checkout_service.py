@@ -138,19 +138,21 @@ def _as_aware_utc(dt: "Optional[datetime.datetime]") -> "Optional[datetime.datet
     return dt
 
 
-def list_active_checkouts(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offset: int = 0) -> dict:
+def list_active_checkouts(
+    db: Session, user: dict, limit: int = DEFAULT_LIMIT, offset: int = 0, status_filter: Optional[str] = None,
+) -> dict:
     """
     Powers GET /checkouts (root) -- the full org-wide "who has what" table
-    behind the Checkouts page's "All" tab. Neither list_overdue_checkouts()
-    nor list_due_soon_checkouts() above is a substitute for this: together
-    they only cover checkouts whose due_date has ALREADY passed, or is
-    landing within settings.DUE_SOON_REMINDER_DAYS (2 days by default) --
-    a perfectly healthy checkout dispatched today with a due_date three
-    weeks out falls into neither bucket and would otherwise never appear
-    anywhere in the Checkouts page at all, even though it's real,
-    outstanding custody. This lists every ACTIVE checkout regardless of
-    how far off its due_date is (or whether it has one), so "All" really
-    does mean all.
+    behind every tab of the Checkouts page. Neither list_overdue_checkouts()
+    nor list_due_soon_checkouts() above is a substitute for the unfiltered
+    call: together they only cover checkouts whose due_date has ALREADY
+    passed, or is landing within settings.DUE_SOON_REMINDER_DAYS (2 days by
+    default) -- a perfectly healthy checkout dispatched today with a
+    due_date three weeks out falls into neither bucket and would otherwise
+    never appear anywhere in the Checkouts page at all, even though it's
+    real, outstanding custody. With `status_filter` omitted this lists
+    every ACTIVE checkout regardless of how far off its due_date is (or
+    whether it has one), so "All" really does mean all.
 
     SCOPING: Super Admins and Managers see every active checkout
     system-wide -- same as list_overdue_checkouts()/list_due_soon_checkouts()
@@ -167,15 +169,23 @@ def list_active_checkouts(db: Session, user: dict, limit: int = DEFAULT_LIMIT, o
     REMINDER_DAYS environment value (.env) the Dashboard's own "Due Soon"
     banner already uses, instead of the frontend guessing or hardcoding
     its own window.
+
+    `status_filter` ("overdue" | "due_soon" | "active" | None) narrows the
+    SQL query itself -- not a post-fetch Python filter -- so `total` and
+    the LIMIT/OFFSET page it returns are both correct for that subset. This
+    is what lets the Checkouts page's Overdue/Due Soon/Active tabs page
+    server-side instead of fetching the whole table and slicing it in the
+    browser: the due-date math (what counts as "overdue"/"due soon" RIGHT
+    NOW) still happens once per request, against the current `now`, exactly
+    like the unfiltered call and exactly like list_overdue_checkouts()/
+    list_due_soon_checkouts() above -- it never gets cached or computed
+    ahead of time, so a checkout can't be "stuck" showing a stale bucket.
     """
     limit = max(1, min(limit, MAX_LIMIT))
     offset = max(0, offset)
     now = utc_now()
 
     query = db.query(models.AssetCheckout).filter(models.AssetCheckout.status == "active")
-
-    total = query.count()
-    active = query.order_by(models.AssetCheckout.checkout_date.desc()).offset(offset).limit(limit).all()
 
     # DUE SOON: same window list_due_soon_checkouts() uses for the
     # Dashboard's own "Due Soon" alert banner --
@@ -186,6 +196,25 @@ def list_active_checkouts(db: Session, user: dict, limit: int = DEFAULT_LIMIT, o
     # agree on what counts as "soon" -- changing DUE_SOON_REMINDER_DAYS in
     # .env moves both at once.
     due_soon_horizon = now + datetime.timedelta(days=settings.DUE_SOON_REMINDER_DAYS)
+
+    if status_filter == "overdue":
+        query = query.filter(models.AssetCheckout.due_date.isnot(None), models.AssetCheckout.due_date < now)
+    elif status_filter == "due_soon":
+        query = query.filter(
+            models.AssetCheckout.due_date.isnot(None),
+            models.AssetCheckout.due_date >= now,
+            models.AssetCheckout.due_date <= due_soon_horizon,
+        )
+    elif status_filter == "active":
+        # Frontend's "Active" tab: not (yet) overdue -- an open-ended
+        # checkout (due_date IS NULL) counts as active too, same as an
+        # unfiltered row with no due_date always reports is_overdue=False
+        # below.
+        query = query.filter((models.AssetCheckout.due_date.is_(None)) | (models.AssetCheckout.due_date >= now))
+    # status_filter is None (or an unrecognized value) -> no extra filter, "All" tab.
+
+    total = query.count()
+    active = query.order_by(models.AssetCheckout.checkout_date.desc()).offset(offset).limit(limit).all()
 
     items = []
     for c in active:

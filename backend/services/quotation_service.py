@@ -151,13 +151,21 @@ def _notify_quotation_recipient(db: Session, quotation: "models.Quotation", acto
         quotation_id=quotation.id, recipient_user_id=recipient.id,
         kind=kind, message=message, created_by=actor.get("email"),
     ))
-    # Best-effort email alongside the in-app row -- send_email() itself
-    # already no-ops quietly when NOTIFICATIONS_ENABLED is off or the
-    # recipient has no usable address, so no extra guard is needed here.
+    # Best-effort email alongside the in-app row above -- gated by its own
+    # SEND_QUOTATION_RECIPIENT_EMAILS switch (see config.py's docstring on
+    # that setting) on top of the master NOTIFICATIONS_ENABLED one, since
+    # some customers find an email for every single line-item tweak
+    # intrusive. The in-app QuotationNotification row above is NEVER
+    # gated by this -- it's always created either way, so nothing is lost
+    # for someone who just doesn't want the email; they still see it next
+    # time they open the Notification Center. send_email() itself already
+    # no-ops quietly when NOTIFICATIONS_ENABLED is off or the recipient
+    # has no usable address, so no extra guard is needed for that part.
     # `_display_reference()` (not the raw column) since this can fire for
     # a still-draft quote assigned before Submit -- see `_display_reference()`'s
     # own docstring.
-    notification_service.send_email(recipient.email, f"Quotation {_display_reference(quotation)}", message)
+    if settings.SEND_QUOTATION_RECIPIENT_EMAILS:
+        notification_service.send_email(recipient.email, f"Quotation {_display_reference(quotation)}", message)
 
 
 def _money(value: Decimal) -> float:
@@ -972,6 +980,17 @@ def admin_add_outsourced_item(db: Session, actor: dict, quotation_id: int, paylo
                 f"{_money(Decimal(str(payload.unit_price)))}/day"
                 f"{f', sourced from {payload.sourced_from}' if payload.sourced_from else ''}) to Quotation {quotation.reference_number}.",
     ))
+    # Notify the recipient too, same as every other line-item mutation
+    # above -- but deliberately WITHOUT the word "outsourced"/"sourced
+    # from" that the AuditLog entry above carries. Where this item
+    # actually came from is Admin/Manager-internal bookkeeping (see
+    # models.py's QuotationOutsourcedItem docstring); from the customer's
+    # side it should read exactly like any other line was added, just the
+    # asset name and quantity.
+    _notify_quotation_recipient(
+        db, quotation, actor, kind="updated",
+        message=f"{actor['email']} added {payload.name} (qty {payload.quantity}) to Quotation {quotation.reference_number}.",
+    )
     db.commit()
     db.refresh(quotation)
     return _serialize_quotation(db, quotation, include_admin_fields=True, reveal_sourcing=True)
@@ -1507,6 +1526,16 @@ def bulk_checkout_quotation(
             details=f"Bulk-checked-out Quotation {quotation.reference_number} to {target_label}: "
                     f"{'; '.join(line_summaries)}.",
         ))
+        # Fulfillment is the final, most consequential step in the whole
+        # lifecycle -- "your equipment is ready" -- so notify the
+        # recipient here too, same rules/gating as every other quotation
+        # notification (see _notify_quotation_recipient()'s own
+        # docstring): only a real linked user, and never the actor
+        # notifying themselves.
+        _notify_quotation_recipient(
+            db, quotation, actor, kind="updated",
+            message=f"Quotation {quotation.reference_number} has been fulfilled and checked out to you.",
+        )
         db.commit()
         db.refresh(quotation)
         result = _serialize_quotation(db, quotation, include_admin_fields=True, reveal_sourcing=True)

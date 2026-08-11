@@ -107,6 +107,16 @@ AWS SES's SMTP endpoint, etc. — there's no vendor-specific SDK involved.
    you have any checkout that's overdue or due soon already, it'll show
    up in the very next scheduled run without needing any of this at all.
 
+   The same `celery call` trick also works for the two SLA-nudge jobs
+   (`tasks.escalate_pending_extension_requests`/
+   `tasks.escalate_pending_quotations` — see
+   [Environment Variables Reference](README.md#environment-variables-reference)'s
+   `EXTENSION_REQUEST_SLA_HOURS`/`QUOTATION_SLA_HOURS`/etc.), and since
+   those run on a plain interval (`APPROVAL_SLA_CHECK_INTERVAL_MINUTES`)
+   rather than a fixed clock time, temporarily lowering that interval
+   *does* reliably shorten the wait for the next real scheduled run, if
+   you'd rather test that path than force one manually.
+
 ---
 
 ## 2. Google Drive backup uploads
@@ -358,6 +368,21 @@ one **is** sensitive and stays a per-environment Secret (see
 | `DUE_SOON_REMINDER_DAYS` | `2` | How many days ahead of its due date a checkout counts as "due soon" (dashboard banner, My Items badge, and the reminder email) |
 | `DUE_SOON_DIGEST_HOURS_UTC` | `8` | Comma-separated hours of day (UTC, each 0-23) the worker checks for checkouts about to go overdue |
 | `SEND_INDIVIDUAL_HOLDER_REMINDERS` | `true` | Whether the "your item is overdue/due soon" reminder also goes to the checkout's own holder, in addition to the admin/manager digest |
+
+### Pending-approval SLA nudges
+
+| Variable | Default | What it changes |
+|---|---|---|
+| `EXTENSION_REQUEST_SLA_HOURS` | `24` | How many hours a `pending` Extension Request can go without a Manager/Admin/Super Admin decision before the SLA-nudge digest escalates it |
+| `QUOTATION_SLA_HOURS` | `24` | Same idea for a `submitted` Quotation waiting on an Admin/Manager's approve/adjust decision — its own independent threshold |
+| `APPROVAL_SLA_CHECK_INTERVAL_MINUTES` | `60` | How often (in minutes) the worker checks both queues above for anything past its SLA threshold |
+| `APPROVAL_SLA_ESCALATION_REPEAT_HOURS` | `24` | Once a pending request/quote has been escalated, how many hours before it's eligible to be escalated again if still undecided |
+
+### Quotation notifications
+
+| Variable | Default | What it changes |
+|---|---|---|
+| `SEND_QUOTATION_RECIPIENT_EMAILS` | `true` | Whether a Quotation's own recipient gets emailed on every change (line items, notes, discount, assignment, approval, fulfillment). The in-app bell notification is always created regardless of this setting — it only gates the extra email |
 
 ### Locale & catalog
 

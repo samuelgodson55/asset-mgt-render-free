@@ -330,6 +330,11 @@ jobs:
               dueSoonReminderDays=${{ vars.DUE_SOON_REMINDER_DAYS || 2 }} \
               dueSoonDigestHoursUtc="${{ vars.DUE_SOON_DIGEST_HOURS_UTC || '8' }}" \
               sendIndividualHolderReminders=${{ vars.SEND_INDIVIDUAL_HOLDER_REMINDERS != 'false' }} \
+              extensionRequestSlaHours=${{ vars.EXTENSION_REQUEST_SLA_HOURS || 24 }} \
+              quotationSlaHours=${{ vars.QUOTATION_SLA_HOURS || 24 }} \
+              approvalSlaCheckIntervalMinutes=${{ vars.APPROVAL_SLA_CHECK_INTERVAL_MINUTES || 60 }} \
+              approvalSlaEscalationRepeatHours=${{ vars.APPROVAL_SLA_ESCALATION_REPEAT_HOURS || 24 }} \
+              sendQuotationRecipientEmails=${{ vars.SEND_QUOTATION_RECIPIENT_EMAILS != 'false' }} \
               displayTimezone="${{ vars.DISPLAY_TIMEZONE || 'Africa/Lagos' }}" \
               currencyCode="${{ vars.CURRENCY_CODE || 'NGN' }}" \
               catalogShowStockToStaffCustomer=${{ vars.CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER == 'true' }} \

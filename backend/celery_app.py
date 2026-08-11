@@ -47,7 +47,7 @@ celery_app = Celery(
     "snipeit_lite",
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
-    include=["tasks.export_tasks", "tasks.notification_tasks", "tasks.audit_partition_tasks"],
+    include=["tasks.export_tasks", "tasks.notification_tasks", "tasks.audit_partition_tasks", "tasks.sla_tasks"],
 )
 
 celery_app.conf.update(
@@ -212,11 +212,13 @@ def _init_beat_tracing(**_kwargs) -> None:
 # ---------------------------------------------------------------------------
 # CELERY BEAT SCHEDULE -- Email + Dashboard Notifications requirement
 # ---------------------------------------------------------------------------
-# Fires three independent, recurring jobs -- two in
-# backend/tasks/notification_tasks.py, plus
-# backend/tasks/audit_partition_tasks.py's partition-maintenance check
-# (see its own docstring, and services/audit_partition_service.py's, for
-# why that one exists and why it's safe to run this often):
+# Fires five independent, recurring jobs -- two in
+# backend/tasks/notification_tasks.py, backend/tasks/audit_partition_tasks.py's
+# partition-maintenance check (see its own docstring, and
+# services/audit_partition_service.py's, for why that one exists and why
+# it's safe to run this often), and two in backend/tasks/sla_tasks.py
+# (see that module's own docstring for the pending-approval SLA-nudge
+# rationale):
 #   - `tasks.send_overdue_notifications`, daily at
 #     `settings.OVERDUE_DIGEST_HOURS_UTC` (08:00 UTC by default) --
 #     checkouts that have ALREADY gone overdue.
@@ -283,5 +285,22 @@ celery_app.conf.beat_schedule = {
     "ensure-audit-log-partitions": {
         "task": "tasks.ensure_audit_log_partitions",
         "schedule": datetime.timedelta(hours=settings.AUDIT_PARTITION_CHECK_INTERVAL_HOURS),
+    },
+    # SLA nudges on pending approvals -- see tasks/sla_tasks.py's module
+    # docstring for the full rationale. Like `ensure-audit-log-partitions`
+    # above (and unlike the two daily digests), these are plain
+    # timedelta-since-last-tick schedules, not a fixed clock time: "how
+    # promptly does an escalation land after crossing the SLA threshold"
+    # is what matters here, not a specific time of day. Both queues share
+    # `APPROVAL_SLA_CHECK_INTERVAL_MINUTES` for how OFTEN the check runs;
+    # each has its own independent `*_SLA_HOURS` threshold for what counts
+    # as overdue for a decision (see config.py).
+    "escalate-pending-extension-requests": {
+        "task": "tasks.escalate_pending_extension_requests",
+        "schedule": datetime.timedelta(minutes=settings.APPROVAL_SLA_CHECK_INTERVAL_MINUTES),
+    },
+    "escalate-pending-quotations": {
+        "task": "tasks.escalate_pending_quotations",
+        "schedule": datetime.timedelta(minutes=settings.APPROVAL_SLA_CHECK_INTERVAL_MINUTES),
     },
 }

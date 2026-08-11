@@ -259,6 +259,28 @@ enabled and configured:
    `BACKUP_HOURS_UTC` (e.g. `8,20` for twice a day) — a fixed clock
    time, not "N hours after the worker booted," so you know exactly
    when a digest lands in your inbox.
+4. **Pending-approval SLA nudges** — closes a quiet gap the three kinds
+   above don't cover: an Extension Request or Quotation that nobody ever
+   opens the panel/tab to decide on can otherwise sit **`pending`/
+   `submitted` forever** with no reminder at all. Two more scheduled
+   Celery Beat jobs (`escalate_pending_extension_requests`/
+   `escalate_pending_quotations`, `backend/tasks/sla_tasks.py`), running
+   every `APPROVAL_SLA_CHECK_INTERVAL_MINUTES` (60 minutes by default —
+   a plain "every N minutes" interval like the audit-partition check, not
+   a fixed clock time like #2/#3 above), find anything still `pending`
+   past `EXTENSION_REQUEST_SLA_HOURS`, or still `submitted` past
+   `QUOTATION_SLA_HOURS` (24 hours each by default), and email ONE
+   combined digest for each queue to the exact same Digest-Recipients +
+   `ADMIN_NOTIFICATION_EMAILS` audience #1–#3 already use. Once a
+   row has been nudged, it won't be nudged again until
+   `APPROVAL_SLA_ESCALATION_REPEAT_HOURS` (24 hours by default) has
+   passed since that nudge — repeatedly enough that a long-neglected item
+   keeps resurfacing, not so often that the alert becomes noise people
+   learn to ignore. As soon as a request/quote is actually decided
+   (approved/denied/fulfilled), it stops matching this check for good,
+   regardless of how many times it was nudged before. If the combined
+   recipient list is empty, nothing is sent — same as every other digest
+   above.
 
 Every one of these emails is **enqueued on the background `worker`
 container** (`tasks.send_email_task`, `backend/celery_app.py`) rather than
@@ -410,6 +432,31 @@ workflow behind it. See `backend/services/quotation_service.py` and
   shown in the navbar/login header, `<title>`, AND the letterhead printed
   on every Quotation PDF. See [Environment Variables
   Reference](#environment-variables-reference).
+
+**Notifications** — every Admin/Manager change to a Quotation notifies
+its current recipient (whoever it's assigned to, else the original
+requester) — never the person making the change, if that happens to be
+the same account. Two things fire together, per notify-worthy change:
+1. An **in-app bell notification** (`backend/models.py`'s
+   `QuotationNotification`, `GET`/`PUT /quotations/notifications/*`) —
+   always created, regardless of any email setting below, so nothing is
+   ever silently lost.
+2. A best-effort **email**, gated by `SEND_QUOTATION_RECIPIENT_EMAILS`
+   (default `true`) on top of the master `NOTIFICATIONS_ENABLED` switch —
+   set it `false` if customers find an email for every line-item tweak
+   intrusive; they'll still see the same update in-app next time they log
+   in.
+
+Notify-worthy changes: a line item added/changed/removed, a
+**not-in-inventory line added** (the email/in-app message names just the
+asset and quantity — the "not-in-inventory"/"sourced from" detail stays
+Admin/Manager-internal, in the audit log only), notes or the discount
+edited, the quote **assigned** to someone, **approved**, and — the final,
+most consequential step — **fulfilled** ("your equipment is ready").
+Removing a not-in-inventory line is the one exception that still doesn't
+notify (unlike removing a regular catalog line, which does) — a
+pre-existing gap, not something this feature changed. See
+`services/quotation_service.py`'s `_notify_quotation_recipient()`.
 
 ### Exporting Data (all roles, scoped by permission)
 
@@ -1429,6 +1476,10 @@ see `.gitignore`) and are read by `backend/config.py` into a single typed
 | `DUE_SOON_REMINDER_DAYS` | `2` | "A reminder before something goes overdue" — how many days ahead of its `due_date` an active checkout counts as "due soon". Drives the "Due Soon" section of the Notification Center, the "Due Soon" badge on My Items, AND the due-soon reminder email below, all from this one setting. |
 | `DUE_SOON_DIGEST_HOURS_UTC` | `8` | Comma-separated hours of day (UTC, each 0-23) the Celery Beat job checks for checkouts about to go overdue and sends the due-soon reminder digest. Same comma-separated-hours syntax as `OVERDUE_DIGEST_HOURS_UTC` above — its own independent schedule. |
 | `SEND_INDIVIDUAL_HOLDER_REMINDERS` | `true` | Whether the daily overdue/due-soon digests also email each affected checkout's own holder individually, on top of the combined Digest-Recipients summary. Set `false` to send only the one ops-facing summary email per run. |
+| `EXTENSION_REQUEST_SLA_HOURS` | `24` | How many hours a `pending` Extension Request can go without a Manager/Admin/Super Admin decision before the SLA-nudge job escalates it — see [Due-Date Extensions & Notifications](#due-date-extensions--notifications). |
+| `QUOTATION_SLA_HOURS` | `24` | Same idea for a `submitted` Quotation waiting on an Admin/Manager's approve/adjust decision — its own independent threshold, since the two queues can reasonably need different response-time expectations. |
+| `APPROVAL_SLA_CHECK_INTERVAL_MINUTES` | `60` | How often (in minutes) the Celery Beat job checks both the Extension Requests and Quotations queues for anything past its SLA threshold above. A plain "every N minutes" interval, not a fixed clock time like `OVERDUE_DIGEST_HOURS_UTC` above. |
+| `APPROVAL_SLA_ESCALATION_REPEAT_HOURS` | `24` | Once a pending request/quote has been escalated once, how many hours before it's eligible to be escalated again if it's still undecided — keeps a long-neglected item nudging repeatedly instead of firing once and going quiet. |
 | `ACCOUNT_LOCKOUT_MAX_ATTEMPTS` | `5` | Wrong-password attempts against **the same account** before it's locked, regardless of which IP they came from. |
 | `ACCOUNT_LOCKOUT_DURATION_MINUTES` | `15` | How long that per-account lock lasts once triggered. |
 | `PASSWORD_RESET_TOKEN_EXPIRY_MINUTES` | `30` | How long a self-service "Forgot password?" email link stays valid before it must be requested again — see [Account Security](#account-security-built-in-mostly-invisible-until-you-need-it). |
@@ -1446,6 +1497,7 @@ see `.gitignore`) and are read by `backend/config.py` into a single typed
 | `CURRENCY_CODE` | `NGN` | ISO 4217 currency code applied to every price shown/exported anywhere in the app — the Asset Inventory's per-unit price, the Quotation Catalog's day-rate, and every line/subtotal/VAT/total on a Quotation PDF export. See [Equipment Quotations](#equipment-quotations-quote-to-checkout). |
 | `SITE_NAME` | `Snipe-IT Lite` | Brand name shown across the deployment — the on-screen navbar/login brand + browser tab `<title>` (read live from `GET /config/public` on every page load) AND the letterhead printed on the Quotation PDF. One setting rebrands both. |
 | `CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER` | `false` | Whether a Staff/Customer account browsing the self-service Quotation Catalog can see each pool's available-quantity/in-stock status. `false` (recommended for production) shows them only name, category, and price. A Manager/Admin/Super Admin's own Asset Inventory view is unaffected either way. |
+| `SEND_QUOTATION_RECIPIENT_EMAILS` | `true` | Whether a Quotation's own recipient (whoever it's assigned to, else the original requester) gets emailed every time an Admin/Manager changes it (line items, notes, discount, assignment, approval, fulfillment). The in-app bell notification is **always** created regardless of this setting — this only gates the extra email. Only takes effect when `NOTIFICATIONS_ENABLED=true`. |
 | `AUDIT_PARTITION_YEARS_AHEAD` | `2` | Postgres-only. How many years of FUTURE `audit_logs` partitions the daily `ensure_audit_log_partitions` Celery Beat job keeps pre-created, so a write never falls through to the DEFAULT catch-all partition just because the calendar rolled over. No-op against non-Postgres databases. See `SRE_STRATEGY.md`. |
 | `AUDIT_PARTITION_CHECK_INTERVAL_HOURS` | `24` | How often that same Celery Beat job runs. |
 
@@ -2554,8 +2606,14 @@ them, completely out-of-band from any HTTP request.
   at `OVERDUE_DIGEST_HOURS_UTC` AND `tasks.send_due_soon_reminders`
   to run daily at `DUE_SOON_DIGEST_HOURS_UTC` (both `crontab` schedules,
   not plain intervals — a fixed UTC clock time, same idea as the Backups
-  section's `BACKUP_HOURS_UTC`), as two independent schedule entries.
-  `-B` embeds Celery Beat directly inside the `worker` container's own
+  section's `BACKUP_HOURS_UTC`), plus `tasks.escalate_pending_extension_requests`
+  and `tasks.escalate_pending_quotations` (see [Due-Date Extensions &
+  Notifications](#due-date-extensions--notifications)'s SLA-nudges item),
+  which run on a plain `timedelta(minutes=APPROVAL_SLA_CHECK_INTERVAL_MINUTES)`
+  interval instead — "how promptly after crossing the SLA line" is what
+  matters there, not a specific time of day, same reasoning as the
+  audit-partition check's own interval schedule. `-B` embeds Celery Beat
+  directly inside the `worker` container's own
   process (see `docker-compose.yml`'s `worker` service) rather than
   running it as a separate container. Safe to scale to multiple replicas
   of an embedded worker+beat process (Render's/Azure's cost-optimized
@@ -2588,6 +2646,19 @@ them, completely out-of-band from any HTTP request.
   for checkouts due within `DUE_SOON_REMINDER_DAYS` instead of ones
   already overdue (`_due_soon_query()`/`_format_line()` are shared
   helpers used by both jobs).
+- **`tasks/sla_tasks.py`** — the two SLA-nudge scheduled jobs from the
+  `celery_app.py` bullet above:
+  `escalate_pending_extension_requests()`/`escalate_pending_quotations()`
+  find every `ExtensionRequest`/`Quotation` row still stuck `pending`/
+  `submitted` past its own `EXTENSION_REQUEST_SLA_HOURS`/
+  `QUOTATION_SLA_HOURS`, and email ONE combined digest per queue to the
+  same Digest Recipients + `ADMIN_NOTIFICATION_EMAILS` audience as
+  `notification_tasks.py`'s digests above. `_due_for_escalation()` is a
+  small shared helper both jobs call: past-SLA AND (never nudged before
+  OR past `APPROVAL_SLA_ESCALATION_REPEAT_HOURS` since the last nudge) —
+  each row's own `sla_last_reminded_at` column (see `models.py`) is what
+  makes the cooldown per-row instead of re-spamming every single
+  `APPROVAL_SLA_CHECK_INTERVAL_MINUTES` tick forever.
 
 ### Backend — Schemas (`backend/schemas/`)
 

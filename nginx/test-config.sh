@@ -233,6 +233,22 @@ EOF
     expect_status "/checkouts" 200
     expect_status "/assets/42" 200
 
+    # BUG FIX REGRESSION -- the app's OWN "/assets" route (App.tsx's
+    # Inventory page) has the exact same name as Vite's own build-output
+    # directory (this stub's "$WORKDIR/html/assets/", same as a real
+    # "dist/assets/"). Before this template's `location /` block dropped
+    # the middle `$uri/` clause from its try_files chain (it used to be
+    # `try_files $uri $uri/ /index.html;`), a request for the bare route
+    # "/assets" matched that REAL directory before ever reaching the
+    # `/index.html` SPA-fallback argument, and nginx returned a 403 --
+    # even though every other client-side route (checked above) refreshed
+    # fine. This is the request a person's browser sends on a plain
+    # page reload of the Inventory page, or of the header search's own
+    # "/assets?search=..." deep link (see frontend-app's
+    # lib/globalSearch.ts) -- exactly the "server error in production
+    # on refresh" bug this regression check exists to catch.
+    expect_status "/assets" 200
+
     # A request for a real missing FILE under /assets/ still 404s -- the
     # SPA fallback only ever catches app ROUTES via the bare `location /`
     # try_files chain; the hashed-asset regex location above it is a

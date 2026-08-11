@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { X, Send, QrCode } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
-import { api, extensionsApi, getDueSoonReminderDays, relativeTime, formatDate } from "../lib/api";
+import { checkoutsApi, extensionsApi, getDueSoonReminderDays, relativeTime, formatDate } from "../lib/api";
 import type { Checkout, ExtensionRequest } from "../lib/types";
 import { StatusPill } from "../components/StatusPill";
 import { PaginationBar, RowsPerPageSelect } from "../components/PaginationBar";
@@ -12,6 +12,17 @@ import { ReceiptModal } from "../components/ReceiptModal";
 import type { ReceiptTarget } from "../lib/receipt";
 
 const tabs = ["All", "Overdue", "Due Soon", "Active"] as const;
+
+// Maps each Checkouts page tab to the `filter` query param GET /checkouts
+// narrows its SQL query with server-side (see backend/services/
+// checkout_service.py's list_active_checkouts() `status_filter` param) --
+// a module-level constant (not component state) since it never changes.
+const FILTER_FOR_TAB: Record<(typeof tabs)[number], "overdue" | "due_soon" | "active" | undefined> = {
+  All: undefined,
+  Overdue: "overdue",
+  "Due Soon": "due_soon",
+  Active: "active",
+};
 
 function DenyReasonModal({ request, onClose, onDenied }: { request: ExtensionRequest | null; onClose: () => void; onDenied: () => void }) {
   const [note, setNote] = useState("");
@@ -84,57 +95,70 @@ export function Checkouts() {
   // holding something, so clicking it should jump straight to that
   // person's Custody Ledger rather than going nowhere.
   const { openCustody } = useCustody();
-  // Client-side pagination over the already-loaded (and tab-filtered) list
-  // below -- GET /checkouts is fetched once, up to `limit=500`, the same
-  // way it always has been (see loadCheckouts() in lib/api.ts), so this
-  // just adds "Rows per page"/Prev-Next controls on top of that in-memory
-  // list rather than round-tripping to the server per page turn. Mirrors
-  // the shape (not the data source) of every other paginated table in the
-  // app -- see components/PaginationBar.tsx.
+  // TRUE server-side pagination -- each tab/page-size/offset combination
+  // round-trips to GET /checkouts with `limit`/`offset` and (for
+  // Overdue/Due Soon/Active) a `filter` narrowing the query itself (see
+  // lib/api.ts's checkoutsApi.list() and backend/services/
+  // checkout_service.py's list_active_checkouts() `status_filter` param),
+  // instead of fetching every active checkout in one shot and slicing an
+  // in-memory array. This matters specifically BECAUSE the tabs are
+  // real-time-sensitive: "Overdue"/"Due Soon" are computed against the
+  // current moment on every request (due_date vs `now`), never cached, so
+  // the filter is re-evaluated fresh on every page turn/tab switch/refresh
+  // -- a checkout can't be stuck showing a stale bucket the way a
+  // client-side snapshot fetched once at mount could.
+  const [checkoutsTotal, setCheckoutsTotal] = useState(0);
   const [perPage, setPerPage] = useState(DEFAULT_PAGE_SIZE);
   const [offset, setOffset] = useState(0);
-  // Client-side pagination over the "Extension requests" side panel too --
-  // previously rendered every pending request with no limit at all, so a
-  // backlog of them just made the whole page scroll endlessly. Mirrors the
-  // checkouts list's own client-side paging above (GET
-  // /checkouts/extension-requests has no limit/offset params to page
-  // server-side against).
+  // Same server-side pagination for the "Extension requests" side panel --
+  // GET /checkouts/extension-requests already accepts limit/offset (see
+  // checkoutsApi.list's sibling, extensionsApi.list), so this pages
+  // against the server too rather than fetching up to 100 pending
+  // requests and slicing that in-memory list.
+  const [extensionsTotal, setExtensionsTotal] = useState(0);
   const [extPerPage, setExtPerPage] = useState(DEFAULT_PAGE_SIZE);
   const [extOffset, setExtOffset] = useState(0);
-  // Read after getCheckouts() resolves below (not at mount) -- lib/api.ts's
-  // loadCheckouts() only learns the real, .env-configured
+  // Read after checkoutsApi.list() resolves below (not at mount) --
+  // lib/api.ts only learns the real, .env-configured
   // settings.DUE_SOON_REMINDER_DAYS value from GET /checkouts' own
   // response, so this has to be re-read once that request lands rather
   // than assumed up front.
   const [dueSoonDays, setDueSoonDays] = useState(getDueSoonReminderDays());
 
-  const refreshExtensions = () => api.getExtensionRequests().then(setExtensions).catch((err) => console.error("Failed to load extension requests:", err));
-
-  useEffect(() => {
-    api.getCheckouts(true)
-      .then((data) => {
-        setCheckouts(data);
+  const refreshCheckouts = () => {
+    checkoutsApi.list(perPage, offset, FILTER_FOR_TAB[tab])
+      .then(({ items, total }) => {
+        setCheckouts(items);
+        setCheckoutsTotal(total);
         setDueSoonDays(getDueSoonReminderDays());
       })
       .catch((err) => console.error("Failed to load checkouts:", err));
-    refreshExtensions();
-  }, []);
+  };
+  const refreshExtensions = () => {
+    extensionsApi.list(extPerPage, extOffset)
+      .then(({ items, total }) => {
+        setExtensions(items);
+        setExtensionsTotal(total);
+      })
+      .catch((err) => console.error("Failed to load extension requests:", err));
+  };
+
+  // Re-fetch whenever the tab, page size, or offset changes -- each of
+  // those changes what the server should return, so there's no
+  // client-side list left to just slice.
+  useEffect(refreshCheckouts, [tab, perPage, offset]);
+  useEffect(refreshExtensions, [extPerPage, extOffset]);
 
   const approve = async (id: number) => {
     await extensionsApi.decide(id, true, null);
     refreshExtensions();
   };
 
-  const filtered = checkouts.filter((c) => {
-    if (tab === "All") return true;
-    if (tab === "Overdue") return c.status === "overdue";
-    if (tab === "Due Soon") return c.due_soon;
-    return c.status === "active";
-  });
-
-  // Switching tabs changes the underlying result set, so always jump back
-  // to the first page -- same behavior as every other paginated table's
-  // "rows per page" / search change (see Assets.tsx's handlePerPageChange).
+  // Switching tabs changes the underlying (server-side) result set, so
+  // always jump back to the first page -- same behavior as every other
+  // paginated table's "rows per page" / search change (see Assets.tsx's
+  // handlePerPageChange). Resetting `offset` here also triggers the
+  // refetch above via its own effect.
   const changeTab = (t: (typeof tabs)[number]) => {
     setTab(t);
     setOffset(0);
@@ -156,13 +180,14 @@ export function Checkouts() {
 
   // An approve/deny (or a background refresh) can shrink the list out from
   // under whatever page was open -- snap back to the first page rather
-  // than stranding the panel on a now-empty page.
+  // than stranding the panel on a now-empty page. Resetting `extOffset`
+  // here re-triggers the refetch above via its own effect.
   useEffect(() => {
-    if (extOffset >= extensions.length) setExtOffset(0);
-  }, [extensions.length, extOffset]);
+    if (extOffset > 0 && extOffset >= extensionsTotal) setExtOffset(0);
+  }, [extensionsTotal, extOffset]);
 
-  const paged = filtered.slice(offset, offset + perPage);
-  const pagedExtensions = extensions.slice(extOffset, extOffset + extPerPage);
+  const paged = checkouts;
+  const pagedExtensions = extensions;
 
   return (
     <div>
@@ -250,19 +275,19 @@ export function Checkouts() {
                 </motion.div>
                 );
               })}
-              {filtered.length === 0 && <p className="text-center text-text-faint text-[12px] py-10">No checkouts in this view.</p>}
+              {checkoutsTotal === 0 && <p className="text-center text-text-faint text-[12px] py-10">No checkouts in this view.</p>}
             </div>
           </div>
 
           <div className="mt-4">
-            <PaginationBar total={filtered.length} perPage={perPage} offset={offset} onOffsetChange={setOffset} />
+            <PaginationBar total={checkoutsTotal} perPage={perPage} offset={offset} onOffsetChange={setOffset} />
           </div>
         </div>
 
         <div>
           <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
             <h2 className="font-display text-[15px] font-medium text-text">Extension requests</h2>
-            {extensions.length > extPerPage && <RowsPerPageSelect value={extPerPage} onChange={handleExtPerPageChange} />}
+            {extensionsTotal > extPerPage && <RowsPerPageSelect value={extPerPage} onChange={handleExtPerPageChange} />}
           </div>
           <div className="flex flex-col gap-3">
             {pagedExtensions.map((e, i) => (
@@ -289,11 +314,11 @@ export function Checkouts() {
                 </div>
               </motion.div>
             ))}
-            {extensions.length === 0 && <p className="text-text-faint text-[12px]">No pending requests.</p>}
+            {extensionsTotal === 0 && <p className="text-text-faint text-[12px]">No pending requests.</p>}
           </div>
-          {extensions.length > extPerPage && (
+          {extensionsTotal > extPerPage && (
             <div className="mt-3">
-              <PaginationBar total={extensions.length} perPage={extPerPage} offset={extOffset} onOffsetChange={setExtOffset} />
+              <PaginationBar total={extensionsTotal} perPage={extPerPage} offset={extOffset} onOffsetChange={setExtOffset} />
             </div>
           )}
         </div>

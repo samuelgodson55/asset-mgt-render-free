@@ -277,6 +277,24 @@ services:
         value: 7
       - key: SEND_INDIVIDUAL_HOLDER_REMINDERS
         value: false
+      # Pending-approval SLA nudges (ExtensionRequest & Quotation) -- see
+      # backend/config.py's own comment block and backend/tasks/sla_tasks.py's
+      # module docstring for the full rationale. Sent from the SAME
+      # embedded-worker process as every other notification above.
+      - key: EXTENSION_REQUEST_SLA_HOURS
+        value: 24
+      - key: QUOTATION_SLA_HOURS
+        value: 24
+      - key: APPROVAL_SLA_CHECK_INTERVAL_MINUTES
+        value: 60
+      - key: APPROVAL_SLA_ESCALATION_REPEAT_HOURS
+        value: 24
+      # Whether a Quotation's own recipient gets emailed on every change
+      # (line items, notes, discount, assignment, approval, fulfillment)
+      # on top of the in-app bell notification, which is always created
+      # regardless -- see backend/config.py's own comment.
+      - key: SEND_QUOTATION_RECIPIENT_EMAILS
+        value: true
       # Database backups -- see backend/config.py's BACKUP_* docstring and
       # README.md's "Backups" section. Runs daily inside this same web
       # service process (a plain daemon thread, not Celery), so it works

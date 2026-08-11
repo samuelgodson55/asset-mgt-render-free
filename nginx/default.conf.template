@@ -148,6 +148,11 @@ server {
     gzip_vary on;
     gzip_min_length 256;
     gzip_types text/plain text/css application/javascript application/json image/svg+xml;
+    # PERFORMANCE: same fix as nginx/default.react.conf.template's own
+    # comment on this line -- gzip_comp_level was never set, silently
+    # defaulting to nginx's weakest level (1). 6 is nginx's documented
+    # good ratio/CPU tradeoff.
+    gzip_comp_level 6;
 
     # =========================================================================
     # THE REVERSE PROXY: forward every /api/* call to the FastAPI backend
