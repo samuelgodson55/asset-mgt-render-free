@@ -28,6 +28,34 @@ html {
 }
 
 /* -----------------------------------------------------------------------
+   Checkout receipt printing -- see components/ReceiptModal.tsx.
+   "Print" on the receipt should produce just the ticket (usable as a real
+   receipt, or Save-as-PDF from the browser's print dialog), not the rest
+   of the app underneath it. `.receipt-no-print` opts out chrome that's
+   only useful on screen (backdrop, close button, Print/Copy buttons, the
+   punch-hole decoration) without hiding it outside of print.
+   ----------------------------------------------------------------------- */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  #receipt-print-area,
+  #receipt-print-area * {
+    visibility: visible;
+  }
+  #receipt-print-area {
+    position: absolute;
+    inset: 0;
+    margin: 24px auto;
+    width: 340px;
+    box-shadow: none;
+  }
+  .receipt-no-print {
+    display: none !important;
+  }
+}
+
+/* -----------------------------------------------------------------------
    LIGHT THEME -- "Studio"
    -----------------------------------------------------------------------
    `.light` on <html> (toggled + persisted by src/lib/theme.tsx, applied

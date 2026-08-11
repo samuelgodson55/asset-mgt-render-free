@@ -77,7 +77,7 @@ on:
         required: false
         type: string
       frontend_type:
-        description: 'Which frontend to ship: "react" (the React "Ledger" SPA) or "legacy" (the legacy static site). "(environment default)" uses this target''s own FRONTEND_BUILD_TARGET Actions variable (Settings > Environments > staging|production > Environment variables). Ignored entirely when `image_tag` above is set -- a reused image was already built with whatever flavor it was built with.'
+        description: 'Which frontend to ship: "react" (the React "Ledger" SPA) or "legacy" (the legacy static site) -- see frontend/Dockerfile''s top-of-file comment; the two are mutually exclusive, both land at "/". "(environment default)" uses this target''s own FRONTEND_BUILD_TARGET Actions variable (Settings > Environments > vm-staging|prod > Environment variables) -- the normal case, and the only option that needs no code/settings change to keep working. Pick one of the other two to override that variable for THIS run only (e.g. a one-off react build without touching the Environment''s standing config). Combined with `image_tag` below: leave `image_tag` blank to build this flavor FRESH from this branch, or supply an existing version/tag to pull that flavor''s already-built image (e.g. one release.yml already published) instead of rebuilding -- see `image_tag`''s own description.'
         required: false
         type: choice
         options: ['(environment default)', react, legacy]

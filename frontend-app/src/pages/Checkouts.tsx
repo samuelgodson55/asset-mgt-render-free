@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { X, Send } from "lucide-react";
+import { X, Send, QrCode } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 import { api, extensionsApi, getDueSoonReminderDays, relativeTime, formatDate } from "../lib/api";
 import type { Checkout, ExtensionRequest } from "../lib/types";
@@ -8,6 +8,8 @@ import { StatusPill } from "../components/StatusPill";
 import { PaginationBar, RowsPerPageSelect } from "../components/PaginationBar";
 import { DEFAULT_PAGE_SIZE } from "../lib/pagination";
 import { useCustody } from "../lib/useCustody";
+import { ReceiptModal } from "../components/ReceiptModal";
+import type { ReceiptTarget } from "../lib/receipt";
 
 const tabs = ["All", "Overdue", "Due Soon", "Active"] as const;
 
@@ -73,6 +75,10 @@ export function Checkouts() {
   const initialTab = tabs.find((t) => t === searchParams.get("tab")) ?? "All";
   const [tab, setTab] = useState<(typeof tabs)[number]>(initialTab);
   const [denying, setDenying] = useState<ExtensionRequest | null>(null);
+  // Regenerate-a-lost-receipt / hand-someone-a-ticket-on-the-spot from the
+  // system-wide list -- a single-checkout ReceiptTarget built straight
+  // from the row that was clicked, same as MyItems.tsx's per-row receipt.
+  const [receipt, setReceipt] = useState<ReceiptTarget | null>(null);
   // Same click-through the Notification Bell's grouped rows and legacy
   // custody.js's openCustodyModal() use: a checkout row IS a person
   // holding something, so clicking it should jump straight to that
@@ -224,8 +230,22 @@ export function Checkouts() {
                       <p className="text-[12px] text-text-faint">No due date</p>
                     )}
                   </div>
-                  <div className="w-16 flex justify-end">
+                  <div className="flex items-center justify-end gap-2">
                     <StatusPill status={c.due_soon ? "due_soon" : c.status === "overdue" ? "overdue" : "active"} />
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setReceipt({
+                          holderName: c.checked_out_to,
+                          note: "Regenerated from Checkouts",
+                          items: [{ checkout_id: c.id, asset_name: c.asset_name, tag: c.tag, quantity: c.quantity, due_date: c.due_at, checked_out_at: c.checked_out_at }],
+                        });
+                      }}
+                      title="View/print receipt"
+                      className="text-text-faint hover:text-brass-soft transition-colors"
+                    >
+                      <QrCode size={13} />
+                    </button>
                   </div>
                 </motion.div>
                 );
@@ -287,6 +307,8 @@ export function Checkouts() {
           refreshExtensions();
         }}
       />
+
+      <ReceiptModal target={receipt} onClose={() => setReceipt(null)} />
     </div>
   );
 }

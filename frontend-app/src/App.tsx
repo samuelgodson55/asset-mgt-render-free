@@ -32,6 +32,7 @@ import { isFullAdmin, isPrivileged } from "./lib/roles";
 const Dashboard = lazy(() => import("./pages/Dashboard").then((m) => ({ default: m.Dashboard })));
 const Assets = lazy(() => import("./pages/Assets").then((m) => ({ default: m.Assets })));
 const Checkouts = lazy(() => import("./pages/Checkouts").then((m) => ({ default: m.Checkouts })));
+const Reports = lazy(() => import("./pages/Reports").then((m) => ({ default: m.Reports })));
 const Notifications = lazy(() => import("./pages/Notifications").then((m) => ({ default: m.Notifications })));
 const Admin = lazy(() => import("./pages/Admin").then((m) => ({ default: m.Admin })));
 const Manager = lazy(() => import("./pages/Admin").then((m) => ({ default: m.Manager })));
@@ -104,6 +105,20 @@ export default function App() {
               <Route path="/my-items" element={<MyItems />} />
               <Route path="/quotations" element={<Quotations />} />
               <Route path="/profile" element={<Profile />} />
+              <Route
+                path="/reports"
+                element={
+                  // Manager/Admin business-metrics dashboard -- built on
+                  // require_privileged_role endpoints (see lib/api.ts's
+                  // reportsApi). Same gate/redirect shape as /checkouts
+                  // above: a Staff/Customer typing/bookmarking the URL
+                  // lands back on their own Overview instead of a page
+                  // that's all 403s underneath.
+                  <RequireRole allow={(role, demo) => demo || isPrivileged(role)} redirectTo="/">
+                    <Reports />
+                  </RequireRole>
+                }
+              />
               <Route
                 path="/admin"
                 element={

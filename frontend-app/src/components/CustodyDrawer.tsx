@@ -1,9 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { X, PackageCheck, Loader2, CalendarClock, Check, Ban, Send } from "lucide-react";
+import { X, PackageCheck, Loader2, CalendarClock, Check, Ban, Send, QrCode, ScanLine } from "lucide-react";
 import { usersApi, outsidersApi, checkoutsApi, extensionsApi, ApiError, formatDate } from "../lib/api";
 import type { CustodyItem } from "../lib/types";
 import { ExportButtons } from "./ExportButtons";
+import { ReceiptModal } from "./ReceiptModal";
+import type { ReceiptTarget } from "../lib/receipt";
 
 function errMsg(err: unknown, fallback: string): string {
   if (err instanceof ApiError) return err.message;
@@ -192,6 +194,38 @@ export function CustodyDrawer({
   const [decidingId, setDecidingId] = useState<number | null>(null);
   const [denyTarget, setDenyTarget] = useState<{ requestId: number; assetName: string } | null>(null);
 
+  // Whole-ledger scannable receipt -- "hand the person a ticket" at the
+  // front desk. Built straight from the already-loaded `items` (this
+  // drawer never paginates), same ReceiptTarget shape MyItems.tsx and
+  // Checkouts.tsx build for their own per-row receipts.
+  const [receiptOpen, setReceiptOpen] = useState(false);
+
+  // Quick find: a returning borrower's OWN receipt barcode encodes
+  // "CO-<checkout_id>" (see lib/receipt.ts's buildReceiptCode()) -- a
+  // handheld scanner (or a phone's camera app typed into this box) can
+  // key straight off that to jump to the matching row instead of hunting
+  // through the list by eye, speeding up in-person check-in.
+  const [scanQuery, setScanQuery] = useState("");
+  const [highlightId, setHighlightId] = useState<number | null>(null);
+  const rowRefs = useRef<Record<number, HTMLDivElement | null>>({});
+
+  const handleScanSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const raw = scanQuery.trim();
+    if (!raw) return;
+    const match = raw.match(/(\d+)/);
+    const id = match ? Number(match[1]) : NaN;
+    const item = items.find((i) => i.checkout_id === id);
+    if (item) {
+      setHighlightId(item.checkout_id);
+      rowRefs.current[item.checkout_id]?.scrollIntoView({ behavior: "smooth", block: "center" });
+      setTimeout(() => setHighlightId((cur) => (cur === item.checkout_id ? null : cur)), 2200);
+    } else {
+      setError(`No item on this ledger matches "${raw}".`);
+    }
+    setScanQuery("");
+  };
+
   const refresh = () => {
     if (!target) return;
     setLoading(true);
@@ -370,16 +404,41 @@ export function CustodyDrawer({
         </div>
         <div className="flex items-center justify-between gap-3 mt-2 mb-4">
           <p className="text-[12.5px] text-text-muted">{items.length} item(s) currently in custody.</p>
-          <ExportButtons
-            compact
-            disabled={items.length === 0}
-            urlFor={(format) => (target.type === "user" ? usersApi.itemsExportUrl(target.id, format) : outsidersApi.itemsExportUrl(target.id, format))}
-            filenameFor={(format) => `${target.name.toLowerCase().replace(/\s+/g, "_")}_properties.${format}`}
-          />
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => setReceiptOpen(true)}
+              disabled={items.length === 0}
+              title="Scannable receipt for this whole ledger"
+              className="flex items-center gap-1 rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-brass/50 hover:text-brass-soft disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              <QrCode size={11} /> Receipt
+            </button>
+            <ExportButtons
+              compact
+              disabled={items.length === 0}
+              urlFor={(format) => (target.type === "user" ? usersApi.itemsExportUrl(target.id, format) : outsidersApi.itemsExportUrl(target.id, format))}
+              filenameFor={(format) => `${target.name.toLowerCase().replace(/\s+/g, "_")}_properties.${format}`}
+            />
+          </div>
         </div>
 
         {error && <div className="bg-rust/10 border border-rust/30 text-rust-soft text-[12px] rounded-[3px] px-3 py-2.5 mb-3">{error}</div>}
         {notice && !error && <div className="bg-moss/10 border border-moss/30 text-moss-soft text-[12px] rounded-[3px] px-3 py-2.5 mb-3">{notice}</div>}
+
+        {items.length > 0 && (
+          <form onSubmit={handleScanSubmit} className="flex items-center gap-1.5 mb-3">
+            <div className="relative flex-1">
+              <ScanLine size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-faint pointer-events-none" />
+              <input
+                value={scanQuery}
+                onChange={(e) => setScanQuery(e.target.value)}
+                placeholder="Scan their receipt barcode to find an item…"
+                className="w-full bg-ink-soft border border-border-soft rounded-[3px] pl-8 pr-2.5 py-2 text-[12px] text-text placeholder:text-text-faint focus:border-brass/50 focus:outline-none transition-colors"
+              />
+            </div>
+          </form>
+        )}
 
         {items.length > 0 && (
           <div className="flex items-center justify-between gap-2 mb-3 px-0.5">
@@ -422,7 +481,13 @@ export function CustodyDrawer({
             const qty = qtyByCheckout[item.checkout_id] ?? item.outstanding;
             const busy = returningId === item.checkout_id || decidingId === item.checkout_id;
             return (
-              <div key={item.checkout_id} className="border border-border-soft rounded-[3px] p-3.5">
+              <div
+                key={item.checkout_id}
+                ref={(el) => { rowRefs.current[item.checkout_id] = el; }}
+                className={`border rounded-[3px] p-3.5 transition-colors duration-300 ${
+                  highlightId === item.checkout_id ? "border-brass bg-brass/10" : "border-border-soft"
+                }`}
+              >
                 <div className="flex items-start gap-2.5">
                   <input
                     type="checkbox"
@@ -528,6 +593,26 @@ export function CustodyDrawer({
         onSubmit={submitBulkExtend}
       />
       <DenyModal target={denyTarget} onClose={() => setDenyTarget(null)} onSubmit={submitDenyExtension} />
+
+      <ReceiptModal
+        target={
+          receiptOpen
+            ? ({
+                holderName: target.name,
+                holderSubtitle: target.type === "outsider" ? "Outsider" : undefined,
+                note: "Custody ledger snapshot",
+                items: items.map((item) => ({
+                  checkout_id: item.checkout_id,
+                  asset_name: item.asset_name,
+                  quantity: item.outstanding,
+                  due_date: item.due_date,
+                  checked_out_at: item.checkout_date ?? null,
+                })),
+              } satisfies ReceiptTarget)
+            : null
+        }
+        onClose={() => setReceiptOpen(false)}
+      />
     </AnimatePresence>
   );
 }

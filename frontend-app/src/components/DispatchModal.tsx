@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { X, Loader2 } from "lucide-react";
-import { assetsApi, ApiError } from "../lib/api";
+import { X, Loader2, QrCode, CheckCircle2 } from "lucide-react";
+import { assetsApi, ApiError, formatDate } from "../lib/api";
 import type { RosterUser, OutsiderRow } from "../lib/types";
+import { ReceiptModal } from "./ReceiptModal";
+import type { ReceiptTarget } from "../lib/receipt";
 
 function errMsg(err: unknown, fallback: string): string {
   if (err instanceof ApiError) return err.message;
@@ -55,6 +57,14 @@ export function DispatchModal({
 
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  // Post-dispatch success state -- replaces the old `alert(result.message)`
+  // with an inline confirmation that offers a scannable receipt on the
+  // spot, since this dispatch is (almost always) the moment the receipt
+  // is actually needed. `assigneeName` is captured at submit time from
+  // whichever route was used, since the roster/form state it came from
+  // gets cleared the next time this modal opens for a new asset.
+  const [dispatched, setDispatched] = useState<{ assigneeName: string; quantity: number; dueDate: string; message?: string } | null>(null);
+  const [receiptOpen, setReceiptOpen] = useState(false);
 
   useEffect(() => {
     if (!asset) return;
@@ -69,6 +79,8 @@ export function DispatchModal({
     setAdhocEmail("");
     setAdhocPhone("");
     setError(null);
+    setDispatched(null);
+    setReceiptOpen(false);
     setRosterLoading(true);
     Promise.all([assetsApi.staffRoster(), assetsApi.customerRoster(), assetsApi.outsiderRoster()])
       .then(([s, c, o]) => {
@@ -122,11 +134,19 @@ export function DispatchModal({
       }
     }
 
+    // Captured before the async call resolves -- reflects the roster
+    // pick/typed name for whichever route was used, for the receipt's
+    // "Held by" line (the raw payload only carries IDs).
+    const assigneeName =
+      route === "staff" ? staff.find((u) => String(u.id) === staffId)?.name ?? "Staff member"
+      : route === "customer" ? customers.find((u) => String(u.id) === customerId)?.name ?? "Customer"
+      : adhocExistingId !== "new" ? outsiders.find((o) => String(o.id) === adhocExistingId)?.name ?? adhocName
+      : adhocName;
+
     setSubmitting(true);
     try {
       const result = await assetsApi.checkoutAdvanced(asset.id, payload);
-      if (result.message) alert(result.message);
-      onDispatched();
+      setDispatched({ assigneeName, quantity, dueDate, message: result.message });
     } catch (err) {
       setError(errMsg(err, "Dispatch failed."));
     } finally {
@@ -151,73 +171,118 @@ export function DispatchModal({
         </div>
         <p className="text-[12.5px] text-text-muted mb-4">{asset.name} · {asset.available_quantity} available</p>
 
-        <form onSubmit={submit} className="flex flex-col gap-3">
-          <div className="flex flex-col gap-1">
-            <label className="text-[11px] uppercase tracking-wider text-text-faint">Assign to</label>
-            <select value={route} onChange={(e) => setRoute(e.target.value as Route)} className={inputClass}>
-              <option value="staff">Staff member</option>
-              <option value="customer">Linked customer account</option>
-              <option value="adhoc">Ad-Hoc (unlinked) individual</option>
-            </select>
+        {dispatched ? (
+          // Success state -- replaces the old blocking `alert(result.message)`.
+          // A checkout receipt is most useful right at the moment it's
+          // issued (nothing to look up later), so this is the primary
+          // action here rather than something to hunt for afterward.
+          <div className="flex flex-col gap-3">
+            <div className="flex items-start gap-2.5 bg-moss/10 border border-moss/30 rounded-[3px] px-3.5 py-3">
+              <CheckCircle2 size={16} className="text-moss-soft shrink-0 mt-0.5" />
+              <div className="min-w-0">
+                <p className="text-[13px] text-text font-medium">Dispatched to {dispatched.assigneeName}</p>
+                <p className="text-[11.5px] text-text-muted mt-0.5">
+                  {dispatched.quantity} × {asset.name}{dispatched.dueDate ? ` · due ${formatDate(dispatched.dueDate)}` : ""}
+                </p>
+                {dispatched.message && <p className="text-[11px] text-text-faint mt-1">{dispatched.message}</p>}
+              </div>
+            </div>
+
+            <button
+              onClick={() => setReceiptOpen(true)}
+              className="flex items-center justify-center gap-1.5 border border-border-soft hover:border-brass/50 text-text-muted hover:text-brass-soft text-[13px] font-medium rounded-[3px] py-2.5 transition-colors"
+            >
+              <QrCode size={13} /> View / print receipt
+            </button>
+            <button
+              onClick={onDispatched}
+              className="flex items-center justify-center gap-1.5 bg-brass hover:bg-brass-soft text-ink font-medium text-[13px] rounded-[3px] py-2.5 transition-colors"
+            >
+              Done
+            </button>
           </div>
+        ) : (
+          <form onSubmit={submit} className="flex flex-col gap-3">
+            <div className="flex flex-col gap-1">
+              <label className="text-[11px] uppercase tracking-wider text-text-faint">Assign to</label>
+              <select value={route} onChange={(e) => setRoute(e.target.value as Route)} className={inputClass}>
+                <option value="staff">Staff member</option>
+                <option value="customer">Linked customer account</option>
+                <option value="adhoc">Ad-Hoc (unlinked) individual</option>
+              </select>
+            </div>
 
-          {route === "staff" && (
-            <select required value={staffId} onChange={(e) => setStaffId(e.target.value)} className={inputClass}>
-              <option value="" disabled>{rosterLoading ? "Loading…" : staff.length ? "Select a staff account" : "No staff accounts on file"}</option>
-              {staff.map((u) => (
-                <option key={u.id} value={u.id}>{u.name} ({u.department_role || u.role})</option>
-              ))}
-            </select>
-          )}
-
-          {route === "customer" && (
-            <select required value={customerId} onChange={(e) => setCustomerId(e.target.value)} className={inputClass}>
-              <option value="" disabled>{rosterLoading ? "Loading…" : customers.length ? "Select a linked customer" : "No linked customer accounts on file"}</option>
-              {customers.map((u) => (
-                <option key={u.id} value={u.id}>{u.name} ({u.email})</option>
-              ))}
-            </select>
-          )}
-
-          {route === "adhoc" && (
-            <>
-              <select value={adhocExistingId} onChange={(e) => setAdhocExistingId(e.target.value)} className={inputClass}>
-                <option value="new">+ Create new unlinked profile</option>
-                {outsiders.map((o) => (
-                  <option key={o.id} value={o.id}>{o.name}{o.company ? ` (${o.company})` : ""}</option>
+            {route === "staff" && (
+              <select required value={staffId} onChange={(e) => setStaffId(e.target.value)} className={inputClass}>
+                <option value="" disabled>{rosterLoading ? "Loading…" : staff.length ? "Select a staff account" : "No staff accounts on file"}</option>
+                {staff.map((u) => (
+                  <option key={u.id} value={u.id}>{u.name} ({u.department_role || u.role})</option>
                 ))}
               </select>
-              {adhocExistingId === "new" && (
-                <>
-                  <input required value={adhocName} onChange={(e) => setAdhocName(e.target.value)} placeholder="Name" className={inputClass} />
-                  <input value={adhocCompany} onChange={(e) => setAdhocCompany(e.target.value)} placeholder="Company (optional)" className={inputClass} />
-                  <input type="email" value={adhocEmail} onChange={(e) => setAdhocEmail(e.target.value)} placeholder="Email" className={inputClass} />
-                  <input value={adhocPhone} onChange={(e) => setAdhocPhone(e.target.value)} placeholder="Phone" className={inputClass} />
-                  <p className="text-[11px] text-text-faint -mt-1">At least one of email or phone is required.</p>
-                </>
-              )}
-            </>
-          )}
+            )}
 
-          <div className="grid grid-cols-2 gap-3">
-            <div className="flex flex-col gap-1">
-              <label className="text-[11px] uppercase tracking-wider text-text-faint">Quantity</label>
-              <input type="number" min={1} max={asset.available_quantity} value={quantity} onChange={(e) => setQuantity(Math.max(1, parseInt(e.target.value, 10) || 1))} className={inputClass} />
+            {route === "customer" && (
+              <select required value={customerId} onChange={(e) => setCustomerId(e.target.value)} className={inputClass}>
+                <option value="" disabled>{rosterLoading ? "Loading…" : customers.length ? "Select a linked customer" : "No linked customer accounts on file"}</option>
+                {customers.map((u) => (
+                  <option key={u.id} value={u.id}>{u.name} ({u.email})</option>
+                ))}
+              </select>
+            )}
+
+            {route === "adhoc" && (
+              <>
+                <select value={adhocExistingId} onChange={(e) => setAdhocExistingId(e.target.value)} className={inputClass}>
+                  <option value="new">+ Create new unlinked profile</option>
+                  {outsiders.map((o) => (
+                    <option key={o.id} value={o.id}>{o.name}{o.company ? ` (${o.company})` : ""}</option>
+                  ))}
+                </select>
+                {adhocExistingId === "new" && (
+                  <>
+                    <input required value={adhocName} onChange={(e) => setAdhocName(e.target.value)} placeholder="Name" className={inputClass} />
+                    <input value={adhocCompany} onChange={(e) => setAdhocCompany(e.target.value)} placeholder="Company (optional)" className={inputClass} />
+                    <input type="email" value={adhocEmail} onChange={(e) => setAdhocEmail(e.target.value)} placeholder="Email" className={inputClass} />
+                    <input value={adhocPhone} onChange={(e) => setAdhocPhone(e.target.value)} placeholder="Phone" className={inputClass} />
+                    <p className="text-[11px] text-text-faint -mt-1">At least one of email or phone is required.</p>
+                  </>
+                )}
+              </>
+            )}
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="flex flex-col gap-1">
+                <label className="text-[11px] uppercase tracking-wider text-text-faint">Quantity</label>
+                <input type="number" min={1} max={asset.available_quantity} value={quantity} onChange={(e) => setQuantity(Math.max(1, parseInt(e.target.value, 10) || 1))} className={inputClass} />
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="text-[11px] uppercase tracking-wider text-text-faint">Due date{route === "adhoc" ? "" : " (optional)"}</label>
+                <input type="date" required={route === "adhoc"} min={todayInputValue()} max={maxDueDateValue()} value={dueDate} onChange={(e) => setDueDate(e.target.value)} className={inputClass} />
+              </div>
             </div>
-            <div className="flex flex-col gap-1">
-              <label className="text-[11px] uppercase tracking-wider text-text-faint">Due date{route === "adhoc" ? "" : " (optional)"}</label>
-              <input type="date" required={route === "adhoc"} min={todayInputValue()} max={maxDueDateValue()} value={dueDate} onChange={(e) => setDueDate(e.target.value)} className={inputClass} />
-            </div>
-          </div>
 
-          {error && <div className="bg-rust/10 border border-rust/30 text-rust-soft text-[12px] rounded-[3px] px-3 py-2.5">{error}</div>}
+            {error && <div className="bg-rust/10 border border-rust/30 text-rust-soft text-[12px] rounded-[3px] px-3 py-2.5">{error}</div>}
 
-          <button type="submit" disabled={submitting} className="mt-1 flex items-center justify-center gap-1.5 bg-brass hover:bg-brass-soft disabled:opacity-60 text-ink font-medium text-[13px] rounded-[3px] py-2.5 transition-colors">
-            {submitting && <Loader2 size={13} className="animate-spin" />}
-            {submitting ? "Dispatching…" : "Dispatch"}
-          </button>
-        </form>
+            <button type="submit" disabled={submitting} className="mt-1 flex items-center justify-center gap-1.5 bg-brass hover:bg-brass-soft disabled:opacity-60 text-ink font-medium text-[13px] rounded-[3px] py-2.5 transition-colors">
+              {submitting && <Loader2 size={13} className="animate-spin" />}
+              {submitting ? "Dispatching…" : "Dispatch"}
+            </button>
+          </form>
+        )}
       </motion.div>
+
+      <ReceiptModal
+        target={
+          receiptOpen && dispatched
+            ? ({
+                holderName: dispatched.assigneeName,
+                note: "Issued at dispatch",
+                items: [{ asset_name: asset.name, quantity: dispatched.quantity, due_date: dispatched.dueDate || null }],
+              } satisfies ReceiptTarget)
+            : null
+        }
+        onClose={() => setReceiptOpen(false)}
+      />
     </AnimatePresence>
   );
 }

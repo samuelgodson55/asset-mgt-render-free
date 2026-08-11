@@ -1,6 +1,6 @@
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
-import { LayoutGrid, Boxes, ClipboardList, Bell, Search, LogOut, ShieldCheck, PackageCheck, FileText, Menu, X } from "lucide-react";
+import { LayoutGrid, Boxes, ClipboardList, Bell, Search, LogOut, ShieldCheck, PackageCheck, FileText, Menu, X, BarChart3 } from "lucide-react";
 import { Suspense, useEffect, useState } from "react";
 import { api, quotationsApi, setCurrencyCode } from "../lib/api";
 import { useAuth } from "../lib/useAuth";
@@ -32,6 +32,11 @@ const nav: { to: string; label: string; icon: typeof LayoutGrid; end?: boolean }
 ];
 
 const checkoutsNavItem: (typeof nav)[number] = { to: "/checkouts", label: "Checkouts", icon: ClipboardList };
+// Manager/Admin business-metrics dashboard -- same require_privileged_role
+// gate as Checkouts above (see App.tsx's <RequireRole>), so it's appended
+// the same way: only for a privileged role or demo, never shown to a
+// Staff/Customer session.
+const reportsNavItem: (typeof nav)[number] = { to: "/reports", label: "Reports", icon: BarChart3 };
 
 // Shown only for the brief window a lazy-loaded route's own JS chunk is
 // still downloading/parsing (typically well under a second on any normal
@@ -134,7 +139,7 @@ export function Layout() {
   // Checkouts slots in right after Inventory (its natural position in the
   // base list) only for a privileged role/demo; Admin/Manager stays last.
   const navItems: typeof nav = privileged
-    ? [nav[0], nav[1], checkoutsNavItem, ...nav.slice(2), { to: isManagerRole ? "/manager" : "/admin", label: isManagerRole ? "Manager" : "Admin", icon: ShieldCheck }]
+    ? [nav[0], nav[1], checkoutsNavItem, reportsNavItem, ...nav.slice(2), { to: isManagerRole ? "/manager" : "/admin", label: isManagerRole ? "Manager" : "Admin", icon: ShieldCheck }]
     : nav;
 
   // Resolves the deployment's real currency (settings.CURRENCY_CODE, via

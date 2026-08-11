@@ -490,3 +490,82 @@ export interface DashboardStats {
   categories: { name: string; count: number }[];
   activity: { date: string; checkouts: number; returns: number }[];
 }
+
+// ---------------------------------------------------------------------------
+// Reporting / Analytics dashboard -- Manager/Admin only
+// (require_privileged_role). Backed by backend/api/reports_api.py +
+// backend/services/reports_service.py's get_dashboard(). See lib/api.ts's
+// reportsApi and pages/Reports.tsx.
+// ---------------------------------------------------------------------------
+
+export interface UtilizationRow {
+  asset_type_id: number;
+  name: string;
+  category: string | null;
+  total_quantity: number;
+  available_quantity: number;
+  currently_checked_out: number;
+  utilization_rate: number | null;
+  checkout_count: number;
+  total_checkout_days: number;
+}
+
+export interface OverdueTrendPoint {
+  month: string;
+  label: string;
+  overdue_count: number;
+}
+
+export interface OverdueBreakdownRow {
+  name?: string;
+  department?: string;
+  overdue_count: number;
+}
+
+export interface OverdueReport {
+  trend: OverdueTrendPoint[];
+  total_overdue_now: number;
+  by_asset_type: OverdueBreakdownRow[];
+  by_department: OverdueBreakdownRow[];
+}
+
+export interface SpendRow {
+  category?: string;
+  department?: string;
+  total_spend: number;
+  item_count: number;
+}
+
+export interface SpendReport {
+  by_category: SpendRow[];
+  by_department: SpendRow[];
+  priced_checkout_count: number;
+  unpriced_checkout_count: number;
+}
+
+export interface QuotationTurnaroundMonth {
+  month: string;
+  label: string;
+  avg_submit_to_fulfill_hours: number | null;
+  sample_size: number;
+}
+
+export interface QuotationTurnaroundReport {
+  avg_submit_to_approve_hours: number | null;
+  sample_size_submit_to_approve: number;
+  avg_approve_to_fulfill_hours: number | null;
+  sample_size_approve_to_fulfill: number;
+  avg_submit_to_fulfill_hours: number | null;
+  sample_size_submit_to_fulfill: number;
+  total_quotations_submitted: number;
+  by_month: QuotationTurnaroundMonth[];
+}
+
+export interface ReportsDashboard {
+  period: { start_date: string | null; end_date: string | null };
+  utilization_by_asset_type: UtilizationRow[];
+  overdue: OverdueReport;
+  spend: SpendReport;
+  quotation_turnaround: QuotationTurnaroundReport;
+}
+

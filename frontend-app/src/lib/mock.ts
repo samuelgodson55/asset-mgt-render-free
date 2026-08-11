@@ -1,4 +1,4 @@
-import type { AssetType, Checkout, ExtensionRequest, NotificationItem, DashboardStats, BackupEntry, BackupStatus, CatalogAsset, QuotationCartOrDetail } from "./types";
+import type { AssetType, Checkout, ExtensionRequest, NotificationItem, DashboardStats, BackupEntry, BackupStatus, CatalogAsset, QuotationCartOrDetail, ReportsDashboard } from "./types";
 
 const categories = ["Field Radios", "Optics", "Power", "Networking", "Fabrication", "Safety"];
 
@@ -134,4 +134,85 @@ export const mockStats: DashboardStats = {
       returns: 1 + Math.round(Math.abs(Math.cos(i * 1.1)) * 6),
     };
   }),
+};
+
+// Demo data for the Manager/Admin Reporting dashboard (see
+// pages/Reports.tsx) -- reuses mockAssets/mockCheckouts so "Demo browsing"
+// shows figures consistent with the rest of the app rather than an
+// unrelated fabricated dataset. Not a live computation of the real
+// services/reports_service.py formulas -- just plausible-looking numbers
+// derived from the same fixtures every other mock export already uses.
+export const mockReportsDashboard: ReportsDashboard = {
+  period: { start_date: null, end_date: null },
+  utilization_by_asset_type: mockAssets
+    .map((a) => ({
+      asset_type_id: a.id,
+      name: a.name,
+      category: a.category,
+      total_quantity: a.total_quantity,
+      available_quantity: a.available_quantity,
+      currently_checked_out: a.checked_out_quantity,
+      utilization_rate: a.total_quantity ? Math.round((a.checked_out_quantity / a.total_quantity) * 10000) / 10000 : null,
+      checkout_count: mockCheckouts.filter((c) => c.asset_id === a.id).length,
+      total_checkout_days: mockCheckouts.filter((c) => c.asset_id === a.id).length * 4.5,
+    }))
+    .sort((a, b) => (b.utilization_rate ?? 0) - (a.utilization_rate ?? 0)),
+  overdue: {
+    trend: Array.from({ length: 6 }).map((_, i) => {
+      const d = new Date();
+      d.setMonth(d.getMonth() - (5 - i));
+      return {
+        month: d.toISOString().slice(0, 7),
+        label: d.toLocaleDateString(undefined, { month: "short", year: "numeric" }),
+        overdue_count: i === 5 ? mockCheckouts.filter((c) => c.status === "overdue").length : 1 + (i % 3),
+      };
+    }),
+    total_overdue_now: mockCheckouts.filter((c) => c.status === "overdue").length,
+    by_asset_type: mockCheckouts
+      .filter((c) => c.status === "overdue")
+      .map((c) => ({ name: c.asset_name, overdue_count: 1 })),
+    by_department: mockCheckouts
+      .filter((c) => c.status === "overdue")
+      .map((_, i) => ({ department: categories[i % categories.length], overdue_count: 1 })),
+  },
+  spend: {
+    by_category: categories.map((cat) => {
+      const rows = mockAssets.filter((a) => a.category === cat && a.checked_out_quantity > 0);
+      return {
+        category: cat,
+        total_spend: Math.round(rows.reduce((s, a) => s + (a.price ?? 0) * a.checked_out_quantity, 0) * 100) / 100,
+        item_count: rows.reduce((s, a) => s + a.checked_out_quantity, 0),
+      };
+    }).filter((r) => r.item_count > 0).sort((a, b) => b.total_spend - a.total_spend),
+    by_department: people.map((p, i) => {
+      const rows = mockCheckouts.filter((c) => c.checked_out_to === p);
+      const asset = (id: number) => mockAssets.find((a) => a.id === id);
+      return {
+        department: categories[i % categories.length],
+        total_spend: Math.round(rows.reduce((s, c) => s + (asset(c.asset_id)?.price ?? 0) * c.quantity, 0) * 100) / 100,
+        item_count: rows.reduce((s, c) => s + c.quantity, 0),
+      };
+    }).filter((r) => r.item_count > 0).sort((a, b) => b.total_spend - a.total_spend),
+    priced_checkout_count: mockCheckouts.length,
+    unpriced_checkout_count: 0,
+  },
+  quotation_turnaround: {
+    avg_submit_to_approve_hours: 6.4,
+    sample_size_submit_to_approve: 9,
+    avg_approve_to_fulfill_hours: 18.2,
+    sample_size_approve_to_fulfill: 7,
+    avg_submit_to_fulfill_hours: 24.6,
+    sample_size_submit_to_fulfill: 7,
+    total_quotations_submitted: 11,
+    by_month: Array.from({ length: 6 }).map((_, i) => {
+      const d = new Date();
+      d.setMonth(d.getMonth() - (5 - i));
+      return {
+        month: d.toISOString().slice(0, 7),
+        label: d.toLocaleDateString(undefined, { month: "short", year: "numeric" }),
+        avg_submit_to_fulfill_hours: 18 + ((i * 7) % 20),
+        sample_size: 1 + (i % 3),
+      };
+    }),
+  },
 };

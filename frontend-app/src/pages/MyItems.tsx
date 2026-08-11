@@ -1,12 +1,14 @@
 import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { PackageCheck, CalendarClock, X, Send } from "lucide-react";
+import { PackageCheck, CalendarClock, X, Send, QrCode } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 import { myItemsApi, extensionsApi, ApiError, formatDate } from "../lib/api";
 import type { MyItem } from "../lib/types";
 import { ExportButtons } from "../components/ExportButtons";
 import { PaginationBar, RowsPerPageSelect } from "../components/PaginationBar";
 import { DEFAULT_PAGE_SIZE } from "../lib/pagination";
+import { ReceiptModal } from "../components/ReceiptModal";
+import type { ReceiptTarget } from "../lib/receipt";
 
 const filterTabs = ["all", "overdue", "due_soon"] as const;
 const filterLabels: Record<(typeof filterTabs)[number], string> = {
@@ -112,6 +114,9 @@ export function MyItems() {
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<MyItem | null>(null);
   const [sentMsg, setSentMsg] = useState<string | null>(null);
+  const [holderName, setHolderName] = useState("You");
+  const [receipt, setReceipt] = useState<ReceiptTarget | null>(null);
+  const [fullReceiptLoading, setFullReceiptLoading] = useState(false);
   const [searchParams, setSearchParams] = useSearchParams();
   // Deep-link support (?filter=overdue|due_soon) -- lets the Dashboard's
   // "Your overdue items" StatCard land straight on the narrowed view
@@ -149,12 +154,49 @@ export function MyItems() {
       .then((data) => {
         setItems(data.assigned_items);
         setTotal(data.total);
+        setHolderName(data.name);
       })
       .catch(() => { setItems([]); setTotal(0); })
       .finally(() => setLoading(false));
   };
 
   useEffect(refresh, [perPage, offset]);
+
+  // Single-item receipt for whatever page is currently loaded -- opens
+  // straight from the row, same as Checkouts.tsx's per-row receipt.
+  const openItemReceipt = (item: MyItem) => {
+    setReceipt({
+      holderName,
+      items: [{ checkout_id: item.checkout_id, asset_name: item.asset_name, quantity: item.quantity, due_date: item.due_date, checked_out_at: item.checkout_date }],
+    });
+  };
+
+  // "Everything I have out" needs the FULL custody list, not just
+  // whatever page happens to be on screen -- myItemsApi.list() with no
+  // limit/offset gets the backend's generous default ("effectively
+  // everything", see lib/api.ts), same call the Notification Bell/
+  // Dashboard already make for the same reason.
+  const openFullReceipt = () => {
+    setFullReceiptLoading(true);
+    myItemsApi
+      .list()
+      .then((data) => {
+        setHolderName(data.name);
+        setReceipt({
+          holderName: data.name,
+          note: "All items currently checked out to you",
+          items: data.assigned_items.map((item) => ({
+            checkout_id: item.checkout_id,
+            asset_name: item.asset_name,
+            quantity: item.quantity,
+            due_date: item.due_date,
+            checked_out_at: item.checkout_date,
+          })),
+        });
+      })
+      .catch(() => { /* Non-fatal -- the person can still use the per-row receipt buttons. */ })
+      .finally(() => setFullReceiptLoading(false));
+  };
 
   // Called from the "Rows per page" <select> -- always jumps back to the
   // first page on a page-size change (mirrors Assets.tsx's handlePerPageChange).
@@ -187,6 +229,14 @@ export function MyItems() {
           <p className="text-text-muted text-sm mt-1">{total} item(s) currently checked out to you</p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
+          <button
+            onClick={openFullReceipt}
+            disabled={total === 0 || fullReceiptLoading}
+            title="Scannable receipt for everything you have out"
+            className="flex items-center gap-1.5 rounded-md border border-border-soft px-2.5 py-1.5 text-[11.5px] font-medium text-text-muted hover:border-brass/50 hover:text-brass-soft disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          >
+            <QrCode size={12} /> {fullReceiptLoading ? "Loading…" : "My receipt"}
+          </button>
           <RowsPerPageSelect value={perPage} onChange={handlePerPageChange} />
           <ExportButtons
             disabled={total === 0}
@@ -250,12 +300,21 @@ export function MyItems() {
                   <p className="mt-1 text-[11px] text-text-faint sm:hidden">
                     Qty {item.quantity} · Out {formatDate(item.checkout_date)} · Due {formatDate(item.due_date)}
                   </p>
-                  <button
-                    onClick={() => setSelected(item)}
-                    className="sm:hidden mt-2 flex items-center gap-1.5 rounded-md border border-border-soft px-2.5 py-1 text-[11.5px] font-medium text-text-muted hover:border-sky/50 hover:text-sky transition-colors"
-                  >
-                    <CalendarClock size={11} /> Request extension
-                  </button>
+                  <div className="sm:hidden mt-2 flex items-center gap-2">
+                    <button
+                      onClick={() => setSelected(item)}
+                      className="flex items-center gap-1.5 rounded-md border border-border-soft px-2.5 py-1 text-[11.5px] font-medium text-text-muted hover:border-sky/50 hover:text-sky transition-colors"
+                    >
+                      <CalendarClock size={11} /> Request extension
+                    </button>
+                    <button
+                      onClick={() => openItemReceipt(item)}
+                      title="View/print receipt"
+                      className="flex items-center gap-1.5 rounded-md border border-border-soft px-2.5 py-1 text-[11.5px] font-medium text-text-muted hover:border-brass/50 hover:text-brass-soft transition-colors"
+                    >
+                      <QrCode size={11} /> Receipt
+                    </button>
+                  </div>
                 </td>
                 <td className="hidden sm:table-cell px-5 py-3 font-mono text-text-muted">{item.quantity}</td>
                 <td className="hidden sm:table-cell px-5 py-3 font-mono text-text-muted">{formatDate(item.checkout_date)}</td>
@@ -292,12 +351,21 @@ export function MyItems() {
                   </div>
                 </td>
                 <td className="hidden sm:table-cell px-5 py-3 text-right">
-                  <button
-                    onClick={() => setSelected(item)}
-                    className="flex items-center gap-1.5 ml-auto rounded-md border border-border-soft px-2.5 py-1 text-[11.5px] font-medium text-text-muted hover:border-sky/50 hover:text-sky transition-colors"
-                  >
-                    <CalendarClock size={11} /> Request extension
-                  </button>
+                  <div className="flex items-center justify-end gap-2">
+                    <button
+                      onClick={() => openItemReceipt(item)}
+                      title="View/print receipt"
+                      className="flex items-center gap-1.5 rounded-md border border-border-soft px-2.5 py-1 text-[11.5px] font-medium text-text-muted hover:border-brass/50 hover:text-brass-soft transition-colors"
+                    >
+                      <QrCode size={11} /> Receipt
+                    </button>
+                    <button
+                      onClick={() => setSelected(item)}
+                      className="flex items-center gap-1.5 rounded-md border border-border-soft px-2.5 py-1 text-[11.5px] font-medium text-text-muted hover:border-sky/50 hover:text-sky transition-colors"
+                    >
+                      <CalendarClock size={11} /> Request extension
+                    </button>
+                  </div>
                 </td>
               </tr>
             ))}
@@ -319,6 +387,8 @@ export function MyItems() {
           refresh();
         }}
       />
+
+      <ReceiptModal target={receipt} onClose={() => setReceipt(null)} />
     </div>
   );
 }

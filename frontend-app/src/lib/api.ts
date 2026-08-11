@@ -1,5 +1,5 @@
-import { mockAssets, mockCheckouts, mockExtensions, mockNotifications, mockStats, mockBackups, mockBackupStatus, mockDigestRecipients, mockCatalog, mockQuotationCart } from "./mock";
-import type { AssetType, Checkout, ExtensionRequest, NotificationItem, DashboardStats, BackupEntry, BackupStatus, RestoreResult, ImportResult, MyItem, ProfileDetail, UserRow, OutsiderRow, CustodyItem, AuditLogEntry, PublicConfig, CatalogAsset, QuotationCartOrDetail, QuotationListRow, FulfillmentQueueRow, QuotationOutsourcedItemCreate, QuotationOutsourceShortfallItem, AssetDetails, DeletedAssetRow, DeletedUserRow, RosterUser, BulkExtendResult, MyExtensionDecision, QuotationNotification } from "./types";
+import { mockAssets, mockCheckouts, mockExtensions, mockNotifications, mockStats, mockBackups, mockBackupStatus, mockDigestRecipients, mockCatalog, mockQuotationCart, mockReportsDashboard } from "./mock";
+import type { AssetType, Checkout, ExtensionRequest, NotificationItem, DashboardStats, BackupEntry, BackupStatus, RestoreResult, ImportResult, MyItem, ProfileDetail, UserRow, OutsiderRow, CustodyItem, AuditLogEntry, PublicConfig, CatalogAsset, QuotationCartOrDetail, QuotationListRow, FulfillmentQueueRow, QuotationOutsourcedItemCreate, QuotationOutsourceShortfallItem, AssetDetails, DeletedAssetRow, DeletedUserRow, RosterUser, BulkExtendResult, MyExtensionDecision, QuotationNotification, ReportsDashboard } from "./types";
 
 
 // Points at the FastAPI backend. In production this app is built with
@@ -789,6 +789,26 @@ export const auditApi = {
     rawFetch<{ task_id: string }>(`/audit-logs/export${qs({ format, start_date: startDate, end_date: endDate })}`, { method: "POST" }),
   exportStatus: (taskId: string) => rawFetch<{ state: string; ready: boolean; error?: string }>(`/audit-logs/export/${taskId}/status`),
   downloadUrl: (taskId: string) => `${API_BASE}/audit-logs/export/${taskId}/download`,
+};
+
+// ---------------------------------------------------------------------------
+// admin: Reporting / Analytics dashboard (backend/api/reports_api.py) --
+// require_privileged_role (Super Admin/Admin/Manager). One combined GET
+// /reports/dashboard call per page load/filter change -- see
+// backend/services/reports_service.py's get_dashboard() for how each
+// section is derived. tryLoad-wrapped like the other org-wide, privileged
+// views (getCheckouts/auditApi) so "Demo browsing" still renders something
+// explorable (see lib/mock.ts's mockReportsDashboard) while a real signed-in
+// session that hits a genuine error surfaces it instead of silently
+// swapping in fabricated numbers.
+// ---------------------------------------------------------------------------
+
+export const reportsApi = {
+  dashboard: (startDate?: string, endDate?: string, category?: string) =>
+    tryLoad(
+      () => rawFetch<ReportsDashboard>(`/reports/dashboard${qs({ start_date: startDate, end_date: endDate, category })}`),
+      mockReportsDashboard
+    ),
 };
 
 // ---------------------------------------------------------------------------
