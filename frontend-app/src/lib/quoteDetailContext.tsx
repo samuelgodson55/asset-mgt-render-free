@@ -1,5 +1,5 @@
 import { useMemo, useState, type ReactNode } from "react";
-import { QuoteDetailContext, type QuoteDetailContextValue } from "./quote-detail-context";
+import { QuoteDetailContext, type QuoteDetailContextValue, type QuoteDetailMode } from "./quote-detail-context";
 
 // =============================================================================
 // lib/quoteDetailContext.tsx
@@ -33,13 +33,21 @@ import { QuoteDetailContext, type QuoteDetailContextValue } from "./quote-detail
 
 export function QuoteDetailProvider({ children }: { children: ReactNode }) {
   const [quotationId, setQuotationId] = useState<number | null>(null);
+  const [mode, setMode] = useState<QuoteDetailMode>("self");
   const value = useMemo<QuoteDetailContextValue>(
     () => ({
       quotationId,
-      openQuoteDetail: (id) => setQuotationId(id),
-      closeQuoteDetail: () => setQuotationId(null),
+      mode,
+      openQuoteDetail: (id, nextMode = "self") => {
+        setMode(nextMode);
+        setQuotationId(id);
+      },
+      closeQuoteDetail: () => {
+        setQuotationId(null);
+        setMode("self");
+      },
     }),
-    [quotationId]
+    [quotationId, mode]
   );
   return <QuoteDetailContext.Provider value={value}>{children}</QuoteDetailContext.Provider>;
 }

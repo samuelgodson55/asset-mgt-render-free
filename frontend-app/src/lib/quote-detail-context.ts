@@ -7,9 +7,12 @@ import { createContext } from "react";
 // lib/custody-context.ts + lib/custodyContext.tsx + lib/useCustody.ts
 // already uses. Pure type/context split; no behavior changed.
 
+export type QuoteDetailMode = "self" | "admin";
+
 export interface QuoteDetailContextValue {
   quotationId: number | null;
-  openQuoteDetail: (id: number) => void;
+  mode: QuoteDetailMode;
+  openQuoteDetail: (id: number, mode?: QuoteDetailMode) => void;
   closeQuoteDetail: () => void;
 }
 

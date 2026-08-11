@@ -134,30 +134,32 @@ export function Layout() {
           navigate(`/my-items?highlight=${target.checkoutId}`);
         }
       } else if (target.kind === "quotation") {
-        // Try the searcher's own quotes first -- the only lookup a
-        // Staff/Customer session can reach at all (GET
-        // /quotations/me/history is self-scoped, see quotationsApi's own
-        // docstring on myQuoteDetail()), and covers the common case for
-        // every role before falling through to the org-wide table below.
-        const mine = await quotationsApi.myHistory();
-        const ownMatch = mine.find((row) => row.reference_number.toUpperCase() === target.referenceNumber);
-        if (ownMatch) {
-          navigate(`/quotations?quotation=${ownMatch.id}`);
-        } else if (privileged) {
-          // Not the searcher's own -- fall through to the org-wide Quotes
-          // table (require_privileged_role; see backend's
-          // list_quotations(), which already matches on reference_number).
+        // Open the exact quotation in the shared Quote Detail drawer, just
+        // like a checkout search opens the shared Custody Ledger drawer.
+        // Do NOT navigate to /quotations or /admin first: that turns a precise
+        // global search into a directory lookup and makes the user search
+        // for the same quote again.
+        if (privileged) {
+          // Managers/Admins can search the organisation-wide quotation
+          // directory, so use the admin drawer for the exact match. This is
+          // the same system-wide lookup used by the Admin/Manager Quotes
+          // panel itself.
           const page = await quotationsApi.list(1, 0, target.referenceNumber);
           const found = page.items[0];
           if (!found) {
             setSearchError(`No quotation matches "${target.referenceNumber}".`);
             return;
           }
-          const dest = !demo && user?.role === "manager" ? "/manager" : "/admin";
-          navigate(`${dest}?tab=quotes&openQuote=${found.id}`);
+          openQuoteDetail(found.id, "admin");
         } else {
-          setSearchError(`No quotation matches "${target.referenceNumber}" among your quotes.`);
-          return;
+          // Staff/Customer can only search their own quotation history.
+          const mine = await quotationsApi.myHistory();
+          const ownMatch = mine.find((row) => row.reference_number.toUpperCase() === target.referenceNumber);
+          if (!ownMatch) {
+            setSearchError(`No quotation matches "${target.referenceNumber}" among your quotes.`);
+            return;
+          }
+          openQuoteDetail(ownMatch.id, "self");
         }
       }
       setHeaderSearch("");
@@ -171,7 +173,7 @@ export function Layout() {
   // Same shared-drawer shape as Custody Ledger above, for the Notification
   // Bell's "Quotation updates" click-through (see lib/quoteDetailContext.tsx's
   // own docstring for why this replaced the old ?quotation=<id> navigation).
-  const { quotationId: quoteDetailId, closeQuoteDetail } = useQuoteDetail();
+  const { quotationId: quoteDetailId, mode: quoteDetailMode, closeQuoteDetail, openQuoteDetail } = useQuoteDetail();
   const [quoteCatalog, setQuoteCatalog] = useState<CatalogAsset[]>([]);
   const location = useLocation();
 
@@ -526,7 +528,7 @@ export function Layout() {
       </div>
 
       <CustodyDrawer target={custodyTarget} onClose={closeCustody} />
-      <QuoteDetailDrawer mode="self" quotationId={quoteDetailId} catalog={quoteCatalog} onClose={closeQuoteDetail} />
+      <QuoteDetailDrawer mode={quoteDetailMode} quotationId={quoteDetailId} catalog={quoteCatalog} onClose={closeQuoteDetail} />
     </div>
   );
 }
