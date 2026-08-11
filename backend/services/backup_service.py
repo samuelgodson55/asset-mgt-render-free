@@ -701,7 +701,7 @@ def _detect_schema_revision(conn) -> str:
     Fix: don't assume -- LOOK. Every migration since the baseline
     (0003 onward) adds a column, table, or shape change that's directly
     inspectable, and they're in a single linear chain (0001 -> 0002 ->
-    ... -> 0010, see each file's own `down_revision`), so walking that
+    ... -> 0016, see each file's own `down_revision`), so walking that
     chain in order and checking for each migration's own marker finds
     exactly how far this restored schema's DDL actually got -- whether
     that's "all the way to head" (AUTO_INIT_DB-from-current-code, or a
@@ -787,6 +787,48 @@ def _detect_schema_revision(conn) -> str:
     if not inspector.has_table("password_reset_tokens"):
         return revision
     revision = "0011_password_reset_tokens"
+
+    # 0012 adds users.company. create_all()-bootstrapped databases have this
+    # column even though they have no alembic_version row, so it must be part
+    # of detection or reconciliation will replay the migration unnecessarily.
+    if not has_column("users", "company"):
+        return revision
+    revision = "0012_user_company"
+
+    # 0013 adds the quotation_notifications table.
+    if not inspector.has_table("quotation_notifications"):
+        return revision
+    revision = "0013_quotation_notifications"
+
+    # 0014 adds the SLA reminder timestamp to both parent tables.
+    if not (
+        has_column("extension_requests", "sla_last_reminded_at")
+        and has_column("quotations", "sla_last_reminded_at")
+    ):
+        return revision
+    revision = "0014_pending_approval_sla_nudges"
+
+    # 0015 adds the asset-pool department dimension. The column is distinct
+    # from users.department and from asset_types.category. Check the index as
+    # well because models.py declares index=True and a create_all() schema has
+    # both pieces already.
+    if not has_column("asset_types", "department"):
+        return revision
+    asset_type_indexes = {
+        idx.get("name") for idx in inspector.get_indexes("asset_types")
+    }
+    if "ix_asset_types_department" not in asset_type_indexes:
+        return revision
+    revision = "0015_asset_department"
+
+    # 0016 adds the quotation payment fields. All four are nullable, so their
+    # presence is a safe shape marker for old backups and create_all() schemas.
+    if not all(
+        has_column("quotations", column)
+        for column in ("paid_at", "paid_by_id", "payment_method", "payment_reference")
+    ):
+        return revision
+    revision = "0016_quotation_paid_status"
 
     return revision
 
@@ -1946,8 +1988,9 @@ def _restore_backup_impl(filepath: str, take_safety_backup: bool = True) -> dict
             # detect the restored schema's REAL revision by inspecting it
             # directly, stamp exactly that, then still run `upgrade(head)` on
             # top of it either way -- a schema that's genuinely already
-            # current detects straight through to "0010_partition_audit_logs"
-            # and upgrade(head) is then a no-op, same as before; a genuinely
+            # current detects straight through to the actual migration head
+            # (0016_quotation_paid_status) and upgrade(head) is then a no-op,
+            # same as before; a genuinely
             # older schema detects an earlier revision and upgrade(head)
             # actually applies the DDL it's missing, instead of skipping it.
             try:

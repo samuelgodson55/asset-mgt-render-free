@@ -566,16 +566,18 @@ def test_detect_schema_revision_against_partially_migrated_database(database_url
     finally:
         test_engine.dispose()
 
-    # And a fully-migrated database should be detected as being at the
-    # real head marker -- 0011 (password_reset_tokens) now that the
-    # password-recovery feature has shipped, not 0010 (partitioned
-    # audit_logs), which was only head before 0011 existed.
+    # And a fully-migrated database should be detected at the actual
+    # current head, including the post-password-recovery migrations. This
+    # is important for restore reconciliation: stamping a current
+    # create_all()-style schema at 0011 would replay 0012-0016 and can hit
+    # DuplicateColumn/duplicate-index errors (notably asset_types.department
+    # in 0015).
     _run_alembic("upgrade", "head", database_url=database_url)
     test_engine = create_engine(database_url)
     try:
         with test_engine.connect() as conn:
             detected_full = backup_service._detect_schema_revision(conn)
-        assert detected_full == "0011_password_reset_tokens"
+        assert detected_full == "0016_quotation_paid_status"
     finally:
         test_engine.dispose()
 
