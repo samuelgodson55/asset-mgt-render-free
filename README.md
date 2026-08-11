@@ -1311,6 +1311,19 @@ whole app fits on a single free Web Service.
   instance would start its own worker/beat and fire every scheduled task
   once per instance (duplicate emails). See the next section.
 
+**Choosing a frontend (legacy or React)** — `Dockerfile.render` bakes
+*both* the legacy multi-page static site and the React "Ledger" SPA into
+this same image unconditionally; `render.yaml`'s `FRONTEND_VARIANT`
+environment variable picks which one this service actually serves
+(`legacy`, the default, or `react`). Switching is just a value change in
+the Render Dashboard's Environment tab (or `render.yaml`) followed by a
+redeploy — since nothing about the image itself changes, that's a plain
+restart, not a rebuild. See `backend/config.py`'s `FRONTEND_VARIANT`
+docstring and `backend/main.py`'s "STATIC FRONTEND" section for how the
+choice is applied (`middleware/clean_urls.py`'s clean-URL rewrite for
+`legacy`, `middleware/spa_fallback.py`'s client-side-route fallback for
+`react`).
+
 <details>
 <summary>Need a paid, multi-service, horizontally-scalable deployment instead? Click to expand.</summary>
 

@@ -108,7 +108,7 @@ services:
     name: snipeit-lite-web
     runtime: docker
     dockerfilePath: Dockerfile.render
-    dockerContext: . # Repo root -- Dockerfile.render COPYs both backend/ and frontend/ from here.
+    dockerContext: . # Repo root -- Dockerfile.render COPYs backend/, frontend/, and frontend-app/ from here.
     plan: free
     region: oregon # Must match snipeit-lite-redis's region -- private networking only works within a single Render region.
     healthCheckPath: /healthz
@@ -132,6 +132,18 @@ services:
       # relying on a separate nginx service -- see top-of-file comment.
       - key: SERVE_FRONTEND
         value: true
+      # WHICH frontend to serve: "legacy" (default -- the multi-page
+      # static site) or "react" (the "Ledger" SPA). Dockerfile.render
+      # bakes BOTH into this image unconditionally, so flipping this to
+      # "react" and letting Render redeploy (a restart, not a rebuild --
+      # nothing about the image itself changes) is all it takes to switch
+      # -- no build-arg plumbing needed, since Render's Blueprint spec has
+      # no field for passing one through at all. See
+      # backend/config.py's FRONTEND_VARIANT docstring for the full
+      # reasoning, and this file's own top-of-file Dockerfile.render
+      # comment.
+      - key: FRONTEND_VARIANT
+        value: legacy
       # Launch `celery -A celery_app worker -B` as a background process
       # inside THIS container (see render-start.sh) instead of a separate
       # Background Worker service, which isn't available on the Free plan

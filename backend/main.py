@@ -71,6 +71,7 @@ from middleware.request_context import RequestContextMiddleware
 from middleware.rate_limit import RateLimitMiddleware
 from middleware.security_headers import SecurityHeadersMiddleware
 from middleware.clean_urls import CleanUrlsMiddleware
+from middleware.spa_fallback import SpaFallbackMiddleware
 
 from api.auth_api import router as auth_router
 from api.assets_api import router as assets_router
@@ -456,38 +457,56 @@ app.include_router(reports_router, prefix="/api")
 # Off by default (see config.py's SERVE_FRONTEND docstring) so this stays a
 # pure API-only container for docker-compose.yml's `backend` service and
 # any multi-service Render deployment, exactly as before. Dockerfile.render
-# (the free-tier combined image) sets SERVE_FRONTEND=true and COPYs
-# frontend/ into the image at settings.FRONTEND_DIR.
+# (the free-tier combined image) sets SERVE_FRONTEND=true and COPYs BOTH
+# the legacy site and the React SPA into the image (settings.FRONTEND_DIR
+# and settings.FRONTEND_REACT_DIR respectively) -- which one actually gets
+# SERVED is picked below by settings.FRONTEND_VARIANT (see that setting's
+# own docstring for why this is a runtime choice, not a build one).
 #
 # Mounted LAST and at "/" on purpose: FastAPI/Starlette matches routes in
 # the order they're registered, so every "/api/*" route (and /docs/etc.
 # above) is matched first and this StaticFiles mount only ever handles
-# whatever's left over -- the actual frontend/*.html, css/*, and js/* files.
-# `html=True` makes "/" itself resolve to frontend/index.html. Every other
-# page is requested by its CLEAN url (/admin, /manager, /staff, /customer
-# -- see frontend/js/auth.js) rather than its raw filename; CleanUrlsMiddleware,
-# added just below, rewrites that clean path to the real *.html filename
-# before this mount ever sees the request.
+# whatever's left over -- the actual frontend files. `html=True` makes "/"
+# itself resolve to the chosen frontend's index.html. The legacy site's
+# other pages are requested by their CLEAN url (/admin, /manager, /staff,
+# /customer -- see frontend/js/auth.js); the React SPA's other "pages" are
+# entirely client-side routes (e.g. /checkouts) that never correspond to a
+# real file at all. Exactly one of CleanUrlsMiddleware (legacy) or
+# SpaFallbackMiddleware (react), added just below, handles the one this
+# deployment is actually serving -- see each middleware's own docstring.
 if settings.SERVE_FRONTEND:
     import os
 
     from fastapi.staticfiles import StaticFiles
 
-    if os.path.isdir(settings.FRONTEND_DIR):
-        # Clean URLs (see middleware/clean_urls.py): rewrites "/admin" ->
-        # "admin.html" before it reaches the StaticFiles mount below, and
-        # 301-redirects any lingering "/admin.html"-style link to "/admin".
-        # Registered here (rather than unconditionally near the other
-        # app.add_middleware(...) calls above) because it only makes sense
-        # at all when there's actually a frontend mounted to rewrite paths
-        # for -- the docker-compose/multi-service deployment shape has
-        # SERVE_FRONTEND off and does the equivalent rewrite in nginx
-        # instead (see nginx/default.conf.template).
-        app.add_middleware(CleanUrlsMiddleware)
-        app.mount("/", StaticFiles(directory=settings.FRONTEND_DIR, html=True), name="frontend")
+    is_react = settings.FRONTEND_VARIANT == "react"
+    frontend_dir = settings.FRONTEND_REACT_DIR if is_react else settings.FRONTEND_DIR
+
+    if os.path.isdir(frontend_dir):
+        if is_react:
+            # SPA fallback (see middleware/spa_fallback.py): rewrites any
+            # request that isn't a real built file to "/", so the
+            # StaticFiles mount below serves index.html and React Router
+            # takes over client-side -- the SPA equivalent of the clean-URL
+            # rewrite below, for a site that has no *.html pages to map.
+            app.add_middleware(SpaFallbackMiddleware, frontend_dir=frontend_dir)
+        else:
+            # Clean URLs (see middleware/clean_urls.py): rewrites "/admin" ->
+            # "admin.html" before it reaches the StaticFiles mount below, and
+            # 301-redirects any lingering "/admin.html"-style link to "/admin".
+            # Registered here (rather than unconditionally near the other
+            # app.add_middleware(...) calls above) because it only makes sense
+            # at all when there's actually a frontend mounted to rewrite paths
+            # for -- the docker-compose/multi-service deployment shape has
+            # SERVE_FRONTEND off and does the equivalent rewrite in nginx
+            # instead (see nginx/default.conf.template).
+            app.add_middleware(CleanUrlsMiddleware)
+        app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="frontend")
     else:
         logger.warning(
-            "SERVE_FRONTEND is enabled but FRONTEND_DIR (%s) doesn't exist -- "
-            "the frontend won't be served. Check Dockerfile.render's COPY step.",
-            settings.FRONTEND_DIR,
+            "SERVE_FRONTEND is enabled but the %s frontend directory (%s) "
+            "doesn't exist -- the frontend won't be served. Check "
+            "Dockerfile.render's COPY step and FRONTEND_VARIANT.",
+            settings.FRONTEND_VARIANT,
+            frontend_dir,
         )

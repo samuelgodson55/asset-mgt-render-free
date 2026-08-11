@@ -701,6 +701,31 @@ class Settings(BaseSettings):
     SERVE_FRONTEND: bool = False
     FRONTEND_DIR: str = "/app/frontend"
 
+    # Which frontend to serve when SERVE_FRONTEND is on: "legacy" (default
+    # -- the multi-page static site, frontend/) or "react" (the "Ledger"
+    # SPA, frontend-app/). Dockerfile.render bakes BOTH builds into the
+    # image unconditionally (at FRONTEND_DIR and FRONTEND_REACT_DIR below,
+    # respectively) specifically so switching between them is a plain
+    # environment-variable change -- flip this in render.yaml/the Render
+    # dashboard and redeploy (a restart, not a rebuild) rather than
+    # needing a Docker build arg, which Render's Blueprint spec has no
+    # field for passing through at all. See main.py's "STATIC FRONTEND"
+    # section for how this picks between CleanUrlsMiddleware (legacy's
+    # clean-URL multi-page rewrite, middleware/clean_urls.py) and
+    # SpaFallbackMiddleware (react's client-side-route fallback,
+    # middleware/spa_fallback.py) -- the two are mutually exclusive, same
+    # as frontend/Dockerfile's own frontend-legacy-only/frontend-react-only
+    # split for the multi-service deployment shape. Any value other than
+    # exactly "react" is treated as "legacy".
+    FRONTEND_VARIANT: str = "legacy"
+    # Where Dockerfile.render's frontend-app-build stage's Vite output
+    # (frontend-app/'s built dist/) lives in the image -- only read when
+    # FRONTEND_VARIANT="react". Kept as its own separate directory (rather
+    # than reusing FRONTEND_DIR for both) so both builds can genuinely
+    # coexist in the same image with nothing to overwrite or choose
+    # between at BUILD time, only at container-start time.
+    FRONTEND_REACT_DIR: str = "/app/frontend-react"
+
     # --- Embedded Celery worker/beat (no separate worker container) -------
     # Two deployment shapes read this flag and both avoid running a
     # dedicated `worker`/`beat` service the way docker-compose.yml does:

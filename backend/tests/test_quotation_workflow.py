@@ -635,7 +635,6 @@ def test_fulfillment_notifies_the_recipient(as_admin, as_manager, as_customer):
     customer_client, customer_headers = as_customer
 
     asset_id = _create_pool(admin_client, admin_headers, "Boom Mic", total_quantity=5, price=15.00)
-    customer_id = customer_client.get("/api/auth/me", headers=customer_headers).json()["id"]
     _add_to_cart(customer_client, customer_headers, asset_id, quantity=1, start_date=TODAY, due_date=TODAY)
     submitted = customer_client.post("/api/quotations/submit", headers=customer_headers).json()
     quotation_id = submitted["id"]
@@ -670,7 +669,6 @@ def test_adding_not_in_inventory_item_notifies_recipient_without_outsourced_word
     customer_client, customer_headers = as_customer
 
     asset_id = _create_pool(admin_client, admin_headers, "Gimbal", total_quantity=2, price=30.00)
-    customer_id = customer_client.get("/api/auth/me", headers=customer_headers).json()["id"]
     _add_to_cart(customer_client, customer_headers, asset_id, quantity=1, start_date=TODAY, due_date=TODAY)
     submitted = customer_client.post("/api/quotations/submit", headers=customer_headers).json()
     quotation_id = submitted["id"]
