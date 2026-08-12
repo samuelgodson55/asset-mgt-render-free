@@ -102,6 +102,17 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      - name: Register Azure resource providers
+        working-directory: .
+        run: |
+          set -euo pipefail
+          az account set --subscription "${ARM_SUBSCRIPTION_ID}"
+          for provider in             Microsoft.Resources             Microsoft.Compute             Microsoft.Network             Microsoft.Storage             Microsoft.RecoveryServices
+          do
+            echo "Registering/checking ${provider}..."
+            az provider register --namespace "${provider}" --wait >/dev/null
+          done
+
       - name: Bootstrap Terraform state backend
         working-directory: .
         run: |

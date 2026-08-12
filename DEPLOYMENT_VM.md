@@ -169,12 +169,37 @@ rg-snipeit-tfstate
 ```
 
 The Storage Account name is deterministically derived from the Azure
-subscription ID (`snipeittfstate<12-char-sha256-prefix>`). The workflow also
-grants the GitHub OIDC identity `Storage Blob Data Contributor` on that
-Storage Account. No `TF_STATE_*` GitHub Environment variables are required.
-The bootstrap script accepts `TF_STATE_RESOURCE_GROUP`,
+subscription ID (`snipeittfstate<10-char-sha256-prefix>`). The prefix is 14
+characters, so the 10-character suffix produces exactly 24 characters, which
+is Azure's Storage Account maximum. The workflow also grants the GitHub OIDC
+identity `Storage Blob Data Contributor` on that Storage Account.
+
+The bootstrap is idempotent and deliberately discovery-first:
+
+```text
+register Azure providers
+        ↓
+bootstrap Terraform state
+        ├─ find existing state RG
+        ├─ find existing state Storage Account
+        ├─ find existing vm-state container
+        └─ create only missing resources
+        ↓
+terraform init
+        └─ use the existing prod.tfstate/vm-staging.tfstate key
+```
+
+For existing environments, the bootstrap also recognizes the known legacy
+`snipeittfstate01` account and previously tagged/prefix-matching
+`snipeittfstate*` state accounts, so changing the deterministic naming formula
+does not strand an existing state backend. If multiple possible state
+accounts are found, set `TF_STATE_STORAGE_ACCOUNT` explicitly rather than
+risk attaching Terraform to the wrong state.
+
+No `TF_STATE_*` GitHub Environment variables are required for the normal
+case. The bootstrap script accepts `TF_STATE_RESOURCE_GROUP`,
 `TF_STATE_STORAGE_ACCOUNT`, and `TF_STATE_CONTAINER` only as optional
-advanced overrides; the normal configuration should leave them unset.
+advanced overrides.
 
 The state backend is deliberately **outside** the VM resource group. This is
 what makes the destroy path safe: Terraform can destroy the VM stack while
@@ -696,7 +721,7 @@ az login   # if you haven't already in this shell
 # local plan, derive the same deterministic state-account name instead of
 # manually creating or looking up a storage account.
 SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
-STATE_ACCOUNT="snipeittfstate$(printf '%s' "$SUBSCRIPTION_ID" | sha256sum | cut -c1-12)"
+STATE_ACCOUNT="snipeittfstate$(printf '%s' "$SUBSCRIPTION_ID" | sha256sum | cut -c1-10)"
 terraform init -input=false \
   -backend-config="resource_group_name=rg-snipeit-tfstate" \
   -backend-config="storage_account_name=$STATE_ACCOUNT" \
@@ -1630,7 +1655,7 @@ would show it wanting to create *everything*, not just replace the VM:
 cd infra-vm
 az login
 SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
-STATE_ACCOUNT="snipeittfstate$(printf '%s' "$SUBSCRIPTION_ID" | sha256sum | cut -c1-12)"
+STATE_ACCOUNT="snipeittfstate$(printf '%s' "$SUBSCRIPTION_ID" | sha256sum | cut -c1-10)"
 terraform init -input=false \
   -backend-config="resource_group_name=rg-snipeit-tfstate" \
   -backend-config="storage_account_name=$STATE_ACCOUNT" \

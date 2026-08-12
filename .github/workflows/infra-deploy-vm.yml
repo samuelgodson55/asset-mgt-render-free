@@ -214,15 +214,28 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      - name: Register Azure resource providers
+        working-directory: .
+        run: |
+          set -euo pipefail
+          az account set --subscription "${ARM_SUBSCRIPTION_ID}"
+          for provider in             Microsoft.Resources             Microsoft.Compute             Microsoft.Network             Microsoft.Storage             Microsoft.RecoveryServices
+          do
+            echo "Registering/checking ${provider}..."
+            az provider register --namespace "${provider}" --wait >/dev/null
+          done
+
       - name: Bootstrap Terraform state backend
         working-directory: .
         run: |
           ./scripts/bootstrap-terraform-state.sh >> "$GITHUB_ENV"
 
       - name: terraform init
-        # The state backend is created above on every run if it does not yet
-        # exist. `key` remains per-environment so staging and prod never share
-        # a state file.
+        # Bootstrap above discovers/reuses the existing state RG, storage
+        # account, and vm-state container when present, and creates only what
+        # is missing. The environment key remains stable, so an existing
+        # prod.tfstate/vm-staging.tfstate is opened in place rather than
+        # recreated.
         run: |
           for attempt in 1 2 3 4 5; do
             if terraform init -input=false \
