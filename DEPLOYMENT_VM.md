@@ -278,6 +278,43 @@ remove that ignore rule deliberately and commit the generated lock file. Never
 commit `.terraform/`, `*.tfstate`, `terraform.tfvars`, or plan files containing
 environment-specific information.
 
+### 5a. Diagnose Cloudflare Access policy refresh failures
+
+The `Deploy VM Infrastructure` workflow performs two Cloudflare checks before
+`terraform plan`: a general Access API check and then an exact GET request for
+each existing Terraform-managed Access policy. The second check matters because
+the general Access API can return HTTP 200 while the policy-specific endpoint
+returns an error such as Cloudflare HTTP 1010.
+
+The workflow derives the policy IDs from the existing Terraform state, so it
+does not hard-code policy IDs that could become stale after an import/recreate.
+The check is read-only and does not modify Terraform state or Cloudflare.
+
+To reproduce the exact policy checks locally, set the same Cloudflare account
+and token used by the selected GitHub Environment (never paste the token into
+Git or into chat):
+
+```bash
+export CLOUDFLARE_API_TOKEN='your-token'
+export CLOUDFLARE_ACCOUNT_ID='your-account-id'
+
+for POLICY_ID in \
+  'e9b06fe2-36d2-4054-b871-967f745e45d4' \
+  '5a999c0c-5339-4c19-af5d-8bff7b6220c9'; do
+  curl -sS -i \
+    -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+    -H 'Content-Type: application/json' \
+    "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/access/policies/${POLICY_ID}"
+done
+```
+
+For the GitHub Actions test, inspect the new **Test exact Cloudflare Access
+policy endpoints** step. If token verification and `/access/apps` succeed but
+these policy requests return HTTP 1010, do **not** remove or re-import the
+policies from Terraform state. That result isolates the problem to the
+policy-specific API request/Cloudflare-side handling rather than Terraform state
+or GitHub secret validity.
+
 ### 6. Run a real local plan only when you intentionally want to inspect Azure
 
 A local `terraform validate` is not a substitute for a plan. A full plan needs

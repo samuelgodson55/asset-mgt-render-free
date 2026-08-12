@@ -332,6 +332,67 @@ jobs:
 
           echo "Cloudflare credential preflight passed."
 
+      - name: Test exact Cloudflare Access policy endpoints
+        if: inputs.action != 'import'
+        working-directory: .
+        env:
+          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+
+          # WHY THIS EXISTS: The general Access API can return HTTP 200 while
+          # the Cloudflare Terraform provider still fails refreshing a specific
+          # access policy. This test calls the exact account/policy endpoints
+          # Terraform needs, from the same GitHub runner, before terraform plan.
+          # It is diagnostic only: it never changes Terraform state or Cloudflare.
+          policy_addresses=(
+            "cloudflare_zero_trust_access_policy.ssh_humans"
+            "cloudflare_zero_trust_access_policy.ssh_ci"
+          )
+
+          for policy_address in "${policy_addresses[@]}"; do
+            policy_id="$(terraform state show -no-color "$policy_address" 2>/dev/null | awk -F' = ' '$1 ~ /^id$/ {print $2; exit}')"
+            if [[ -z "$policy_id" ]]; then
+              echo "::error::Could not read the policy ID from Terraform state for '${policy_address}'."
+              echo "::error::This diagnostic expects the existing Cloudflare Access policies to already be present in the remote Terraform state."
+              exit 1
+            fi
+            response_file="$(mktemp)"
+            trap 'rm -f "$response_file"' EXIT
+
+            http_code="$(curl -sS -o "$response_file" -w '%{http_code}' \
+              -H "Authorization: Bearer ${CF_API_TOKEN}" \
+              -H "Content-Type: application/json" \
+              "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/access/policies/${policy_id}")"
+
+            success="$(jq -r '.success // false' "$response_file")"
+            errors="$(jq -c '.errors // []' "$response_file")"
+            messages="$(jq -c '.messages // []' "$response_file")"
+            result="$(jq -c 'if .result == null then null else {id: .result.id, name: .result.name} end' "$response_file")"
+
+            echo "Cloudflare Access Policy ${policy_id}: HTTP ${http_code}, success=${success}"
+            echo "Cloudflare Access Policy ${policy_id} result: ${result}"
+            if [[ "$errors" != "[]" ]]; then
+              echo "Cloudflare Access Policy ${policy_id} errors: ${errors}"
+            fi
+            if [[ "$messages" != "[]" ]]; then
+              echo "Cloudflare Access Policy ${policy_id} messages: ${messages}"
+            fi
+
+            if [[ ! "$http_code" =~ ^2[0-9][0-9]$ || "$success" != "true" ]]; then
+              echo "::error::The exact Cloudflare Access Policy API request failed for policy '${policy_id}' before Terraform was invoked."
+              echo "::error::If this returns 1010 while the general Access API succeeds, the problem is specific to the policy endpoint/request path or Cloudflare-side request handling, not Terraform state."
+              echo "::error::Do not remove/re-import the policy from Terraform state based on this diagnostic alone."
+              exit 1
+            fi
+
+            rm -f "$response_file"
+            trap - EXIT
+          done
+
+          echo "Exact Cloudflare Access policy endpoint tests passed."
+
       - name: terraform import
         if: inputs.action == 'import'
         # WHY THIS EXISTS: "Error: A resource with the ID ... already exists
