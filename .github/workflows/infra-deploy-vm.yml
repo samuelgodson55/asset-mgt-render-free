@@ -261,10 +261,9 @@ jobs:
           exit 1
 
       - name: terraform fmt -check
-        # Report-only -- a formatting nit shouldn't block an otherwise-good
-        # apply, but it's worth seeing in the log. Run `terraform fmt
-        # infra-vm/` locally before pushing to keep this quiet.
-        run: terraform fmt -check -recursive || true
+        # Formatting is enforced so the workflow never reports a hidden
+        # Terraform formatting error as a successful deployment.
+        run: terraform fmt -check -recursive
 
       - name: terraform validate
         run: terraform validate

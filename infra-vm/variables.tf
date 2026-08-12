@@ -240,15 +240,15 @@ variable "email_provider" {
 }
 variable "brevo_api_key" {
   description = "https://app.brevo.com/settings/keys/api -- only read when email_provider is \"brevo\"."
-  type      = string
-  sensitive = true
-  default   = ""
+  type        = string
+  sensitive   = true
+  default     = ""
 }
 variable "resend_api_key" {
   description = "https://resend.com/api-keys -- only read when email_provider is \"resend\"."
-  type      = string
-  sensitive = true
-  default   = ""
+  type        = string
+  sensitive   = true
+  default     = ""
 }
 variable "admin_notification_emails" {
   type    = string
