@@ -174,7 +174,7 @@ jobs:
       TF_VAR_otel_console_exporter: ${{ vars.OTEL_CONSOLE_EXPORTER || 'false' }}
       TF_VAR_applicationinsights_connection_string: ${{ secrets.APPLICATIONINSIGHTS_CONNECTION_STRING }}
       TF_VAR_dockerhub_backend_image: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend${{ inputs.environment == 'vm-staging' && '-staging' || '' }}
-      TF_VAR_dockerhub_frontend_image: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-frontend${{ inputs.environment == 'vm-staging' && '-staging' || '' }}
+      TF_VAR_dockerhub_frontend_image: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-frontend-${{ vars.FRONTEND_BUILD_TARGET == 'react' && 'react' || 'legacy' }}${{ inputs.environment == 'vm-staging' && '-staging' || '' }}
       # Same source as deploy-azure-vm.yml's resolve-target job reads to
       # actually pick frontend/Dockerfile's --target when THAT Docker Hub
       # image above gets built -- reading the identical Environment

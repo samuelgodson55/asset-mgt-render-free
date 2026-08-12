@@ -63,9 +63,10 @@ write_files:
     permissions: "0600"
     content: |
       # Generated once by Terraform on first VM boot. Safe to hand-edit
-      # after that -- deploy-azure-vm.yml only ever touches the
-      # IMAGE_TAG line on redeploys, everything else is left as you set
-      # it here. Re-running `terraform apply` later will NOT overwrite
+      # after that -- deploy-azure-vm.yml refreshes IMAGE_TAG, image refs,
+      # and the selected frontend expectation on redeploys; other values
+      # are left as you set them here. Re-running `terraform apply` later
+      # will NOT overwrite
       # this file (cloud-init only runs on first boot -- see this
       # file's top comment).
       DOMAIN=${domain}

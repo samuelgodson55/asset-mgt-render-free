@@ -631,6 +631,24 @@ jobs:
             else
               echo "ENVIRONMENT=$RUNTIME_ENVIRONMENT" >> .env
             fi
+            if grep -q '^DOCKERHUB_BACKEND_IMAGE=' .env; then
+              sed -i "s|^DOCKERHUB_BACKEND_IMAGE=.*|DOCKERHUB_BACKEND_IMAGE=$BACKEND_IMAGE|" .env
+            else
+              echo "DOCKERHUB_BACKEND_IMAGE=$BACKEND_IMAGE" >> .env
+            fi
+            if grep -q '^DOCKERHUB_FRONTEND_IMAGE=' .env; then
+              sed -i "s|^DOCKERHUB_FRONTEND_IMAGE=.*|DOCKERHUB_FRONTEND_IMAGE=$FRONTEND_IMAGE|" .env
+            else
+              echo "DOCKERHUB_FRONTEND_IMAGE=$FRONTEND_IMAGE" >> .env
+            fi
+            if grep -q '^EXPECTED_FRONTEND_BUILD_TARGET=' .env; then
+              sed -i "s/^EXPECTED_FRONTEND_BUILD_TARGET=.*/EXPECTED_FRONTEND_BUILD_TARGET=${{ needs.resolve-target.outputs.frontend_type }}/" .env
+            else
+              echo "EXPECTED_FRONTEND_BUILD_TARGET=${{ needs.resolve-target.outputs.frontend_type }}" >> .env
+            fi
+            echo "Resolved backend image: $BACKEND_IMAGE:$IMAGE_TAG"
+            echo "Resolved frontend image: $FRONTEND_IMAGE:$IMAGE_TAG"
+            docker compose -f docker-compose.vm.yml config --images
             docker compose -f docker-compose.vm.yml pull
           EOF
 
