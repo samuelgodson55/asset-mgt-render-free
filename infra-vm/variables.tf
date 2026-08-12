@@ -1,12 +1,3 @@
-# =============================================================================
-# infra-vm/variables.tf
-# -----------------------------------------------------------------------------
-# Every input this stack accepts. Mirrors infra/main.bicep's parameter list
-# where the concept overlaps (same defaults, same naming where sensible) so
-# switching between the Container Apps path and this VM path is predictable.
-# Copy infra-vm/terraform.tfvars.example to terraform.tfvars and fill in the
-# handful that have no default (marked below) before `terraform apply`.
-# =============================================================================
 
 variable "subscription_id" {
   description = "Azure subscription ID to deploy into. Find yours with: az account show --query id -o tsv"
@@ -34,10 +25,6 @@ variable "app_base_name" {
   type        = string
   default     = "snipeit-lite"
 }
-
-# -----------------------------------------------------------------------------
-# VM sizing
-# -----------------------------------------------------------------------------
 
 variable "vm_size" {
   description = "Azure VM SKU. Standard_B2s (2 vCPU burstable, 4 GiB RAM) is the smallest size that comfortably runs all six containers (db, redis, backend, worker, beat, frontend/Caddy) together for light-to-moderate traffic -- see DEPLOYMENT_VM.md's Cost section for the full sizing table and when to size up to Standard_B2ms."
@@ -73,20 +60,6 @@ variable "ssh_allowed_source_ips" {
   type        = list(string)
   default     = []
 }
-
-# -----------------------------------------------------------------------------
-# Cloudflare Tunnel -- how the VM is reached for BOTH the web app and SSH,
-# with ZERO inbound ports open on the NSG, without Tailscale and without
-# Azure Bastion. The VM makes one outbound, always-on connection to
-# Cloudflare's edge (via the `cloudflared` container in docker-compose.vm.yml)
-# and registers itself as that tunnel's only endpoint -- Cloudflare then
-# proxies both https://<custom_domain> (-> Caddy) and ssh.<custom_domain>
-# (-> this VM's sshd) over that one outbound connection. Nothing about this
-# depends on Tailscale's own coordination/DERP infrastructure being
-# reachable, which is the whole point if that's what you've been fighting.
-# See DEPLOYMENT_VM.md's "Set up Cloudflare Tunnel" section for full setup
-# (free on Cloudflare's free plan, no credit card required for Tunnel/Access).
-# -----------------------------------------------------------------------------
 
 variable "cloudflare_api_token" {
   description = "Cloudflare API token used by Terraform to create the Tunnel, its DNS records, and the Access application/policy protecting SSH. Scope it to: Account > Cloudflare Tunnel > Edit, Account > Access: Apps and Policies > Edit, Zone > DNS > Edit (restricted to cloudflare_zone_id below) -- create at https://dash.cloudflare.com/profile/api-tokens. Never commit the real value; pass it as TF_VAR_cloudflare_api_token (see infra-deploy-vm.yml)."
@@ -126,10 +99,6 @@ variable "cloudflare_origin_cert_key" {
   sensitive   = true
 }
 
-# -----------------------------------------------------------------------------
-# Application domain / TLS
-# -----------------------------------------------------------------------------
-
 variable "custom_domain" {
   description = "Your own domain/subdomain, e.g. \"assets.example.com\", that resolves through Cloudflare's proxy to this app (Cloudflare creates the DNS record itself -- see the cloudflare_record resources in main.tf -- so do NOT create your own A/CNAME record for it). REQUIRED in this Cloudflare Tunnel setup: unlike the old direct-IP + Let's Encrypt path, there's no bare public IP left to fall back to a free sslip.io hostname for -- the domain must live in the Cloudflare zone identified by cloudflare_zone_id. Buy a cheap domain and move its nameservers to Cloudflare (free) if you don't have one yet -- see DEPLOYMENT_VM.md's \"Set up Cloudflare Tunnel\" section."
   type        = string
@@ -139,14 +108,6 @@ variable "custom_domain" {
     error_message = "custom_domain is required -- Cloudflare Tunnel needs a real hostname in your Cloudflare zone to route to, not just the VM's bare IP."
   }
 }
-
-# -----------------------------------------------------------------------------
-# Application secrets -- passed through to the VM's /opt/snipeit/.env at
-# provisioning time via cloud-init, then read by docker-compose.vm.yml. All
-# marked sensitive so `terraform plan`/`apply` output and any CI log never
-# print them. NEVER commit a terraform.tfvars file containing real values --
-# it's already listed in infra-vm/.gitignore.
-# -----------------------------------------------------------------------------
 
 variable "postgres_password" {
   description = "Password for the `db` container's postgres superuser. Generate with: openssl rand -base64 24"
@@ -273,9 +234,6 @@ variable "display_timezone" {
   default     = "Africa/Lagos"
 }
 
-# --- Pending-approval SLA nudges (ExtensionRequest & Quotation) -----------
-# Matches .env.example's own "Pending-approval SLA nudges" block -- see
-# backend/tasks/sla_tasks.py's module docstring for the full "why".
 variable "extension_request_sla_hours" {
   description = "How many hours a `pending` ExtensionRequest can go without a Manager/Admin/Super Admin decision before the SLA-nudge digest escalates it -- matches .env.example's EXTENSION_REQUEST_SLA_HOURS."
   type        = string
@@ -336,13 +294,6 @@ variable "backup_gdrive_oauth_refresh_token" {
   sensitive = true
   default   = ""
 }
-# Mode 2 -- Google Workspace service account + Shared Drive (the raw JSON
-# key contents, one line). BUG FIX: this was never added here even though
-# backend/config.py, backend/services/backup_service.py, docker-compose.yml,
-# and render.yaml all already support it -- meaning the VM path could only
-# ever use Mode 1 (personal OAuth) backups, silently, with no error, even if
-# you set this expecting Mode 2 to work. See docker-compose.vm.yml's matching
-# comment on this same variable's env var.
 variable "backup_gdrive_credentials_json" {
   type      = string
   sensitive = true
@@ -352,15 +303,6 @@ variable "backup_gdrive_folder_id" {
   type    = string
   default = ""
 }
-
-# -----------------------------------------------------------------------------
-# Distributed tracing (OpenTelemetry -- Operations & Observability
-# requirement #4; see backend/telemetry.py's module docstring). Off by
-# default, matching every other opt-in flag in this file -- mirrors
-# infra/main.bicep's otel* params (the Container Apps path's equivalent)
-# and .env.example's OTEL_* defaults one-for-one, so the same mental model
-# applies whichever deployment target you're using.
-# -----------------------------------------------------------------------------
 
 variable "otel_enabled" {
   description = "Master switch for OpenTelemetry distributed tracing on `backend` (and its embedded Celery worker/beat). Off by default -- zero cost, zero behavior change. Turning this on with no exporter destination configured just means spans are created and immediately discarded -- harmless, but pointless. Matches .env.example's OTEL_ENABLED."
@@ -400,14 +342,6 @@ variable "applicationinsights_connection_string" {
   default     = ""
 }
 
-# -----------------------------------------------------------------------------
-# Container images -- set once here so the VM's very first boot already has
-# something to run; every deploy AFTER that is handled by
-# .github/workflows/deploy-azure-vm.yml updating /opt/snipeit/.env's
-# IMAGE_TAG over SSH and re-running `docker compose up -d`, not by
-# re-applying Terraform (see DEPLOYMENT_VM.md step 9).
-# -----------------------------------------------------------------------------
-
 variable "dockerhub_backend_image" {
   description = "Docker Hub repository for the backend image, e.g. \"yourusername/snipeit-lite-backend\"."
   type        = string
@@ -446,12 +380,6 @@ variable "dockerhub_token" {
   sensitive   = true
   default     = ""
 }
-
-# -----------------------------------------------------------------------------
-# Snapshots (disk-level backup of the data disk, independent of the app's own
-# pg_dump job -- covers Redis/export files too, and is a fast whole-disk
-# restore path if the VM itself is ever lost)
-# -----------------------------------------------------------------------------
 
 variable "enable_data_disk_snapshots" {
   description = "Create a daily Azure Backup policy for the data disk (Postgres/Redis/backup/export data). Adds a small, usage-based cost (you pay for snapshot storage, not a fixed fee) -- see DEPLOYMENT_VM.md's Cost section."
