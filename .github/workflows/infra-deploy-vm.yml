@@ -19,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        description: 'Which environment to target -- Deliberately named "vm-staging", not "staging" -- the Container Apps path already owns a GitHub Environment literally called "staging"'
+        description: 'Target environment. "vm-staging", not "staging" -- kept deliberately distinct from the Container Apps path''s "staging" GitHub Environment so the two paths never share AZURE_CLIENT_ID or other environment-scoped secrets.'
         required: true
         type: choice
         options: [vm-staging, prod]
