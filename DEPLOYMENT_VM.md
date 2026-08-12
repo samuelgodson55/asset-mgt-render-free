@@ -54,63 +54,99 @@ with no Azure resources yet.
 
 ## 0. Prerequisites
 
-Install locally (only needed for step 7's optional local plan — steps 8-10
-run entirely inside GitHub Actions):
+Install locally (the VM infrastructure workflow itself runs in GitHub Actions):
 
 - [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) (`az`)
-- [Terraform](https://developer.hashicorp.com/terraform/install) >= 1.7
+- [GitHub CLI](https://cli.github.com/) (`gh`) — used only for the one-time Azure/GitHub bootstrap
+- [Terraform](https://developer.hashicorp.com/terraform/install) >= 1.7 — only needed if you want the optional local plan
 - An SSH client (`ssh-keygen`, already on macOS/Linux; use WSL or Git Bash on Windows)
 - A Docker Hub account (free tier is fine — same requirement `DEPLOYMENT.md` already has)
 
-You'll also need an Azure subscription with permission to create resource
-groups, and (for step 5) permission to create an Azure AD App Registration —
-ask a subscription/tenant admin for that if you don't have it yourself.
+You need an Azure subscription and enough tenant/subscription permissions for
+the one-time bootstrap to create the GitHub Actions Entra application/service
+principal and grant its subscription role. After that bootstrap, the workflow
+creates and manages the VM resource group and Terraform state backend itself.
 
 ---
 
 ## 1. One-time Azure setup
 
+The VM path is designed so you do **not** manually create the VM resource
+group, Terraform state resource group, Storage Account, blob container, NIC,
+network, public IP, VM, disks, or other Azure infrastructure. The only
+unavoidable bootstrap is establishing the Azure identity that GitHub Actions
+will use.
+
+Run this once from your local CLI:
+
 ```bash
 az login
-az account list --output table          # confirm you're on the right subscription
 az account set --subscription "<subscription-id-or-name>"
-az account show --query id -o tsv        # copy this — it's TF_VAR_subscription_id / AZURE_SUBSCRIPTION_ID later
+gh auth login
+./scripts/bootstrap-azure-github.sh
 ```
 
-**Also create the Terraform remote state backend now**, before your
-first `infra-deploy-vm.yml` run — `infra-vm/versions.tf` requires one.
-Without it, state only ever lives on the GitHub Actions runner's local,
-throwaway disk, which is wiped the moment the job ends — so a run that
-fails partway (or a later, separate run) can't see what it already
-created, and re-running errors with "A resource with the ID ... already
-exists" instead of picking up where it left off:
+The bootstrap helper is idempotent. It:
 
-```bash
-az group create -n rg-snipeit-tfstate -l eastus
-az storage account create -n snipeittfstate01 \
-  --resource-group rg-snipeit-tfstate --sku Standard_LRS \
-  --min-tls-version TLS1_2 --allow-blob-public-access false
-az storage container create -n vm-state \
-  --account-name snipeittfstate01 --auth-mode login
+1. Registers the Azure providers used by the Bicep and VM paths.
+2. Creates or reuses the Microsoft Entra application and service principal.
+3. Grants the CI identity subscription-level `Contributor`.
+4. Creates or reuses the exact GitHub OIDC federated credentials for
+   `production`, `staging`, `prod`, and `vm-staging`.
+5. Writes `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and
+   `AZURE_SUBSCRIPTION_ID` into those GitHub Environments.
+
+You therefore **do not** manually create an App Registration, service
+principal, federated credential, Azure resource group, or Terraform state
+storage.
+
+### Terraform state is bootstrapped by the workflow
+
+Before `terraform init`, `.github/workflows/infra-deploy-vm.yml` runs
+`scripts/bootstrap-terraform-state.sh`. That script automatically creates or
+reuses:
+
+```text
+rg-snipeit-tfstate
+└── <subscription-specific Storage Account>
+    └── vm-state
 ```
 
-(Storage account names must be 3-24 characters, lowercase letters and
-numbers only, and globally unique across all of Azure -- if
-`snipeittfstate01` is taken, or you'd rather use your own name, just
-keep it within that length/character limit and use it consistently
-below.) You'll grant the CI service principal access to
-this storage account in step 5, once it exists — see that step's
-"Also grant it access to the Terraform state storage account" callout.
+The Storage Account name is deterministically derived from the Azure
+subscription ID (`snipeittfstate<12-char-sha256-prefix>`). The workflow also
+grants the GitHub OIDC identity `Storage Blob Data Contributor` on that
+Storage Account. No `TF_STATE_*` GitHub Environment variables are required.
+The bootstrap script accepts `TF_STATE_RESOURCE_GROUP`,
+`TF_STATE_STORAGE_ACCOUNT`, and `TF_STATE_CONTAINER` only as optional
+advanced overrides; the normal configuration should leave them unset.
 
-Then set `TF_STATE_RESOURCE_GROUP=rg-snipeit-tfstate`,
-`TF_STATE_STORAGE_ACCOUNT=snipeittfstate01`, and
-`TF_STATE_CONTAINER=vm-state` as repo/environment **Variables** in step
-6 below — one storage account/container is shared by both the
-`vm-staging` and `prod` environments, they just write to different
-`key`s (`vm-staging.tfstate` / `prod.tfstate`) inside it automatically,
-so they can never clobber each other's state.
+The state backend is deliberately **outside** the VM resource group. This is
+what makes the destroy path safe: Terraform can destroy the VM stack while
+retaining the state it needs to record that destruction. The environments use
+separate backend keys:
 
----
+```text
+vm-staging.tfstate
+prod.tfstate
+```
+
+The lifecycle is therefore:
+
+```text
+workflow
+  ├─ register providers
+  ├─ create/reuse Terraform state RG + Storage Account + container
+  ├─ grant Blob Data Contributor to CI identity
+  ├─ terraform init
+  └─ terraform plan/apply/destroy
+```
+
+If the state backend already exists, the bootstrap step simply reuses it.
+There is no recurring scheduler and no manual storage maintenance.
+
+> **Important:** `terraform destroy` intentionally does **not** destroy the
+> Terraform state resource group or Storage Account. Those are bootstrap
+> infrastructure for the lifecycle itself.
 
 ## 2. Set up Cloudflare Tunnel (no open ports, no Bastion)
 
@@ -309,104 +345,44 @@ only if you want a specific known password on first login.
 
 ---
 
-## 5. Configure GitHub OIDC federation (for Terraform + no client secrets)
+## 5. Configure GitHub OIDC federation (automated)
 
-Same mechanism `DEPLOYMENT.md`'s Container Apps path already uses — a
-federated Azure AD App Registration lets GitHub Actions authenticate to
-Azure with a short-lived OIDC token instead of a long-lived client secret
-sitting in a GitHub secret. If you already have one set up for this repo
-(from following `DEPLOYMENT.md`), you can reuse it and skip to step 6 —
-just make sure its federated credential's subject matches the branches/
-environments this VM path's workflows actually run from.
+You do not manually create the Azure App Registration, service principal,
+subscription role assignment, or federated credentials.
+
+Those are created/reused by:
 
 ```bash
-az ad app create --display-name "snipeit-lite-vm-deploy" \
-  --query appId -o tsv
-# -> save this as AZURE_CLIENT_ID
-
-az ad sp create --id <appId-from-above>
-
-az account show --query tenantId -o tsv
-# -> save this as AZURE_TENANT_ID
+./scripts/bootstrap-azure-github.sh
 ```
 
-Grant it Contributor on the subscription (or scope it tighter to a
-specific resource group if you'd rather pre-create one):
+The script uses your current `az` subscription and `gh` repository context,
+then configures the four GitHub Environment subjects used by this repository.
+It is safe to run again; existing identities, role assignments, and federated
+credentials are reused.
 
-```bash
-az role assignment create \
-  --assignee <appId> \
-  --role Contributor \
-  --scope /subscriptions/<subscription-id>
-```
+The only values you should expect to see in GitHub as Azure bootstrap values
+are:
 
-**Also grant it access to the Terraform state storage account from step
-1 now** — Contributor above is an Azure Resource Manager (control-plane)
-role and deliberately does **not** include data-plane blob access, so
-without this separate grant `terraform init` fails with `Failed to get
-existing workspaces: ... AuthorizationPermissionMismatch` the first time
-this app registration's OIDC identity tries to read/write state:
+- `AZURE_CLIENT_ID`
+- `AZURE_TENANT_ID`
+- `AZURE_SUBSCRIPTION_ID`
 
-```bash
-az role assignment create --role "Storage Blob Data Contributor" \
-  --assignee <appId> \
-  --scope "$(az storage account show -n snipeittfstate01 -g rg-snipeit-tfstate --query id -o tsv)"
-```
+The VM Terraform workflow authenticates to both Azure Resource Manager and the
+Terraform `azurerm` backend using GitHub Actions OIDC. No Azure client secret
+is stored in the repository or required by the VM infrastructure workflow.
 
-(Substitute your own state resource group/storage account names from
-step 1 if you changed them. RBAC role assignments can take a minute or
-two to propagate — if `terraform init` still fails immediately after
-running this, wait a moment and re-run the workflow before assuming
-something else is wrong.)
-
-Add federated credentials — one per environment/workflow combination that
-needs to authenticate. At minimum, for `infra-deploy-vm.yml` (triggered by
-`workflow_dispatch`, GitHub Environment `prod` or `vm-staging` — see the
-callout right after this code block for why it's `vm-staging` and not
-plain `staging`):
-
-```bash
-az ad app federated-credential create --id <appId> --parameters '{
-  "name": "snipeit-lite-vm-prod",
-  "issuer": "https://token.actions.githubusercontent.com",
-  "subject": "repo:<your-org>/<your-repo>:environment:prod",
-  "audiences": ["api://AzureADTokenExchange"]
-}'
-
-az ad app federated-credential create --id <appId> --parameters '{
-  "name": "snipeit-lite-vm-staging",
-  "issuer": "https://token.actions.githubusercontent.com",
-  "subject": "repo:<your-org>/<your-repo>:environment:vm-staging",
-  "audiences": ["api://AzureADTokenExchange"]
-}'
-```
-
-> **Why `vm-staging` and not `staging`?** If you've also set up
-> `DEPLOYMENT.md`'s Container Apps path against this same repo, it already
-> owns a GitHub Environment literally called `staging` — with its own
-> `AZURE_CLIENT_ID`/`AZURE_TENANT_ID`/`AZURE_SUBSCRIPTION_ID` (federated to
-> a subject of `environment:staging`) and its own `POSTGRES_PASSWORD`/
-> `JWT_SECRET_KEY`/etc. Every workflow on this VM path
-> (`infra-deploy-vm.yml`, `deploy-azure-vm.yml`, `sync-secrets-vm.yml`)
-> uses `vm-staging` as its second environment's name specifically so it
-> never reads from or overwrites that Environment — the two paths' second
-> environments are fully independent, same as `prod` (VM) already is from
-> `production` (Container Apps). See [Using both deployment
-> targets](#using-both-deployment-targets-optional) below for the full
-> picture, including what happens if you rename this back to `staging`
-> yourself.
-
-`deploy-azure-vm.yml`'s `deploy` job also declares `environment:`, but it
-never calls `azure/login` (it only SSHes to the VM) — it doesn't need a
-federated credential of its own.
-
----
+> **Bootstrap boundary:** GitHub Actions cannot create the first Azure
+> identity it needs to authenticate. That is why the `az login` +
+> `gh auth login` + bootstrap command is the one-time local step. Once it has
+> run, Azure infrastructure provisioning and Terraform state provisioning are
+> owned by GitHub Actions.
 
 ## 6. Set GitHub Environment secrets/variables
 
 In GitHub: **Settings → Environments** → create `prod` (and `vm-staging`
 if you want a second, cheaper/smaller environment for testing changes
-first — see step 5's callout above for why it's not just `staging`). For
+first — see the OIDC bootstrap step's callout above for why it's not just `staging`). For
 `prod`, consider adding a **required reviewer** protection rule — this
 is what makes `infra-deploy-vm.yml`'s `destroy` action require a second
 person's approval before it can run (see that workflow's comment on the
@@ -500,11 +476,8 @@ Add these to each Environment (Secrets unless marked **Variable**):
 |---|---|---|
 | `ENVIRONMENT` (**Variable**, not secret) | `production` for a minified+obfuscated frontend build and `ENVIRONMENT=production` in the containers; `development`/unset for minified-only and `ENVIRONMENT=development` -- set this independently on EACH Environment page (`prod`, and `vm-staging` if used) | `deploy-azure-vm.yml` (`resolve-target` job) |
 | `FRONTEND_BUILD_TARGET` (**Variable**, not secret) | `react` to ship the React "Ledger" SPA; unset/anything else for the default legacy static site -- the two are mutually exclusive (no combined option) -- set independently on EACH Environment page | `deploy-azure-vm.yml` (`resolve-target` job), `infra-deploy-vm.yml` |
-| `TF_STATE_RESOURCE_GROUP` (**Variable**, not secret) | `rg-snipeit-tfstate` from step 1's state backend setup | `infra-deploy-vm.yml` |
-| `TF_STATE_STORAGE_ACCOUNT` (**Variable**, not secret) | `snipeittfstate01` (or whatever you named it) from step 1 | `infra-deploy-vm.yml` |
-| `TF_STATE_CONTAINER` (**Variable**, not secret) | `vm-state` from step 1 | `infra-deploy-vm.yml` |
-| `AZURE_CLIENT_ID` | App Registration's appId (step 5) | `infra-deploy-vm.yml` |
-| `AZURE_TENANT_ID` | Tenant ID (step 5) | `infra-deploy-vm.yml` |
+| `AZURE_CLIENT_ID` | App Registration's appId (the OIDC bootstrap step) | `infra-deploy-vm.yml` |
+| `AZURE_TENANT_ID` | Tenant ID (the OIDC bootstrap step) | `infra-deploy-vm.yml` |
 | `AZURE_SUBSCRIPTION_ID` | Subscription ID (step 1) | `infra-deploy-vm.yml` |
 | `VM_SSH_PUBLIC_KEY` | Contents of `snipeit_vm_deploy_key.pub` (step 3) | `infra-deploy-vm.yml` |
 | `VM_SSH_PRIVATE_KEY` | Contents of `snipeit_vm_deploy_key` (step 3) | `deploy-azure-vm.yml`, `sync-secrets-vm.yml` |
@@ -663,7 +636,16 @@ next invocation.
 ```bash
 cd infra-vm
 az login   # if you haven't already in this shell
-terraform init
+# The CI workflow creates the remote backend automatically. For an optional
+# local plan, derive the same deterministic state-account name instead of
+# manually creating or looking up a storage account.
+SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
+STATE_ACCOUNT="snipeittfstate$(printf '%s' "$SUBSCRIPTION_ID" | sha256sum | cut -c1-12)"
+terraform init -input=false \
+  -backend-config="resource_group_name=rg-snipeit-tfstate" \
+  -backend-config="storage_account_name=$STATE_ACCOUNT" \
+  -backend-config="container_name=vm-state" \
+  -backend-config="key=prod.tfstate"
 
 export TF_VAR_subscription_id="<from step 1>"
 export TF_VAR_ssh_public_key="$(cat ../snipeit_vm_deploy_key.pub)"
@@ -696,6 +678,13 @@ state and the run history both live in one place your whole team can see.
 ---
 
 ## 8. Provision the VM (`infra-deploy-vm.yml`)
+
+The workflow also bootstraps Terraform's remote state automatically. There is
+nothing to create manually for Terraform state. For `destroy`, the workflow
+requires an explicit confirmation string (`DESTROY vm-staging` or `DESTROY
+prod`) before Terraform is allowed to remove the tracked VM resources; the
+separate state resource group/storage account is retained.
+
 
 In GitHub: **Actions → Deploy VM Infrastructure (Terraform) → Run workflow**.
 
@@ -894,11 +883,11 @@ which slot most recently won a rollout.
    Finally stop+remove `blue`'s containers so it's idle again, ready for
    the next incoming image.
 
-**On any failed check before step 5**, the rollout stops immediately:
+**On any failed check before the OIDC bootstrap step**, the rollout stops immediately:
 traffic is left at (or restored to) 100% on the still-good `green` slot,
 and `blue`'s containers are stopped — `green` is never touched until
 `blue` has already proven itself end to end, so a bad deploy never causes
-an outage, it just doesn't roll out. **A failure DURING step 5 itself**
+an outage, it just doesn't roll out. **A failure DURING the OIDC bootstrap step itself**
 (green's own health check failing after blue had already proven itself at
 100% traffic) is handled differently: the already-proven new image is
 left serving traffic on `blue` rather than reverting to `green`'s old,
@@ -1584,9 +1573,11 @@ would show it wanting to create *everything*, not just replace the VM:
 ```bash
 cd infra-vm
 az login
+SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
+STATE_ACCOUNT="snipeittfstate$(printf '%s' "$SUBSCRIPTION_ID" | sha256sum | cut -c1-12)"
 terraform init -input=false \
   -backend-config="resource_group_name=rg-snipeit-tfstate" \
-  -backend-config="storage_account_name=<your TF_STATE_STORAGE_ACCOUNT>" \
+  -backend-config="storage_account_name=$STATE_ACCOUNT" \
   -backend-config="container_name=vm-state" \
   -backend-config="key=prod.tfstate"   # or vm-staging.tfstate
 

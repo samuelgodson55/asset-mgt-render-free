@@ -648,10 +648,9 @@ snipe-it-lite/
 │       │                                  # .github/scripts/aca-blue-
 │       │                                  # green.sh) with automatic rollback
 │       │                                  # on a failed smoke test. Replaces
-│       │                                  # what used to be two separate
-│       │                                  # copy-pasted files
-│       │                                  # (deploy-azure-staging.yml /
-│       │                                  # deploy-azure-production.yml)
+│       │                                  # replaces the old separate
+│       │                                  # staging/production workflows;
+│       │                                  # choose the target in workflow_dispatch
 │       ├── release.yml                 # Triggered by `git tag v1.x.x` push --
 │       │                                # builds + tags both images with the
 │       │                                # VERSION (not just a SHA), pushes
@@ -785,7 +784,7 @@ snipe-it-lite/
 │   ├── default.conf.template        # nginx config template -- see "Deploying
 │   │                                  # Across Environments" section above
 │   └── docker-entrypoint.d/
-│       └── 15-detect-resolver-ip.sh  # Auto-detects RESOLVER_IP from
+│       └── 15-detect-resolver-ip.envsh  # Auto-detects RESOLVER_IP from
 │                                       # /etc/resolv.conf if it isn't set
 │                                       # (must stay non-executable -- see
 │                                       # its own header comment for why)
@@ -1229,13 +1228,13 @@ image works in all three tiers — only these environment variables change:
 | `PORT` | Port nginx listens on inside its container | `80` | Whatever port that platform injects |
 | `BACKEND_HOST` | Hostname nginx proxies `/api/*` to | `backend` (the Compose service name) | Your backend service's real hostname on that platform |
 | `BACKEND_PORT` | Port on that host | `8000` | Whatever port your backend actually listens on there |
-| `RESOLVER_IP` | Internal DNS server nginx uses to re-resolve `BACKEND_HOST` on every request (so a backend redeploy never leaves nginx pointed at a stale IP) | `127.0.0.11` (Docker's built-in DNS) | Auto-detected at boot from `/etc/resolv.conf` if left unset — see [`nginx/docker-entrypoint.d/15-detect-resolver-ip.sh`](nginx/docker-entrypoint.d/15-detect-resolver-ip.sh) |
+| `RESOLVER_IP` | Internal DNS server nginx uses to re-resolve `BACKEND_HOST` on every request (so a backend redeploy never leaves nginx pointed at a stale IP) | `127.0.0.11` (Docker's built-in DNS) | Auto-detected at boot from `/etc/resolv.conf` if left unset — see [`nginx/docker-entrypoint.d/15-detect-resolver-ip.envsh`](nginx/docker-entrypoint.d/15-detect-resolver-ip.envsh) |
 
 `PORT`, `BACKEND_HOST`, and `BACKEND_PORT` all have sensible defaults baked
 into `frontend/Dockerfile`. `RESOLVER_IP` deliberately does **not** — instead of
 hardcoding a guess that could go stale on some future platform, it's
 auto-detected at container boot (see the table above and
-[`nginx/docker-entrypoint.d/15-detect-resolver-ip.sh`](nginx/docker-entrypoint.d/15-detect-resolver-ip.sh)
+[`nginx/docker-entrypoint.d/15-detect-resolver-ip.envsh`](nginx/docker-entrypoint.d/15-detect-resolver-ip.envsh)
 for why). All four are already wired up as `environment:` overrides on the
 `frontend` service in `docker-compose.yml`, sourced from `.env` (see
 `.env.example`) — Compose explicitly pins `RESOLVER_IP=127.0.0.11` there, so
@@ -1369,15 +1368,15 @@ a Kubernetes Service DNS name like `backend.default.svc.cluster.local`, or
 an internal ALB/NLB hostname). Leave `RESOLVER_IP` unset unless you've
 confirmed a specific value your platform needs — it's auto-detected from
 `/etc/resolv.conf` at boot otherwise (see
-[`nginx/docker-entrypoint.d/15-detect-resolver-ip.sh`](nginx/docker-entrypoint.d/15-detect-resolver-ip.sh)).
+[`nginx/docker-entrypoint.d/15-detect-resolver-ip.envsh`](nginx/docker-entrypoint.d/15-detect-resolver-ip.envsh)).
 
 **Deploying to Azure specifically?** This project ships a complete,
 fully-automated, cost-optimized version of this pattern already —
-[`infra/main.bicep`](infra/main.bicep) (four Azure Container Apps —
-`frontend`, `backend`, `db`, `redis` — `frontend`/`backend` split so each
-scales independently, with Postgres/Redis running as containers instead of
-managed services and both images pulled from Docker Hub instead of Azure
-Container Registry, to keep monthly cost as low as realistically possible)
+[`infra/main.bicep`](infra/main.bicep) (three Azure Container Apps —
+`frontend`, `backend`, `redis` — plus a managed Azure Database for
+PostgreSQL Flexible Server and one Container Apps `migrate` Job;
+`frontend`/`backend` scale independently, Redis remains internal-only and
+Postgres uses Microsoft-managed database storage)
 plus
 `.github/workflows/deploy-azure-aca.yml` /
 `infra-deploy.yml` — instead of the generic
@@ -3417,18 +3416,21 @@ Cloudflare Tunnel replaces both inbound SSH and any open inbound app port
 (no public IP ever has port 22/80/443 listening on it), and `docker
 compose -f docker-compose.vm.yml` runs the same six services as local dev
 as plain containers pulled by tag from Docker Hub, plus `caddy` (TLS
-re-presentation) and `cloudflared` (the tunnel). Same manual-`workflow_
-dispatch`-only shape as the Container Apps path above -- a pushed version
-tag publishes the images but you still run this workflow by hand with that
-tag to deploy it -- just over SSH instead of `az containerapp update`. Full
-one-time setup (Cloudflare
-account, Terraform apply, GitHub OIDC federation, secrets) and day-2
-tasks (rollback, growing the data disk, Google Drive backups, updating
-secrets on a running VM) live in their entirety in
-[`DEPLOYMENT_VM.md`](DEPLOYMENT_VM.md) — pick this path over Container
-Apps if you'd rather manage one predictably-priced VM than a serverless
-control plane, or don't have an Azure subscription tier that supports
-Container Apps at all.
+re-presentation) and `cloudflared` (the tunnel). The VM infrastructure is
+fully lifecycle-managed by GitHub Actions: the workflow creates/reuses the
+Terraform state resource group, Storage Account, and blob container before
+`terraform init`, then owns Terraform plan/apply/destroy. The state backend is
+kept outside the VM resource group so a destroy cannot delete the state it
+needs. The only one-time Azure bootstrap is the local OIDC identity setup
+(`az login`, `gh auth login`, then `scripts/bootstrap-azure-github.sh`).
+After that, no VM resource group or Terraform storage needs to be created
+manually.
+
+The application deployment remains manual-`workflow_dispatch`-only: a pushed
+version tag publishes the images but does not deploy them. Full setup,
+Cloudflare configuration, OIDC bootstrap, remote-state lifecycle, rollback,
+growing the data disk, Google Drive backups, and updating secrets on a running
+VM live in [`DEPLOYMENT_VM.md`](DEPLOYMENT_VM.md).
 
 ### Render
 

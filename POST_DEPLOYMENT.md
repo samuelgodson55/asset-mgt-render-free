@@ -11,11 +11,15 @@ point:
 3. [Mapping a custom domain](#3-mapping-a-custom-domain)
 4. [Site branding, security limits & operational tuning](#4-site-branding-security-limits--operational-tuning)
 
-All four follow the same shape: set some GitHub repository config, then
-re-run `infra-deploy.yml` for that environment (Actions tab → "Deploy Azure
-Infrastructure" → Run workflow → pick `staging` or `production`). That
-workflow is safe to re-run any time — see its own top-of-file comment; it
-never rolls back a running app's image, it only reconciles config.
+All four follow the same shape: set some GitHub Environment config, then
+re-run `infra-deploy.yml` for that environment (Actions tab → **Deploy ACA
+Infrastructure (Bicep)** → Run workflow → pick `staging` or `production` →
+`apply`). The workflow derives the resource group automatically
+(`rg-snipeit-lite-staging` or `rg-snipeit-lite-prod`), registers the Bicep
+providers, and reconciles the Deployment Stack. You do not create or select
+a resource group manually. It also reads the currently deployed backend
+image tag before applying infra changes so an infrastructure reconciliation
+does not silently replace a running application image with a placeholder.
 
 GitHub gives you two kinds of repository config, and this doc uses both —
 the table under each section below says which one applies:

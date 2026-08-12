@@ -35,9 +35,9 @@
 # driven off the same `$ENVIRONMENT`/`$RESOURCE_GROUP`/`$BACKEND_IMAGE`/
 # `$FRONTEND_IMAGE` variables, plus the `resolve-target` job's `build_env`
 # output):
-#   - Resource group: `staging` vs. `production` GitHub Environment secret
-#     (`STAGING_RESOURCE_GROUP`/`PROD_RESOURCE_GROUP`), picked by the
-#     `environment` dropdown.
+#   - Resource group: derived deterministically from the selected target:
+#     `staging` -> `rg-snipeit-lite-staging`, `production` ->
+#     `rg-snipeit-lite-prod`. There is no resource-group GitHub secret.
 #   - Image repo (`-staging` suffix vs. none): picked independently, by
 #     each target GitHub Environment's own `ENVIRONMENT` Actions variable
 #     -- see the `build_env` bullet below, `resolve-target`'s

@@ -20,6 +20,19 @@
 #   - once, to create a brand-new environment (staging or prod)
 #   - again, any time infra/main.bicep itself changes and you want that
 #     change applied
+#   - with action=destroy to safely remove ONLY resources tracked by the
+#     Azure Deployment Stack for that environment
+#
+# Resource groups are derived from the environment name and created by this
+# workflow. No RESOURCE_GROUP secret is required:
+#   staging    -> rg-snipeit-lite-staging
+#   production -> rg-snipeit-lite-prod
+#
+# The workflow also registers the providers used by infra/main.bicep. The
+# Bicep stack is managed through Azure Deployment Stacks so destroy behaves
+# like Terraform destroy: Azure deletes the resources tracked by the stack
+# (`action-on-unmanage=deleteResources`) rather than blindly deleting the
+# entire resource group. The parent resource group is intentionally retained.
 #
 # SAFE TO RE-RUN: it reads whatever image tags are CURRENTLY deployed on
 # `backend`/`frontend` first and passes those back in as `initialImageTag`
@@ -33,10 +46,21 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: 'Which environment to provision/update'
+        description: 'Which environment to provision/update/destroy'
         required: true
         type: choice
         options: [staging, production]
+      action:
+        description: 'Bicep stack action'
+        required: true
+        type: choice
+        options: [plan, apply, destroy]
+        default: plan
+      destroy_confirmation:
+        description: 'Required only for destroy: type DESTROY-STAGING or DESTROY-PRODUCTION exactly'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   id-token: write # required for OIDC federated login (azure/login) -- no client secret stored anywhere
@@ -44,11 +68,13 @@ permissions:
 
 jobs:
   deploy-infra:
+    if: ${{ github.event.inputs.action != 'destroy' }}
     runs-on: ubuntu-latest
     environment: ${{ github.event.inputs.target }}
     env:
-      RESOURCE_GROUP: ${{ github.event.inputs.target == 'production' && secrets.PROD_RESOURCE_GROUP || secrets.STAGING_RESOURCE_GROUP }}
       ENV_NAME: ${{ github.event.inputs.target == 'production' && 'prod' || 'staging' }}
+      RESOURCE_GROUP: rg-snipeit-lite-${{ github.event.inputs.target == 'production' && 'prod' || 'staging' }}
+      STACK_NAME: snipeit-lite-${{ github.event.inputs.target == 'production' && 'prod' || 'staging' }}
       # NOTE: deliberately checked as == 'staging' (not == 'production' && ''
       # || '-staging') -- GitHub Actions expressions use JS-style
       # truthy/falsy && / ||, and '' is falsy, so a `production && '' ||
@@ -72,19 +98,28 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Ensure resource group exists
-        # AZURE_LOCATION is a repo-level Variable, not a Secret -- an Azure
-        # region slug (e.g. "eastus2") isn't sensitive. See this repo's
-        # Secrets vs Variables convention: infra-deploy-vm.yml's equivalent
-        # (TF_VAR_location) reads the exact same AZURE_LOCATION Variable, so
-        # both deploy paths share one name and one classification for "what
-        # Azure region" instead of drifting (this used to be a repo Secret
-        # here, named differently from the VM path's Variable).
+      - name: Register Bicep resource providers
         run: |
-          az group show --name "$RESOURCE_GROUP" 2>/dev/null || \
-          az group create --name "$RESOURCE_GROUP" --location "${{ vars.AZURE_LOCATION || 'eastus2' }}"
+          set -euo pipefail
+          for provider in \
+            Microsoft.App \
+            Microsoft.DBforPostgreSQL \
+            Microsoft.Insights \
+            Microsoft.Network \
+            Microsoft.OperationalInsights \
+            Microsoft.Storage
+          do
+            echo "Registering $provider (already registered is a no-op)"
+            az provider register --namespace "$provider" --wait
+          done
 
-      
+      - name: Ensure resource group exists
+        run: |
+          set -euo pipefail
+          az group show --name "$RESOURCE_GROUP" >/dev/null 2>&1 || \
+            az group create --name "$RESOURCE_GROUP" \
+              --location "${{ vars.AZURE_LOCATION || 'eastus2' }}"
+
       # main.bicep's alerting section (action group + 3 scheduled query
       # alert rules, see that file's "Alerting" comment) only deploys when
       # ALERT_EMAIL_ADDRESS is set -- both are Microsoft.Insights resource
@@ -287,6 +322,7 @@ jobs:
       # silently move production traffic to an infra-created revision or
       # leave the next blue-green deploy with the wrong "active" revision.
       - name: Snapshot current ACA traffic before infra deployment
+        if: ${{ github.event.inputs.action == 'apply' }}
         id: traffic_before
         run: |
           mkdir -p "$RUNNER_TEMP/aca-traffic"
@@ -314,11 +350,90 @@ jobs:
             cat "$RUNNER_TEMP/aca-traffic/${APP}.json"
           done
 
-      - name: Deploy Bicep
+      - name: Validate Bicep deployment stack
+        if: ${{ github.event.inputs.action == 'plan' }}
         run: |
-          az deployment group create \
+          az stack group validate \
+            --name "$STACK_NAME" \
             --resource-group "$RESOURCE_GROUP" \
             --template-file infra/main.bicep \
+            --action-on-unmanage deleteResources \
+            --deny-settings-mode none \
+            --parameters \
+              environmentName="$ENV_NAME" \
+              dockerHubBackendImage="${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend$ENV_SUFFIX" \
+              dockerHubFrontendImage="${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-frontend$ENV_SUFFIX" \
+              initialImageTag="${{ steps.verify.outputs.tag }}" \
+              dockerHubUsername="${{ secrets.DOCKERHUB_USERNAME }}" \
+              dockerHubToken="${{ secrets.DOCKERHUB_TOKEN }}" \
+              backendMinReplicas=${{ steps.replicas.outputs.backend_min }} \
+              frontendMinReplicas=${{ steps.replicas.outputs.frontend_min }} \
+              postgresPassword="${{ secrets.POSTGRES_PASSWORD }}" \
+              postgresSkuName="${{ vars.POSTGRES_SKU_NAME || 'Standard_B1ms' }}" \
+              postgresStorageGb=${{ vars.POSTGRES_STORAGE_GB || 32 }} \
+              redisPassword="${{ secrets.REDIS_PASSWORD }}" \
+              jwtSecretKey="${{ secrets.JWT_SECRET_KEY }}" \
+              rootAdminBootstrapPassword="${{ secrets.ROOT_ADMIN_BOOTSTRAP_PASSWORD }}" \
+              customDomain="${{ vars.CUSTOM_DOMAIN }}" \
+              customDomainCertificateId="${{ steps.cert.outputs.id }}" \
+              alertEmailAddress="${{ secrets.ALERT_EMAIL_ADDRESS }}" \
+              notificationsEnabled=${{ vars.NOTIFICATIONS_ENABLED == 'true' }} \
+              smtpHost="${{ secrets.SMTP_HOST }}" \
+              smtpUsername="${{ secrets.SMTP_USERNAME }}" \
+              smtpPassword="${{ secrets.SMTP_PASSWORD }}" \
+              smtpFromEmail="${{ secrets.SMTP_FROM_EMAIL }}" \
+              emailProvider="${{ vars.EMAIL_PROVIDER || 'smtp' }}" \
+              brevoApiKey="${{ secrets.BREVO_API_KEY }}" \
+              resendApiKey="${{ secrets.RESEND_API_KEY }}" \
+              adminNotificationEmails="${{ secrets.ADMIN_NOTIFICATION_EMAILS }}" \
+              gdriveBackupEnabled=${{ vars.BACKUP_GDRIVE_ENABLED == 'true' }} \
+              gdriveOauthClientId="${{ secrets.BACKUP_GDRIVE_OAUTH_CLIENT_ID }}" \
+              gdriveOauthClientSecret="${{ secrets.BACKUP_GDRIVE_OAUTH_CLIENT_SECRET }}" \
+              gdriveOauthRefreshToken="${{ secrets.BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN }}" \
+              gdriveFolderId="${{ secrets.BACKUP_GDRIVE_FOLDER_ID }}" \
+              enableApiDocs=${{ vars.ENABLE_API_DOCS == 'true' }} \
+              siteName="${{ vars.SITE_NAME || 'Snipe-IT Lite' }}" \
+              logLevel="${{ vars.LOG_LEVEL || 'INFO' }}" \
+              loginRateLimitMax=${{ vars.LOGIN_RATE_LIMIT_MAX || 5 }} \
+              loginRateLimitWindowSeconds=${{ vars.LOGIN_RATE_LIMIT_WINDOW_SECONDS || 60 }} \
+              accountLockoutMaxAttempts=${{ vars.ACCOUNT_LOCKOUT_MAX_ATTEMPTS || 5 }} \
+              accountLockoutDurationMinutes=${{ vars.ACCOUNT_LOCKOUT_DURATION_MINUTES || 15 }} \
+              superAdminUsername="${{ vars.SUPER_ADMIN_USERNAME || 'superadmin' }}" \
+              superAdminName="${{ vars.SUPER_ADMIN_NAME || 'Super Admin' }}" \
+              smtpPort=${{ vars.SMTP_PORT || 587 }} \
+              smtpUseTls=${{ vars.SMTP_USE_TLS != 'false' }} \
+              smtpUseSsl=${{ vars.SMTP_USE_SSL == 'true' }} \
+              overdueDigestHoursUtc="${{ vars.OVERDUE_DIGEST_HOURS_UTC || '8' }}" \
+              dueSoonReminderDays=${{ vars.DUE_SOON_REMINDER_DAYS || 2 }} \
+              dueSoonDigestHoursUtc="${{ vars.DUE_SOON_DIGEST_HOURS_UTC || '8' }}" \
+              sendIndividualHolderReminders=${{ vars.SEND_INDIVIDUAL_HOLDER_REMINDERS != 'false' }} \
+              extensionRequestSlaHours=${{ vars.EXTENSION_REQUEST_SLA_HOURS || 24 }} \
+              quotationSlaHours=${{ vars.QUOTATION_SLA_HOURS || 24 }} \
+              approvalSlaCheckIntervalMinutes=${{ vars.APPROVAL_SLA_CHECK_INTERVAL_MINUTES || 60 }} \
+              approvalSlaEscalationRepeatHours=${{ vars.APPROVAL_SLA_ESCALATION_REPEAT_HOURS || 24 }} \
+              sendQuotationRecipientEmails=${{ vars.SEND_QUOTATION_RECIPIENT_EMAILS != 'false' }} \
+              displayTimezone="${{ vars.DISPLAY_TIMEZONE || 'Africa/Lagos' }}" \
+              currencyCode="${{ vars.CURRENCY_CODE || 'NGN' }}" \
+              catalogShowStockToStaffCustomer=${{ vars.CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER == 'true' }} \
+              backupHoursUtc="${{ vars.BACKUP_HOURS_UTC || '3' }}" \
+              backupRetentionCount=${{ vars.BACKUP_RETENTION_COUNT || 7 }} \
+              otelEnabled=${{ vars.OTEL_ENABLED == 'true' }} \
+              otelServiceName="${{ vars.OTEL_SERVICE_NAME || 'snipeit-lite-backend' }}" \
+              otelExporterOtlpEndpoint="${{ vars.OTEL_EXPORTER_OTLP_ENDPOINT }}" \
+              otelExporterOtlpHeaders="${{ secrets.OTEL_EXPORTER_OTLP_HEADERS }}" \
+              otelTracesSampleRatio="${{ vars.OTEL_TRACES_SAMPLE_RATIO || '1.0' }}" \
+              otelAzureMonitorEnabled=${{ vars.OTEL_AZURE_MONITOR_ENABLED == 'true' }}
+
+      - name: Deploy Bicep deployment stack
+        if: ${{ github.event.inputs.action == 'apply' }}
+        run: |
+          az stack group create \
+            --name "$STACK_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --template-file infra/main.bicep \
+            --action-on-unmanage deleteResources \
+            --deny-settings-mode none \
+            --yes \
             --parameters \
               environmentName="$ENV_NAME" \
               dockerHubBackendImage="${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend$ENV_SUFFIX" \
@@ -457,7 +572,77 @@ jobs:
           cleanup_new_zero_traffic backend
           cleanup_new_zero_traffic frontend
 
-      - name: Show outputs
+      - name: Show Bicep stack state
+        if: ${{ github.event.inputs.action == 'apply' }}
         run: |
-          az deployment group show --resource-group "$RESOURCE_GROUP" --name main \
-            --query properties.outputs -o json
+          az stack group show \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "$STACK_NAME" \
+            --query "{stack:name,resourceGroup:resourceGroup,managedResourceCount:length(resources),resources:resources}" \
+            -o json
+
+  destroy-infra:
+    if: ${{ github.event.inputs.action == 'destroy' }}
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.target }}
+    env:
+      ENV_NAME: ${{ github.event.inputs.target == 'production' && 'prod' || 'staging' }}
+      RESOURCE_GROUP: rg-snipeit-lite-${{ github.event.inputs.target == 'production' && 'prod' || 'staging' }}
+      STACK_NAME: snipeit-lite-${{ github.event.inputs.target == 'production' && 'prod' || 'staging' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Azure login (OIDC, no secret)
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Verify destroy confirmation
+        env:
+          CONFIRMATION: ${{ github.event.inputs.destroy_confirmation }}
+        run: |
+          set -euo pipefail
+          expected="DESTROY-${{ github.event.inputs.target }}"
+          if [ "$CONFIRMATION" != "$expected" ]; then
+            echo "::error::Destroy is intentionally blocked. Enter '$expected' in destroy_confirmation."
+            exit 1
+          fi
+
+      - name: Register deployment-stack provider
+        run: |
+          set -euo pipefail
+          az provider register --namespace Microsoft.Resources --wait
+
+      - name: Show managed resources before destroy
+        run: |
+          set -euo pipefail
+          if ! az group show --name "$RESOURCE_GROUP" >/dev/null 2>&1; then
+            echo "Resource group '$RESOURCE_GROUP' does not exist; nothing to destroy."
+            exit 0
+          fi
+          if ! az stack group show --name "$STACK_NAME" --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1; then
+            echo "::warning::Deployment stack '$STACK_NAME' does not exist. Nothing managed by this workflow will be deleted."
+            exit 0
+          fi
+          az stack group show \
+            --name "$STACK_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --query "{name:name,resourceGroup:resourceGroup,resources:resources}" \
+            -o json
+
+      - name: Destroy Bicep deployment stack
+        run: |
+          set -euo pipefail
+          if ! az stack group show --name "$STACK_NAME" --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1; then
+            echo "Stack already absent; nothing to destroy."
+            exit 0
+          fi
+          az stack group delete \
+            --name "$STACK_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --action-on-unmanage deleteResources \
+            --yes
+          echo "All resources tracked by '$STACK_NAME' have been requested for deletion."
+          echo "The resource group itself is intentionally retained."

@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased — Infrastructure documentation
+
+- Synchronized ACA deployment documentation with the current Bicep and
+  GitHub Actions implementation: deterministic environment resource-group
+  names, automatic provider registration, Deployment Stack plan/apply/destroy
+  semantics, environment-specific destroy confirmations, and the shared
+  OIDC bootstrap model.
+- Corrected stale references to the former `STAGING_RESOURCE_GROUP` /
+  `PROD_RESOURCE_GROUP` secrets and the former separate ACA staging/production
+  deployment workflows.
+- Synchronized the VM deployment documentation with the current automatic
+  Terraform-state bootstrap, including the deterministic subscription-derived
+  Storage Account name and the fact that `TF_STATE_*` values are optional
+  advanced overrides rather than required GitHub Environment configuration.
+
+
+- Documented the VM Terraform remote-state bootstrap as fully automated: the
+  workflow creates/reuses the dedicated state resource group, Storage Account,
+  blob container, and Blob Data Contributor RBAC before `terraform init`.
+- Removed the old documented requirement to manually provision Terraform state
+  storage or configure `TF_STATE_STORAGE_ACCOUNT` / `TF_STATE_CONTAINER`.
+- Documented the single unavoidable bootstrap boundary: local `az login`,
+  `gh auth login`, and `scripts/bootstrap-azure-github.sh` establish the GitHub
+  Actions OIDC identity; all subsequent Azure VM infrastructure lifecycle work
+  is owned by GitHub Actions.
+- Documented that Terraform destroy retains the remote-state infrastructure
+  while destroying the VM stack tracked by the environment state.
+- Updated the main deployment documentation to describe the VM and Bicep paths
+  consistently as no-manual-resource workflows.
+
 All notable changes to this project are documented here, one section per
 `git tag v*.*.*` release. Entries below the marker are inserted
 automatically by [`release.yml`](.github/workflows/release.yml) at

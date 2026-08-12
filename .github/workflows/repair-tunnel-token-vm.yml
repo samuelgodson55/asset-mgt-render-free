@@ -33,8 +33,9 @@
 # then re-run whichever workflow failed.
 #
 # Required repo/environment secrets (same Azure OIDC federation
-# infra-deploy-vm.yml already uses, plus that workflow's TF_STATE_* repo
-# Variables for locating state):
+# infra-deploy-vm.yml already uses). The Terraform state backend is
+# bootstrapped automatically before init, so no TF_STATE_* GitHub Variables
+# are required:
 #   AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID
 #                                         - same federated App Registration
 #                                           infra-deploy-vm.yml uses for
@@ -42,12 +43,6 @@
 #                                           here to `az login` so
 #                                           `az vm run-command invoke` is
 #                                           authorized against the VM
-#   TF_STATE_RESOURCE_GROUP, TF_STATE_STORAGE_ACCOUNT, TF_STATE_CONTAINER
-#                                         - repo/environment Variables,
-#                                           same ones infra-deploy-vm.yml
-#                                           uses to find the right state
-#                                           file (see that workflow's
-#                                           `terraform init` step)
 # -----------------------------------------------------------------------------
 name: Repair Cloudflare Tunnel token on Azure VM
 
@@ -91,9 +86,6 @@ jobs:
       ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       ARM_USE_OIDC: "true"
-      TF_STATE_RESOURCE_GROUP: ${{ vars.TF_STATE_RESOURCE_GROUP }}
-      TF_STATE_STORAGE_ACCOUNT: ${{ vars.TF_STATE_STORAGE_ACCOUNT }}
-      TF_STATE_CONTAINER: ${{ vars.TF_STATE_CONTAINER }}
 
     steps:
       - uses: actions/checkout@v7
@@ -103,17 +95,34 @@ jobs:
         with:
           terraform_version: "1.9.8"
 
-      - name: terraform init
-        # Same -backend-config flags / per-environment `key` as
-        # infra-deploy-vm.yml's own init step -- this MUST resolve to the
-        # exact same state file that workflow's applies write to, or the
-        # token/resource-group/vm-name read below would just be wrong.
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Bootstrap Terraform state backend
+        working-directory: .
         run: |
-          terraform init -input=false \
-            -backend-config="resource_group_name=${TF_STATE_RESOURCE_GROUP}" \
-            -backend-config="storage_account_name=${TF_STATE_STORAGE_ACCOUNT}" \
-            -backend-config="container_name=${TF_STATE_CONTAINER}" \
-            -backend-config="key=${{ inputs.environment }}.tfstate"
+          ./scripts/bootstrap-terraform-state.sh >> "$GITHUB_ENV"
+
+      - name: terraform init
+        # Resolve the exact same per-environment state file used by
+        # infra-deploy-vm.yml. The backend itself is created automatically.
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if terraform init -input=false \
+              -backend-config="resource_group_name=${TF_STATE_RESOURCE_GROUP}" \
+              -backend-config="storage_account_name=${TF_STATE_STORAGE_ACCOUNT}" \
+              -backend-config="container_name=${TF_STATE_CONTAINER}" \
+              -backend-config="key=${{ inputs.environment }}.tfstate"; then
+              exit 0
+            fi
+            echo "Terraform backend init attempt $attempt/5 failed; waiting for Azure RBAC propagation..."
+            sleep 15
+          done
+          exit 1
 
       - name: Read live tunnel token + VM identity from Terraform state
         id: tf
@@ -135,12 +144,6 @@ jobs:
           echo "resource_group=$RG" >> "$GITHUB_OUTPUT"
           echo "vm_name=$VM" >> "$GITHUB_OUTPUT"
 
-      - name: Azure login (OIDC)
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Write the render script
         # A file rather than an inline --scripts string so the token never

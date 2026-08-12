@@ -44,62 +44,17 @@ terraform {
   }
 
   # ---------------------------------------------------------------------
-  # Remote state -- REQUIRED, not optional. Terraform defaults to a LOCAL
-  # state file (infra-vm/terraform.tfstate) if no backend is configured,
-  # which is fine for a single person experimenting locally, but every
-  # infra-deploy-vm.yml run happens on a fresh, throwaway GitHub Actions
-  # runner -- its filesystem (and any local .tfstate written to it) is
-  # deleted the moment the job ends, whether that job succeeded, failed
-  # partway through, or was cancelled. Without a remote backend, the NEXT
-  # run then starts from a totally empty state, sees the resource group
-  # (and anything else the previous run managed to create before it
-  # failed) already sitting in Azure, and errors with "A resource with
-  # the ID ... already exists" -- the exact failure this backend fixes.
-  # With a remote backend, Terraform writes state after every single
-  # resource it touches (not just at the end of a successful apply), so
-  # a run that fails on, say, resource #6 of 10 leaves state for
-  # resources #1-5 safely in blob storage for the next run to pick up
-  # from -- no more manually deleting the resource group to retry.
+  # Remote state -- REQUIRED. The GitHub Actions workflow creates the
+  # dedicated state resource group/storage account/container automatically
+  # before `terraform init` (scripts/bootstrap-terraform-state.sh). Nothing
+  # needs to be provisioned manually and the state backend intentionally
+  # lives outside the VM resource group so `terraform destroy` cannot delete
+  # the state it needs to perform the destroy.
   #
-  # This is a PARTIAL backend config on purpose -- resource_group_name/
-  # storage_account_name/container_name/key are deliberately left out of
-  # this file and supplied instead via `terraform init -backend-config=...`
-  # flags (see infra-deploy-vm.yml's "terraform init" step), so the same
-  # config can point vm-staging and prod at two different state files
-  # (different `key`) without editing this file, and so no account-
-  # specific storage account name is hardcoded into version control.
-  #
-  # One-time setup, before the very first real (non-throwaway) deploy,
-  # create a small storage account for state manually (NOT via this same
-  # Terraform config -- state can't reliably bootstrap its own backend):
-  #
-  #   az group create -n rg-snipeit-tfstate -l eastus
-  #   az storage account create -n snipeittfstate01 \
-  #     --resource-group rg-snipeit-tfstate --sku Standard_LRS \
-  #     --min-tls-version TLS1_2 --allow-blob-public-access false
-  #   az storage container create -n vm-state \
-  #     --account-name snipeittfstate01 --auth-mode login
-  #
-  # Then set these as repo/environment Variables (not secrets -- none of
-  # this is sensitive, it's just where state lives) for each of the
-  # vm-staging/prod GitHub Environments: TF_STATE_RESOURCE_GROUP,
-  # TF_STATE_STORAGE_ACCOUNT, TF_STATE_CONTAINER. See DEPLOYMENT_VM.md's
-  # "One-time Azure setup" section for the full walkthrough, including
-  # the one-off `terraform init -migrate-state` if you're moving an
-  # existing local state file into this backend rather than starting
-  # clean.
-  #
-  # use_azuread_auth = true below means auth flows through Azure AD
-  # rather than a storage account access key (none is ever generated or
-  # stored anywhere). In infra-deploy-vm.yml this comes from the job's
-  # ARM_CLIENT_ID/ARM_TENANT_ID/ARM_SUBSCRIPTION_ID/ARM_USE_OIDC=true
-  # env vars -- direct GitHub Actions OIDC federation, no `az login` CLI
-  # session involved (the backend's Azure-CLI auth path only supports a
-  # User account, not the Service Principal a federated `az login`
-  # produces -- see that workflow's auth env-var comment for the full
-  # story). Running `terraform init`/`plan` locally instead, just run
-  # `az login` first -- the backend falls back to that CLI session fine
-  # when it's a real user, just not when it's a service principal.
+  # The backend is partial so the workflow can supply the resource group,
+  # storage account, container and per-environment key at init time. This
+  # keeps vm-staging and prod in separate state files while sharing one small
+  # state account per subscription.
   backend "azurerm" {
     use_azuread_auth = true
   }

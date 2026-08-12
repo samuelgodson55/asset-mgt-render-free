@@ -505,8 +505,23 @@ into its `image_tag` input.
 >   variable is set to now.
 >
 > The pipeline lives in `.github/workflows/` (`ci.yml`, `infra-deploy.yml`,
-`deploy-azure-aca.yml`, `release.yml`, `build-push-images.yml`)
-and the infrastructure lives in `infra/main.bicep`.
+`deploy-azure-aca.yml`, `release.yml`, `build-push-images.yml`) and the
+infrastructure lives in `infra/main.bicep`. The ACA infrastructure workflow
+derives the resource group from the selected environment; there is no
+`STAGING_RESOURCE_GROUP` or `PROD_RESOURCE_GROUP` GitHub secret.
+
+Current ACA resource-group names are deterministic:
+
+```text
+staging    -> rg-snipeit-lite-staging
+production -> rg-snipeit-lite-prod
+```
+
+`infra-deploy.yml` creates the selected resource group when it does not exist,
+registers the Azure resource providers used by `infra/main.bicep`, and then
+owns the Bicep Deployment Stack lifecycle. You do not create the resource
+group, Deployment Stack, Container Apps Environment, Storage Account,
+PostgreSQL Flexible Server, Container Apps, or migration Job manually.
 
 > **If you deployed an earlier version of this architecture** — either the
 > original managed-services design (Flexible Server + Azure Cache + ACR +
@@ -578,7 +593,7 @@ to `frontend`'s one public origin; nginx quietly reverse-proxies `/api/*`
 to `backend` over the Container Apps environment's internal DNS
 (`nginx/default.conf.template`'s `BACKEND_HOST`/`BACKEND_PORT` env vars —
 resolver auto-detected at boot, see
-`nginx/docker-entrypoint.d/15-detect-resolver-ip.sh`). Zero frontend code
+`nginx/docker-entrypoint.d/15-detect-resolver-ip.envsh`). Zero frontend code
 changes were needed for any of this.
 
 > **Considered and deliberately not used: Azure Static Web Apps for
@@ -643,179 +658,70 @@ not you ever push an image).
 
 ### One-time setup
 
-1. **Create a Docker Hub account and access token** (Docker Hub → Account
-   Settings → Security → New Access Token, "Read & Write" scope).
+1. **Authenticate the CLI once.** The workflow cannot bootstrap its own first
+   Azure identity: GitHub OIDC needs an Azure identity to exist before a
+   runner can call Azure. That is the one unavoidable bootstrap boundary.
+   You do **not** need to manually create an App Registration, service
+   principal, role assignment, resource group, or federated credentials.
 
-2. **Register the Azure resource providers `infra/main.bicep` needs** (one
-   time, per subscription):
+2. **Run the bootstrap helper after `az login` and `gh auth login`:**
    ```bash
-   az provider register --namespace Microsoft.App
-   az provider register --namespace Microsoft.OperationalInsights
-   az provider register --namespace Microsoft.Storage
-   az provider register --namespace Microsoft.Network
-   az provider register --namespace Microsoft.DBforPostgreSQL
+   az account set --subscription "<subscription-id>"
+   ./scripts/bootstrap-azure-github.sh
    ```
-   (`infra-deploy.yml` also registers `Microsoft.DBforPostgreSQL` — and,
-   conditionally, `Microsoft.Insights` if you set `ALERT_EMAIL_ADDRESS` —
-   automatically on every run, so this step is a belt-and-suspenders
-   one-time step, not strictly required before your first deploy. No
-   `Microsoft.ContainerRegistry`, `Microsoft.Cache`, or `Microsoft.KeyVault`
-   registration needed — none of those services are used.)
+   The helper registers the Azure providers used by the Bicep path, creates/reuses
+   the Microsoft Entra App Registration and service principal, grants subscription
+   Contributor, creates the exact GitHub Environment OIDC credentials used
+   by the workflows, and writes the three Azure OIDC values into the existing
+   GitHub Environments (`production`, `staging`, `prod`, `vm-staging`). The same
+   CI identity is reused across these four GitHub Environment subjects; it is
+   GitHub's environment-scoped OIDC subject that prevents an unrelated
+   environment from using the credential.
 
-3. **Create the two resource groups** (or let `infra-deploy.yml` create them
-   on first run):
-   ```bash
-   az group create --name rg-snipeit-lite-staging --location eastus2
-   az group create --name rg-snipeit-lite-prod --location eastus2
-   ```
-   (`eastus2` is used here instead of `eastus` because brand-new/Free Trial
-   subscriptions are frequently hit with `LocationIsOfferRestricted` on
-   `eastus` specifically for Azure Database for PostgreSQL Flexible Server —
-   `eastus2` and `centralus` are the two regions that most consistently work
-   on Free Trial/Pay-As-You-Go subscriptions. If `eastus2` also gets
-   restricted for your subscription, try `centralus` next — there's no way
-   to know in advance which region a given subscription is cleared for, so
-   this is trial and error. Whatever you pick, use the same region for both
-   commands above and for the `AZURE_LOCATION` Variable in step 5, and keep
-   `POSTGRES_SKU_NAME` on a `Standard_B*` (Burstable) tier — Burstable has
-   the widest regional availability of the three Flexible Server tiers.)
+   The helper is intentionally idempotent. Re-running it does not create
+   duplicate identities or federated credentials.
 
-4. **Set up OIDC federated login** for GitHub Actions: an Azure AD App
-   Registration, Contributor on both resource groups, a federated
-   credential per environment. Full steps:
-   [Azure docs: Connect GitHub Actions to Azure](https://learn.microsoft.com/azure/developer/github/connect-from-azure).
+3. **Do not create the ACA resource groups yourself.** `.github/workflows/
+   infra-deploy.yml` derives them as:
+   - `rg-snipeit-lite-staging`
+   - `rg-snipeit-lite-prod`
 
-5. **Add GitHub repository secrets** (Settings → Secrets and variables →
-   Actions), split across two GitHub **Environments** (`staging`,
-   `production`) where the value differs, repo-level where it doesn't:
+   The workflow creates the selected group automatically.
 
-   | Secret | Scope | Notes |
-   |---|---|---|
-   | `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` | per-environment | From the App Registration in step 4 |
-   | `STAGING_RESOURCE_GROUP` / `PROD_RESOURCE_GROUP` | repo | The two resource group names from step 3 |
-   | `DOCKERHUB_USERNAME` | repo | From step 1 |
-   | `DOCKERHUB_TOKEN` | repo | From step 1 |
-   | `POSTGRES_PASSWORD` | per-environment | Generate with `openssl rand -base64 24`, **not** `openssl rand -hex ...` — Azure Database for PostgreSQL Flexible Server requires 8-128 characters with at least 3 of {uppercase, lowercase, digit, symbol}; hex output is only digits + a-f (2 categories) and will be rejected. Different value per environment. |
-   | `REDIS_PASSWORD` | per-environment | `openssl rand -hex 16` is fine here — no complexity rule, this isn't Flexible Server. Different per environment. |
-   | `JWT_SECRET_KEY` | per-environment | Generate with `openssl rand -hex 32` |
-   | `ROOT_ADMIN_BOOTSTRAP_PASSWORD` | per-environment | Optional — the root admin's initial password. Leave unset to have `0002_bootstrap_root_admin.py` generate a random one and print it once instead (see README's "Viewing the one-time-generated root admin password"). The root admin's username/display name (`SUPER_ADMIN_USERNAME`/`SUPER_ADMIN_NAME`) are set separately — see the Variables table below, not here. |
-   | `SMTP_HOST` / `SMTP_USERNAME` / `SMTP_PASSWORD` / `SMTP_FROM_EMAIL` | per-environment | Optional — required together if `NOTIFICATIONS_ENABLED=true` (see the Variables list below). Any RFC 5321 SMTP server works (your own Postfix, SendGrid, Mailgun, AWS SES's SMTP endpoint, ...) — no vendor-specific SDK. See [POST_DEPLOYMENT.md](POST_DEPLOYMENT.md). |
-   | `BREVO_API_KEY` | per-environment | Only read when `EMAIL_PROVIDER=brevo` — from your Brevo (formerly Sendinblue) account's API Keys page. |
-   | `RESEND_API_KEY` | per-environment | Only read when `EMAIL_PROVIDER=resend` — from your Resend account's API Keys page. |
-   | `ADMIN_NOTIFICATION_EMAILS` | per-environment | Optional — comma-separated extra recipients for extension-request alerts, on top of Admins/Managers/the Super Admin, who are covered automatically. |
-   | `BACKUP_GDRIVE_OAUTH_CLIENT_ID` / `BACKUP_GDRIVE_OAUTH_CLIENT_SECRET` / `BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN` | per-environment | Optional — required together if `BACKUP_GDRIVE_ENABLED=true` (see the Variables list below). Produced by running `backend/scripts/gdrive_oauth_setup.py` **once, on your own machine, not in CI** — see [POST_DEPLOYMENT.md](POST_DEPLOYMENT.md). |
-   | `BACKUP_GDRIVE_FOLDER_ID` | per-environment | Optional — the destination Drive folder's ID (from its URL), required alongside the three secrets above. |
-   | `ALERT_EMAIL_ADDRESS` | per-environment | Optional — leave unset to skip creating any alerting resources (no cost, no action group). Set it to wire up the three Azure Monitor scheduled query alerts (backend error-rate spike, `/readyz` failing, daily backup missing) from `infra/main.bicep` to that address — see [SRE_STRATEGY.md](SRE_STRATEGY.md) section 2. **Leave this unset on a brand-new environment's first-ever `infra-deploy.yml` run.** The three alert rules query the `ContainerAppConsoleLogs_CL` table, which Azure only creates once a log line has actually been ingested — on a fresh Log Analytics workspace it doesn't exist yet, and the deployment fails with `Failed to resolve table or column expression named 'ContainerAppConsoleLogs_CL'` if you try to create the rules first. Deploy once with this unset, let `backend`/`frontend` run for a few minutes (or serve one request), then set this secret and re-run `infra-deploy.yml` for the same environment to add the alert rules on top of the already-running infra. |
-   | `OTEL_EXPORTER_OTLP_HEADERS` | per-environment | Optional — only used if `OTEL_ENABLED=true` (see the Variables table below). The one OTel setting kept as a Secret rather than a Variable, since it commonly carries a collector API key (`Authorization=Bearer <token>`-style header). See README.md's "Distributed Tracing" section. | 
-   Where does otel_exporter_otlp_header come from?
-   
-   It depends entirely on which OTLP-compatible backend you're sending traces to — this only matters if you're using the generic OTLP route (self-hosted collector, Grafana Cloud, Honeycomb, etc.) rather than otelAzureMonitorEnabled. You get the actual key/value from that vendor's dashboard:
-   Honeycomb → x-honeycomb-team=<your API key> (from Honeycomb's Team Settings → API Keys)
-    Grafana Cloud OTLP → typically Authorization=Basic <base64(instanceID:apiToken)> (from your Grafana Cloud stack's "OTLP" connection page)
-    Self-hosted otel-collector → only needed if you've configured that collector to require an API key/bearer token itself — many self-hosted setups on a private network skip auth entirely, in which case leave this empty.
-    Any other OTLP SaaS vendor → check their docs for "OTLP HTTP headers" or "OTLP authentication."
-    If you don't have one of these
+4. **Registering providers manually is optional.** The workflow registers
+   every provider used by `infra/main.bicep` on each infrastructure run.
+   `az provider register` is a fast no-op when the provider is already
+   registered.
 
-Leave otelExporterOtlpHeaders (and otelExporterOtlpEndpoint) empty and use otelAzureMonitorEnabled=true instead — that path needs no external vendor, no manually-obtained credential, and Azure provisions the App Insights connection string for you automatically, as covered above.
+5. **Keep application secrets in GitHub Environments.** Docker Hub
+   credentials, PostgreSQL/Redis/JWT secrets, and optional mail/backup
+   credentials remain application configuration and are not silently
+   generated by the Azure bootstrap. This keeps the infrastructure identity
+   automation separate from application data.
 
-   Also set these repo/environment-level **Variables** (Settings → Secrets
-   and variables → Actions → **Variables** tab, not Secrets — none of
-   these are sensitive). Most of these share the same name/meaning with
-   `infra-deploy-vm.yml`/`sync-secrets-vm.yml` on the VM deploy path — see
-   `DEPLOYMENT_VM.md` step 6 for that path's own table, and its callout
-   just below that table for the handful (mostly rate-limiting/lockout
-   and notification-timing knobs) not yet wired as VM Variables:
+6. **Use the Bicep workflow as the lifecycle owner.** In Actions →
+   **Deploy ACA Infrastructure (Bicep)**:
+   - `plan` validates the stack without applying it.
+   - `apply` creates/updates the Azure Deployment Stack.
+   - `destroy` requires an exact confirmation string and deletes only
+     resources tracked by that Bicep stack. The resource group is retained.
 
-   | Variable | Scope | Notes |
-   |---|---|---|
-   | `ENVIRONMENT` | per-environment | `production` for a minified+obfuscated frontend build (read by `deploy-azure-aca.yml`'s `resolve-target` job, fed into `frontend/Dockerfile`'s `BUILD_ENV`); `development`/unset for minified-only -- set independently on EACH GitHub Environment (`staging`, `production`). See the callout above -- this does NOT pick which Azure resource group/environment gets deployed, that's the workflow's `environment` dropdown. |
-   | `FRONTEND_BUILD_TARGET` | per-environment | `react` to ship the React "Ledger" SPA (served at `/`), `legacy`/unset (default) to ship the legacy static site (also served at `/`) -- the two are mutually exclusive; there's no longer a combined option that ships both. Read by the same `resolve-target` job, fed into `frontend/Dockerfile`'s `--target` -- independent of `ENVIRONMENT` above, so build mode and which frontend ships are separate choices. Set independently on EACH GitHub Environment. This is the **standing default** -- for a one-off override on a single run, use the `frontend_type` dropdown on that workflow's "Run workflow" form instead (`(environment default)` / `react` / `legacy`); no Settings page needed, and nothing is saved past that run. See `frontend-app/README.md`'s "Choosing which frontend to ship" section. |
-   | `AZURE_LOCATION` | repo | e.g. `eastus2` — see the note on region restrictions in step 3 above; `centralus` is the fallback if `eastus2` is also restricted on your subscription. Falls back to `eastus2` if unset. |
-   | `CUSTOM_DOMAIN` | per-environment | Optional — leave unset to use the generated `*.azurecontainerapps.io` FQDN |
-   | `NOTIFICATIONS_ENABLED` | per-environment | Optional, string `"true"`/`"false"` — master switch for all outbound email. Leave unset (defaults to off) until the four `SMTP_*` secrets above are set. See [POST_DEPLOYMENT.md](POST_DEPLOYMENT.md) for the full walkthrough. |
-   | `BACKUP_GDRIVE_ENABLED` | per-environment | Optional, string `"true"`/`"false"` — leave unset (defaults to off, local-disk-only backups) until the four `BACKUP_GDRIVE_*` secrets above are set. See [POST_DEPLOYMENT.md](POST_DEPLOYMENT.md). |
-   | `POSTGRES_SKU_NAME` | repo | Optional — sizes the Flexible Server. Default `Standard_B1ms` if unset. |
-   | `POSTGRES_STORAGE_GB` | repo | Optional — sizes the Flexible Server. Default `32` if unset. |
-   | `ENABLE_API_DOCS` | per-environment | Optional, string `"true"`/`"false"` — exposes `/docs`/`/redoc` (Swagger/ReDoc). Default `false` if unset. |
-   | `SITE_NAME` | per-environment | Optional — display name shown in the UI/emails. Default `Snipe-IT Lite` if unset. |
-   | `LOG_LEVEL` | per-environment | Optional — `backend`'s structured JSON log level (`DEBUG`/`INFO`/`WARNING`/`ERROR`). Default `INFO` if unset. |
-   | `LOGIN_RATE_LIMIT_MAX` | per-environment | Optional — failed-login attempts allowed per window before rate-limiting kicks in. Default `5` if unset. |
-   | `LOGIN_RATE_LIMIT_WINDOW_SECONDS` | per-environment | Optional — the window `LOGIN_RATE_LIMIT_MAX` is measured over, in seconds. Default `60` if unset. |
-   | `ACCOUNT_LOCKOUT_MAX_ATTEMPTS` | per-environment | Optional — failed logins before an account is locked out entirely (separate from, and on top of, the rate limit above). Default `5` if unset. |
-   | `ACCOUNT_LOCKOUT_DURATION_MINUTES` | per-environment | Optional — how long a lockout from the setting above lasts. Default `15` if unset. |
-   | `EMAIL_PROVIDER` | per-environment | Optional, `smtp` (default) \| `brevo` \| `resend` — which transport `send_email()` uses. Set this to `brevo` or `resend` instead of using the four `SMTP_*` secrets above if your outbound network blocks plain SMTP ports (both alternatives send over plain HTTPS). See `infra/main.bicep`'s `emailProvider` param. |
-   | `SUPER_ADMIN_USERNAME` | per-environment | Optional — the root admin's login username. Default `superadmin` if unset. |
-   | `SUPER_ADMIN_NAME` | per-environment | Optional — the root admin's display name. Default `Super Admin` if unset. |
-   | `SMTP_PORT` | per-environment | Optional — only relevant once `NOTIFICATIONS_ENABLED=true`. Default `587` if unset. |
-   | `SMTP_USE_TLS` | per-environment | Optional, string `"true"`/`"false"` — STARTTLS. Default `true` unless explicitly set to `"false"`. |
-   | `SMTP_USE_SSL` | per-environment | Optional, string `"true"`/`"false"` — implicit TLS (e.g. port 465). Default `false` unless explicitly set to `"true"`. Mutually exclusive with `SMTP_USE_TLS` in practice — set at most one. |
-   | `OVERDUE_DIGEST_HOURS_UTC` | per-environment | Optional — comma-separated hours of day (UTC, each 0-23) the overdue-assets digest fires, e.g. `8` or `8,20`. Same syntax as `BACKUP_HOURS_UTC` below. Default `8` if unset. |
-   | `DUE_SOON_REMINDER_DAYS` | per-environment | Optional — how many days before an asset's return date the "due soon" reminder starts. Default `2` if unset. |
-   | `DUE_SOON_DIGEST_HOURS_UTC` | per-environment | Optional — comma-separated hours of day (UTC, each 0-23) the due-soon digest fires. Same syntax as `OVERDUE_DIGEST_HOURS_UTC` above. Default `8` if unset. |
-   | `SEND_INDIVIDUAL_HOLDER_REMINDERS` | per-environment | Optional, string `"true"`/`"false"` — also emails the individual asset holder, not just Admins/Managers. Default `true` unless explicitly set to `"false"`. |
-   | `EXTENSION_REQUEST_SLA_HOURS` | per-environment | Optional — hours a `pending` Extension Request can go without a decision before the SLA-nudge digest escalates it. Default `24` if unset. |
-   | `QUOTATION_SLA_HOURS` | per-environment | Optional — hours a `submitted` Quotation can go without a decision before the SLA-nudge digest escalates it. Default `24` if unset. |
-   | `APPROVAL_SLA_CHECK_INTERVAL_MINUTES` | per-environment | Optional — how often (in minutes) the worker checks both queues above for anything past its SLA threshold. Default `60` if unset. |
-   | `APPROVAL_SLA_ESCALATION_REPEAT_HOURS` | per-environment | Optional — hours before an already-escalated, still-undecided row is eligible to be re-escalated. Default `24` if unset. |
-   | `SEND_QUOTATION_RECIPIENT_EMAILS` | per-environment | Optional, string `"true"`/`"false"` — whether a Quotation's own recipient gets emailed on every change (line items, notes, discount, assignment, approval, fulfillment), on top of the in-app bell notification which is always created regardless. Default `true` unless explicitly set to `"false"`. |
-   | `DISPLAY_TIMEZONE` | per-environment | Optional — IANA zone (e.g. `America/New_York`) used to render timestamps in the UI, filenames, and emails. Default `Africa/Lagos` if unset. |
-   | `CURRENCY_CODE` | per-environment | Optional — ISO 4217 code (e.g. `USD`) shown next to asset costs. Default `NGN` if unset. |
-   | `CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER` | per-environment | Optional, string `"true"`/`"false"` — whether Staff/Customer roles see remaining stock counts in the catalog. Default `false` if unset. |
-   | `BACKUP_HOURS_UTC` | per-environment | Optional — UTC hour(s) the daily `pg_dump` backup job runs, e.g. `3`. Default `3` if unset. |
-   | `BACKUP_RETENTION_COUNT` | per-environment | Optional — how many local backups to keep before pruning the oldest. Default `7` if unset. |
-   | `OTEL_ENABLED` | per-environment | Optional, string `"true"`/`"false"` — master switch for OpenTelemetry distributed tracing. Off by default. See README.md's "Distributed Tracing" section. |
-   | `OTEL_SERVICE_NAME` | per-environment | Optional — only relevant once `OTEL_ENABLED=true`. Default `snipeit-lite-backend` if unset. |
-   | `OTEL_EXPORTER_OTLP_ENDPOINT` | per-environment | Required once `OTEL_ENABLED=true` — your OTLP collector's endpoint (e.g. an Application Insights- or Jaeger-compatible one). No default; leave unset while tracing is off. |
-   | `OTEL_TRACES_SAMPLE_RATIO` | per-environment | Optional — fraction of requests traced, `0.0`–`1.0`. Default `1.0` if unset. |
-   | `OTEL_AZURE_MONITOR_ENABLED` | per-environment | Optional, string `"true"`/`"false"` — additionally exports traces to Azure Monitor/Application Insights alongside the plain OTLP endpoint above. Default `false` if unset. |
+   Azure Deployment Stacks are used instead of `az deployment group delete`
+   because deleting an ARM deployment record does **not** delete the
+   resources it created. Deployment Stacks maintain the managed-resource
+   collection and support an explicit delete operation, which gives this
+   Bicep path Terraform-like destroy semantics. Azure requires Azure CLI
+   2.61.0+ for Deployment Stacks. See
+   [Microsoft's Deployment Stacks documentation](https://learn.microsoft.com/azure/azure-resource-manager/bicep/deployment-stacks).
 
-   Most deployments only ever need to touch a handful of these —
-   `POSTGRES_SKU_NAME`/`POSTGRES_STORAGE_GB`, the notification-timing
-   ones, and `DISPLAY_TIMEZONE`/`CURRENCY_CODE`, are the ones most
-   commonly customized; everything else is safe to leave unset and take
-   the default shown.
+7. **The VM path follows the same no-manual-resource principle.**
+   `infra-deploy-vm.yml` automatically creates/reuses its Terraform remote
+   state backend before `terraform init` (`rg-snipeit-tfstate`, a Storage
+   Account, and `vm-state` container), and keeps that state outside the VM
+   resource group so `terraform destroy` can safely destroy the VM stack
+   without destroying its own state. See [DEPLOYMENT_VM.md](DEPLOYMENT_VM.md)
+   for the exact lifecycle and bootstrap boundary.
 
-6. **Run `infra-deploy.yml` manually once per environment** (Actions tab →
-   "Deploy Azure Infrastructure" → Run workflow → choose `staging`, then run
-   it again for `production`). This provisions everything: Log Analytics,
-   Storage + Azure Files shares, the Container Apps Environment, all three
-   Container Apps (`backend`/`frontend` start on a placeholder `latest` tag
-   — the next step gives them real images), and the Azure Database for
-   PostgreSQL Flexible Server. The Flexible Server takes noticeably longer
-   to provision than the Container Apps (several minutes is normal) — this
-   is expected, not a stuck deployment.
-
-7. **Allow Actions to open pull requests** (Settings → Actions → General →
-   Workflow permissions → check **"Allow GitHub Actions to create and
-   approve pull requests"**, then Save). This is **off by default** on
-   every repo and easy to miss — without it, `release.yml`'s `changelog`
-   job (which opens the `CHANGELOG.md` PR against `main` using the default
-   `GITHUB_TOKEN`) fails with a 403 the first time you push a tag. Nothing
-   else in this pipeline needs this setting — only that one PR-creation
-   step.
-
-8. **(Recommended) Turn on squash merging, off everything else**
-   (Settings → General → Pull Requests → uncheck "Allow merge commits" and
-   "Allow rebase merging", check "Allow squash merging", and check "Default
-   to pull request title for squash merge commits"). Not required for
-   anything to function, but it means each PR you merge into `develop`/
-   `main` becomes exactly one commit — which keeps the changelog entries
-   `release.yml` generates from `git log <prev-tag>..<tag>` (one bullet per
-   commit) one bullet per feature/fix instead of one bullet per intermediate
-   commit inside the branch.
-
-9. **Manually run `deploy-azure-aca.yml`** (Actions tab → "Run
-   workflow"): `environment: staging` for Staging, or `environment:
-   production` for Production — either way this builds real images, pushes
-   them to Docker Hub, runs migrations, and rolls them out. To deploy a
-   tagged release rather than building fresh, first `git push --tags` (see
-   [Versioning & Cutting a Release](#versioning--cutting-a-release) below --
-   this only builds and publishes the images, it does not deploy them),
-   then run `deploy-azure-aca.yml` with `environment: production` and that
-   version pasted into `image_tag`. From here on, every deploy — staging or
-   production — is a manual `deploy-azure-aca.yml` run; a plain `git push`
-   to any branch or tag never deploys anything by itself, only `ci.yml`
-   (and, for a tag, `release.yml`'s build-and-publish step).
 
 ### Versioning & Cutting a Release
 
@@ -1094,7 +1000,7 @@ any direction:
   Set the `DEPLOY_STATUS_USER` GitHub Environment *Variable* (defaults to
   `admin` if you skip it) and the `DEPLOY_STATUS_PASSWORD_APR1_HASH`
   *Secret* (paste the `$apr1$` hash above) on the `staging`/`production`
-  Environment(s), the same place `AZURE_CLIENT_ID`/`PROD_RESOURCE_GROUP`
+  Environment(s), the same place `AZURE_CLIENT_ID`
   already live — the next `deploy-azure-aca.yml` run picks them up
   automatically via its "Write ACA deploy status - init" step. If no
   storage account is found in the target resource group yet (a fresh

@@ -39,6 +39,11 @@ on:
         required: false
         type: string
         default: ''
+      confirm_destroy:
+        description: 'Required only for action=destroy. Type DESTROY <environment> exactly (for example: DESTROY prod). The state backend is retained; only resources tracked by this Terraform state are destroyed.'
+        required: false
+        type: string
+        default: ''
 
 concurrency:
   # Only one Terraform run per environment at a time -- two concurrent
@@ -188,16 +193,11 @@ jobs:
       TF_VAR_dockerhub_username: ${{ secrets.DOCKERHUB_USERNAME }}
       TF_VAR_dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # ---- Remote state backend (versions.tf's partial `backend
-      # "azurerm" {}` block) -- NOT sensitive, just where state lives, so
-      # these are repo/environment Variables, not secrets. Created once
-      # manually per DEPLOYMENT_VM.md's "One-time Azure setup" section.
-      # `key` is derived from `inputs.environment` (not a repeated
-      # Variable) so vm-staging and prod, which share nothing else here,
-      # can never accidentally point at the same state file.
-      TF_STATE_RESOURCE_GROUP: ${{ vars.TF_STATE_RESOURCE_GROUP }}
-      TF_STATE_STORAGE_ACCOUNT: ${{ vars.TF_STATE_STORAGE_ACCOUNT }}
-      TF_STATE_CONTAINER: ${{ vars.TF_STATE_CONTAINER }}
+      # ---- Terraform remote state is bootstrapped automatically by the
+      # first workflow step. Nothing needs to be created in the Portal and
+      # no TF_STATE_* GitHub Variables are required. The state backend lives
+      # in its own resource group, outside the VM stack, so destroy can never
+      # delete the state it needs in order to destroy the VM resources.
 
     steps:
       - uses: actions/checkout@v7
@@ -207,18 +207,35 @@ jobs:
         with:
           terraform_version: "1.9.8"
 
-      - name: terraform init
-        # -backend-config flags fill in versions.tf's partial `backend
-        # "azurerm" {}` block. `key` is set per-environment here (not a
-        # GitHub Variable) so vm-staging and prod always land in separate
-        # state files, e.g. "vm-staging.tfstate" / "prod.tfstate", inside
-        # the one shared state storage account/container.
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Bootstrap Terraform state backend
+        working-directory: .
         run: |
-          terraform init -input=false \
-            -backend-config="resource_group_name=${TF_STATE_RESOURCE_GROUP}" \
-            -backend-config="storage_account_name=${TF_STATE_STORAGE_ACCOUNT}" \
-            -backend-config="container_name=${TF_STATE_CONTAINER}" \
-            -backend-config="key=${{ inputs.environment }}.tfstate"
+          ./scripts/bootstrap-terraform-state.sh >> "$GITHUB_ENV"
+
+      - name: terraform init
+        # The state backend is created above on every run if it does not yet
+        # exist. `key` remains per-environment so staging and prod never share
+        # a state file.
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if terraform init -input=false \
+              -backend-config="resource_group_name=${TF_STATE_RESOURCE_GROUP}" \
+              -backend-config="storage_account_name=${TF_STATE_STORAGE_ACCOUNT}" \
+              -backend-config="container_name=${TF_STATE_CONTAINER}" \
+              -backend-config="key=${{ inputs.environment }}.tfstate"; then
+              exit 0
+            fi
+            echo "Terraform backend init attempt $attempt/5 failed; waiting for Azure RBAC propagation..."
+            sleep 15
+          done
+          exit 1
 
       - name: terraform fmt -check
         # Report-only -- a formatting nit shouldn't block an otherwise-good
@@ -321,14 +338,22 @@ jobs:
           echo "::error::terraform apply failed after $MAX_ATTEMPTS attempts -- this no longer looks like a transient Azure propagation race. Check the log above for the real error."
           exit 1
 
+      - name: Verify destroy confirmation
+        if: inputs.action == 'destroy'
+        working-directory: .
+        run: |
+          expected="DESTROY ${{ inputs.environment }}"
+          if [[ "${{ inputs.confirm_destroy }}" != "$expected" ]]; then
+            echo "::error::Destroy blocked. Set confirm_destroy to exactly: $expected"
+            exit 1
+          fi
+
       - name: terraform destroy
         if: inputs.action == 'destroy'
-        # No -auto-approve safety net removed here on purpose -- the
-        # `environment: ${{ inputs.environment }}` above is exactly what
-        # lets you attach a GitHub Environment protection rule (required
-        # reviewer) to "prod" so a destroy against production needs a
-        # second person's approval before this step ever runs, not just a
-        # Terraform flag.
+        # `-auto-approve` is required because this is a non-interactive
+        # GitHub runner. The explicit DESTROY <environment> confirmation
+        # above plus GitHub Environment protection rules provide the safety
+        # gate before this step can run.
         run: terraform destroy -input=false -auto-approve
 
       - name: Print outputs

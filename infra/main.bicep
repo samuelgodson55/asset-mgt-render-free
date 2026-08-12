@@ -41,7 +41,8 @@
 //
 // USAGE
 // ---------------------------------------------------------------------------
-//   az deployment group create \
+//   az stack group create \
+//     --name snipeit-lite-prod \
 //     --resource-group rg-snipeit-lite-prod \
 //     --template-file infra/main.bicep \
 //     --parameters environmentName=prod \
@@ -60,7 +61,7 @@
 //                  # (see DEPLOYMENT.md's Monitoring section for how to read
 //                  # it back out of Log Analytics).
 //
-// Re-run the same command any time to update the environment idempotently --
+// Re-run the same stack command any time to update the environment idempotently --
 // this file does NOT set `backend`/`frontend`/`migrate`'s image tags on every
 // run (that's the CI/CD pipeline's job via `az containerapp update --image`),
 // so deploying new code never requires a full infra re-deploy.
