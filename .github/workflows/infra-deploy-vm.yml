@@ -439,14 +439,106 @@ jobs:
           done
 
       - name: terraform plan
+        id: terraform_plan
         if: inputs.action == 'plan' || inputs.action == 'apply'
+        # Cloudflare Access policy refresh is currently failing inside the
+        # provider with API error 1010 even though the token/account
+        # preflight succeeds. Run this plan with provider TRACE logging so
+        # the provider's actual request/response can be diagnosed.
+        #
+        # The trace is written to files, not streamed as a separate debug
+        # channel. If plan fails, the next step redacts known GitHub secret
+        # values before uploading the diagnostic artifact.
+        env:
+          TF_LOG_PROVIDER: TRACE
+          TF_LOG_PATH: terraform-provider.log
         run: |
+          set +e
+
           if [ -n "${{ inputs.replace_target }}" ]; then
             echo "Planning a targeted replace of: ${{ inputs.replace_target }}"
-            terraform plan -input=false -replace="${{ inputs.replace_target }}" -out=tfplan
+            terraform plan -input=false -no-color \
+              -replace="${{ inputs.replace_target }}" \
+              -out=tfplan 2>&1 | tee terraform-plan-debug.log
           else
-            terraform plan -input=false -out=tfplan
+            terraform plan -input=false -no-color \
+              -out=tfplan 2>&1 | tee terraform-plan-debug.log
           fi
+
+          PLAN_EXIT=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$PLAN_EXIT" -ne 0 ]; then
+            echo "::error::Terraform plan failed. The Cloudflare provider TRACE diagnostic will be sanitized and uploaded by the next step."
+            exit "$PLAN_EXIT"
+          fi
+
+          echo "Terraform plan succeeded."
+          exit 0
+
+      - name: Sanitize and upload Terraform provider diagnostics
+        if: steps.terraform_plan.outcome == 'failure'
+        shell: bash
+        env:
+          # These values are used only for local redaction. They are never
+          # printed. GitHub's own secret masking remains an additional layer.
+          REDACT_CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          REDACT_CF_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          REDACT_CF_ZONE: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+          REDACT_AZ_CLIENT: ${{ secrets.AZURE_CLIENT_ID }}
+          REDACT_AZ_TENANT: ${{ secrets.AZURE_TENANT_ID }}
+          REDACT_AZ_SUBSCRIPTION: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p terraform-debug-artifact
+
+          # Copy first so the original diagnostic files remain available to
+          # the current runner only. The uploaded copies are sanitized.
+          for file in terraform-provider.log terraform-plan-debug.log; do
+            if [ -f "$file" ]; then
+              cp "$file" "terraform-debug-artifact/$file"
+            fi
+          done
+
+          # Redact known credential/account values before artifact upload.
+          # Do not attempt to make TRACE logs a security boundary: provider
+          # logs can contain sensitive request/response data.
+          for file in terraform-debug-artifact/*; do
+            [ -f "$file" ] || continue
+
+            for secret in \
+              "$REDACT_CF_TOKEN" \
+              "$REDACT_CF_ACCOUNT" \
+              "$REDACT_CF_ZONE" \
+              "$REDACT_AZ_CLIENT" \
+              "$REDACT_AZ_TENANT" \
+              "$REDACT_AZ_SUBSCRIPTION"; do
+              if [ -n "${secret:-}" ]; then
+                SECRET="$secret" python3 -c 'import os,sys; p=sys.argv[1]; s=os.environ.get("SECRET",""); data=open(p,encoding="utf-8",errors="replace").read(); open(p,"w",encoding="utf-8").write(data.replace(s,"[REDACTED]"))' "$file"
+              fi
+            done
+          done
+
+          {
+            echo "Terraform provider diagnostic"
+            echo "Workflow: $GITHUB_WORKFLOW"
+            echo "Run: $GITHUB_RUN_ID"
+            echo "Environment: ${{ inputs.environment }}"
+            echo "Action: ${{ inputs.action }}"
+            echo "Terraform provider TRACE was enabled only for the failed plan."
+            echo "Known Azure/Cloudflare credential values were redacted before upload."
+            echo "Review this artifact only with repository/deployment administrators."
+          } > terraform-debug-artifact/README.txt
+
+      - name: Upload Terraform provider diagnostics
+        if: steps.terraform_plan.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-provider-debug-${{ github.run_id }}
+          path: infra-vm/terraform-debug-artifact/
+          if-no-files-found: warn
+          retention-days: 3
 
       - name: terraform apply
         if: inputs.action == 'apply'

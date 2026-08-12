@@ -2631,3 +2631,35 @@ or the CI service token was rotated/deleted and `CF_ACCESS_CLIENT_ID`/
 `cloudflare_ci_service_token_id`/`_secret` Terraform outputs). Either way,
 the two break-glass options above still work regardless of Access's own
 state, since they don't go through the Tunnel at all.
+
+
+## Terraform Provider Debugging for Failed Plans
+
+If the Cloudflare credential preflight passes but `terraform plan` still fails while refreshing a Cloudflare resource, the Deploy VM workflow automatically runs the plan with provider TRACE logging.
+
+For a failed plan it:
+
+1. Writes the provider trace to `infra-vm/terraform-provider.log`.
+2. Captures the normal Terraform plan output in `infra-vm/terraform-plan-debug.log`.
+3. Redacts the known Cloudflare and Azure credential/account values.
+4. Uploads the sanitized files as the short-lived GitHub Actions artifact:
+   `terraform-provider-debug-<run-id>`.
+
+This is intentionally a **failure-only diagnostic**. Successful plans do not upload provider TRACE logs.
+
+### Security
+
+Provider TRACE logs can contain sensitive request/response information. Terraform's own documentation warns that log redaction is best-effort rather than a security boundary. Do not commit the diagnostic files to Git, and only share the artifact with authorized deployment/repository administrators.
+
+The workflow does not modify Terraform state, remove resources, or re-import Cloudflare Access policies as part of this diagnostic.
+
+### What to look for
+
+For the current Cloudflare issue, inspect the lines around:
+
+```text
+cloudflare_zero_trust_access_policy.ssh_humans
+cloudflare_zero_trust_access_policy.ssh_ci
+```
+
+Look for the Cloudflare API request immediately before the provider reports error `1010`. The goal is to determine the exact provider request/response rather than guessing an endpoint from Terraform state.
