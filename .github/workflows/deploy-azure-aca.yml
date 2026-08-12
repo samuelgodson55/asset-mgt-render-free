@@ -57,6 +57,16 @@
 #     pulled: `production` -> no suffix, `development`/unset -> `-staging`.
 #   - Trivy blocking: staging reports CRITICAL findings but doesn't fail the
 #     build on them; production does.
+# CLEANUP LIFECYCLE: there is deliberately NO scheduled cleanup workflow.
+#   Every real staging/production deployment owns its own revision lifecycle:
+#   stale 0%-traffic revisions are reaped before migration/deployment starts,
+#   rollout failures attempt immediate rollback/deactivation, and a final
+#   always-run cleanup job reaps any older orphaned revisions after the deploy
+#   job ends (including failed/cancelled deploys). A manual-only reap workflow
+#   remains available for incident response when no deployment is planned.
+#   This avoids waking a GitHub-hosted runner every 30 minutes just to discover
+#   that no deployment happened and nothing needs cleanup.
+#
 #   - Blue-green canary shape: both environments now roll out via
 #     .github/scripts/aca-blue-green.sh (see the `deploy` job's own
 #     comments) -- a new revision is always created at 0% traffic and
@@ -1007,3 +1017,58 @@ jobs:
             echo ""
             echo "Monitor any revision live: \`bash .github/scripts/aca-blue-green.sh status <app> $RESOURCE_GROUP --watch\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+
+  # Deployment-owned cleanup: no cron runner is needed. This job runs after
+  # the deploy job finishes, including when that job failed or was cancelled.
+  # The deploy job already performs immediate rollback/deactivation for the
+  # normal failure paths; this final pass catches older 0%-traffic leftovers
+  # from any path that escaped that cleanup. `reap` is safety-hardened: it never
+  # touches an app's only active revision and respects the grace window.
+  cleanup:
+    name: Final revision cleanup
+    needs: [resolve-target, deploy]
+    if: ${{ always() && needs.resolve-target.result == 'success' && needs.deploy.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment || 'production' }}
+    env:
+      RESOURCE_GROUP: ${{ (inputs.environment || 'production') == 'production' && secrets.PROD_RESOURCE_GROUP || secrets.STAGING_RESOURCE_GROUP }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Fresh OIDC login: the deploy job may have spent several minutes in
+      # health gates, canary waits, smoke tests, and log collection. This job
+      # gets its own fresh Azure token rather than relying on an expired one.
+      - name: Azure login for cleanup
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Reap stale revisions left by this deployment or an earlier one
+        run: |
+          set -u
+          FAILED=0
+          for APP in backend frontend; do
+            if ! az containerapp show --name "$APP" --resource-group "$RESOURCE_GROUP" --query name -o tsv >/dev/null 2>&1; then
+              echo "::warning::Container App '$APP' does not exist in '$RESOURCE_GROUP' -- skipping cleanup for this app."
+              continue
+            fi
+            if ! bash .github/scripts/aca-blue-green.sh reap "$APP" "$RESOURCE_GROUP" 20; then
+              FAILED=1
+            fi
+          done
+          if [ "$FAILED" -ne 0 ]; then
+            echo "::error::Final ACA revision cleanup could not deactivate one or more orphaned revisions. The deployment result is preserved; inspect the revision status below and rerun the manual reap workflow if necessary."
+            exit 1
+          fi
+
+      - name: Show revision status after cleanup
+        if: always()
+        run: |
+          for APP in backend frontend; do
+            if az containerapp show --name "$APP" --resource-group "$RESOURCE_GROUP" --query name -o tsv >/dev/null 2>&1; then
+              bash .github/scripts/aca-blue-green.sh status "$APP" "$RESOURCE_GROUP"
+            fi
+          done

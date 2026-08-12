@@ -14,11 +14,28 @@ Grotesk (display) + IBM Plex Sans (body) + IBM Plex Mono (tags, IDs, timestamps)
 
 ## Pages
 
-- Overview — stats, 14-day checkout/return activity chart, "needs attention" list, fleet-by-category breakdown
-- Inventory — searchable/filterable grid of asset-tag cards, opens a slide-over detail drawer
-- Checkouts — active/overdue table + pending extension-request approvals
+- Dashboard — stats, 14-day checkout/return activity chart, "needs attention" list, fleet-by-category breakdown
+- Assets — searchable/filterable grid of asset-tag cards, opens a slide-over detail drawer (`AssetDrawer`)
+- Checkouts — active/overdue table + pending extension-request approvals (`CustodyDrawer`, `DispatchModal`)
+- Quotations — self-service cart/checkout flow plus "My Quotes" history, with its own detail drawer (`QuoteDetailDrawer`)
+- My Items — a signed-in user's own custody ledger (used by every role, not just self-service ones)
+- Reports — exports (`AssetExportModal`, `ExportButtons`)
+- Profile — account settings, including 2FA setup/recovery
+- Admin — Users/Deleted Users, Deleted Assets, Outsiders, Quotes, Audit log, Inventory import, System backups, and Settings panels (`pages/admin/*`), gated by role
 - Notifications — unread indicator, categorized activity feed
-- Login — animated entry screen
+- Login — animated entry screen, including the MFA challenge/setup steps for `super_admin` accounts
+
+## Global search
+
+The header search box (`Layout.tsx`'s `submitHeaderSearch()`, classified by `lib/globalSearch.ts`) is a
+single jump-to-anything field, not just an Inventory filter: a checkout receipt code
+(`CO-12`), a Quotation reference number (`QT-000003`), typed or scanned, or a plain
+asset/tag name all go through the same box. Depending on what it classifies as, it
+takes the user straight to the custody ledger (scrolling to and briefly highlighting
+the matched item via `CustodyDrawer`), the quotation ledger (`QuotesPanel.tsx`'s
+`?openQuote=` deep link), or the asset ledger — see `lib/globalSearch.ts` for the
+classifier and `lib/custody-context.ts`/`custodyContext.tsx` for the highlight/scroll
+behavior.
 
 ## Running it
 
@@ -37,17 +54,27 @@ you're signed in:
 
 - `POST /api/auth/login`, `GET /api/auth/me`, `POST /api/auth/logout` — real,
   cookie-session-based auth (`src/lib/auth.tsx`). Two-factor (`super_admin`) accounts
-  aren't fully wired up past the initial challenge yet.
-- `GET /api/assets` → Inventory grid + dashboard stats
+  are fully wired up: initial challenge, first-time setup (TOTP secret + recovery
+  codes), and recovery-code verification all run through `auth-context.ts`'s
+  `MfaChallenge` flow.
+- `GET /api/assets` → Assets grid + dashboard stats
 - `GET /api/checkouts/overdue` + `GET /api/checkouts/due-soon` → Checkouts table (the
   backend has no single "list every active checkout" route — custody is tracked
   per-person via `GET /users/{id}/items` instead — so these two alert feeds, the same
   ones the legacy dashboard's own banners use, are the closest real equivalent)
 - `GET /api/checkouts/extension-requests` → pending extension requests
-- Notifications and the dashboard's activity trend chart are synthesized client-side
-  (see the comments in `src/lib/api.ts`) since the backend doesn't expose an in-app
-  notification feed or a historical checkout/return time series today — only a
-  digest-email recipient list (`api/notifications_api.py`) and the alert feeds above.
+- `GET /quotations/me/notifications` + `POST /quotations/me/notifications/read` → a
+  real in-app feed for Quotation assigned/updated alerts (`quotation_service.py`'s
+  `_notify_quotation_recipient()`), polled by the Notification Bell alongside the
+  synthesized feeds below. This is the one notification source that's genuinely
+  server-side today.
+- Every other item in the Notification Bell (overdue/due-soon/pending-extension
+  alerts and the dashboard's activity trend chart) is still synthesized client-side
+  from the alert feeds above (see the comments in `src/lib/api.ts`), since the
+  backend doesn't expose a general-purpose in-app notification feed or a historical
+  checkout/return time series — `api/notifications_api.py` is only the digest-email
+  recipient list. If a fetch here fails, it fails soft to an empty list so one flaky
+  source never breaks the bell's overall unread count.
 
 Every read still falls back to demo data on failure (`src/lib/api.ts`'s `tryLoad`), so
 a signed-in-but-unreachable-backend state degrades gracefully instead of breaking. The
@@ -196,7 +223,17 @@ ecosystem depth for this shape of app.
 ## Structure
 
     src/
-      components/   Layout, AssetTag (signature tag card), AssetDrawer, StatCard, StatusPill
-      pages/        Dashboard, Assets, Checkouts, Notifications, Login
-      lib/          api.ts (fetch + fallback), mock.ts (demo data), types.ts
-      index.css     design tokens (Tailwind v4 @theme) + fonts
+      components/   Layout (incl. global search), AssetTag (signature tag card), AssetDrawer,
+                     CustodyDrawer, QuoteDetailDrawer, DispatchModal, CreatePoolModal,
+                     AssetExportModal, ExportButtons, NotificationBell, PaginationBar,
+                     ReceiptModal, StatCard, StatusPill, ThemeToggle, ui/
+      pages/         Dashboard, Assets, Checkouts, Quotations, MyItems, Reports, Profile,
+                     Notifications, Login, admin/ (Users, DeletedUsers, DeletedAssets,
+                     Outsiders, Quotes, Audit, InventoryImport, SystemBackups, Settings panels)
+      lib/           api.ts (fetch + fallback), globalSearch.ts (header search classifier),
+                     custody-context.ts/custodyContext.tsx, quote-detail-context.ts/
+                     quoteDetailContext.tsx, auth-context.ts/auth.tsx, theme-context.ts/theme.tsx,
+                     mock.ts (demo data), types.ts, roles.ts, pagination.ts, receipt.ts,
+                     notificationDismissals.ts, useAuth.ts/useCustody.ts/useTheme.ts/
+                     useQuoteDetail.ts/useIsMobile.ts/useNotificationCount.ts
+      index.css      design tokens (Tailwind v4 @theme) + fonts

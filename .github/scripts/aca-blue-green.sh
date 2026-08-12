@@ -196,7 +196,7 @@ deactivate_or_warn() {
     rm -f /tmp/deactivate-err.$$
     return 0
   fi
-  echo "::error::Could not deactivate $rev ($context) after 2 attempts -- it is LIKELY STILL ACTIVE and holding its own DB connection pool open. Run '$SCRIPT_NAME reap $app $rg' (or the scheduled reap-stuck-revisions.yml workflow) to clean this up, or deactivate it by hand: az containerapp revision deactivate --name $app --resource-group $rg --revision $rev"
+  echo "::error::Could not deactivate $rev ($context) after 2 attempts -- it is LIKELY STILL ACTIVE and holding its own DB connection pool open. Run '$SCRIPT_NAME reap $app $rg' (or the manual-only 'Manually reap orphaned ACA revisions' workflow) to clean this up, or deactivate it by hand: az containerapp revision deactivate --name $app --resource-group $rg --revision $rev"
   rm -f /tmp/deactivate-err.$$
   return 1
 }

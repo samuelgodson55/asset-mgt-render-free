@@ -369,8 +369,8 @@ rather than the same Docker Compose network.
   wires these up exactly this way for `backend` on Azure Container Apps
   (`Liveness` → `/healthz`, `Readiness` → `/readyz`), which is what lets
   a rolling deploy hold traffic back from a new revision until it's
-  actually ready, not just alive — see [Zero-downtime rollout
-  mechanics](#zero-downtime-rollout-mechanics).
+  actually ready, not just alive — see [Zero-downtime rollout mechanics:
+  blue-green](#zero-downtime-rollout-mechanics-blue-green).
 - `db` and `redis` already have `healthcheck:` blocks in
   `docker-compose.yml` that `backend`/`worker`/`beat` all `depends_on:
   condition: service_healthy` — a fresh `docker compose up` won't start
@@ -729,7 +729,7 @@ Leave otelExporterOtlpHeaders (and otelExporterOtlpEndpoint) empty and use otelA
    | Variable | Scope | Notes |
    |---|---|---|
    | `ENVIRONMENT` | per-environment | `production` for a minified+obfuscated frontend build (read by `deploy-azure-aca.yml`'s `resolve-target` job, fed into `frontend/Dockerfile`'s `BUILD_ENV`); `development`/unset for minified-only -- set independently on EACH GitHub Environment (`staging`, `production`). See the callout above -- this does NOT pick which Azure resource group/environment gets deployed, that's the workflow's `environment` dropdown. |
-   | `FRONTEND_BUILD_TARGET` | per-environment | `react` to ship the React "Ledger" SPA (served at `/`), `legacy`/unset (default) to ship the legacy static site (also served at `/`) -- the two are mutually exclusive; there's no longer a combined option that ships both. Read by the same `resolve-target` job, fed into `frontend/Dockerfile`'s `--target` -- independent of `ENVIRONMENT` above, so build mode and which frontend ships are separate choices. Set independently on EACH GitHub Environment. This is the **standing default** -- for a one-off override on a single run, use the `frontend_type` dropdown on that workflow's "Run workflow" form instead (`(environment default)` / `react` / `legacy`); no Settings page needed, and nothing is saved past that run. See `frontend-app/README.md`'s "Detaching this app" section. |
+   | `FRONTEND_BUILD_TARGET` | per-environment | `react` to ship the React "Ledger" SPA (served at `/`), `legacy`/unset (default) to ship the legacy static site (also served at `/`) -- the two are mutually exclusive; there's no longer a combined option that ships both. Read by the same `resolve-target` job, fed into `frontend/Dockerfile`'s `--target` -- independent of `ENVIRONMENT` above, so build mode and which frontend ships are separate choices. Set independently on EACH GitHub Environment. This is the **standing default** -- for a one-off override on a single run, use the `frontend_type` dropdown on that workflow's "Run workflow" form instead (`(environment default)` / `react` / `legacy`); no Settings page needed, and nothing is saved past that run. See `frontend-app/README.md`'s "Choosing which frontend to ship" section. |
    | `AZURE_LOCATION` | repo | e.g. `eastus2` — see the note on region restrictions in step 3 above; `centralus` is the fallback if `eastus2` is also restricted on your subscription. Falls back to `eastus2` if unset. |
    | `CUSTOM_DOMAIN` | per-environment | Optional — leave unset to use the generated `*.azurecontainerapps.io` FQDN |
    | `NOTIFICATIONS_ENABLED` | per-environment | Optional, string `"true"`/`"false"` — master switch for all outbound email. Leave unset (defaults to off) until the four `SMTP_*` secrets above are set. See [POST_DEPLOYMENT.md](POST_DEPLOYMENT.md) for the full walkthrough. |

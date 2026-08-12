@@ -39,7 +39,7 @@ with no Azure resources yet.
 - [11. Verify](#11-verify)
 - [Zero-Downtime Blue-Green Deployments](#zero-downtime-blue-green-deployments)
 - [Tagging & Versioning](#tagging--versioning)
-- [Free domain + HTTPS](#free-domain--https)
+- [Free HTTPS (and the domain it now requires)](#free-https-and-the-domain-it-now-requires)
 - [Updating secrets on an already-running VM](#updating-secrets-on-an-already-running-vm)
 - [Google Drive backup uploads](#google-drive-backup-uploads)
 - [Per-service memory limits](#per-service-memory-limits)
@@ -481,7 +481,7 @@ confuse them:**
   `terraform.tfvars` points at the matching flavor's own Docker Hub repo
   (there are two separate repos now, one per flavor -- see
   `frontend/Dockerfile`'s own top-of-file comment). See
-  `frontend-app/README.md`'s "Detaching this app" section for the full
+  `frontend-app/README.md`'s "Choosing which frontend to ship" section for the full
   reasoning, and this same per-Environment variable is read the same way by
   `deploy-azure-aca.yml`. **This variable is the standing default only.**
   For a one-off override on a single run -- ship the React SPA just this
