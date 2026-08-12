@@ -827,6 +827,50 @@ Access application/policy that gates SSH:
 - Copy the generated token — this is `CLOUDFLARE_API_TOKEN` in step 6's
   secrets table. (Shown only once — if you lose it, create a new one.)
 
+**2b-1. Verify the token/account pair before Terraform** — a token can be
+valid and active while still being unable to access the Cloudflare account or
+Access API configured for this VM stack. The `Deploy VM Infrastructure
+(Terraform)` workflow now performs this same preflight automatically before
+Terraform tries to refresh the Cloudflare Access policies. It checks: token
+verification first, then the account-scoped Access Apps API. It never prints
+the token.
+
+From Git Bash, PowerShell, macOS/Linux, or WSL, you can run the equivalent
+checks locally with the same token/account pair (keep the token out of shell
+history where practical):
+
+```bash
+export CLOUDFLARE_API_TOKEN="<token>"
+export CLOUDFLARE_ACCOUNT_ID="<account-id>"
+
+curl -sS \
+  -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+  -H "Content-Type: application/json" \
+  "https://api.cloudflare.com/client/v4/user/tokens/verify" | jq .
+
+curl -sS \
+  -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+  -H "Content-Type: application/json" \
+  "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/access/apps" | jq .
+```
+
+The first response should report `success: true` and an active token. The
+second should also report `success: true`. If token verification succeeds but
+the Access API returns `Authentication error`, **do not touch Terraform state**
+and do not remove/re-import the Access policies. Check the GitHub Environment
+used by the workflow (`prod` or `vm-staging`) and make sure its
+`CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` belong to the same Cloudflare
+account. Also confirm the token still has **Account → Access: Apps and
+Policies → Edit**. Repository secrets and Environment secrets are separate;
+when the workflow declares `environment: prod`, a `prod` Environment secret
+can override a repository-level secret with the same name.
+
+This distinction matters because `/user/tokens/verify` proving that a token is
+active does **not** prove that it is authorized for the account-scoped Access
+API. The workflow deliberately tests both so a Cloudflare credential problem
+fails early with a clear message instead of surfacing later as Terraform's
+`error finding Access Policy ...` error.
+
 **2c. Generate an Origin CA certificate** — this is what Caddy presents
 for the inner hop from `cloudflared` to itself, instead of requesting one
 from Let's Encrypt (nothing but Cloudflare's own edge ever validates this
