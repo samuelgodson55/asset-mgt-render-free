@@ -31,7 +31,7 @@ locals {
   # resource identity, not regenerated on every plan) is appended to make
   # a collision practically impossible without you having to pick a
   # unique name yourself.
-  dns_label   = lower(replace("${var.app_base_name}-${var.environment_name}-${random_string.suffix.result}", "_", "-"))
+  dns_label = lower(replace("${var.app_base_name}-${var.environment_name}-${random_string.suffix.result}", "_", "-"))
 }
 
 # A short random suffix appended to local.dns_label above so the public
@@ -169,7 +169,7 @@ resource "azurerm_subnet_network_security_group_association" "this" {
 # and manually re-run the workflow).
 # -----------------------------------------------------------------------------
 resource "time_sleep" "network_propagation" {
-  depends_on      = [
+  depends_on = [
     azurerm_subnet.this,
     azurerm_network_security_group.this,
     azurerm_subnet_network_security_group_association.this,
@@ -197,7 +197,7 @@ resource "azurerm_network_interface" "this" {
   # see time_sleep.network_propagation's comment above for why ordering
   # alone (which the implicit dependency already guaranteed) wasn't
   # sufficient by itself.
-  depends_on          = [time_sleep.network_propagation]
+  depends_on = [time_sleep.network_propagation]
 
   ip_configuration {
     name                          = "internal"
@@ -218,7 +218,7 @@ resource "azurerm_network_interface" "this" {
 # on the same Tunnel, used for SSH instead of a separate mesh network.
 # -----------------------------------------------------------------------------
 locals {
-  effective_domain                      = var.custom_domain
+  effective_domain = var.custom_domain
 
   # Falls back to a real, validly-formatted bcrypt hash of a random,
   # never-recorded password when var.deploy_status_password_hash is left
@@ -232,7 +232,7 @@ locals {
   # "assets.example.com" in zone "example.com" needs record name "assets"
   # (and "ssh-assets" for the SSH hostname); an apex custom_domain (equal
   # to cloudflare_zone_name) needs the record name "@" instead.
-  effective_dns_record_name             = local.effective_domain == var.cloudflare_zone_name ? "@" : trimsuffix(local.effective_domain, ".${var.cloudflare_zone_name}")
+  effective_dns_record_name = local.effective_domain == var.cloudflare_zone_name ? "@" : trimsuffix(local.effective_domain, ".${var.cloudflare_zone_name}")
 
   # Uses a hyphen, not a dot ("ssh-assets.example.com", not
   # "ssh.assets.example.com") to keep the SSH hostname to a single DNS
@@ -241,8 +241,8 @@ locals {
   # cover a second label, so a dot-separated hostname fails the TLS
   # handshake before the Tunnel is ever reached. Apex custom_domain
   # (record name "@") still gets the simple "ssh" record name.
-  effective_ssh_dns_record_name         = local.effective_dns_record_name == "@" ? "ssh" : "ssh-${local.effective_dns_record_name}"
-  effective_ssh_domain                  = "${local.effective_ssh_dns_record_name}.${var.cloudflare_zone_name}"
+  effective_ssh_dns_record_name = local.effective_dns_record_name == "@" ? "ssh" : "ssh-${local.effective_dns_record_name}"
+  effective_ssh_domain          = "${local.effective_ssh_dns_record_name}.${var.cloudflare_zone_name}"
 }
 
 # -----------------------------------------------------------------------------
@@ -404,18 +404,18 @@ resource "azurerm_virtual_machine_data_disk_attachment" "data" {
 # The VM itself
 # -----------------------------------------------------------------------------
 resource "azurerm_linux_virtual_machine" "this" {
-  name                                                   = "vm-${local.name_prefix}"
-  resource_group_name                                    = azurerm_resource_group.this.name
-  location                                               = azurerm_resource_group.this.location
-  size                                                   = var.vm_size
-  admin_username                                         = var.admin_username
-  network_interface_ids                                  = [
+  name                = "vm-${local.name_prefix}"
+  resource_group_name = azurerm_resource_group.this.name
+  location            = azurerm_resource_group.this.location
+  size                = var.vm_size
+  admin_username      = var.admin_username
+  network_interface_ids = [
     azurerm_network_interface.this.id,
   ]
-  tags                                                   = local.common_tags
+  tags = local.common_tags
 
   # Password auth is never enabled -- SSH key only.
-  disable_password_authentication                        = true
+  disable_password_authentication = true
   admin_ssh_key {
     username   = var.admin_username
     public_key = var.ssh_public_key
@@ -447,25 +447,25 @@ resource "azurerm_linux_virtual_machine" "this" {
   # whole stack up on FIRST boot only -- every deploy after that is
   # deploy-azure-vm.yml SSHing in directly (see that workflow and
   # DEPLOYMENT_VM.md step 9), not a re-run of this file.
-  custom_data                                            = base64encode(templatefile("${path.module}/cloud-init.yaml", {
-    docker_compose_vm_yml                 = file("${path.module}/../docker-compose.vm.yml")
-    caddyfile                             = file("${path.module}/../Caddyfile")
-    caddy_weights_conf                    = file("${path.module}/../caddy/weights.conf")
-    deploy_status_index_html              = file("${path.module}/../scripts/deploy-status/index.html")
-    deploy_status_seed_json               = file("${path.module}/../scripts/deploy-status/status.json")
-    admin_username                        = var.admin_username
-    domain                                = local.effective_domain
-    cloudflare_tunnel_token               = cloudflare_zero_trust_tunnel_cloudflared.this.tunnel_token
-    cloudflare_origin_cert                = var.cloudflare_origin_cert
-    cloudflare_origin_cert_key            = var.cloudflare_origin_cert_key
-    dockerhub_backend_image               = var.dockerhub_backend_image
-    dockerhub_frontend_image              = var.dockerhub_frontend_image
-    frontend_build_target                 = var.frontend_build_target
-    initial_image_tag                     = var.initial_image_tag
-    dockerhub_username                    = var.dockerhub_username
-    dockerhub_token                       = var.dockerhub_token
-    postgres_user                         = var.postgres_user
-    postgres_password                     = var.postgres_password
+  custom_data = base64encode(templatefile("${path.module}/cloud-init.yaml", {
+    docker_compose_vm_yml      = file("${path.module}/../docker-compose.vm.yml")
+    caddyfile                  = file("${path.module}/../Caddyfile")
+    caddy_weights_conf         = file("${path.module}/../caddy/weights.conf")
+    deploy_status_index_html   = file("${path.module}/../scripts/deploy-status/index.html")
+    deploy_status_seed_json    = file("${path.module}/../scripts/deploy-status/status.json")
+    admin_username             = var.admin_username
+    domain                     = local.effective_domain
+    cloudflare_tunnel_token    = cloudflare_zero_trust_tunnel_cloudflared.this.tunnel_token
+    cloudflare_origin_cert     = var.cloudflare_origin_cert
+    cloudflare_origin_cert_key = var.cloudflare_origin_cert_key
+    dockerhub_backend_image    = var.dockerhub_backend_image
+    dockerhub_frontend_image   = var.dockerhub_frontend_image
+    frontend_build_target      = var.frontend_build_target
+    initial_image_tag          = var.initial_image_tag
+    dockerhub_username         = var.dockerhub_username
+    dockerhub_token            = var.dockerhub_token
+    postgres_user              = var.postgres_user
+    postgres_password          = var.postgres_password
     # DATABASE_URL-safe copies -- Terraform's urlencode() is this VM path's
     # equivalent of infra/main.bicep's uriComponent(postgresPassword) (see
     # that file's databaseUrl comment). Needed because

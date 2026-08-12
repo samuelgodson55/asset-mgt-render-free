@@ -26,6 +26,7 @@ with no Azure resources yet.
 ## Table of Contents
 
 - [0. Prerequisites](#0-prerequisites)
+- [Terraform local validation & Terraform essentials](#terraform-local-validation--terraform-essentials)
 - [1. One-time Azure setup](#1-one-time-azure-setup)
 - [2. Set up Cloudflare Tunnel (no open ports, no Bastion)](#2-set-up-cloudflare-tunnel-no-open-ports-no-bastion)
 - [3. Generate the deploy SSH key pair](#3-generate-the-deploy-ssh-key-pair)
@@ -122,6 +123,336 @@ principal and grant its subscription role. After that bootstrap, the workflow
 creates and manages the VM resource group and Terraform state backend itself.
 
 ---
+
+
+## Terraform local validation & Terraform essentials
+
+Before pushing changes to the VM Terraform configuration, run the same
+formatting and validation gates locally that GitHub Actions runs. This section
+is intentionally separate from Azure provisioning: **formatting and static
+validation are local code-quality checks; `plan`/`apply` are infrastructure
+operations that can read or change real Azure resources.**
+
+The VM Terraform root is:
+
+```text
+infra-vm/
+├── main.tf
+├── variables.tf
+├── outputs.tf
+├── versions.tf
+└── terraform.tfvars.example
+```
+
+There is only one Terraform root in this repository. The commands below can
+therefore be run from the repository root or from `infra-vm/`, but the
+repository-wide CI formatting command is best run from the repository root.
+
+### 1. Check the Terraform version
+
+The VM stack requires Terraform `>= 1.7.0`:
+
+```bash
+terraform version
+```
+
+If Terraform is missing, install it before continuing. Do not substitute an
+older Terraform version just to make a local check pass.
+
+### 2. Format Terraform files
+
+**Fix formatting** with:
+
+```bash
+terraform fmt -recursive
+```
+
+This modifies Terraform files in place.
+
+Then run the exact CI check:
+
+```bash
+terraform fmt -check -recursive
+```
+
+A clean result prints no Terraform filenames and exits with code `0`.
+
+If the output looks like:
+
+```text
+main.tf
+versions.tf
+Error: Terraform exited with code 3.
+```
+
+that means those files are **not canonically formatted**. It is not a Terraform
+provider, Azure, or state error. Run:
+
+```bash
+terraform fmt -recursive
+terraform fmt -check -recursive
+```
+
+Then inspect the changes:
+
+```bash
+git diff -- main.tf versions.tf
+```
+
+or, for a change inside the VM directory:
+
+```bash
+git diff -- infra-vm/main.tf infra-vm/versions.tf
+```
+
+Do not use `|| true` on the CI formatting check. A formatting failure should
+fail the workflow so it gets fixed before deployment.
+
+### 3. Initialize providers without touching the remote Terraform state
+
+For local syntax/static validation, initialize the Terraform working directory
+without configuring the Azure remote backend:
+
+```bash
+cd infra-vm
+terraform init -backend=false
+```
+
+This downloads the providers required by `versions.tf` but does **not** connect
+to or create the remote `azurerm` state backend.
+
+It is safe to repeat. If provider metadata or cached modules need to be
+refreshed, use:
+
+```bash
+terraform init -backend=false -upgrade
+```
+
+Use `-upgrade` deliberately rather than on every run: provider versions are
+constrained by `versions.tf`, and changing the selected provider version can
+change the plan.
+
+### 4. Validate the Terraform configuration
+
+After initialization:
+
+```bash
+terraform validate
+```
+
+A successful result is:
+
+```text
+Success! The configuration is valid.
+```
+
+This catches structural and configuration errors before Azure is contacted.
+It does **not** prove that:
+
+- your Azure credentials are valid;
+- your Cloudflare credentials are valid;
+- the requested Azure SKU/region is available;
+- the remote state exists;
+- your intended resources can actually be created.
+
+Those require `terraform plan`.
+
+### 5. Check providers and dependency versions
+
+Use:
+
+```bash
+terraform providers
+```
+
+This is useful when a provider-related error appears after a change to
+`versions.tf` or a resource block.
+
+The authoritative provider constraints for this repo are in
+`infra-vm/versions.tf`. Do not casually run `terraform init -upgrade` and then
+commit a provider-version change without reviewing the resulting plan.
+
+The repository currently ignores `.terraform.lock.hcl`. If the team later
+decides to lock exact provider selections/checksums for stronger reproducibility,
+remove that ignore rule deliberately and commit the generated lock file. Never
+commit `.terraform/`, `*.tfstate`, `terraform.tfvars`, or plan files containing
+environment-specific information.
+
+### 6. Run a real local plan only when you intentionally want to inspect Azure
+
+A local `terraform validate` is not a substitute for a plan. A full plan needs
+Azure authentication, Cloudflare credentials, all required Terraform variables,
+and the correct remote state.
+
+First authenticate to Azure:
+
+```bash
+az login
+az account set --subscription "<subscription-id>"
+az account show --query "{id:id,tenantId:tenantId,name:name}" -o json
+```
+
+For local experimentation, copy the example variables file:
+
+```bash
+cp infra-vm/terraform.tfvars.example infra-vm/terraform.tfvars
+```
+
+Fill in the real values locally. `infra-vm/terraform.tfvars` is ignored by Git
+and **must never be committed**, because it can contain passwords, API tokens,
+private keys/certificates, and other secrets.
+
+Then initialize against the real backend only after you have confirmed that
+you are targeting the correct environment/state:
+
+```bash
+cd infra-vm
+
+terraform init \
+  -backend-config="resource_group_name=<state-resource-group>" \
+  -backend-config="storage_account_name=<state-storage-account>" \
+  -backend-config="container_name=vm-state" \
+  -backend-config="key=prod.tfstate" \
+  -backend-config="use_azuread_auth=true"
+```
+
+For staging, use the staging state key:
+
+```text
+vm-staging.tfstate
+```
+
+**Be extremely careful with `key`.** It is the identity of the Terraform state
+for the environment. Pointing a production configuration at the wrong key can
+make Terraform plan against the wrong infrastructure.
+
+If the backend configuration changes between environments or you need to
+deliberately reconnect to a different existing backend, use:
+
+```bash
+terraform init -reconfigure \
+  -backend-config="resource_group_name=<state-resource-group>" \
+  -backend-config="storage_account_name=<state-storage-account>" \
+  -backend-config="container_name=vm-state" \
+  -backend-config="key=prod.tfstate" \
+  -backend-config="use_azuread_auth=true"
+```
+
+Do not use `-reconfigure` casually; it tells Terraform to accept the supplied
+backend configuration rather than relying on its previously initialized
+backend metadata.
+
+Then create and inspect a plan:
+
+```bash
+terraform plan -out=tfplan
+terraform show -no-color tfplan
+```
+
+`tfplan` is ignored by this repository. Do not commit it.
+
+For the normal GitHub deployment path, prefer the workflow's plan because it
+uses the same OIDC identity, backend configuration, environment variables,
+state key, and CI runner that will perform the eventual apply.
+
+### 7. The safe local Terraform sequence
+
+For ordinary Terraform code changes, the recommended local sequence is:
+
+```bash
+# From repository root
+terraform fmt -recursive
+terraform fmt -check -recursive
+
+# Static validation
+cd infra-vm
+terraform init -backend=false
+terraform validate
+terraform providers
+```
+
+Then, only when you deliberately need a real infrastructure preview:
+
+```bash
+terraform init \
+  -backend-config="resource_group_name=<state-resource-group>" \
+  -backend-config="storage_account_name=<state-storage-account>" \
+  -backend-config="container_name=vm-state" \
+  -backend-config="key=prod.tfstate" \
+  -backend-config="use_azuread_auth=true"
+
+terraform plan -out=tfplan
+terraform show -no-color tfplan
+```
+
+The deployment workflow then follows its own controlled:
+
+```text
+format check
+    ↓
+terraform init
+    ↓
+terraform validate
+    ↓
+terraform plan
+    ↓
+terraform apply
+```
+
+Never use `terraform apply` merely to find out whether a configuration is
+valid. `validate` and `plan` exist specifically to catch problems before an
+apply.
+
+### 8. What each Terraform command is for
+
+| Command | Purpose | Can contact Azure/state? | Can change infrastructure? |
+|---|---|---:|---:|
+| `terraform fmt` | Fix canonical formatting | No | No |
+| `terraform fmt -check` | CI formatting gate | No | No |
+| `terraform init -backend=false` | Install providers for local checks | No remote state | No |
+| `terraform validate` | Check Terraform configuration structure | Normally no | No |
+| `terraform providers` | Show provider dependency graph | No | No |
+| `terraform init` | Configure/install the real backend and providers | Yes | No |
+| `terraform plan` | Compare configuration with real state/Azure | Yes | No |
+| `terraform show tfplan` | Inspect a saved plan | No new changes | No |
+| `terraform apply` | Apply an approved plan | Yes | **Yes** |
+| `terraform destroy` | Remove managed infrastructure | Yes | **Yes — destructive** |
+
+### 9. Before pushing Terraform changes
+
+Run:
+
+```bash
+terraform fmt -recursive
+terraform fmt -check -recursive
+
+cd infra-vm
+terraform init -backend=false
+terraform validate
+terraform providers
+```
+
+Then review:
+
+```bash
+git status
+git diff
+```
+
+Make sure you are **not** about to commit:
+
+```text
+terraform.tfvars
+*.tfstate
+*.tfplan
+tfplan
+.terraform/
+crash.log
+```
+
+A clean local validation does not guarantee a successful Azure deployment, but
+it removes the avoidable Terraform syntax, formatting, and dependency errors
+before GitHub Actions spends a runner and reaches Azure.
 
 ## 1. One-time Azure setup
 

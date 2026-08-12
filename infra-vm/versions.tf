@@ -12,24 +12,24 @@ terraform {
   required_version = ">= 1.7.0"
 
   required_providers {
-    azurerm    = {
+    azurerm = {
       source  = "hashicorp/azurerm"
       version = "~> 3.116"
     }
-    tls        = {
+    tls = {
       source  = "hashicorp/tls"
       version = "~> 4.0"
     }
-    random     = {
+    random = {
       source  = "hashicorp/random"
       version = "~> 3.6"
     }
-    time       = {
+    time = {
       source  = "hashicorp/time"
       version = "~> 0.12"
     }
     cloudflare = {
-      source  = "cloudflare/cloudflare"
+      source = "cloudflare/cloudflare"
       # Cloudflare renames Zero Trust resources between major versions
       # (e.g. cloudflare_argo_tunnel -> cloudflare_tunnel ->
       # cloudflare_zero_trust_tunnel_cloudflared). This stack targets v4 --
@@ -94,7 +94,7 @@ provider "azurerm" {
 # -- see DEPLOYMENT_VM.md's "Set up Cloudflare Tunnel" section for the
 # exact token permissions to select when creating it.
 provider "cloudflare" {
-  api_token   = var.cloudflare_api_token
+  api_token = var.cloudflare_api_token
 
   # Cloudflare's edge intermittently returns transient errors (most often
   # "HTTP 520, please try again later") when Terraform reads back
