@@ -1,3 +1,17 @@
+# =============================================================================
+# infra-vm/main.tf
+# -----------------------------------------------------------------------------
+# Everything Azure-side for the VM deployment target:
+#   resource group -> vnet/subnet -> NSG -> static public IP -> NIC -> VM
+#   + a separate managed data disk for all application data
+#   + (optional) a daily snapshot policy for that data disk
+#
+# cloud-init.yaml does the actual OS-level setup (Docker install, UFW,
+# fail2ban, the /opt/snipeit/.env + docker-compose.vm.yml + Caddyfile that
+# get the app running on first boot) -- this file's job is purely
+# provisioning the Azure resources and handing cloud-init the values it
+# needs (rendered via templatefile() below).
+# =============================================================================
 
 locals {
   name_prefix = "${var.app_base_name}-${var.environment_name}"
@@ -8,9 +22,24 @@ locals {
     managed-by  = "terraform"
   }, var.tags)
 
+  # DNS label Azure attaches to the public IP -> gives us a stable
+  # <label>.<region>.cloudapp.azure.com FQDN even before any DNS record of
+  # our own exists. Must be globally unique across ALL of Azure, lowercase,
+  # start with a letter -- app_base_name + environment_name alone isn't
+  # guaranteed unique across every Azure customer worldwide, so
+  # random_string.suffix (kept STABLE across re-applies via its own
+  # resource identity, not regenerated on every plan) is appended to make
+  # a collision practically impossible without you having to pick a
+  # unique name yourself.
   dns_label = lower(replace("${var.app_base_name}-${var.environment_name}-${random_string.suffix.result}", "_", "-"))
 }
 
+# A short random suffix appended to local.dns_label above so the public
+# IP's DNS label doesn't collide with someone else's identically-named
+# deployment somewhere else in Azure. Generated once and then left alone
+# by Terraform on every later plan/apply (that's what makes a `resource`
+# stable here instead of a `random_string` regenerating on every run) --
+# the label only changes if this resource is explicitly tainted/destroyed.
 resource "random_string" "suffix" {
   length  = 4
   special = false
@@ -19,12 +48,20 @@ resource "random_string" "suffix" {
   lower   = true
 }
 
+# -----------------------------------------------------------------------------
+# Resource group -- everything this stack creates lives in exactly one, so
+# `terraform destroy` (or deleting the group in the Portal) cleanly removes
+# the whole deployment with nothing orphaned elsewhere.
+# -----------------------------------------------------------------------------
 resource "azurerm_resource_group" "this" {
   name     = "rg-${local.name_prefix}-vm"
   location = var.location
   tags     = local.common_tags
 }
 
+# -----------------------------------------------------------------------------
+# Networking
+# -----------------------------------------------------------------------------
 resource "azurerm_virtual_network" "this" {
   name                = "vnet-${local.name_prefix}"
   resource_group_name = azurerm_resource_group.this.name
@@ -46,6 +83,19 @@ resource "azurerm_network_security_group" "this" {
   location            = azurerm_resource_group.this.location
   tags                = local.common_tags
 
+  # -------------------------------------------------------------------
+  # Break-glass ONLY: this rule is entirely ABSENT unless you explicitly
+  # set ssh_allowed_source_ips to something non-empty. SSH is reached
+  # through the Cloudflare Tunnel instead (see the "Cloudflare Tunnel"
+  # section below and docker-compose.vm.yml's `cloudflared` service): the
+  # VM only makes an OUTBOUND connection to Cloudflare's edge, and Azure
+  # NSGs automatically permit return traffic on a flow the VM itself
+  # initiated, with no explicit inbound "allow" needed. This dynamic
+  # block exists purely so you have a documented, deliberate way to
+  # temporarily open direct SSH (e.g. if Cloudflare's network is ever
+  # unreachable from where you are) without hand-editing the NSG -- see
+  # DEPLOYMENT_VM.md's Troubleshooting section.
+  # -------------------------------------------------------------------
   dynamic "security_rule" {
     for_each = length(var.ssh_allowed_source_ips) > 0 ? [1] : []
     content {
@@ -61,6 +111,13 @@ resource "azurerm_network_security_group" "this" {
     }
   }
 
+  # Deliberately no rules for 80/443/443-udp here. `cloudflared` (see
+  # docker-compose.vm.yml) makes the only connection, purely outbound to
+  # Cloudflare's edge, which proxies both the app and SSH over that one
+  # connection -- there is no public IP-based path in at all. See
+  # Caddyfile's top comment and DEPLOYMENT_VM.md's "Set up Cloudflare
+  # Tunnel" section.
+
   security_rule {
     name                       = "DenyAllOtherInbound"
     priority                   = 4096
@@ -71,6 +128,10 @@ resource "azurerm_network_security_group" "this" {
     destination_port_range     = "*"
     source_address_prefix      = "*"
     destination_address_prefix = "*"
+    # Explicit deny-all, ranked last -- Azure NSGs already deny
+    # unmatched inbound traffic by default, but spelling it out here
+    # means anyone reading this file doesn't have to know that Azure
+    # default to confirm nothing else is reachable.
   }
 }
 
@@ -79,6 +140,34 @@ resource "azurerm_subnet_network_security_group_association" "this" {
   network_security_group_id = azurerm_network_security_group.this.id
 }
 
+# -----------------------------------------------------------------------------
+# BUG FIX: on a fresh (or freshly recreated) apply, azurerm_network_interface
+# .this below used to fail intermittently with:
+#   Error: creating Network Interface ... InvalidResourceReference: Resource
+#   .../subnets/snet-app referenced by resource .../networkInterfaces/nic-...
+#   was not found.
+# and azurerm_network_security_group.this itself would sometimes fail the
+# SAME apply with:
+#   Error: Provider produced inconsistent result after apply ... Root object
+#   was present, but now absent.
+# Both are the same underlying cause, not two separate bugs: Azure Resource
+# Manager's control plane can return HTTP 201/200 for a create/update (vnet,
+# subnet, NSG) before that object has actually finished replicating to every
+# ARM shard that a DEPENDENT resource's own create call gets validated
+# against -- so a NIC created moments later, referencing a subnet ID that
+# genuinely does exist, can still get "not found" back, and a near-
+# simultaneous read of the NSG can briefly see a null/absent object. This is
+# a well-documented class of ARM eventual-consistency race (not something
+# retrying `terraform plan` fixes on its own, and not something a `depends_on`
+# alone fixes either, since the implicit dependency via subnet_id already
+# forces correct ORDERING -- the problem is ARM's own propagation lag after
+# that order is already respected). A short, one-time pause after the
+# subnet/NSG/association are created -- before anything that references them
+# -- gives ARM's replication time to catch up. See
+# infra-deploy-vm.yml's terraform-apply retry loop for the second half of
+# this fix (a transient failure here should never require a human to notice
+# and manually re-run the workflow).
+# -----------------------------------------------------------------------------
 resource "time_sleep" "network_propagation" {
   depends_on = [
     azurerm_subnet.this,
@@ -104,6 +193,10 @@ resource "azurerm_network_interface" "this" {
   location            = azurerm_resource_group.this.location
   tags                = local.common_tags
 
+  # Explicit, on top of the implicit dependency subnet_id already creates --
+  # see time_sleep.network_propagation's comment above for why ordering
+  # alone (which the implicit dependency already guaranteed) wasn't
+  # sufficient by itself.
   depends_on = [time_sleep.network_propagation]
 
   ip_configuration {
@@ -114,17 +207,58 @@ resource "azurerm_network_interface" "this" {
   }
 }
 
+# -----------------------------------------------------------------------------
+# Free HTTPS, via Cloudflare instead of Let's Encrypt
+# -----------------------------------------------------------------------------
+# custom_domain is what real visitors hit; Cloudflare terminates their TLS
+# at its edge (free, automatic, no ACME dance on this VM at all) and
+# forwards the request down the Tunnel to Caddy, which presents the
+# Cloudflare Origin CA certificate (cloudflare_origin_cert/_key) for that
+# inner hop -- see Caddyfile. ssh.<custom_domain> is the second hostname
+# on the same Tunnel, used for SSH instead of a separate mesh network.
+# -----------------------------------------------------------------------------
 locals {
   effective_domain = var.custom_domain
 
+  # Falls back to a real, validly-formatted bcrypt hash of a random,
+  # never-recorded password when var.deploy_status_password_hash is left
+  # empty (its default) -- same fail-closed behavior cloud-init.yaml used
+  # to hardcode directly. Set the DEPLOY_STATUS_PASSWORD_HASH secret to
+  # override with a hash of your own choosing (docker run --rm
+  # caddy:2-alpine caddy hash-password) -- see variables.tf's comment.
   effective_deploy_status_password_hash = var.deploy_status_password_hash != "" ? var.deploy_status_password_hash : "$2b$14$1FLbT3EqJ/ebM2oPXK/FEOSjkHp1XCSTe3KyB99xEas.JdktP0JMm"
 
+  # DNS record names are relative to the zone, e.g. custom_domain
+  # "assets.example.com" in zone "example.com" needs record name "assets"
+  # (and "ssh-assets" for the SSH hostname); an apex custom_domain (equal
+  # to cloudflare_zone_name) needs the record name "@" instead.
   effective_dns_record_name = local.effective_domain == var.cloudflare_zone_name ? "@" : trimsuffix(local.effective_domain, ".${var.cloudflare_zone_name}")
 
+  # Uses a hyphen, not a dot ("ssh-assets.example.com", not
+  # "ssh.assets.example.com") to keep the SSH hostname to a single DNS
+  # label under the zone apex. Cloudflare's default Universal SSL
+  # certificate is a single-level wildcard ("*.example.com") and doesn't
+  # cover a second label, so a dot-separated hostname fails the TLS
+  # handshake before the Tunnel is ever reached. Apex custom_domain
+  # (record name "@") still gets the simple "ssh" record name.
   effective_ssh_dns_record_name = local.effective_dns_record_name == "@" ? "ssh" : "ssh-${local.effective_dns_record_name}"
   effective_ssh_domain          = "${local.effective_ssh_dns_record_name}.${var.cloudflare_zone_name}"
 }
 
+# -----------------------------------------------------------------------------
+# Cloudflare Tunnel -- the substitute for both Tailscale (SSH) and the old
+# open-80/443 Caddy/Let's Encrypt path (the app), per the security tradeoffs
+# discussed in DEPLOYMENT_VM.md's "Set up Cloudflare Tunnel" section. One
+# tunnel, one outbound-only `cloudflared` container (docker-compose.vm.yml),
+# two hostnames routed over it:
+#   - effective_domain     -> Caddy (443)      -> frontend -> backend
+#   - effective_ssh_domain -> this VM's sshd (22), gated by Access below
+# -----------------------------------------------------------------------------
+
+# 32 random bytes, base64-encoded, used as the tunnel's own secret (proves
+# to Cloudflare's edge that a `cloudflared` claiming this tunnel ID is
+# actually authorized to -- distinct from the connector token below, which
+# is what actually gets handed to the VM).
 resource "random_id" "tunnel_secret" {
   byte_length = 32
 }
@@ -136,6 +270,17 @@ resource "cloudflare_zero_trust_tunnel_cloudflared" "this" {
   config_src = "cloudflare" # ingress rules managed remotely (below), not by a local config.yml on the VM
 }
 
+# The long-lived token cloud-init writes into /opt/snipeit/.env as
+# CLOUDFLARE_TUNNEL_TOKEN -- this, not the raw secret above, is what
+# `cloudflared tunnel run` in docker-compose.vm.yml actually authenticates
+# with.
+#
+# Read directly off cloudflare_zero_trust_tunnel_cloudflared.this below,
+# not a separate data source -- on the v4.x provider line this repo pins,
+# the token is a computed, sensitive attribute on the resource itself
+# (tunnel_token in schema_cloudflare_tunnel.go), not a standalone data
+# source (that's a v5-only addition).
+
 resource "cloudflare_zero_trust_tunnel_cloudflared_config" "this" {
   account_id = var.cloudflare_account_id
   tunnel_id  = cloudflare_zero_trust_tunnel_cloudflared.this.id
@@ -146,11 +291,17 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "this" {
       service  = "https://caddy:443"
       origin_request {
         origin_server_name = local.effective_domain
+        # Caddy presents the Cloudflare Origin CA cert for this name (see
+        # Caddyfile) -- cloudflared trusts Cloudflare's own Origin CA
+        # automatically, no extra ca_pool needed here.
       }
     }
     ingress_rule {
       hostname = local.effective_ssh_domain
       service  = "ssh://host.docker.internal:22"
+      # host.docker.internal resolves to the VM itself from inside the
+      # `cloudflared` container (see docker-compose.vm.yml's extra_hosts) --
+      # sshd is a normal host-level service, not a container.
     }
     ingress_rule {
       service = "http_status:404" # required catch-all; anything not matched above is refused
@@ -176,6 +327,15 @@ resource "cloudflare_record" "ssh" {
   ttl     = 1
 }
 
+# -----------------------------------------------------------------------------
+# Cloudflare Access -- gates ssh.<custom_domain>. Without this, anyone who
+# guesses the SSH hostname could still attempt a connection (OpenSSH's own
+# key auth would still stop them, but Access adds a second, independent
+# identity check in front of it -- the "value security" ask this whole
+# substitution is in service of). Two ways in, both covered:
+#   - humans:     browser SSO login, see ssh_access_allowed_emails
+#   - CI/CD:      the service token below (deploy-azure-vm.yml, sync-secrets-vm.yml)
+# -----------------------------------------------------------------------------
 resource "cloudflare_zero_trust_access_application" "ssh" {
   account_id                = var.cloudflare_account_id
   name                      = "${local.name_prefix}-ssh"
@@ -214,6 +374,15 @@ resource "cloudflare_zero_trust_access_policy" "ssh_ci" {
   }
 }
 
+# -----------------------------------------------------------------------------
+# Separate managed data disk -- Docker's data-root (all images, containers,
+# and the bind-mounted volumes docker-compose.vm.yml uses under
+# /mnt/docker-data/volumes/...) lives here, not on the OS disk. Two
+# concrete benefits: (1) you can grow just this disk later without
+# touching the OS disk at all (see DEPLOYMENT_VM.md's resize section), and
+# (2) the snapshot policy below can back up exactly the data that matters
+# without also snapshotting the OS disk on every run.
+# -----------------------------------------------------------------------------
 resource "azurerm_managed_disk" "data" {
   name                 = "disk-${local.name_prefix}-data"
   resource_group_name  = azurerm_resource_group.this.name
@@ -231,6 +400,9 @@ resource "azurerm_virtual_machine_data_disk_attachment" "data" {
   caching            = "ReadWrite"
 }
 
+# -----------------------------------------------------------------------------
+# The VM itself
+# -----------------------------------------------------------------------------
 resource "azurerm_linux_virtual_machine" "this" {
   name                = "vm-${local.name_prefix}"
   resource_group_name = azurerm_resource_group.this.name
@@ -242,6 +414,7 @@ resource "azurerm_linux_virtual_machine" "this" {
   ]
   tags = local.common_tags
 
+  # Password auth is never enabled -- SSH key only.
   disable_password_authentication = true
   admin_ssh_key {
     username   = var.admin_username
@@ -262,29 +435,47 @@ resource "azurerm_linux_virtual_machine" "this" {
     version   = "latest"
   }
 
+  # Azure applies OS security patches automatically on its own schedule
+  # instead of you having to SSH in and `apt upgrade` -- reboots only if a
+  # patch requires one, and only during Azure's maintenance window.
   patch_mode                                             = "AutomaticByPlatform"
   patch_assessment_mode                                  = "AutomaticByPlatform"
   bypass_platform_safety_checks_on_user_schedule_enabled = false
 
+  # cloud-init: installs Docker, formats/mounts the data disk, writes
+  # /opt/snipeit/{.env,docker-compose.vm.yml,Caddyfile}, and brings the
+  # whole stack up on FIRST boot only -- every deploy after that is
+  # deploy-azure-vm.yml SSHing in directly (see that workflow and
+  # DEPLOYMENT_VM.md step 9), not a re-run of this file.
   custom_data = base64encode(templatefile("${path.module}/cloud-init.yaml", {
-    docker_compose_vm_yml                 = file("${path.module}/../docker-compose.vm.yml")
-    caddyfile                             = file("${path.module}/../Caddyfile")
-    caddy_weights_conf                    = file("${path.module}/../caddy/weights.conf")
-    deploy_status_index_html              = file("${path.module}/../scripts/deploy-status/index.html")
-    deploy_status_seed_json               = file("${path.module}/../scripts/deploy-status/status.json")
-    admin_username                        = var.admin_username
-    domain                                = local.effective_domain
-    cloudflare_tunnel_token               = cloudflare_zero_trust_tunnel_cloudflared.this.tunnel_token
-    cloudflare_origin_cert                = var.cloudflare_origin_cert
-    cloudflare_origin_cert_key            = var.cloudflare_origin_cert_key
-    dockerhub_backend_image               = var.dockerhub_backend_image
-    dockerhub_frontend_image              = var.dockerhub_frontend_image
-    frontend_build_target                 = var.frontend_build_target
-    initial_image_tag                     = var.initial_image_tag
-    dockerhub_username                    = var.dockerhub_username
-    dockerhub_token                       = var.dockerhub_token
-    postgres_user                         = var.postgres_user
-    postgres_password                     = var.postgres_password
+    docker_compose_vm_yml      = file("${path.module}/../docker-compose.vm.yml")
+    caddyfile                  = file("${path.module}/../Caddyfile")
+    caddy_weights_conf         = file("${path.module}/../caddy/weights.conf")
+    deploy_status_index_html   = file("${path.module}/../scripts/deploy-status/index.html")
+    deploy_status_seed_json    = file("${path.module}/../scripts/deploy-status/status.json")
+    admin_username             = var.admin_username
+    domain                     = local.effective_domain
+    cloudflare_tunnel_token    = cloudflare_zero_trust_tunnel_cloudflared.this.tunnel_token
+    cloudflare_origin_cert     = var.cloudflare_origin_cert
+    cloudflare_origin_cert_key = var.cloudflare_origin_cert_key
+    dockerhub_backend_image    = var.dockerhub_backend_image
+    dockerhub_frontend_image   = var.dockerhub_frontend_image
+    frontend_build_target      = var.frontend_build_target
+    initial_image_tag          = var.initial_image_tag
+    dockerhub_username         = var.dockerhub_username
+    dockerhub_token            = var.dockerhub_token
+    postgres_user              = var.postgres_user
+    postgres_password          = var.postgres_password
+    # DATABASE_URL-safe copies -- Terraform's urlencode() is this VM path's
+    # equivalent of infra/main.bicep's uriComponent(postgresPassword) (see
+    # that file's databaseUrl comment). Needed because
+    # openssl rand -base64 24 (DEPLOYMENT_VM.md step 4) routinely produces
+    # `+`/`/` (and occasionally `=`), any of which breaks postgresql://
+    # URL syntax if dropped in unescaped -- see docker-compose.vm.yml's
+    # DATABASE_URL comment and backend/services/backup_service.py's
+    # _db_connection_kwargs() docstring for the same class of bug on the
+    # read side. POSTGRES_USER is encoded too on the same principle, even
+    # though the default "admin" needs no escaping.
     postgres_user_urlencoded              = urlencode(var.postgres_user)
     postgres_password_urlencoded          = urlencode(var.postgres_password)
     postgres_db                           = var.postgres_db
@@ -331,17 +522,37 @@ resource "azurerm_linux_virtual_machine" "this" {
 
   lifecycle {
     ignore_changes = [
+      # cloud-init's custom_data only runs on FIRST boot -- Azure won't
+      # even let you change it on a running VM without a rebuild/reset.
+      # Ignoring it here stops `terraform plan` from showing a perpetual
+      # "will replace VM" diff every time a later deploy changes
+      # IMAGE_TAG on the running VM directly (over SSH, via
+      # deploy-azure-vm.yml) without going through Terraform at all --
+      # that drift is EXPECTED, not something to reconcile back.
       custom_data,
     ]
   }
 }
 
+# -----------------------------------------------------------------------------
+# Optional: daily snapshot of the data disk (Postgres/Redis/backup/export
+# data) via Azure Backup. Independent of, and in addition to, the app's own
+# `ENABLE_AUTO_BACKUP` pg_dump job (see variables.tf) -- this covers the
+# WHOLE disk (including Redis and any export files), and is the fast path
+# to recover if the VM itself is ever lost or corrupted, not just the
+# database.
+# -----------------------------------------------------------------------------
 resource "azurerm_recovery_services_vault" "this" {
   count               = var.enable_data_disk_snapshots ? 1 : 0
   name                = "rsv-${local.name_prefix}"
   resource_group_name = azurerm_resource_group.this.name
   location            = azurerm_resource_group.this.location
   sku                 = "Standard"
+  # Azure now makes soft delete mandatory on new Recovery Services Vaults --
+  # trying to disable it (soft_delete_enabled = false, the old default here)
+  # fails the vault's create/update call with
+  # BMSUserErrorDisablingSoftDeleteStateNotAllowed. Leave it enabled (the
+  # provider default -- explicit here just to document why).
   soft_delete_enabled = true
   tags                = local.common_tags
 }

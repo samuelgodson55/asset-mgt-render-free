@@ -1,3 +1,30 @@
+#cloud-config
+# =============================================================================
+# infra-vm/cloud-init.yaml
+# -----------------------------------------------------------------------------
+# Runs exactly ONCE, the very first time the VM boots (Azure feeds this to
+# the VM as custom_data -- see main.tf's azurerm_linux_virtual_machine
+# resource). Rendered through Terraform's templatefile() first, so every
+# $${...} below is substituted with a real value BEFORE the VM ever sees
+# this file -- nothing here is a live Terraform reference at runtime.
+#
+# What it does, in order:
+#   1. Installs Docker Engine + the Compose plugin
+#   2. Formats and mounts the separate data disk at /mnt/docker-data,
+#      points Docker's data-root there instead of the OS disk
+#   3. Hardens the VM: UFW firewall mirroring the NSG, fail2ban for SSH,
+#      unattended-upgrades for OS packages Azure's own patching doesn't
+#      already cover
+#   4. Writes /opt/snipeit/{.env, docker-compose.vm.yml, Caddyfile}
+#   5. Logs into Docker Hub (only if a private registry was configured)
+#      and brings the whole stack up
+#
+# Every deploy AFTER this first boot is handled by
+# .github/workflows/deploy-azure-vm.yml SSHing in directly and re-running
+# `docker compose up -d` with a new IMAGE_TAG -- this file is NOT re-run on
+# redeploys, reboots, or `terraform apply` (see main.tf's `lifecycle.
+# ignore_changes = [custom_data]`).
+# =============================================================================
 
 package_update: true
 package_upgrade: true
@@ -12,6 +39,12 @@ packages:
   - jq
 
 write_files:
+  # ---------------------------------------------------------------------
+  # Cloudflare Origin CA certificate + key -- Caddy's TLS cert now that
+  # nothing but the Cloudflare Tunnel ever reaches it (see Caddyfile and
+  # main.tf's "Cloudflare Tunnel" section). 0600 because the key is as
+  # sensitive as any other secret in /opt/snipeit/.env below.
+  # ---------------------------------------------------------------------
   - path: /opt/snipeit/certs/cloudflare-origin.pem
     permissions: "0644"
     content: |
@@ -21,19 +54,71 @@ write_files:
     content: |
       ${indent(6, cloudflare_origin_cert_key)}
 
+  # ---------------------------------------------------------------------
+  # /opt/snipeit/.env -- every value docker-compose.vm.yml's $${...}
+  # substitutions read. Written with 0600 perms (below, in `runcmd`)
+  # since it holds real secrets (DB password, JWT signing key, etc).
+  # ---------------------------------------------------------------------
   - path: /opt/snipeit/.env
     permissions: "0600"
     content: |
+      # Generated once by Terraform on first VM boot. Safe to hand-edit
+      # after that -- deploy-azure-vm.yml refreshes IMAGE_TAG, image refs,
+      # and the selected frontend expectation on redeploys; other values
+      # are left as you set them here. Re-running `terraform apply` later
+      # will NOT overwrite
+      # this file (cloud-init only runs on first boot -- see this
+      # file's top comment).
       DOMAIN=${domain}
       CLOUDFLARE_TUNNEL_TOKEN=${cloudflare_tunnel_token}
       IMAGE_TAG=${initial_image_tag}
       DOCKERHUB_BACKEND_IMAGE=${dockerhub_backend_image}
       DOCKERHUB_FRONTEND_IMAGE=${dockerhub_frontend_image}
+      # DOCUMENTATION ONLY -- nothing on this VM reads this value; no
+      # process here builds the frontend image, it's only ever pulled
+      # (see DOCKERHUB_FRONTEND_IMAGE above). The real switch is the
+      # paired GitHub Environment's FRONTEND_BUILD_TARGET Actions
+      # variable, read by .github/workflows/deploy-azure-vm.yml's
+      # resolve-target job when THAT image was built and pushed. This
+      # line exists so `cat /opt/snipeit/.env` (or Terraform state) tells
+      # an operator which kind of image this environment is SUPPOSED to
+      # be running -- keep it in sync with that Actions variable by hand;
+      # see infra-vm/variables.tf's frontend_build_target description.
       EXPECTED_FRONTEND_BUILD_TARGET=${frontend_build_target}
 
+      # Zero-downtime blue-green deploys (see docker-compose.vm.yml's own
+      # "ZERO-DOWNTIME BLUE-GREEN DEPLOYMENTS" header comment,
+      # scripts/blue-green-deploy.sh, and DEPLOYMENT_VM.md). Roles are
+      # FIXED, not alternating: green is always the active/production
+      # slot, blue is always the incoming candidate a rollout deploys
+      # into before promoting green onto the same image -- see
+      # blue-green-deploy.sh's own top-of-file comment for the full
+      # mechanics. COMPOSE_PROFILES is what actually tells `docker
+      # compose up -d` (systemd's snipeit.service, and any reboot) which
+      # slot's backend/frontend pair to start; since the active role
+      # never changes anymore, this is set ONCE here and never touched
+      # again by any later rollout (older versions of
+      # blue-green-deploy.sh used to flip both of these at the end of
+      # every deploy -- that's no longer necessary or done). ACTIVE_SLOT
+      # is kept alongside it purely as a human-readable label for anyone
+      # reading .env by hand; nothing reads it programmatically anymore.
       ACTIVE_SLOT=green
       COMPOSE_PROFILES=green
 
+      # HTTP Basic Auth for the /_deploy/ live rollout-status dashboard
+      # (see Caddyfile and DEPLOYMENT_VM.md's "Monitoring a rollout"
+      # section). Sourced from the DEPLOY_STATUS_USER/DEPLOY_STATUS_PASSWORD_HASH
+      # GitHub secrets (infra-vm/variables.tf's deploy_status_user/
+      # deploy_status_password_hash -- see infra-deploy-vm.yml's env block)
+      # so first boot already has real credentials, no SSH required. Leave
+      # those secrets unset and Terraform substitutes a real,
+      # validly-formatted bcrypt hash of a random, never-recorded password
+      # instead -- i.e. a hash nobody, including us, knows the plaintext
+      # for, so the route fails CLOSED (nobody can log in) rather than
+      # open. To change credentials on an ALREADY-provisioned VM without
+      # SSHing in, set/update the two secrets and run
+      # sync-secrets-vm.yml -- it writes these same two keys and restarts
+      # only `caddy`.
       DEPLOY_STATUS_USER=${deploy_status_user}
       DEPLOY_STATUS_PASSWORD_HASH=${deploy_status_password_hash}
 
@@ -41,6 +126,13 @@ write_files:
       POSTGRES_PASSWORD=${postgres_password}
       POSTGRES_DB=${postgres_db}
 
+      # Pre-encoded so docker-compose.vm.yml can use it verbatim instead of
+      # rebuilding a postgresql:// URL from the raw POSTGRES_USER/
+      # POSTGRES_PASSWORD above -- a raw base64 password (DEPLOYMENT_VM.md
+      # step 4's `openssl rand -base64 24`) routinely contains `+`/`/`/`=`,
+      # any of which corrupts URL parsing (e.g. a `:` or `@` landing where
+      # host/port is expected) if substituted in unescaped. See
+      # docker-compose.vm.yml's DATABASE_URL comment for the full story.
       DATABASE_URL=postgresql://${postgres_user_urlencoded}:${postgres_password_urlencoded}@db:5432/${postgres_db}
 
       JWT_SECRET_KEY=${jwt_secret_key}
@@ -48,6 +140,16 @@ write_files:
       JWT_EXPIRY_HOURS=12
 
       CORS_ORIGINS=https://${domain}
+      # QUOTED -- SITE_NAME/SUPER_ADMIN_NAME are free-text and routinely
+      # contain spaces (default "Snipe-IT Lite" / "Super Admin"). Left
+      # unquoted, `source .env` (scripts/blue-green-deploy.sh,
+      # `set -a; source .env; set +a`) parses only the text up to the
+      # first space as the value, then tries to RUN the remaining word(s)
+      # as a shell command -- e.g. "Lite: command not found" -- which
+      # aborts the whole deploy under `set -euo pipefail`. Quoting is
+      # required for every .env value that can contain whitespace, not
+      # just these two; see sync-secrets-vm.yml's matching "Render new
+      # .env" step, which has the identical requirement.
       SITE_NAME="${site_name}"
       ENABLE_API_DOCS=${enable_api_docs}
 
@@ -84,9 +186,20 @@ write_files:
       BACKUP_GDRIVE_OAUTH_CLIENT_ID=${backup_gdrive_oauth_client_id}
       BACKUP_GDRIVE_OAUTH_CLIENT_SECRET=${backup_gdrive_oauth_client_secret}
       BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN=${backup_gdrive_oauth_refresh_token}
+      # Mode 2 -- Google Workspace service account + Shared Drive. Paste the
+      # entire JSON key file contents as one line (see README.md's Backups
+      # section) -- BUG FIX: this was missing here even though Mode 1 above
+      # was already fully wired, so Mode 2 silently never worked on the VM
+      # path. See docker-compose.vm.yml's matching env var comment.
       BACKUP_GDRIVE_CREDENTIALS_JSON=${backup_gdrive_credentials_json}
       BACKUP_GDRIVE_FOLDER_ID=${backup_gdrive_folder_id}
 
+      # Distributed tracing (OpenTelemetry -- Operations & Observability
+      # requirement #4; see backend/telemetry.py's module docstring and
+      # docker-compose.vm.yml's `jaeger` service comment). Off by
+      # default. Flip OTEL_ENABLED=true and run `docker compose -f
+      # docker-compose.vm.yml --profile tracing up -d` to try it locally
+      # on this VM -- see README.md's "Distributed Tracing" section.
       OTEL_ENABLED=${otel_enabled}
       OTEL_SERVICE_NAME=${otel_service_name}
       OTEL_EXPORTER_OTLP_ENDPOINT=${otel_exporter_otlp_endpoint}
@@ -96,6 +209,9 @@ write_files:
       OTEL_CONSOLE_EXPORTER=${otel_console_exporter}
       APPLICATIONINSIGHTS_CONNECTION_STRING=${applicationinsights_connection_string}
 
+      # ---- Per-service memory ceilings -- see docker-compose.vm.yml's
+      # top comment for the full sizing table and how to double these if
+      # you resize the VM up to Standard_B2ms (8 GiB). ----
       DB_MEM_LIMIT=768m
       DB_MEM_RESERVATION=256m
       REDIS_MEM_LIMIT=256m
@@ -111,6 +227,12 @@ write_files:
       CADDY_MEM_LIMIT=160m
       CADDY_MEM_RESERVATION=64m
 
+  # ---------------------------------------------------------------------
+  # Docker daemon config -- moves Docker's data-root to the mounted data
+  # disk (set up in `runcmd` below, BEFORE Docker is installed) and caps
+  # container log growth at the daemon level as a second safety net on
+  # top of each service's own `logging:` block in docker-compose.vm.yml.
+  # ---------------------------------------------------------------------
   - path: /etc/docker/daemon.json
     permissions: "0644"
     content: |
@@ -123,6 +245,11 @@ write_files:
         }
       }
 
+  # ---------------------------------------------------------------------
+  # fail2ban -- ban an IP after repeated failed SSH attempts. A second
+  # layer under the NSG's ssh_allowed_source_ips restriction (main.tf),
+  # useful if that variable is ever left wide open during initial setup.
+  # ---------------------------------------------------------------------
   - path: /etc/fail2ban/jail.local
     permissions: "0644"
     content: |
@@ -133,6 +260,16 @@ write_files:
       findtime = 600
       bantime = 3600
 
+  # ---------------------------------------------------------------------
+  # docker-compose.vm.yml + Caddyfile -- embedded here via Terraform's
+  # file() (see main.tf's templatefile() call) so the VM already has a
+  # working stack the moment `terraform apply` finishes, instead of
+  # sitting empty until the first GitHub Actions deploy. Every deploy
+  # AFTER this first boot overwrites both files again from the repo (see
+  # deploy-azure-vm.yml) -- they're tracked in git, never hand-edited on
+  # the VM, so this initial copy and every later one are always identical
+  # given the same commit.
+  # ---------------------------------------------------------------------
   - path: /opt/snipeit/docker-compose.vm.yml
     permissions: "0644"
     content: |
@@ -143,11 +280,38 @@ write_files:
     content: |
       ${indent(6, caddyfile)}
 
+  # ---------------------------------------------------------------------
+  # caddy/weights.conf -- the live blue/green traffic split (see
+  # Caddyfile and docker-compose.vm.yml's own comments). Seeded here at
+  # "0 100" (100% green, matching ACTIVE_SLOT=green above -- green is the
+  # fixed active role) for a brand-new VM; scripts/blue-green-deploy.sh
+  # rewrites this file in place on every future rollout -- this initial
+  # write is NOT re-applied on redeploys (see this file's top comment),
+  # so a VM mid-rollout is never yanked back to 0/100 by anything other
+  # than that script's own rollback path.
+  # ---------------------------------------------------------------------
   - path: /opt/snipeit/caddy/weights.conf
     permissions: "0644"
     content: |
       ${indent(6, caddy_weights_conf)}
 
+  # ---------------------------------------------------------------------
+  # /_deploy/ rollout-status dashboard -- seeded so the route renders
+  # something sane (an "idle" placeholder) immediately after `terraform
+  # apply`, before the first GitHub Actions deploy has ever run
+  # scripts/blue-green-deploy.sh. Written here under /opt/snipeit (the OS
+  # disk) rather than directly under /mnt/docker-data, because
+  # `write_files` (this whole section) runs BEFORE the data disk is
+  # formatted/mounted (that happens in setup-disk.sh, invoked from
+  # `runcmd` below) -- writing straight to /mnt/docker-data/... here
+  # would land on the OS disk instead and then be hidden the moment the
+  # real data disk mounts over it. The "5. App directory + first deploy"
+  # runcmd step below copies these into their real place
+  # (/mnt/docker-data/volumes/deploy_status/) AFTER that mount exists.
+  # status.json/checks.log are then owned entirely by
+  # scripts/blue-green-deploy.sh from the first real rollout onward;
+  # index.html is re-synced by deploy-azure-vm.yml like Caddyfile is.
+  # ---------------------------------------------------------------------
   - path: /opt/snipeit/seed/deploy-status-index.html
     permissions: "0644"
     content: |
@@ -158,6 +322,14 @@ write_files:
     content: |
       ${indent(6, deploy_status_seed_json)}
 
+  # ---------------------------------------------------------------------
+  # Swap file -- Standard_B2s's 4 GiB RAM is fully allocated by the
+  # per-service mem_limits in docker-compose.vm.yml (~2.9 GiB) plus the
+  # OS/Docker daemon itself; a small swap file is cheap insurance against
+  # an OOM-killed container during a brief spike (e.g. several large PDF
+  # exports queued at once) instead of that container being killed
+  # outright.
+  # ---------------------------------------------------------------------
   - path: /etc/systemd/system/create-swap.service
     permissions: "0644"
     content: |
@@ -178,6 +350,7 @@ write_files:
   - path: /opt/snipeit/scripts/create-swap.sh
     permissions: "0755"
     content: |
+      #!/usr/bin/env bash
       set -euo pipefail
       SWAPFILE=/mnt/docker-data/swapfile
       if [ ! -f "$SWAPFILE" ]; then
@@ -191,9 +364,21 @@ write_files:
       grep -q "$SWAPFILE" /etc/fstab || echo "$SWAPFILE none swap sw 0 0" >> /etc/fstab
       sysctl -w vm.swappiness=10
 
+  # ---------------------------------------------------------------------
+  # First-boot scripts, run from `runcmd` below by PATH rather than as
+  # inline `- |` blocks. Cloud-init concatenates every inline runcmd
+  # block into ONE script and executes it with `#!/bin/sh` (dash on
+  # Ubuntu) -- which does NOT support `set -o pipefail`, so any inline
+  # block using it would abort the *entire* runcmd script at that line,
+  # silently skipping everything after it. Giving each script its own
+  # `#!/usr/bin/env bash` shebang and invoking it by path (same pattern
+  # already used for create-swap.sh above) guarantees it runs under bash
+  # regardless of what shell cloud-init's own wrapper script uses.
+  # ---------------------------------------------------------------------
   - path: /opt/snipeit/scripts/setup-disk.sh
     permissions: "0755"
     content: |
+      #!/usr/bin/env bash
       set -euo pipefail
       DISK=/dev/disk/azure/scsi1/lun0
       for i in $(seq 1 30); do [ -e "$DISK" ] && break; sleep 2; done
@@ -216,6 +401,7 @@ write_files:
   - path: /opt/snipeit/scripts/install-docker.sh
     permissions: "0755"
     content: |
+      #!/usr/bin/env bash
       set -euo pipefail
       install -m 0755 -d /etc/apt/keyrings
       curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
@@ -228,6 +414,14 @@ write_files:
       systemctl enable --now docker
       usermod -aG docker ${admin_username}
 
+  # ---------------------------------------------------------------------
+  # systemd unit so the stack comes back up automatically after a VM
+  # reboot (Azure host maintenance, `AutomaticByPlatform` patch reboot,
+  # or you manually rebooting for any reason) -- `docker compose up -d`
+  # is idempotent and safe to run against an already-running stack too,
+  # which is exactly what deploy-azure-vm.yml itself does on every
+  # deploy.
+  # ---------------------------------------------------------------------
   - path: /etc/systemd/system/snipeit.service
     permissions: "0644"
     content: |
@@ -249,19 +443,66 @@ write_files:
       WantedBy=multi-user.target
 
 runcmd:
+  # -----------------------------------------------------------------------
+  # 1. Format + mount the data disk at /mnt/docker-data. It's attached to
+  #    the VM by main.tf's azurerm_virtual_machine_data_disk_attachment
+  #    at LUN 0, which Azure always exposes as /dev/disk/azure/scsi1/lun0
+  #    regardless of however /dev/sdX happens to enumerate on this
+  #    particular boot -- using the /dev/sdX name directly here would be
+  #    fragile across VM resizes/reboots.
+  # -----------------------------------------------------------------------
   - /opt/snipeit/scripts/setup-disk.sh
 
   - systemctl daemon-reload
   - systemctl enable --now create-swap.service
 
+  # -----------------------------------------------------------------------
+  # 2. Install Docker Engine + Compose plugin from Docker's own apt repo
+  #    (Ubuntu's default repo ships an older, sometimes-stale version).
+  #    daemon.json (written above) is already in place BEFORE this starts
+  #    Docker for the first time, so it comes up already pointed at the
+  #    data disk -- no separate "stop docker, move data, restart" dance.
+  # -----------------------------------------------------------------------
   - /opt/snipeit/scripts/install-docker.sh
 
+  # -----------------------------------------------------------------------
+  # 3. Firewall -- UFW mirrors the NSG (main.tf) at the OS level, a second
+  #    layer in case the NSG is ever loosened by mistake. Enabled LAST
+  #    (after the SSH rule is added) so an active session is never cut.
+  # -----------------------------------------------------------------------
   - ufw allow 22/tcp
   - ufw --force enable
   - systemctl enable --now fail2ban
+  # `ufw allow 22/tcp` above is host-level defense-in-depth only -- the
+  # ACTUAL internet-facing gate is the NSG (main.tf), which has NO
+  # inbound rule for port 22, 80, or 443 by default (empty
+  # ssh_allowed_source_ips, and the Cloudflare Tunnel replaces the old
+  # 80/443 rules entirely -- see main.tf's NSG comment). The `cloudflared`
+  # container (docker-compose.vm.yml) reaches both Caddy and this VM's
+  # sshd purely over the internal Docker network / host-gateway, having
+  # itself made only an OUTBOUND connection to Cloudflare's edge -- so
+  # this UFW rule is only ever reachable via that path or the documented
+  # break-glass NSG rule, never directly from the public internet.
+  #
+  # No separate Tailscale (or any other) agent install step here anymore
+  # -- `cloudflared` runs entirely as a Docker container (see
+  # docker-compose.vm.yml), started along with the rest of the stack in
+  # step 5 below, nothing extra to install on the host itself.
 
+  # -----------------------------------------------------------------------
+  # 4. App directory + first deploy. deploy-azure-vm.yml overwrites
+  #    docker-compose.vm.yml and Caddyfile on every future deploy (they're
+  #    tracked in the repo, not hand-maintained on the VM) -- this first
+  #    write just gets something running immediately after `terraform
+  #    apply` finishes, without waiting for the first CI run.
+  # -----------------------------------------------------------------------
   - mkdir -p /opt/snipeit
   - chown -R ${admin_username}:${admin_username} /opt/snipeit
+  # Data disk is already mounted at this point (setup-disk.sh, step 1
+  # above) -- now it's safe to place these where Caddy actually mounts
+  # them from (see docker-compose.vm.yml's `caddy` service and the
+  # write_files comment on these two source files above for why they
+  # couldn't be written directly to their final path).
   - cp /opt/snipeit/seed/deploy-status-index.html /mnt/docker-data/volumes/deploy_status/index.html
   - cp /opt/snipeit/seed/deploy-status-status.json /mnt/docker-data/volumes/deploy_status/status.json
 %{ if dockerhub_username != "" }
@@ -269,10 +510,33 @@ runcmd:
     echo "${dockerhub_token}" | docker login -u "${dockerhub_username}" --password-stdin
 %{ endif }
 
+  # -----------------------------------------------------------------------
+  # 5. Bring the stack up for the first time via the systemd unit (written
+  #    above) rather than a bare `docker compose up -d` here -- this way
+  #    the exact same command systemd will use on every future reboot is
+  #    what actually starts it now, so first boot isn't a special case
+  #    that behaves differently from every boot after it.
+  # -----------------------------------------------------------------------
   - systemctl daemon-reload
   - systemctl enable snipeit.service
   - systemctl start snipeit.service
 
+  # -----------------------------------------------------------------------
+  # 6. Run the initial DB schema migration + seed the root admin account,
+  #    against `backend-green` -- ACTIVE_SLOT=green/COMPOSE_PROFILES=green
+  #    above make green this VM's active slot from first boot onward (the
+  #    fixed role -- see docker-compose.vm.yml's own "ZERO-DOWNTIME
+  #    BLUE-GREEN DEPLOYMENTS" comment), so that's the service that's
+  #    actually running after step 5. `backend-blue` never runs at all
+  #    until the first real rollout deploys into it. Retries for a couple
+  #    of minutes since backend-green's image itself may still be
+  #    finishing its very first pull from Docker Hub when this line runs.
+  #    Safe to re-run any time (Alembic migrations are idempotent) --
+  #    every future deploy runs this same style of command itself, via
+  #    scripts/blue-green-deploy.sh (always against blue, the incoming
+  #    slot, before promoting green onto the same image) rather than this
+  #    inline step.
+  # -----------------------------------------------------------------------
   - |
     cd /opt/snipeit
     for i in $(seq 1 20); do

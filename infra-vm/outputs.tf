@@ -1,3 +1,11 @@
+# =============================================================================
+# infra-vm/outputs.tf
+# -----------------------------------------------------------------------------
+# Printed after `terraform apply` and read by:
+#   - you, for the SSH command / URL to open
+#   - .github/workflows/deploy-azure-vm.yml, via `terraform output -json` /
+#     `-raw`, to know which VM to SSH into for each deploy
+# =============================================================================
 
 output "resource_group_name" {
   description = "Resource group containing every resource this stack created."
