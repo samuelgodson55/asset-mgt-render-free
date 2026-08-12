@@ -11,6 +11,15 @@ which every page in `frontend/*.html` now loads with a plain
 <link rel="stylesheet" href="css/tailwind.css">
 ```
 
+## Table of Contents
+
+- [Why this exists](#why-this-exists)
+- [How to rebuild it](#how-to-rebuild-it)
+- [Theme customization](#theme-customization)
+- [Nothing to configure in Docker](#nothing-to-configure-in-docker)
+
+---
+
 ## Why this exists
 
 Previously every HTML file pulled Tailwind from the internet at runtime:

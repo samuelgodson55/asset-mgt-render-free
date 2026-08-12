@@ -1,6 +1,21 @@
 # Changelog
 
+## Table of Contents
+
+- [Unreleased — Infrastructure documentation](#unreleased--infrastructure-documentation)
+- [Unreleased](#unreleased)
+- [v1.0.6 — 2026-08-05](#v106---2026-08-05)
+- [v1.0.5 — 2026-08-04](#v105---2026-08-04)
+- [v1.0.4 — 2026-08-03](#v104---2026-08-03)
+- [v1.0.3 — 2026-08-01](#v103---2026-08-01)
+- [v1.0.2 — 2026-08-01](#v102---2026-08-01)
+- [v1.0.1 — 2026-08-01](#v101---2026-08-01)
+- [v1.0.0 — 2026-08-01](#v100---2026-08-01)
+
 ## Unreleased — Infrastructure documentation
+
+- Documented the one-time Windows/Git Bash executable-bit route (`git update-index --chmod=+x`) and clarified that once the mode changes are committed, executable-permission failures do not require further deployment debugging.
+- Added missing documentation TOCs and repaired stale internal/local Markdown links, including the renamed nginx resolver entrypoint (`15-detect-resolver-ip.envsh`) and stale deployment/SRE anchors.
 
 - Fixed Azure bootstrap RBAC provisioning to use the ARM `Microsoft.Authorization` REST API instead of `az role assignment`, avoiding tenant-specific `MissingSubscription` failures. Subscription `Contributor` and Terraform-state `Storage Blob Data Contributor` assignments are now idempotent and use deterministic assignment IDs.
 

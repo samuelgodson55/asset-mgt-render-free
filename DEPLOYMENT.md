@@ -44,6 +44,7 @@ test shape as the Container Apps path above.
 
 ## Table of Contents
 
+- [One-time repository script-permission setup (Windows/Git Bash)](#one-time-repository-script-permission-setup-windowsgit-bash)
 - [Running CI Manually From GitHub](#running-ci-manually-from-github)
 - [Before You Deploy: Safety Checklist](#before-you-deploy-safety-checklist)
 - [Production Setup](#production-setup)
@@ -57,6 +58,63 @@ test shape as the Container Apps path above.
   - [Rollback](#rollback)
 - [Troubleshooting](#troubleshooting)
 - **[Post-Deployment: SMTP, Google Drive backups, custom domain →](POST_DEPLOYMENT.md)**
+
+---
+
+## One-time repository script-permission setup (Windows/Git Bash)
+
+Some deployment and container entrypoint scripts are intentionally stored in Git as executable files (`100755`) because Linux GitHub Actions runners, the VM, and container entrypoints may invoke them directly. This is a **manual repository-maintenance step**, not part of the normal deployment lifecycle.
+
+If you work from Windows/Git Bash, check:
+
+```bash
+git config core.filemode
+```
+
+If it is `false`, do not rely on `chmod` or ZIP extraction to update Git's executable bit. Stage the mode explicitly with Git:
+
+```bash
+git update-index --chmod=+x \
+  .github/scripts/aca-blue-green.sh \
+  .github/scripts/aca-deploy-status.sh \
+  scripts/bootstrap-azure-github.sh \
+  scripts/bootstrap-terraform-state.sh \
+  scripts/blue-green-deploy.sh \
+  scripts/health-check.sh \
+  scripts/poll-live-endpoint.sh \
+  scripts/tail-errors.sh \
+  scripts/trace-request.sh \
+  backend/docker-entrypoint.sh \
+  backend/start.sh \
+  nginx/test-config.sh \
+  nginx/docker-entrypoint.d/25-fetch-deploy-status-htpasswd.sh \
+  nginx/docker-entrypoint.d/15-detect-resolver-ip.envsh \
+  render-start.sh
+```
+
+Verify the staged mode changes:
+
+```bash
+git diff --cached --summary
+```
+
+You should see entries such as:
+
+```text
+mode change 100644 => 100755 .github/scripts/aca-deploy-status.sh
+mode change 100644 => 100755 scripts/bootstrap-terraform-state.sh
+```
+
+Then commit and push the mode changes:
+
+```bash
+git commit -m "fix: mark deployment scripts executable"
+git push
+```
+
+**This is a one-time/manual fix. Once the `100755` changes are committed and pushed, stop here. There is no need to debug Azure, ACA, Terraform, Bicep, OIDC, or the deployment workflow for an executable-permission problem again.** Future clones on Linux/GitHub Actions receive the executable mode from Git. If a brand-new directly invoked shell script is added later, add it to Git as `100755` before merging.
+
+The ACA deployment-status helper is especially important: `aca-blue-green.sh` checks `aca-deploy-status.sh` for executable permission before using it. A script that exists but is stored as `100644` can therefore make the deployment-status view/logging appear to be missing even though the deployment itself succeeds.
 
 ---
 

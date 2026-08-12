@@ -1228,13 +1228,13 @@ image works in all three tiers — only these environment variables change:
 | `PORT` | Port nginx listens on inside its container | `80` | Whatever port that platform injects |
 | `BACKEND_HOST` | Hostname nginx proxies `/api/*` to | `backend` (the Compose service name) | Your backend service's real hostname on that platform |
 | `BACKEND_PORT` | Port on that host | `8000` | Whatever port your backend actually listens on there |
-| `RESOLVER_IP` | Internal DNS server nginx uses to re-resolve `BACKEND_HOST` on every request (so a backend redeploy never leaves nginx pointed at a stale IP) | `127.0.0.11` (Docker's built-in DNS) | Auto-detected at boot from `/etc/resolv.conf` if left unset — see [`nginx/docker-entrypoint.d/15-detect-resolver-ip.sh`](nginx/docker-entrypoint.d/15-detect-resolver-ip.sh) |
+| `RESOLVER_IP` | Internal DNS server nginx uses to re-resolve `BACKEND_HOST` on every request (so a backend redeploy never leaves nginx pointed at a stale IP) | `127.0.0.11` (Docker's built-in DNS) | Auto-detected at boot from `/etc/resolv.conf` if left unset — see [`nginx/docker-entrypoint.d/15-detect-resolver-ip.envsh`](nginx/docker-entrypoint.d/15-detect-resolver-ip.envsh) |
 
 `PORT`, `BACKEND_HOST`, and `BACKEND_PORT` all have sensible defaults baked
 into `frontend/Dockerfile`. `RESOLVER_IP` deliberately does **not** — instead of
 hardcoding a guess that could go stale on some future platform, it's
 auto-detected at container boot (see the table above and
-[`nginx/docker-entrypoint.d/15-detect-resolver-ip.sh`](nginx/docker-entrypoint.d/15-detect-resolver-ip.sh)
+[`nginx/docker-entrypoint.d/15-detect-resolver-ip.envsh`](nginx/docker-entrypoint.d/15-detect-resolver-ip.envsh)
 for why). All four are already wired up as `environment:` overrides on the
 `frontend` service in `docker-compose.yml`, sourced from `.env` (see
 `.env.example`) — Compose explicitly pins `RESOLVER_IP=127.0.0.11` there, so
@@ -1368,7 +1368,7 @@ a Kubernetes Service DNS name like `backend.default.svc.cluster.local`, or
 an internal ALB/NLB hostname). Leave `RESOLVER_IP` unset unless you've
 confirmed a specific value your platform needs — it's auto-detected from
 `/etc/resolv.conf` at boot otherwise (see
-[`nginx/docker-entrypoint.d/15-detect-resolver-ip.sh`](nginx/docker-entrypoint.d/15-detect-resolver-ip.sh)).
+[`nginx/docker-entrypoint.d/15-detect-resolver-ip.envsh`](nginx/docker-entrypoint.d/15-detect-resolver-ip.envsh)).
 
 **Deploying to Azure specifically?** This project ships a complete,
 fully-automated, cost-optimized version of this pattern already —

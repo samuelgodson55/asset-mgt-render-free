@@ -16,6 +16,25 @@ For the full rationale behind each design decision, see `DEPLOYMENT.md`'s
 "Zero-Downtime Blue-Green Deployments" section (VM) — this file only
 summarizes.
 
+## Table of Contents
+
+- [The two paths at a glance](#the-two-paths-at-a-glance)
+- [Path 1: Azure Container Apps](#path-1-azure-container-apps)
+  - [How traffic passes](#how-traffic-passes)
+  - [How to push](#how-to-push)
+  - [What happens per app, in order](#what-happens-per-app-in-order)
+  - [Switching slots / rollback](#switching-slots--rollback)
+  - [Monitoring](#monitoring)
+- [Path 2: the VM](#path-2-the-vm)
+  - [How traffic passes](#how-traffic-passes-1)
+  - [How to push](#how-to-push-1)
+  - [What `blue-green-deploy.sh` does, in order](#what-blue-green-deploysh-does-in-order)
+  - [Switching slots / rollback](#switching-slots--rollback-1)
+  - [Monitoring](#monitoring-1)
+- [Quick reference](#quick-reference)
+
+---
+
 ---
 
 ## The two paths at a glance

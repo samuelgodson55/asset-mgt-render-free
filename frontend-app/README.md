@@ -3,6 +3,21 @@
 A new React + TypeScript frontend for the asset-mgt backend (FastAPI), built with Vite,
 Tailwind CSS v4, Framer Motion, and Recharts.
 
+## Table of Contents
+
+- [Design direction](#design-direction)
+- [Pages](#pages)
+- [Global search](#global-search)
+- [Running it](#running-it)
+- [Connecting to the real backend](#connecting-to-the-real-backend)
+- [Deployment](#deployment)
+  - [CI/CD (Azure VM and Container Apps)](#cicd-azure-vm-and-container-apps)
+- [Choosing which frontend to ship](#choosing-which-frontend-to-ship)
+- [Why React](#why-react)
+- [Structure](#structure)
+
+---
+
 ## Design direction
 
 The visual identity is built around the domain itself: physical inventory tags. Asset

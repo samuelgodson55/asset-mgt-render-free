@@ -50,6 +50,17 @@ behave differently on those — but nothing stops you from scoping any of
 them per-Environment instead if you do want a split (e.g. a different
 `SITE_NAME` for staging).
 
+## Table of Contents
+
+1. [SMTP (email notifications)](#1-smtp-email-notifications)
+2. [Google Drive backup uploads](#2-google-drive-backup-uploads)
+3. [Mapping a custom domain](#3-mapping-a-custom-domain)
+4. [Site branding, security limits & operational tuning](#4-site-branding-security-limits--operational-tuning)
+5. [Troubleshooting: "Backup Now" fails](#troubleshooting-backup-now-fails-with-a-pg_dumppassword-error)
+6. [Reference: where each setting actually lives](#reference-where-each-setting-actually-lives)
+
+---
+
 ---
 
 ## 1. SMTP (email notifications)

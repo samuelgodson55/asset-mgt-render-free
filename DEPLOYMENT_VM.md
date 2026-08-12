@@ -30,7 +30,7 @@ with no Azure resources yet.
 - [2. Set up Cloudflare Tunnel (no open ports, no Bastion)](#2-set-up-cloudflare-tunnel-no-open-ports-no-bastion)
 - [3. Generate the deploy SSH key pair](#3-generate-the-deploy-ssh-key-pair)
 - [4. Generate application secrets](#4-generate-application-secrets)
-- [5. Configure GitHub OIDC federation (for Terraform + no client secrets)](#5-configure-github-oidc-federation-for-terraform--no-client-secrets)
+- [5. Configure GitHub OIDC federation (automated)](#5-configure-github-oidc-federation-automated)
 - [6. Set GitHub Environment secrets/variables](#6-set-github-environment-secretsvariables)
 - [7. Review the Terraform plan locally (optional but recommended first time)](#7-review-the-terraform-plan-locally-optional-but-recommended-first-time)
 - [8. Provision the VM (`infra-deploy-vm.yml`)](#8-provision-the-vm-infra-deploy-vmyml)
@@ -49,6 +49,60 @@ with no Azure resources yet.
 - [Cost](#cost)
 - [Security](#security)
 - [Troubleshooting](#troubleshooting)
+
+---
+
+## One-time repository script-permission setup (Windows/Git Bash)
+
+This is a **manual repository-maintenance step**, not a recurring VM deployment step. The VM path contains scripts that are executed on Linux runners or directly on the VM, so they must be committed to Git with executable mode `100755`.
+
+Windows/Git Bash installations commonly have `core.filemode=false`, which means changing a file with `chmod +x` may not register as a Git change. Check:
+
+```bash
+git config core.filemode
+```
+
+If it is `false`, explicitly stage the executable mode:
+
+```bash
+git update-index --chmod=+x \
+  .github/scripts/aca-blue-green.sh \
+  .github/scripts/aca-deploy-status.sh \
+  scripts/bootstrap-azure-github.sh \
+  scripts/bootstrap-terraform-state.sh \
+  scripts/blue-green-deploy.sh \
+  scripts/health-check.sh \
+  scripts/poll-live-endpoint.sh \
+  scripts/tail-errors.sh \
+  scripts/trace-request.sh \
+  backend/docker-entrypoint.sh \
+  backend/start.sh \
+  nginx/test-config.sh \
+  nginx/docker-entrypoint.d/25-fetch-deploy-status-htpasswd.sh \
+  nginx/docker-entrypoint.d/15-detect-resolver-ip.envsh \
+  render-start.sh
+```
+
+Verify:
+
+```bash
+git diff --cached --summary
+```
+
+The expected form is:
+
+```text
+mode change 100644 => 100755 <script>
+```
+
+Commit and push once the expected mode changes are present:
+
+```bash
+git commit -m "fix: mark deployment scripts executable"
+git push
+```
+
+**Once pushed, this manual route is complete. Do not keep debugging the VM deployment for an executable-bit issue.** The workflow's Terraform state bootstrap is invoked through `bash` as an additional safeguard, while scripts that are copied to the VM and invoked directly are tracked as executable in Git.
 
 ---
 
@@ -1175,7 +1229,7 @@ and paste secrets into whichever Environment each doc tells you to at the
 time. (Earlier drafts of this doc used plain `staging` here too, which
 collided with the Container Apps path's `staging` Environment — if you
 set that up before this note existed, see the callout in [step
-5](#5-configure-github-oidc-federation-for-terraform--no-client-secrets)
+5](#5-configure-github-oidc-federation-automated)
 for how to migrate to `vm-staging` instead.)
 
 If you also have the Container Apps path (`DEPLOYMENT.md`) set up against
