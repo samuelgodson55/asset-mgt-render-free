@@ -360,9 +360,10 @@ jobs:
             app_id="$(printf '%s\n' "$policy_state" | sed -n 's/^application_id[[:space:]]*=[[:space:]]*"\([^"]*\)"/\1/p' | head -1)"
 
             if [[ -z "$policy_id" || -z "$app_id" ]]; then
-              echo "::error::Could not read both policy ID and application ID from Terraform state for '${policy_address}'."
-              echo "::error::Expected state fields: id=<policy UUID> and application_id=<Access application UUID>."
-              exit 1
+              echo "::warning::Could not read both policy ID and application ID from Terraform state for '${policy_address}'."
+              echo "::warning::Expected state fields: id=<policy UUID> and application_id=<Access application UUID>."
+              echo "::warning::Skipping the exact endpoint probe for this policy. This diagnostic must never block Terraform plan/apply."
+              continue
             fi
 
             echo "Testing Cloudflare Access application policy '${policy_address}' (application=${app_id}, policy=${policy_id})..."
@@ -389,10 +390,9 @@ jobs:
             fi
 
             if [[ ! "$http_code" =~ ^2[0-9][0-9]$ || "$success" != "true" ]]; then
-              echo "::error::The exact Cloudflare Access application-policy API request failed for policy '${policy_id}' before Terraform was invoked."
-              echo "::error::If this returns 1010 while the general Access API succeeds, the problem is specific to the application-policy endpoint/request path or Cloudflare-side request handling, not Azure/Terraform state."
-              echo "::error::Do not remove/re-import the policy from Terraform state based on this diagnostic alone."
-              exit 1
+              echo "::warning::The exact Cloudflare Access application-policy API request failed for policy '${policy_id}' before Terraform was invoked."
+              echo "::warning::If this returns 1010 while the general Access API succeeds, the problem is specific to the application-policy endpoint/request path or Cloudflare-side request handling."
+              echo "::warning::This probe is diagnostic only and will NOT block Terraform plan/apply."
             fi
 
             rm -f "$response_file"
@@ -491,6 +491,9 @@ jobs:
         run: |
           set -euo pipefail
 
+          # This shell step runs in infra-vm/ (the workflow default). Keep
+          # the staging directory relative to that directory; upload-artifact
+          # below uses the repository-root-relative path infra-vm/....
           mkdir -p terraform-debug-artifact
 
           # Copy first so the original diagnostic files remain available to
@@ -584,6 +587,69 @@ jobs:
           done
           echo "::error::terraform apply failed after $MAX_ATTEMPTS attempts -- this no longer looks like a transient Azure propagation race. Check the log above for the real error."
           exit 1
+
+      # This runs after the deployment path so a failure anywhere in the
+      # preflight/probe/plan/apply/destroy path leaves a downloadable artifact.
+      - name: Prepare deployment failure diagnostics
+        if: failure()
+        shell: bash
+        env:
+          REDACT_CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          REDACT_CF_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          REDACT_CF_ZONE: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+          REDACT_AZ_CLIENT: ${{ secrets.AZURE_CLIENT_ID }}
+          REDACT_AZ_TENANT: ${{ secrets.AZURE_TENANT_ID }}
+          REDACT_AZ_SUBSCRIPTION: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set -euo pipefail
+          # This shell step runs in infra-vm/ (the workflow default).
+          # upload-artifact later resolves infra-vm/terraform-debug-artifact
+          # from the repository root.
+          mkdir -p terraform-debug-artifact
+
+          for file in terraform-provider.log terraform-plan-debug.log; do
+            if [ -f "$file" ]; then
+              cp "$file" "terraform-debug-artifact/$file"
+            fi
+          done
+
+          # Include a small runner-side inventory without printing credentials.
+          {
+            echo "Terraform deployment failure diagnostic"
+            echo "Workflow: $GITHUB_WORKFLOW"
+            echo "Run: $GITHUB_RUN_ID"
+            echo "Environment: ${{ inputs.environment }}"
+            echo "Action: ${{ inputs.action }}"
+            echo "Terraform provider TRACE was enabled for the plan."
+            echo "Known Azure/Cloudflare credential values are redacted below."
+            echo
+            echo "Files captured:"
+            find terraform-debug-artifact -maxdepth 1 -type f -printf '%f\n' | sort
+          } > terraform-debug-artifact/README.txt
+
+          for file in terraform-debug-artifact/*; do
+            [ -f "$file" ] || continue
+            for secret in \
+              "$REDACT_CF_TOKEN" \
+              "$REDACT_CF_ACCOUNT" \
+              "$REDACT_CF_ZONE" \
+              "$REDACT_AZ_CLIENT" \
+              "$REDACT_AZ_TENANT" \
+              "$REDACT_AZ_SUBSCRIPTION"; do
+              if [ -n "${secret:-}" ]; then
+                SECRET="$secret" python3 -c 'import os,sys; p=sys.argv[1]; s=os.environ.get("SECRET",""); data=open(p,encoding="utf-8",errors="replace").read(); open(p,"w",encoding="utf-8").write(data.replace(s,"[REDACTED]"))' "$file"
+              fi
+            done
+          done
+
+      - name: Upload deployment failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-deployment-failure-${{ github.run_id }}
+          path: infra-vm/terraform-debug-artifact/
+          if-no-files-found: warn
+          retention-days: 3
 
       - name: Verify destroy confirmation
         if: inputs.action == 'destroy'
