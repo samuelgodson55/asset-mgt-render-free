@@ -57,7 +57,7 @@ on:
         options: [plan, apply, destroy]
         default: plan
       destroy_confirmation:
-        description: 'Required only for destroy: type DESTROY-STAGING or DESTROY-PRODUCTION exactly'
+        description: 'Required only for destroy: Type DESTROY <environment> exactly (for example: DESTROY production)'
         required: false
         type: string
         default: ''
@@ -350,15 +350,21 @@ jobs:
             cat "$RUNNER_TEMP/aca-traffic/${APP}.json"
           done
 
-      - name: Validate Bicep deployment stack
+      - name: Bicep What-If plan and GitHub Summary
         if: ${{ github.event.inputs.action == 'plan' }}
         run: |
-          az stack group validate \
-            --name "$STACK_NAME" \
+          set -euo pipefail
+          WHAT_IF="$RUNNER_TEMP/bicep-what-if.json"
+
+          echo "Running Azure Resource Manager What-If..."
+          if ! az deployment group what-if \
+            --name "$STACK_NAME-plan" \
             --resource-group "$RESOURCE_GROUP" \
             --template-file infra/main.bicep \
-            --action-on-unmanage deleteResources \
-            --deny-settings-mode none \
+            --mode Incremental \
+            --result-format ResourceIdOnly \
+            --no-pretty-print \
+            --output json \
             --parameters \
               environmentName="$ENV_NAME" \
               dockerHubBackendImage="${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend$ENV_SUFFIX" \
@@ -422,8 +428,178 @@ jobs:
               otelExporterOtlpEndpoint="${{ vars.OTEL_EXPORTER_OTLP_ENDPOINT }}" \
               otelExporterOtlpHeaders="${{ secrets.OTEL_EXPORTER_OTLP_HEADERS }}" \
               otelTracesSampleRatio="${{ vars.OTEL_TRACES_SAMPLE_RATIO || '1.0' }}" \
-              otelAzureMonitorEnabled=${{ vars.OTEL_AZURE_MONITOR_ENABLED == 'true' }}
+              otelAzureMonitorEnabled=${{ vars.OTEL_AZURE_MONITOR_ENABLED == 'true' }} \
+            > "$WHAT_IF"; then
+            {
+              echo '## ❌ Bicep Plan Failed'
+              echo ''
+              echo "What-If could not be evaluated for **$ENV_NAME**."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
 
+          create=$(jq '[.changes[]? | select(.changeType == "Create")] | length' "$WHAT_IF")
+          modify=$(jq '[.changes[]? | select(.changeType == "Modify")] | length' "$WHAT_IF")
+          delete=$(jq '[.changes[]? | select(.changeType == "Delete")] | length' "$WHAT_IF")
+          deploy=$(jq '[.changes[]? | select(.changeType == "Deploy")] | length' "$WHAT_IF")
+          nochange=$(jq '[.changes[]? | select(.changeType == "NoChange")] | length' "$WHAT_IF")
+          unsupported=$(jq '[.changes[]? | select(.changeType == "Unsupported")] | length' "$WHAT_IF")
+          total=$((create + modify + delete + deploy + nochange + unsupported))
+
+          {
+            echo "## Bicep Plan — ${{ github.event.inputs.target }}"
+            echo ''
+            echo "**Resource Group:** \`$RESOURCE_GROUP\`  "
+            echo "**Deployment Stack:** \`$STACK_NAME\`  "
+            echo ''
+            echo '### Change Summary'
+            echo ''
+            echo '| Change | Count |'
+            echo '|---|---:|'
+            echo "| Create | $create |"
+            echo "| Modify | $modify |"
+            echo "| Delete | $delete |"
+            echo "| Deploy | $deploy |"
+            echo "| No change | $nochange |"
+            echo "| Unsupported | $unsupported |"
+            echo "| **Total** | **$total** |"
+            echo ''
+            if [ "$delete" -gt 0 ]; then
+              echo '> ⚠️ **Destructive changes detected.** This plan does not apply them.'
+              echo ''
+            elif [ "$unsupported" -gt 0 ]; then
+              echo '> ⚠️ **Unsupported changes detected.** Review the full What-If output before applying.'
+              echo ''
+            else
+              echo '> ✅ **No destructive changes detected.** This plan did not modify Azure.'
+              echo ''
+            fi
+            echo '### Resources'
+            echo ''
+            echo '| Change | Resource |'
+            echo '|---|---|'
+            jq -r '.changes[]? | "| \(.changeType) | \(.resourceId) |"' "$WHAT_IF"
+            echo ''
+            echo '> Full Azure What-If JSON is available in the workflow logs/artifacts for detailed inspection.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo '--- Azure What-If (Resource IDs) ---'
+          jq -r '.changes[]? | "\(.changeType): \(.resourceId)"' "$WHAT_IF"
+
+      - name: Bicep What-If before apply and GitHub Summary
+        if: ${{ github.event.inputs.action == 'apply' }}
+        run: |
+          set -euo pipefail
+          WHAT_IF="$RUNNER_TEMP/bicep-what-if-apply.json"
+
+          if ! az deployment group what-if \
+            --name "$STACK_NAME-preapply" \
+            --resource-group "$RESOURCE_GROUP" \
+            --template-file infra/main.bicep \
+            --mode Incremental \
+            --result-format ResourceIdOnly \
+            --no-pretty-print \
+            --output json \
+            --parameters \
+              environmentName="$ENV_NAME" \
+              dockerHubBackendImage="${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend$ENV_SUFFIX" \
+              dockerHubFrontendImage="${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-frontend$ENV_SUFFIX" \
+              initialImageTag="${{ steps.verify.outputs.tag }}" \
+              dockerHubUsername="${{ secrets.DOCKERHUB_USERNAME }}" \
+              dockerHubToken="${{ secrets.DOCKERHUB_TOKEN }}" \
+              backendMinReplicas=${{ steps.replicas.outputs.backend_min }} \
+              frontendMinReplicas=${{ steps.replicas.outputs.frontend_min }} \
+              postgresPassword="${{ secrets.POSTGRES_PASSWORD }}" \
+              postgresSkuName="${{ vars.POSTGRES_SKU_NAME || 'Standard_B1ms' }}" \
+              postgresStorageGb=${{ vars.POSTGRES_STORAGE_GB || 32 }} \
+              redisPassword="${{ secrets.REDIS_PASSWORD }}" \
+              jwtSecretKey="${{ secrets.JWT_SECRET_KEY }}" \
+              rootAdminBootstrapPassword="${{ secrets.ROOT_ADMIN_BOOTSTRAP_PASSWORD }}" \
+              customDomain="${{ vars.CUSTOM_DOMAIN }}" \
+              customDomainCertificateId="${{ steps.cert.outputs.id }}" \
+              alertEmailAddress="${{ secrets.ALERT_EMAIL_ADDRESS }}" \
+              notificationsEnabled=${{ vars.NOTIFICATIONS_ENABLED == 'true' }} \
+              smtpHost="${{ secrets.SMTP_HOST }}" \
+              smtpUsername="${{ secrets.SMTP_USERNAME }}" \
+              smtpPassword="${{ secrets.SMTP_PASSWORD }}" \
+              smtpFromEmail="${{ secrets.SMTP_FROM_EMAIL }}" \
+              emailProvider="${{ vars.EMAIL_PROVIDER || 'smtp' }}" \
+              brevoApiKey="${{ secrets.BREVO_API_KEY }}" \
+              resendApiKey="${{ secrets.RESEND_API_KEY }}" \
+              adminNotificationEmails="${{ secrets.ADMIN_NOTIFICATION_EMAILS }}" \
+              gdriveBackupEnabled=${{ vars.BACKUP_GDRIVE_ENABLED == 'true' }} \
+              gdriveOauthClientId="${{ secrets.BACKUP_GDRIVE_OAUTH_CLIENT_ID }}" \
+              gdriveOauthClientSecret="${{ secrets.BACKUP_GDRIVE_OAUTH_CLIENT_SECRET }}" \
+              gdriveOauthRefreshToken="${{ secrets.BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN }}" \
+              gdriveFolderId="${{ secrets.BACKUP_GDRIVE_FOLDER_ID }}" \
+              enableApiDocs=${{ vars.ENABLE_API_DOCS == 'true' }} \
+              siteName="${{ vars.SITE_NAME || 'Snipe-IT Lite' }}" \
+              logLevel="${{ vars.LOG_LEVEL || 'INFO' }}" \
+              loginRateLimitMax=${{ vars.LOGIN_RATE_LIMIT_MAX || 5 }} \
+              loginRateLimitWindowSeconds=${{ vars.LOGIN_RATE_LIMIT_WINDOW_SECONDS || 60 }} \
+              accountLockoutMaxAttempts=${{ vars.ACCOUNT_LOCKOUT_MAX_ATTEMPTS || 5 }} \
+              accountLockoutDurationMinutes=${{ vars.ACCOUNT_LOCKOUT_DURATION_MINUTES || 15 }} \
+              superAdminUsername="${{ vars.SUPER_ADMIN_USERNAME || 'superadmin' }}" \
+              superAdminName="${{ vars.SUPER_ADMIN_NAME || 'Super Admin' }}" \
+              smtpPort=${{ vars.SMTP_PORT || 587 }} \
+              smtpUseTls=${{ vars.SMTP_USE_TLS != 'false' }} \
+              smtpUseSsl=${{ vars.SMTP_USE_SSL == 'true' }} \
+              overdueDigestHoursUtc="${{ vars.OVERDUE_DIGEST_HOURS_UTC || '8' }}" \
+              dueSoonReminderDays=${{ vars.DUE_SOON_REMINDER_DAYS || 2 }} \
+              dueSoonDigestHoursUtc="${{ vars.DUE_SOON_DIGEST_HOURS_UTC || '8' }}" \
+              sendIndividualHolderReminders=${{ vars.SEND_INDIVIDUAL_HOLDER_REMINDERS != 'false' }} \
+              extensionRequestSlaHours=${{ vars.EXTENSION_REQUEST_SLA_HOURS || 24 }} \
+              quotationSlaHours=${{ vars.QUOTATION_SLA_HOURS || 24 }} \
+              approvalSlaCheckIntervalMinutes=${{ vars.APPROVAL_SLA_CHECK_INTERVAL_MINUTES || 60 }} \
+              approvalSlaEscalationRepeatHours=${{ vars.APPROVAL_SLA_ESCALATION_REPEAT_HOURS || 24 }} \
+              sendQuotationRecipientEmails=${{ vars.SEND_QUOTATION_RECIPIENT_EMAILS != 'false' }} \
+              displayTimezone="${{ vars.DISPLAY_TIMEZONE || 'Africa/Lagos' }}" \
+              currencyCode="${{ vars.CURRENCY_CODE || 'NGN' }}" \
+              catalogShowStockToStaffCustomer=${{ vars.CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER == 'true' }} \
+              backupHoursUtc="${{ vars.BACKUP_HOURS_UTC || '3' }}" \
+              backupRetentionCount=${{ vars.BACKUP_RETENTION_COUNT || 7 }} \
+              otelEnabled=${{ vars.OTEL_ENABLED == 'true' }} \
+              otelServiceName="${{ vars.OTEL_SERVICE_NAME || 'snipeit-lite-backend' }}" \
+              otelExporterOtlpEndpoint="${{ vars.OTEL_EXPORTER_OTLP_ENDPOINT }}" \
+              otelExporterOtlpHeaders="${{ secrets.OTEL_EXPORTER_OTLP_HEADERS }}" \
+              otelTracesSampleRatio="${{ vars.OTEL_TRACES_SAMPLE_RATIO || '1.0' }}" \
+              otelAzureMonitorEnabled=${{ vars.OTEL_AZURE_MONITOR_ENABLED == 'true' }} \
+            > "$WHAT_IF"; then
+            { echo '## ❌ Bicep Pre-Apply What-If Failed'; echo ''; echo 'Deployment was **not** attempted.'; } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          create=$(jq '[.changes[]? | select(.changeType == "Create")] | length' "$WHAT_IF")
+          modify=$(jq '[.changes[]? | select(.changeType == "Modify")] | length' "$WHAT_IF")
+          delete=$(jq '[.changes[]? | select(.changeType == "Delete")] | length' "$WHAT_IF")
+          deploy=$(jq '[.changes[]? | select(.changeType == "Deploy")] | length' "$WHAT_IF")
+          nochange=$(jq '[.changes[]? | select(.changeType == "NoChange")] | length' "$WHAT_IF")
+          unsupported=$(jq '[.changes[]? | select(.changeType == "Unsupported")] | length' "$WHAT_IF")
+          total=$((create + modify + delete + deploy + nochange + unsupported))
+          {
+            echo "## Bicep Pre-Apply Plan — ${{ github.event.inputs.target }}"
+            echo ''
+            echo "**Resource Group:** \`$RESOURCE_GROUP\`  "
+            echo "**Deployment Stack:** \`$STACK_NAME\`  "
+            echo ''
+            echo '| Change | Count |'
+            echo '|---|---:|'
+            echo "| Create | $create |"
+            echo "| Modify | $modify |"
+            echo "| Delete | $delete |"
+            echo "| Deploy | $deploy |"
+            echo "| No change | $nochange |"
+            echo "| Unsupported | $unsupported |"
+            echo "| **Total** | **$total** |"
+            echo ''
+            if [ "$delete" -gt 0 ]; then echo '> ⚠️ **Destructive changes detected.** Apply will proceed because this workflow was explicitly selected as `apply`.'; else echo '> ✅ **No destructive changes detected.**'; fi
+            echo ''
+            echo '### Resources'
+            echo ''
+            echo '| Change | Resource |'
+            echo '|---|---|'
+            jq -r '.changes[]? | "| \(.changeType) | \(.resourceId) |"' "$WHAT_IF"
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Deploy Bicep deployment stack
         if: ${{ github.event.inputs.action == 'apply' }}
         run: |
@@ -615,24 +791,67 @@ jobs:
           set -euo pipefail
           az provider register --namespace Microsoft.Resources --wait
 
-      - name: Show managed resources before destroy
+      - name: Destroy preview and GitHub Summary
+        id: destroy_preview
         run: |
           set -euo pipefail
           if ! az group show --name "$RESOURCE_GROUP" >/dev/null 2>&1; then
-            echo "Resource group '$RESOURCE_GROUP' does not exist; nothing to destroy."
+            {
+              echo "## 🗑️ Bicep Destroy Plan — ${{ github.event.inputs.target }}"
+              echo ''
+              echo "Resource group **$RESOURCE_GROUP** does not exist."
+              echo ''
+              echo '**Resources scheduled for deletion:** 0'
+              echo ''
+              echo '> ✅ Nothing to destroy.'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo 'nothing=true' >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if ! az stack group show --name "$STACK_NAME" --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1; then
-            echo "::warning::Deployment stack '$STACK_NAME' does not exist. Nothing managed by this workflow will be deleted."
+          if ! STACK_JSON=$(az stack group show --name "$STACK_NAME" --resource-group "$RESOURCE_GROUP" -o json 2>/dev/null); then
+            {
+              echo "## 🗑️ Bicep Destroy Plan — ${{ github.event.inputs.target }}"
+              echo ''
+              echo "Deployment stack **$STACK_NAME** does not exist."
+              echo ''
+              echo '**Resources scheduled for deletion:** 0'
+              echo ''
+              echo '> ✅ Nothing managed by this Bicep stack will be deleted.'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo 'nothing=true' >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          az stack group show \
-            --name "$STACK_NAME" \
-            --resource-group "$RESOURCE_GROUP" \
-            --query "{name:name,resourceGroup:resourceGroup,resources:resources}" \
-            -o json
+
+          printf '%s\n' "$STACK_JSON" > "$RUNNER_TEMP/stack.json"
+          resource_count=$(jq '(.resources // []) | length' "$RUNNER_TEMP/stack.json")
+          {
+            echo "## ⚠️ Bicep Destroy Plan — ${{ github.event.inputs.target }}"
+            echo ''
+            echo "**Resource Group:** \`$RESOURCE_GROUP\`  "
+            echo "**Deployment Stack:** \`$STACK_NAME\`  "
+            echo ''
+            echo '### Destruction Summary'
+            echo ''
+            echo '| Item | Value |'
+            echo '|---|---:|'
+            echo "| Managed resources scheduled for deletion | **$resource_count** |"
+            echo '| Resource group | Retained |'
+            echo ''
+            echo '> ⚠️ **Destructive operation.** The stack is deleted with `action-on-unmanage=deleteResources`, so resources managed by this stack are deleted while the parent resource group is retained.'
+            echo ''
+            echo '### Resources'
+            echo ''
+            echo '| # | Resource ID |'
+            echo '|---:|---|'
+            jq -r '(.resources // []) | to_entries[] | "| \(.key + 1) | \(.value.id // .value.resourceId // .value) |"' "$RUNNER_TEMP/stack.json"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo '--- Managed resources scheduled for deletion ---'
+          jq -r '(.resources // [])[] | .id // .resourceId // .' "$RUNNER_TEMP/stack.json"
+          echo 'nothing=false' >> "$GITHUB_OUTPUT"
 
       - name: Destroy Bicep deployment stack
+        if: ${{ steps.destroy_preview.outputs.nothing != 'true' }}
         run: |
           set -euo pipefail
           if ! az stack group show --name "$STACK_NAME" --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1; then

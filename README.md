@@ -3609,3 +3609,9 @@ Small, well-scoped follow-ups if you want to keep extending this project:
   `denied` (only `pending` requests can be decided), or that you're
   actually logged in as a Manager/Admin/Super Admin and not a Staff/
   Customer account. See [Extension-request permissions](#extension-request-permissions).
+
+### Bicep plan/apply/destroy summaries
+
+The **Deploy ACA Infrastructure (Bicep)** workflow now surfaces infrastructure previews in the GitHub Actions **Summary** tab. `plan` runs Azure Resource Manager What-If without changing Azure and reports Create/Modify/Delete/Deploy/No-change counts plus resource IDs. `apply` runs the same What-If immediately before the deployment and records the preview before applying it. `destroy` reads the Deployment Stack's managed-resource list and publishes the resources that will be deleted; the parent resource group is retained.
+
+The Bicep preview uses `az deployment group what-if`, while actual lifecycle management continues to use the Azure Deployment Stack. Azure's What-If supports resource-group scoped previews, and Deployment Stacks support `deleteResources` for deleting resources that are no longer managed.
