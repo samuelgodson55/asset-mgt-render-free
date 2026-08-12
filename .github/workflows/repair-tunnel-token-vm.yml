@@ -105,7 +105,7 @@ jobs:
       - name: Bootstrap Terraform state backend
         working-directory: .
         run: |
-          ./scripts/bootstrap-terraform-state.sh >> "$GITHUB_ENV"
+          bash ./scripts/bootstrap-terraform-state.sh >> "$GITHUB_ENV"
 
       - name: terraform init
         # Resolve the exact same per-environment state file used by
