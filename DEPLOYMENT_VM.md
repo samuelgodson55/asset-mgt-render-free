@@ -229,6 +229,210 @@ There is no recurring scheduler and no manual storage maintenance.
 > Terraform state resource group or Storage Account. Those are bootstrap
 > infrastructure for the lifecycle itself.
 
+
+### Incorporating an existing Terraform state Storage Account
+
+If you are adding this VM deployment to an Azure environment that already has
+Terraform state, **do not create a second state Storage Account** and do not
+rename or copy the existing state blob. Point the bootstrap at the existing
+account and keep the existing environment key (`prod.tfstate` or
+`vm-staging.tfstate`).
+
+The known legacy account `snipeittfstate01` is discovered automatically. For
+any other existing account, set `TF_STATE_STORAGE_ACCOUNT` explicitly in the
+workflow environment or use the discovery commands below to identify the
+correct account first.
+
+#### 1. Sign in and identify the subscription
+
+Run from Azure CLI (Git Bash is fine):
+
+```bash
+az login
+az account set --subscription "<subscription-id>"
+az account show --query "{id:id,tenantId:tenantId,name:name}" -o json
+```
+
+#### 2. Find the existing state account
+
+List likely Terraform state accounts:
+
+```bash
+az storage account list \
+  --subscription "<subscription-id>" \
+  --query "[?starts_with(name, 'snipeittfstate')].{name:name,resourceGroup:resourceGroup,location:location}" \
+  -o table
+```
+
+For a known account, confirm it exists and record its resource group:
+
+```bash
+az storage account show \
+  --name "snipeittfstate01" \
+  --resource-group "rg-snipeit-tfstate" \
+  --subscription "<subscription-id>" \
+  --query "{id:id,name:name,resourceGroup:resourceGroup}" \
+  -o json
+```
+
+If the account has a different name, substitute that name in the commands and
+set `TF_STATE_STORAGE_ACCOUNT` to it.
+
+#### 3. Confirm the state container and state files
+
+The expected container is `vm-state`. Check it before changing anything:
+
+```bash
+az storage container exists \
+  --account-name "snipeittfstate01" \
+  --name "vm-state" \
+  --auth-mode login \
+  -o tsv
+```
+
+Then list the state blobs:
+
+```bash
+az storage blob list \
+  --account-name "snipeittfstate01" \
+  --container-name "vm-state" \
+  --auth-mode login \
+  --query "[].{name:name,size:properties.contentLength,lastModified:properties.lastModified}" \
+  -o table
+```
+
+For a production VM deployment you should normally see:
+
+```text
+prod.tfstate
+```
+
+For staging:
+
+```text
+vm-staging.tfstate
+```
+
+**Do not create an empty replacement `prod.tfstate` or copy the old state into
+a new account.** The backend key is the state identity. The workflow's
+`terraform init` opens the existing blob in place.
+
+#### 4. Verify or configure Blob RBAC
+
+The GitHub OIDC service principal needs `Storage Blob Data Contributor` on the
+existing state account, or inherited from its resource group/subscription.
+First identify the service principal object ID:
+
+```bash
+az ad sp show \
+  --id "<AZURE_CLIENT_ID>" \
+  --query "{objectId:id,appId:appId}" \
+  -o json
+```
+
+Because some Azure CLI versions/tenants can return `MissingSubscription` for
+`az role assignment`, use the ARM Authorization API for a reliable check:
+
+```bash
+az rest \
+  --method get \
+  --url "https://management.azure.com/subscriptions/<subscription-id>/resourceGroups/rg-snipeit-tfstate/providers/Microsoft.Storage/storageAccounts/snipeittfstate01/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01" \
+  --query "value[?properties.principalId=='<service-principal-object-id>']" \
+  -o table
+```
+
+The required role definition ID is:
+
+```text
+ba92f5b4-2d11-453d-a403-e96b0029c9fe
+```
+
+If the assignment is missing, perform the one-time assignment as an Azure
+Owner/User Access Administrator. In Git Bash, generate the role-assignment ID
+with PowerShell (no `uuidgen` package is required):
+
+```bash
+ROLE_ASSIGNMENT_ID="$(powershell.exe -NoProfile -Command "[guid]::NewGuid().ToString()")"
+```
+
+Then assign the role directly through ARM:
+
+```bash
+az rest \
+  --method put \
+  --url "https://management.azure.com/subscriptions/<subscription-id>/resourceGroups/rg-snipeit-tfstate/providers/Microsoft.Storage/storageAccounts/snipeittfstate01/providers/Microsoft.Authorization/roleAssignments/$ROLE_ASSIGNMENT_ID?api-version=2022-04-01" \
+  --body '{
+    "properties": {
+      "roleDefinitionId": "/subscriptions/<subscription-id>/providers/Microsoft.Authorization/roleDefinitions/ba92f5b4-2d11-453d-a403-e96b0029c9fe",
+      "principalId": "<service-principal-object-id>",
+      "principalType": "ServicePrincipal"
+    }
+  }'
+```
+
+Verify the assignment again before running GitHub Actions. RBAC propagation
+can take a few minutes.
+
+> **Do not grant the GitHub deployment identity `User Access Administrator`
+> just to make this bootstrap work.** The preferred model is that an Azure
+> Owner performs the one-time state RBAC setup and the GitHub identity retains
+> only the permissions it actually needs: subscription `Contributor` for the
+> infrastructure plus `Storage Blob Data Contributor` for Terraform state.
+
+#### 5. Tell the workflow to use the existing account when discovery is ambiguous
+
+The bootstrap automatically recognizes `snipeittfstate01` and the current
+`snipeittfstate<10-character-hash>` naming scheme. If your subscription has
+multiple `snipeittfstate*` accounts, explicitly provide the existing one:
+
+```text
+TF_STATE_RESOURCE_GROUP=rg-snipeit-tfstate
+TF_STATE_STORAGE_ACCOUNT=snipeittfstate01
+TF_STATE_CONTAINER=vm-state
+```
+
+Use these as GitHub Environment variables for the target environment, or pass
+them when running the bootstrap locally. Do **not** set them to a new account
+name merely to make the workflow pass; the value must be the account that
+already contains the state blob.
+
+#### 6. Run the VM deployment
+
+Once the existing account, `vm-state`, and Blob Data Contributor assignment
+are confirmed:
+
+1. Run **Deploy VM Infrastructure (Terraform)** with `environment=prod` (or
+   `vm-staging`).
+2. Start with `action=plan`.
+3. Confirm Terraform reports the existing state backend and does not attempt
+   to replace the state account/container.
+4. Only then run `action=apply`.
+
+The resulting path is:
+
+```text
+register Azure providers
+        ↓
+find existing rg-snipeit-tfstate
+        ↓
+find existing snipeittfstate01 (or explicit account)
+        ↓
+find existing vm-state
+        ↓
+verify Storage Blob Data Contributor
+        ↓
+terraform init
+        ↓
+use existing prod.tfstate / vm-staging.tfstate
+        ↓
+terraform plan/apply
+```
+
+If the state account exists but the Blob role is missing, the bootstrap should
+be treated as a **one-time Azure administration task**, not as a reason to
+create a second state account or give the deployment identity broad RBAC
+administration rights.
+
 ## 2. Set up Cloudflare Tunnel (no open ports, no Bastion)
 
 This is what lets the VM have **zero inbound ports open at all** — no

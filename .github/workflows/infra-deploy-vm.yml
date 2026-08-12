@@ -228,7 +228,17 @@ jobs:
       - name: Bootstrap Terraform state backend
         working-directory: .
         run: |
-          ./scripts/bootstrap-terraform-state.sh >> "$GITHUB_ENV"
+          set -euo pipefail
+          state_env_file="$(mktemp)"
+          trap 'rm -f "$state_env_file"' EXIT
+
+          # The bootstrap script writes human-readable diagnostics to stderr and
+          # only TF_STATE_* assignments to stdout. Capture stdout first so a
+          # status message can never corrupt GitHub's $GITHUB_ENV file.
+          ./scripts/bootstrap-terraform-state.sh > "$state_env_file"
+          cat "$state_env_file" >&2
+          grep -E '^TF_STATE_(RESOURCE_GROUP|STORAGE_ACCOUNT|CONTAINER)=' "$state_env_file" >> "$GITHUB_ENV"
+
 
       - name: terraform init
         # Bootstrap above discovers/reuses the existing state RG, storage

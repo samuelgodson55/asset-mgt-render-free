@@ -74,10 +74,10 @@ if [[ -n "$STATE_ACCOUNT_OVERRIDE" ]]; then
   if [[ -n "$ACCOUNT_INFO" ]]; then
     STATE_ACCOUNT="$(printf '%s\n' "$ACCOUNT_INFO" | awk '{print $1}')"
     STATE_RG="$(printf '%s\n' "$ACCOUNT_INFO" | awk '{print $2}')"
-    echo "Reusing explicitly configured Terraform state account '$STATE_ACCOUNT' in resource group '$STATE_RG'."
+    echo "Reusing explicitly configured Terraform state account '$STATE_ACCOUNT' in resource group '$STATE_RG'." >&2
   else
     STATE_ACCOUNT="$STATE_ACCOUNT_OVERRIDE"
-    echo "Configured Terraform state account '$STATE_ACCOUNT' does not exist; it will be created in '$STATE_RG'."
+    echo "Configured Terraform state account '$STATE_ACCOUNT' does not exist; it will be created in '$STATE_RG'." >&2
   fi
 else
   for candidate in "$DEFAULT_STATE_ACCOUNT" "$LEGACY_STATE_ACCOUNT"; do
@@ -85,7 +85,7 @@ else
     if [[ -n "$ACCOUNT_INFO" ]]; then
       STATE_ACCOUNT="$(printf '%s\n' "$ACCOUNT_INFO" | awk '{print $1}')"
       STATE_RG="$(printf '%s\n' "$ACCOUNT_INFO" | awk '{print $2}')"
-      echo "Reusing existing Terraform state account '$STATE_ACCOUNT' in resource group '$STATE_RG'."
+      echo "Reusing existing Terraform state account '$STATE_ACCOUNT' in resource group '$STATE_RG'." >&2
       break
     fi
   done
@@ -136,10 +136,10 @@ else
 
       STATE_ACCOUNT="$(printf '%s\n' "$CANDIDATES" | head -n1 | awk '{print $1}')"
       STATE_RG="$(printf '%s\n' "$CANDIDATES" | head -n1 | awk '{print $2}')"
-      echo "Reusing discovered Terraform state account '$STATE_ACCOUNT' in resource group '$STATE_RG'."
+      echo "Reusing discovered Terraform state account '$STATE_ACCOUNT' in resource group '$STATE_RG'." >&2
     else
       STATE_ACCOUNT="$DEFAULT_STATE_ACCOUNT"
-      echo "No existing Terraform state account found; new account '$STATE_ACCOUNT' will be created."
+      echo "No existing Terraform state account found; new account '$STATE_ACCOUNT' will be created." >&2
     fi
   fi
 fi
@@ -150,9 +150,9 @@ validate_storage_account_name "$STATE_ACCOUNT"
 # Resource-group lifecycle: existing -> reuse; missing -> create.
 # ---------------------------------------------------------------------------
 if az group show --name "$STATE_RG" --subscription "$SUBSCRIPTION_ID" >/dev/null 2>&1; then
-  echo "Reusing existing Terraform state resource group '$STATE_RG'."
+  echo "Reusing existing Terraform state resource group '$STATE_RG'." >&2
 else
-  echo "Creating Terraform state resource group '$STATE_RG'."
+  echo "Creating Terraform state resource group '$STATE_RG'." >&2
   az group create \
     --name "$STATE_RG" \
     --location "$LOCATION" \
@@ -167,7 +167,7 @@ if az storage account show \
     --name "$STATE_ACCOUNT" \
     --resource-group "$STATE_RG" \
     --subscription "$SUBSCRIPTION_ID" >/dev/null 2>&1; then
-  echo "Reusing existing storage account '$STATE_ACCOUNT'."
+  echo "Reusing existing storage account '$STATE_ACCOUNT'." >&2
 else
   # A discovered account must exist in its discovered RG; do not accidentally
   # create a duplicate with the same intended backend name elsewhere.
@@ -176,7 +176,7 @@ else
     exit 1
   fi
 
-  echo "Creating storage account '$STATE_ACCOUNT'."
+  echo "Creating storage account '$STATE_ACCOUNT'." >&2
   az storage account create \
     --name "$STATE_ACCOUNT" \
     --resource-group "$STATE_RG" \
@@ -197,35 +197,65 @@ STATE_ID="$(az storage account show \
   --query id -o tsv)"
 
 # ---------------------------------------------------------------------------
-# RBAC: idempotently grant the GitHub OIDC service principal access to blobs.
+# RBAC: idempotently ensure the GitHub OIDC service principal can read/write
+# blobs. Query Azure Resource Manager directly because `az role assignment`
+# can return `MissingSubscription` in some tenants even when the ARM
+# Authorization API is healthy. An assignment inherited from the subscription
+# or state resource group is sufficient; only create one when no effective
+# assignment exists.
 # ---------------------------------------------------------------------------
 OBJECT_ID="$(az ad sp show --id "$CLIENT_ID" --query id -o tsv)"
 STORAGE_BLOB_DATA_CONTRIBUTOR_ROLE_ID="ba92f5b4-2d11-453d-a403-e96b0029c9fe"
 STORAGE_ROLE_DEFINITION_ID="/subscriptions/${SUBSCRIPTION_ID}/providers/Microsoft.Authorization/roleDefinitions/${STORAGE_BLOB_DATA_CONTRIBUTOR_ROLE_ID}"
-ROLE_ASSIGNMENTS_URL="https://management.azure.com${STATE_ID}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01"
 
-EXISTING_STORAGE_ASSIGNMENT_ID="$(az rest \
-  --method get \
-  --url "$ROLE_ASSIGNMENTS_URL" \
-  --query "value[?properties.principalId=='$OBJECT_ID' && properties.roleDefinitionId=='$STORAGE_ROLE_DEFINITION_ID' && properties.scope=='$STATE_ID'] | [0].name" \
-  -o tsv)"
+role_assignment_count_at_scope() {
+  local scope="$1"
+  local url="https://management.azure.com${scope}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01"
 
-if [[ -n "$EXISTING_STORAGE_ASSIGNMENT_ID" ]]; then
-  echo "Storage Blob Data Contributor role already present: $EXISTING_STORAGE_ASSIGNMENT_ID"
-else
-  echo "Granting Storage Blob Data Contributor on Terraform state storage via ARM Authorization API..."
+  az rest \
+    --method get \
+    --url "$url" \
+    --query "value[?properties.principalId=='${OBJECT_ID}' && properties.roleDefinitionId=='${STORAGE_ROLE_DEFINITION_ID}'] | length(@)" \
+    -o tsv 2>/dev/null || echo 0
+}
 
+HAS_BLOB_ROLE="0"
+for scope in \
+  "/subscriptions/${SUBSCRIPTION_ID}" \
+  "/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${STATE_RG}" \
+  "$STATE_ID"
+do
+  COUNT="$(role_assignment_count_at_scope "$scope")"
+  if [[ "$COUNT" != "0" ]]; then
+    HAS_BLOB_ROLE="1"
+    echo "Storage Blob Data Contributor is already assigned at '$scope' and is effective for '$CLIENT_ID'." >&2
+    break
+  fi
+done
+
+if [[ "$HAS_BLOB_ROLE" == "0" ]]; then
+  echo "No effective Storage Blob Data Contributor role found for '$CLIENT_ID'; attempting to grant it on '$STATE_ID'..." >&2
+
+  # Deterministic UUID: rerunning bootstrap for the same account/SP/role
+  # targets the same role-assignment resource instead of creating duplicates.
   ROLE_ASSIGNMENT_ID="$(python -c 'import sys,uuid; print(uuid.uuid5(uuid.NAMESPACE_URL, sys.argv[1]))' \
     "${STATE_ID}:${OBJECT_ID}:${STORAGE_BLOB_DATA_CONTRIBUTOR_ROLE_ID}")"
+
   ROLE_ASSIGNMENT_URL="https://management.azure.com${STATE_ID}/providers/Microsoft.Authorization/roleAssignments/${ROLE_ASSIGNMENT_ID}?api-version=2022-04-01"
   ROLE_BODY="{\"properties\":{\"roleDefinitionId\":\"${STORAGE_ROLE_DEFINITION_ID}\",\"principalId\":\"${OBJECT_ID}\",\"principalType\":\"ServicePrincipal\"}}"
 
-  az rest \
-    --method put \
-    --url "$ROLE_ASSIGNMENT_URL" \
-    --body "$ROLE_BODY" >/dev/null
+  if ! az rest \
+      --method put \
+      --url "$ROLE_ASSIGNMENT_URL" \
+      --body "$ROLE_BODY" \
+      >/dev/null; then
+    echo "::error::The GitHub OIDC identity '$CLIENT_ID' cannot create Azure role assignments." >&2
+    echo "::error::Grant this identity Owner or User Access Administrator on '$STATE_RG' (or the subscription), OR perform the one-time state RBAC setup as an Azure Owner." >&2
+    echo "::error::Required permission: Microsoft.Authorization/roleAssignments/write." >&2
+    exit 1
+  fi
 
-  echo "Storage Blob Data Contributor role granted: $ROLE_ASSIGNMENT_ID"
+  echo "Storage Blob Data Contributor role granted on '$STATE_ID'." >&2
 fi
 
 # ---------------------------------------------------------------------------
@@ -236,9 +266,9 @@ fi
 CONTAINER_ID="${STATE_ID}/blobServices/default/containers/${STATE_CONTAINER}"
 
 if az resource show --ids "$CONTAINER_ID" >/dev/null 2>&1; then
-  echo "Reusing existing Terraform state container '$STATE_CONTAINER'."
+  echo "Reusing existing Terraform state container '$STATE_CONTAINER'." >&2
 else
-  echo "Creating Terraform state container '$STATE_CONTAINER'."
+  echo "Creating Terraform state container '$STATE_CONTAINER'." >&2
   az resource create \
     --ids "$CONTAINER_ID" \
     --api-version 2023-01-03 \
