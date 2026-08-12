@@ -593,7 +593,7 @@ to `frontend`'s one public origin; nginx quietly reverse-proxies `/api/*`
 to `backend` over the Container Apps environment's internal DNS
 (`nginx/default.conf.template`'s `BACKEND_HOST`/`BACKEND_PORT` env vars —
 resolver auto-detected at boot, see
-`nginx/docker-entrypoint.d/15-detect-resolver-ip.envsh`). Zero frontend code
+`nginx/docker-entrypoint.d/15-detect-resolver-ip.sh`). Zero frontend code
 changes were needed for any of this.
 
 > **Considered and deliberately not used: Azure Static Web Apps for
@@ -679,7 +679,14 @@ not you ever push an image).
    environment from using the credential.
 
    The helper is intentionally idempotent. Re-running it does not create
-   duplicate identities or federated credentials.
+   duplicate identities or federated credentials. Subscription `Contributor`
+   RBAC is checked and created through the Azure Resource Manager
+   `Microsoft.Authorization` REST API rather than `az role assignment`; this
+   avoids the `MissingSubscription` failure that can occur in Azure CLI role
+   assignment commands even when the subscription and Authorization API are
+   accessible. The role-assignment ID is deterministic, so reruns reuse the
+   same assignment. The bootstrap uses Python 3 only for this deterministic
+   UUID generation.
 
 3. **Do not create the ACA resource groups yourself.** `.github/workflows/
    infra-deploy.yml` derives them as:

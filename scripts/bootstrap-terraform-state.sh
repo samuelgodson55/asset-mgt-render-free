@@ -82,17 +82,37 @@ STATE_ID="$(az storage account show --name "$STATE_ACCOUNT" --resource-group "$S
 # management-plane role and does NOT grant Blob data access, so explicitly add
 # Storage Blob Data Contributor to the federated CI service principal.
 OBJECT_ID="$(az ad sp show --id "$CLIENT_ID" --query id -o tsv)"
-if ! az role assignment list \
-  --assignee-object-id "$OBJECT_ID" \
-  --scope "$STATE_ID" \
-  --role "Storage Blob Data Contributor" \
-  --query '[0].id' -o tsv | grep -q .; then
-  az role assignment create \
-    --assignee-object-id "$OBJECT_ID" \
-    --assignee-principal-type ServicePrincipal \
-    --role "Storage Blob Data Contributor" \
-    --scope "$STATE_ID" \
-    >/dev/null
+
+# Use the ARM Authorization API directly. Some Azure CLI tenants return
+# MissingSubscription from `az role assignment list/create` even though ARM
+# authorization calls work normally. Direct ARM also avoids principal lookup
+# ambiguity and makes this bootstrap consistent with the main Azure bootstrap.
+STORAGE_BLOB_DATA_CONTRIBUTOR_ROLE_ID="ba92f5b4-2d11-453d-a403-e96b0029c9fe"
+STORAGE_ROLE_DEFINITION_ID="/subscriptions/${SUBSCRIPTION_ID}/providers/Microsoft.Authorization/roleDefinitions/${STORAGE_BLOB_DATA_CONTRIBUTOR_ROLE_ID}"
+ROLE_ASSIGNMENTS_URL="https://management.azure.com${STATE_ID}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01"
+
+EXISTING_STORAGE_ASSIGNMENT_ID="$(az rest \
+  --method get \
+  --url "$ROLE_ASSIGNMENTS_URL" \
+  --query "value[?properties.principalId=='$OBJECT_ID' && properties.roleDefinitionId=='$STORAGE_ROLE_DEFINITION_ID' && properties.scope=='$STATE_ID'] | [0].name" \
+  -o tsv)"
+
+if [[ -n "$EXISTING_STORAGE_ASSIGNMENT_ID" ]]; then
+  echo "Storage Blob Data Contributor role already present: $EXISTING_STORAGE_ASSIGNMENT_ID"
+else
+  echo "Granting Storage Blob Data Contributor on Terraform state storage via ARM Authorization API..."
+
+  ROLE_ASSIGNMENT_ID="$(python -c 'import sys,uuid; print(uuid.uuid5(uuid.NAMESPACE_URL, sys.argv[1]))' \
+    "${STATE_ID}:${OBJECT_ID}:${STORAGE_BLOB_DATA_CONTRIBUTOR_ROLE_ID}")"
+  ROLE_ASSIGNMENT_URL="https://management.azure.com${STATE_ID}/providers/Microsoft.Authorization/roleAssignments/${ROLE_ASSIGNMENT_ID}?api-version=2022-04-01"
+  ROLE_BODY="{\"properties\":{\"roleDefinitionId\":\"${STORAGE_ROLE_DEFINITION_ID}\",\"principalId\":\"${OBJECT_ID}\",\"principalType\":\"ServicePrincipal\"}}"
+
+  az rest \
+    --method put \
+    --url "$ROLE_ASSIGNMENT_URL" \
+    --body "$ROLE_BODY" >/dev/null
+
+  echo "Storage Blob Data Contributor role granted: $ROLE_ASSIGNMENT_ID"
 fi
 
 # Container creation is management-plane ARM, so it does not depend on the

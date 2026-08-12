@@ -2,6 +2,8 @@
 
 ## Unreleased — Infrastructure documentation
 
+- Fixed Azure bootstrap RBAC provisioning to use the ARM `Microsoft.Authorization` REST API instead of `az role assignment`, avoiding tenant-specific `MissingSubscription` failures. Subscription `Contributor` and Terraform-state `Storage Blob Data Contributor` assignments are now idempotent and use deterministic assignment IDs.
+
 - Synchronized ACA deployment documentation with the current Bicep and
   GitHub Actions implementation: deterministic environment resource-group
   names, automatic provider registration, Deployment Stack plan/apply/destroy

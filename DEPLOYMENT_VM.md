@@ -98,7 +98,9 @@ The bootstrap helper is idempotent. It:
 
 You therefore **do not** manually create an App Registration, service
 principal, federated credential, Azure resource group, or Terraform state
-storage.
+storage. The VM state bootstrap also uses the ARM Authorization REST API for
+`Storage Blob Data Contributor`, with a deterministic role-assignment ID, so
+it does not depend on `az role assignment` working in the local tenant.
 
 ### Terraform state is bootstrapped by the workflow
 
@@ -136,7 +138,7 @@ The lifecycle is therefore:
 workflow
   ├─ register providers
   ├─ create/reuse Terraform state RG + Storage Account + container
-  ├─ grant Blob Data Contributor to CI identity
+  ├─ grant Blob Data Contributor to CI identity via ARM Authorization API
   ├─ terraform init
   └─ terraform plan/apply/destroy
 ```
