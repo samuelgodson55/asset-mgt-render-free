@@ -268,9 +268,28 @@ fi
 # data-plane operation just like the workflow retries terraform init.
 echo "Ensuring Terraform state container '$STATE_CONTAINER' exists in '$STATE_ACCOUNT'..." >&2
 for attempt in 1 2 3 4 5; do
-  if az storage container create       --name "$STATE_CONTAINER"       --account-name "$STATE_ACCOUNT"       --auth-mode login       --fail-on-exist false       >/dev/null; then
-    echo "Terraform state container '$STATE_CONTAINER' is ready." >&2
-    break
+  # --fail-on-exist is a boolean switch in Azure CLI; it must NOT be followed
+  # by the literal value "false". Check existence explicitly so this remains
+  # idempotent and does not treat an already-existing container as an error.
+  if container_exists="$(az storage container exists \
+      --name "$STATE_CONTAINER" \
+      --account-name "$STATE_ACCOUNT" \
+      --auth-mode login \
+      --query exists \
+      -o tsv 2>/dev/null)"; then
+    if [[ "$container_exists" == "true" ]]; then
+      echo "Terraform state container '$STATE_CONTAINER' already exists and is ready." >&2
+      break
+    fi
+
+    if az storage container create \
+        --name "$STATE_CONTAINER" \
+        --account-name "$STATE_ACCOUNT" \
+        --auth-mode login \
+        >/dev/null; then
+      echo "Terraform state container '$STATE_CONTAINER' is ready." >&2
+      break
+    fi
   fi
 
   if [[ "$attempt" == "5" ]]; then

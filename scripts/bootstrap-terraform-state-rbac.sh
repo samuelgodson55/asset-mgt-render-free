@@ -92,7 +92,21 @@ ensure_state_container() {
   fi
 
   echo "Ensuring Terraform state container '$STATE_CONTAINER' exists..."
-  az storage container create     --name "$STATE_CONTAINER"     --account-name "$STATE_ACCOUNT"     --account-key "$account_key"     --fail-on-exist false     >/dev/null
+  if az storage container exists \
+      --name "$STATE_CONTAINER" \
+      --account-name "$STATE_ACCOUNT" \
+      --account-key "$account_key" \
+      --query exists \
+      -o tsv | grep -qx true; then
+    echo "Terraform state container '$STATE_CONTAINER' already exists and is ready."
+    return
+  fi
+
+  az storage container create \
+      --name "$STATE_CONTAINER" \
+      --account-name "$STATE_ACCOUNT" \
+      --account-key "$account_key" \
+      >/dev/null
   echo "Terraform state container '$STATE_CONTAINER' is ready."
 }
 
