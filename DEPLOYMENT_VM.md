@@ -801,6 +801,39 @@ be treated as a **one-time Azure administration task**, not as a reason to
 create a second state account or give the deployment identity broad RBAC
 administration rights.
 
+## VM disk snapshot backup toggle
+
+The VM stack's Azure Backup protection can be switched per GitHub Environment
+using **Variables** (not Secrets):
+
+| Variable | Values | Default |
+|---|---|---:|
+| `ENABLE_DATA_DISK_SNAPSHOTS` | `true` / `false` | `true` |
+| `SNAPSHOT_RETENTION_DAYS` | positive integer | `7` |
+
+In **Settings -> Environments -> prod (or vm-staging) -> Variables**, set for example:
+
+```text
+ENABLE_DATA_DISK_SNAPSHOTS=true
+SNAPSHOT_RETENTION_DAYS=7
+```
+
+To deactivate scheduled Azure Backup protection for that environment:
+
+```text
+ENABLE_DATA_DISK_SNAPSHOTS=false
+```
+
+The workflow passes these to Terraform as `TF_VAR_enable_data_disk_snapshots`
+and `TF_VAR_snapshot_retention_days`; no workflow edit is required. The
+Terraform variable defaults remain enabled/7 days if the GitHub Variables are
+absent, so existing deployments do not unexpectedly lose backup protection.
+
+**Important:** setting the toggle to `false` stops Terraform-managed backup
+protection; it is not a command to delete existing Azure recovery points. Do
+not use it as a data-erasure mechanism. Re-enable it before relying on future
+scheduled recovery points.
+
 ## 2. Set up Cloudflare Tunnel (no open ports, no Bastion)
 
 This is what lets the VM have **zero inbound ports open at all** — no

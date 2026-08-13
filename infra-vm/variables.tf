@@ -454,7 +454,7 @@ variable "dockerhub_token" {
 # -----------------------------------------------------------------------------
 
 variable "enable_data_disk_snapshots" {
-  description = "Create a daily Azure Backup policy for the data disk (Postgres/Redis/backup/export data). Adds a small, usage-based cost (you pay for snapshot storage, not a fixed fee) -- see DEPLOYMENT_VM.md's Cost section."
+  description = "Enable Terraform-managed Azure Backup protection for the VM/data workload. Controlled by the GitHub Environment Variable ENABLE_DATA_DISK_SNAPSHOTS; defaults to true. Disabling stops Terraform-managed protection but is not a recovery-point deletion mechanism."
   type        = bool
   default     = true
 }

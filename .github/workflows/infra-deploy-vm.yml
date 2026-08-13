@@ -161,6 +161,11 @@ jobs:
       TF_VAR_overdue_digest_hours_utc: ${{ vars.OVERDUE_DIGEST_HOURS_UTC || '8' }}
       TF_VAR_due_soon_digest_hours_utc: ${{ vars.DUE_SOON_DIGEST_HOURS_UTC || '8' }}
       TF_VAR_enable_auto_backup: ${{ vars.ENABLE_AUTO_BACKUP || 'true' }}
+      # Azure VM/disk backup is controlled per GitHub Environment. Keep the
+      # default enabled so existing environments retain current behavior when
+      # the Variable has not been created yet.
+      TF_VAR_enable_data_disk_snapshots: ${{ vars.ENABLE_DATA_DISK_SNAPSHOTS || 'true' }}
+      TF_VAR_snapshot_retention_days: ${{ vars.SNAPSHOT_RETENTION_DAYS || '7' }}
       TF_VAR_backup_gdrive_enabled: ${{ vars.BACKUP_GDRIVE_ENABLED || 'false' }}
       TF_VAR_backup_gdrive_oauth_client_id: ${{ secrets.BACKUP_GDRIVE_OAUTH_CLIENT_ID }}
       TF_VAR_backup_gdrive_oauth_client_secret: ${{ secrets.BACKUP_GDRIVE_OAUTH_CLIENT_SECRET }}
