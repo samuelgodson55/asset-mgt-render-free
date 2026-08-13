@@ -568,6 +568,15 @@ jobs:
             "cloudflare_zero_trust_access_policy.ssh_humans" \
             "cloudflare_zero_trust_access_policy.ssh_ci"; do
 
+            # A fresh environment has no Cloudflare Access policy instances in
+            # Terraform state yet. This probe is diagnostic only, so it must
+            # never fail the deployment before Terraform has created those
+            # resources.
+            if ! terraform state list | grep -Fxq "$policy_address"; then
+              echo "${policy_address}: not present in Terraform state yet; skipping preflight probe."
+              continue
+            fi
+
             policy_state="$(terraform state show -no-color "$policy_address")"
             policy_id="$(printf '%s\n' "$policy_state" | sed -n 's/^id[[:space:]]*=[[:space:]]*"\([^"]*\)"/\1/p' | head -1)"
             app_id="$(printf '%s\n' "$policy_state" | sed -n 's/^application_id[[:space:]]*=[[:space:]]*"\([^"]*\)"/\1/p' | head -1)"
