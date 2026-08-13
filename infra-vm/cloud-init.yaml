@@ -511,7 +511,19 @@ runcmd:
 %{ endif }
 
   # -----------------------------------------------------------------------
-  # 5. Bring the stack up for the first time via the systemd unit (written
+  # 5. Pull the exact initial backend/frontend build images before the
+  #    first compose start. Terraform supplies the repository pair and
+  #    IMAGE_TAG; FRONTEND_BUILD_TARGET defaults to react in the GitHub
+  #    infra workflow when the environment variable is unset. This is an
+  #    explicit pull rather than relying on Compose's "image missing"
+  #    behavior, so first boot deterministically uses the selected build.
+  # -----------------------------------------------------------------------
+  - |
+    cd /opt/snipeit
+    docker compose -f docker-compose.vm.yml pull backend-green frontend-green
+
+  # -----------------------------------------------------------------------
+  # 6. Bring the stack up for the first time via the systemd unit (written
   #    above) rather than a bare `docker compose up -d` here -- this way
   #    the exact same command systemd will use on every future reboot is
   #    what actually starts it now, so first boot isn't a special case
@@ -522,7 +534,7 @@ runcmd:
   - systemctl start snipeit.service
 
   # -----------------------------------------------------------------------
-  # 6. Run the initial DB schema migration + seed the root admin account,
+  # 7. Run the initial DB schema migration + seed the root admin account,
   #    against `backend-green` -- ACTIVE_SLOT=green/COMPOSE_PROFILES=green
   #    above make green this VM's active slot from first boot onward (the
   #    fixed role -- see docker-compose.vm.yml's own "ZERO-DOWNTIME

@@ -131,41 +131,78 @@ jobs:
       # ALERT_EMAIL_ADDRESS-gated condition here in bash.
       #
       
-      # First deploy ever: this `az containerapp show` call fails (backend
-      # doesn't exist yet) -- fall back to "latest", which is fine, since
-      # deploy-azure-aca.yml will push a real image
-      # immediately after this workflow finishes anyway.
-      - name: Resolve currently-deployed image tag (so infra updates don't clobber it)
+      # INITIAL DEPLOYMENT vs INFRA REFRESH
+      # ----------------------------------
+      # First deployment: no Container Apps exist yet, so select the frontend
+      # image flavor from this GitHub Environment's FRONTEND_BUILD_TARGET.
+      # React is the safe/default initial target when the variable is unset.
+      #
+      # Refresh/update: never substitute "latest" and never rebuild the
+      # frontend selection from the current variable. Read the exact image
+      # references currently used by BOTH backend and frontend, verify both
+      # manifests still exist on Docker Hub, and feed those exact repos/tags
+      # back into Bicep. This preserves the running build even if
+      # FRONTEND_BUILD_TARGET changed after the environment was created.
+      - name: Resolve current ACA images (or initial defaults)
         id: current
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          FRONTEND_BUILD_TARGET: ${{ vars.FRONTEND_BUILD_TARGET || 'react' }}
         run: |
-          TAG=$(az containerapp show --name backend --resource-group "$RESOURCE_GROUP" \
-                  --query "properties.template.containers[0].image" -o tsv 2>/dev/null | awk -F: '{print $NF}') || true
-          echo "tag=${TAG:-latest}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
 
-      # GUARD: the tag above is whatever `backend` currently reports, but a
-      # tag can stop existing on Docker Hub after it's been reported here --
-      # deleted manually, overwritten by Docker Hub's own tag-retention
-      # policy, or (staging vs production) simply never pushed under this
-      # particular repo's $ENV_SUFFIX at all. Deploying with a tag that
-      # 404s on Docker Hub fails Bicep with
-      # InvalidParameterValueInContainerTemplate ("GET ...: MANIFEST_UNKNOWN")
-      # AFTER most of the deployment has already run, instead of failing
-      # fast here with a clear reason. Falls back to "latest" (same
-      # fallback as the first-deploy-ever case above) rather than letting a
-      # stale tag reach `az deployment group create`.
-      - name: Verify resolved tag still exists on Docker Hub
-        id: verify
-        run: |
-          REPO="${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend$ENV_SUFFIX"
-          TAG="${{ steps.current.outputs.tag }}"
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-                     "https://hub.docker.com/v2/repositories/${REPO}/tags/${TAG}/" || echo "000")
-          if [ "$STATUS" = "200" ]; then
-            echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          else
-            echo "::warning::Docker Hub has no tag '${TAG}' for ${REPO} (HTTP ${STATUS}) -- falling back to 'latest' instead of redeploying a dangling reference."
-            echo "tag=latest" >> "$GITHUB_OUTPUT"
+          if [[ "$FRONTEND_BUILD_TARGET" != "react" && "$FRONTEND_BUILD_TARGET" != "legacy" ]]; then
+            echo "::error::FRONTEND_BUILD_TARGET must be 'react' or 'legacy' when set; got '$FRONTEND_BUILD_TARGET'."
+            exit 1
           fi
+
+          BACKEND_IMAGE=""
+          FRONTEND_IMAGE=""
+          if az containerapp show --name backend --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1 && \
+             az containerapp show --name frontend --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1; then
+            BACKEND_IMAGE=$(az containerapp show --name backend --resource-group "$RESOURCE_GROUP" \
+              --query "properties.template.containers[0].image" -o tsv)
+            FRONTEND_IMAGE=$(az containerapp show --name frontend --resource-group "$RESOURCE_GROUP" \
+              --query "properties.template.containers[0].image" -o tsv)
+          fi
+
+          if [[ -n "$BACKEND_IMAGE" && -n "$FRONTEND_IMAGE" ]]; then
+            echo "Existing ACA images found; preserving the exact build images for this infra refresh."
+            BACKEND_REPO="${BACKEND_IMAGE%:*}"
+            BACKEND_TAG="${BACKEND_IMAGE##*:}"
+            FRONTEND_REPO="${FRONTEND_IMAGE%:*}"
+            FRONTEND_TAG="${FRONTEND_IMAGE##*:}"
+            SOURCE="existing"
+          else
+            echo "No complete existing ACA image pair found; treating this as the initial deployment."
+            BACKEND_REPO="${DOCKERHUB_USERNAME}/snipeit-lite-backend${ENV_SUFFIX}"
+            FRONTEND_REPO="${DOCKERHUB_USERNAME}/snipeit-lite-frontend-${FRONTEND_BUILD_TARGET}${ENV_SUFFIX}"
+            BACKEND_TAG="latest"
+            FRONTEND_TAG="latest"
+            SOURCE="initial"
+          fi
+
+          if [[ -n "${DOCKERHUB_USERNAME:-}" && -n "${DOCKERHUB_TOKEN:-}" ]]; then
+            printf '%s\n' "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin >/dev/null
+          fi
+
+          for pair in \
+            "backend|$BACKEND_REPO|$BACKEND_TAG" \
+            "frontend|$FRONTEND_REPO|$FRONTEND_TAG"; do
+            IFS='|' read -r NAME REPO TAG <<< "$pair"
+            if ! docker manifest inspect "${REPO}:${TAG}" >/dev/null 2>&1; then
+              echo "::error::Docker Hub image ${REPO}:${TAG} is not available. Refusing to refresh ACA with a dangling image reference."
+              exit 1
+            fi
+            echo "$NAME image verified: ${REPO}:${TAG}"
+          done
+
+          echo "backend_repo=$BACKEND_REPO" >> "$GITHUB_OUTPUT"
+          echo "frontend_repo=$FRONTEND_REPO" >> "$GITHUB_OUTPUT"
+          echo "backend_tag=$BACKEND_TAG" >> "$GITHUB_OUTPUT"
+          echo "frontend_tag=$FRONTEND_TAG" >> "$GITHUB_OUTPUT"
+          echo "source=$SOURCE" >> "$GITHUB_OUTPUT"
 
       # COST LEVER: staging has no real users waiting on it, so `backend`
       # AND `frontend` both scale to zero when idle (min replicas 0 -- pure
@@ -367,9 +404,11 @@ jobs:
             --output json \
             --parameters \
               environmentName="$ENV_NAME" \
-              dockerHubBackendImage="${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend$ENV_SUFFIX" \
-              dockerHubFrontendImage="${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-frontend$ENV_SUFFIX" \
-              initialImageTag="${{ steps.verify.outputs.tag }}" \
+              dockerHubBackendImage="${{ steps.current.outputs.backend_repo }}" \
+              dockerHubFrontendImage="${{ steps.current.outputs.frontend_repo }}" \
+              initialImageTag="latest" \
+              initialBackendImageTag="${{ steps.current.outputs.backend_tag }}" \
+              initialFrontendImageTag="${{ steps.current.outputs.frontend_tag }}" \
               dockerHubUsername="${{ secrets.DOCKERHUB_USERNAME }}" \
               dockerHubToken="${{ secrets.DOCKERHUB_TOKEN }}" \
               backendMinReplicas=${{ steps.replicas.outputs.backend_min }} \
@@ -502,9 +541,11 @@ jobs:
             --output json \
             --parameters \
               environmentName="$ENV_NAME" \
-              dockerHubBackendImage="${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend$ENV_SUFFIX" \
-              dockerHubFrontendImage="${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-frontend$ENV_SUFFIX" \
-              initialImageTag="${{ steps.verify.outputs.tag }}" \
+              dockerHubBackendImage="${{ steps.current.outputs.backend_repo }}" \
+              dockerHubFrontendImage="${{ steps.current.outputs.frontend_repo }}" \
+              initialImageTag="latest" \
+              initialBackendImageTag="${{ steps.current.outputs.backend_tag }}" \
+              initialFrontendImageTag="${{ steps.current.outputs.frontend_tag }}" \
               dockerHubUsername="${{ secrets.DOCKERHUB_USERNAME }}" \
               dockerHubToken="${{ secrets.DOCKERHUB_TOKEN }}" \
               backendMinReplicas=${{ steps.replicas.outputs.backend_min }} \
@@ -612,9 +653,11 @@ jobs:
             --yes \
             --parameters \
               environmentName="$ENV_NAME" \
-              dockerHubBackendImage="${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend$ENV_SUFFIX" \
-              dockerHubFrontendImage="${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-frontend$ENV_SUFFIX" \
-              initialImageTag="${{ steps.verify.outputs.tag }}" \
+              dockerHubBackendImage="${{ steps.current.outputs.backend_repo }}" \
+              dockerHubFrontendImage="${{ steps.current.outputs.frontend_repo }}" \
+              initialImageTag="latest" \
+              initialBackendImageTag="${{ steps.current.outputs.backend_tag }}" \
+              initialFrontendImageTag="${{ steps.current.outputs.frontend_tag }}" \
               dockerHubUsername="${{ secrets.DOCKERHUB_USERNAME }}" \
               dockerHubToken="${{ secrets.DOCKERHUB_TOKEN }}" \
               backendMinReplicas=${{ steps.replicas.outputs.backend_min }} \

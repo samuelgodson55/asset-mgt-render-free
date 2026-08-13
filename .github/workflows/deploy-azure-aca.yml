@@ -237,9 +237,9 @@ jobs:
         # which of the two mutually exclusive frontend images this
         # environment ships. There's no "ship everything" fail-safe
         # anymore (the old combined `frontend-final` target is gone) --
-        # anything other than exactly "react" (including unset) resolves
-        # to "legacy", chosen as the safe default because it's the
-        # smaller, longer-proven surface. This run's own
+        # unset resolves to "react" for initial/default deployments.
+        # Set the variable explicitly to "legacy" when an environment needs
+        # the legacy frontend. This run's own
         # `inputs.frontend_type` (the workflow_dispatch dropdown) takes
         # priority over that variable when explicitly set to "react" or
         # "legacy" -- its default value, "(environment default)", falls
@@ -262,12 +262,18 @@ jobs:
           if [ "$RAW_FRONTEND_TYPE_INPUT" = "react" ] || [ "$RAW_FRONTEND_TYPE_INPUT" = "legacy" ]; then
             echo "frontend_type=$RAW_FRONTEND_TYPE_INPUT" >> "$GITHUB_OUTPUT"
             echo "frontend_type_source=this run's frontend_type input" >> "$GITHUB_OUTPUT"
-          elif [ "$RAW_FRONTEND_BUILD_TARGET" = "react" ]; then
+          elif [ -z "$RAW_FRONTEND_BUILD_TARGET" ] || [ "$RAW_FRONTEND_BUILD_TARGET" = "react" ]; then
+            # Initial/default frontend flavor is React. Set the Environment
+            # variable to "legacy" explicitly when an environment needs the
+            # legacy frontend instead.
             echo "frontend_type=react" >> "$GITHUB_OUTPUT"
-            echo "frontend_type_source=this environment's FRONTEND_BUILD_TARGET variable" >> "$GITHUB_OUTPUT"
-          else
+            echo "frontend_type_source=${RAW_FRONTEND_BUILD_TARGET:+this environment's FRONTEND_BUILD_TARGET variable; unset/default=react}" >> "$GITHUB_OUTPUT"
+          elif [ "$RAW_FRONTEND_BUILD_TARGET" = "legacy" ]; then
             echo "frontend_type=legacy" >> "$GITHUB_OUTPUT"
             echo "frontend_type_source=this environment's FRONTEND_BUILD_TARGET variable" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::FRONTEND_BUILD_TARGET must be exactly 'react' or 'legacy' when set; got '$RAW_FRONTEND_BUILD_TARGET'."
+            exit 1
           fi
 
   verify-ci:

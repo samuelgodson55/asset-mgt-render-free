@@ -83,8 +83,14 @@ param dockerHubBackendImage string
 @description('Docker Hub repository for the frontend image (static frontend + reverse proxy to `backend`), e.g. "yourusername/snipeit-lite-frontend", built from frontend/Dockerfile UNCHANGED from local Docker Compose. Public repo by default.')
 param dockerHubFrontendImage string
 
-@description('Image tag to deploy on first create, applied to BOTH images. The CI/CD pipeline overwrites this on every push via `az containerapp update --image` (backend and frontend are updated independently -- see deploy-azure-*.yml).')
+@description('Backward-compatible common image tag. Used only when initialBackendImageTag/initialFrontendImageTag are omitted.')
 param initialImageTag string = 'latest'
+
+@description('Image tag to use for the backend during infrastructure creation/refresh. On refresh, the infra workflow passes the exact tag currently deployed instead of falling back to latest.')
+param initialBackendImageTag string = ''
+
+@description('Image tag to use for the frontend during infrastructure creation/refresh. On refresh, the infra workflow passes the exact tag currently deployed instead of falling back to latest.')
+param initialFrontendImageTag string = ''
 
 @description('Set only if dockerHubBackendImage/dockerHubFrontendImage are PRIVATE Docker Hub repositories (same account for both). Leave empty if both are public (recommended -- zero credential management). NOTE: Docker Hub free plan includes only ONE private repo -- if you need both private, either upgrade your Docker Hub plan or keep one of the two public.')
 param dockerHubUsername string = ''
@@ -289,8 +295,8 @@ var suffix = uniqueString(resourceGroup().id, environmentName)
 var storageAccountName = take(replace('${appBaseName}${environmentName}st${take(suffix, 6)}', '-', ''), 24)
 
 var usePrivateDockerHubRepo = !empty(dockerHubUsername)
-var backendImage = '${dockerHubBackendImage}:${initialImageTag}'
-var frontendImage = '${dockerHubFrontendImage}:${initialImageTag}'
+var backendImage = '${dockerHubBackendImage}:${empty(initialBackendImageTag) ? initialImageTag : initialBackendImageTag}'
+var frontendImage = '${dockerHubFrontendImage}:${empty(initialFrontendImageTag) ? initialImageTag : initialFrontendImageTag}'
 
 // One Log Analytics workspace for every container app's console/system
 // logs. Application Insights is opt-in (see `otelAzureMonitorEnabled` above).

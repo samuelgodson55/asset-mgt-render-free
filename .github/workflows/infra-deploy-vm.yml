@@ -184,17 +184,18 @@ jobs:
       TF_VAR_otel_console_exporter: ${{ vars.OTEL_CONSOLE_EXPORTER || 'false' }}
       TF_VAR_applicationinsights_connection_string: ${{ secrets.APPLICATIONINSIGHTS_CONNECTION_STRING }}
       TF_VAR_dockerhub_backend_image: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend${{ inputs.environment == 'vm-staging' && '-staging' || '' }}
-      TF_VAR_dockerhub_frontend_image: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-frontend-${{ vars.FRONTEND_BUILD_TARGET == 'react' && 'react' || 'legacy' }}${{ inputs.environment == 'vm-staging' && '-staging' || '' }}
+      TF_VAR_dockerhub_frontend_image: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-frontend-${{ vars.FRONTEND_BUILD_TARGET || 'react' }}${{ inputs.environment == 'vm-staging' && '-staging' || '' }}
       # Same source as deploy-azure-vm.yml's resolve-target job reads to
       # actually pick frontend/Dockerfile's --target when THAT Docker Hub
       # image above gets built -- reading the identical Environment
       # variable here means this only ever documents (infra-vm/
       # variables.tf's frontend_build_target -- see its own description)
       # what deploy-azure-vm.yml is already doing, and the two can't drift
-      # out of sync with each other by definition. Same fail-safe default:
-      # only the exact string "react" opts into the React SPA; anything
-      # else (including unset) resolves to "legacy".
-      TF_VAR_frontend_build_target: ${{ vars.FRONTEND_BUILD_TARGET == 'react' && 'react' || 'legacy' }}
+      # out of sync with each other by definition. Initial deployments
+      # default to React when FRONTEND_BUILD_TARGET is unset; set the
+      # variable explicitly to "legacy" for a legacy-only environment.
+      TF_VAR_frontend_build_target: ${{ vars.FRONTEND_BUILD_TARGET || 'react' }}
+      TF_VAR_initial_image_tag: latest
       TF_VAR_dockerhub_username: ${{ secrets.DOCKERHUB_USERNAME }}
       TF_VAR_dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
 
@@ -264,6 +265,134 @@ jobs:
             sleep 15
           done
           exit 1
+
+      - name: Detect whether this environment already has a VM
+        id: vm_state
+        if: inputs.action == 'plan' || inputs.action == 'apply'
+        run: |
+          if terraform state list | grep -qx 'azurerm_linux_virtual_machine.this'; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Existing VM found in Terraform state; preserving its exact application images."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "No existing VM in Terraform state; using initial image defaults."
+          fi
+
+      - name: Install cloudflared for existing-VM image discovery
+        if: steps.vm_state.outputs.exists == 'true'
+        env:
+          CLOUDFLARED_VERSION: '2026.5.1'
+        run: |
+          curl -fsSL --output /tmp/cloudflared.deb \
+            "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-amd64.deb"
+          sudo dpkg -i /tmp/cloudflared.deb
+          cloudflared --version
+
+      - name: Validate existing-VM SSH secrets
+        if: steps.vm_state.outputs.exists == 'true'
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_SSH_USER: ${{ secrets.VM_SSH_USER }}
+          VM_SSH_PRIVATE_KEY: ${{ secrets.VM_SSH_PRIVATE_KEY }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          MISSING=()
+          [ -z "$VM_HOST" ] && MISSING+=("VM_HOST")
+          [ -z "$VM_SSH_USER" ] && MISSING+=("VM_SSH_USER")
+          [ -z "$VM_SSH_PRIVATE_KEY" ] && MISSING+=("VM_SSH_PRIVATE_KEY")
+          [ -z "$CF_ACCESS_CLIENT_ID" ] && MISSING+=("CF_ACCESS_CLIENT_ID")
+          [ -z "$CF_ACCESS_CLIENT_SECRET" ] && MISSING+=("CF_ACCESS_CLIENT_SECRET")
+          if [ "${#MISSING[@]}" -gt 0 ]; then
+            echo "::error::Existing VM image preservation requires these secrets in GitHub Environment '${{ inputs.environment }}': ${MISSING[*]}"
+            exit 1
+          fi
+
+      - name: Set up SSH for existing-VM image discovery
+        if: steps.vm_state.outputs.exists == 'true'
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.VM_SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          cat >> ~/.ssh/config <<SSHCONFIG
+          Host $VM_HOST
+            StrictHostKeyChecking accept-new
+            ProxyCommand cloudflared access ssh --hostname %h --service-token-id $CF_ACCESS_CLIENT_ID --service-token-secret $CF_ACCESS_CLIENT_SECRET
+          SSHCONFIG
+          chmod 600 ~/.ssh/config
+
+      - name: Resolve current VM images (or initial defaults)
+        id: current_images
+        if: inputs.action == 'plan' || inputs.action == 'apply'
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_SSH_USER: ${{ secrets.VM_SSH_USER }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          ENV_SUFFIX: ${{ inputs.environment == 'vm-staging' && '-staging' || '' }}
+          FRONTEND_BUILD_TARGET: ${{ vars.FRONTEND_BUILD_TARGET || 'react' }}
+        run: |
+          set -euo pipefail
+          if [[ "$FRONTEND_BUILD_TARGET" != "react" && "$FRONTEND_BUILD_TARGET" != "legacy" ]]; then
+            echo "::error::FRONTEND_BUILD_TARGET must be 'react' or 'legacy' when set; got '$FRONTEND_BUILD_TARGET'."
+            exit 1
+          fi
+
+          if [[ "${{ steps.vm_state.outputs.exists }}" == "true" ]]; then
+            CURRENT=$(ssh -i ~/.ssh/deploy_key "$VM_SSH_USER@$VM_HOST" \
+              "awk -F= '/^(DOCKERHUB_BACKEND_IMAGE|DOCKERHUB_FRONTEND_IMAGE|IMAGE_TAG)=/{print}' /opt/snipeit/.env")
+            BACKEND_REPO=$(printf '%s\n' "$CURRENT" | sed -n 's/^DOCKERHUB_BACKEND_IMAGE=//p')
+            FRONTEND_REPO=$(printf '%s\n' "$CURRENT" | sed -n 's/^DOCKERHUB_FRONTEND_IMAGE=//p')
+            IMAGE_TAG=$(printf '%s\n' "$CURRENT" | sed -n 's/^IMAGE_TAG=//p')
+            if [[ -z "$BACKEND_REPO" || -z "$FRONTEND_REPO" || -z "$IMAGE_TAG" ]]; then
+              echo "::error::Existing VM does not expose a complete application image configuration in /opt/snipeit/.env."
+              exit 1
+            fi
+            SOURCE="existing"
+          else
+            BACKEND_REPO="${DOCKERHUB_USERNAME}/snipeit-lite-backend${ENV_SUFFIX}"
+            FRONTEND_REPO="${DOCKERHUB_USERNAME}/snipeit-lite-frontend-${FRONTEND_BUILD_TARGET}${ENV_SUFFIX}"
+            IMAGE_TAG="latest"
+            SOURCE="initial"
+          fi
+
+          if [[ -n "${DOCKERHUB_USERNAME:-}" && -n "${DOCKERHUB_TOKEN:-}" ]]; then
+            printf '%s\n' "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin >/dev/null
+          fi
+
+          for image in "${BACKEND_REPO}:${IMAGE_TAG}" "${FRONTEND_REPO}:${IMAGE_TAG}"; do
+            if ! docker manifest inspect "$image" >/dev/null 2>&1; then
+              echo "::error::Docker Hub image $image does not exist. Refusing to apply infrastructure with a dangling application image."
+              exit 1
+            fi
+            echo "Verified application image: $image"
+          done
+
+          if [[ "$FRONTEND_REPO" == *"-react" || "$FRONTEND_REPO" == *"-react-staging" ]]; then
+            RESOLVED_FRONTEND_TARGET="react"
+          elif [[ "$FRONTEND_REPO" == *"-legacy" || "$FRONTEND_REPO" == *"-legacy-staging" ]]; then
+            RESOLVED_FRONTEND_TARGET="legacy"
+          else
+            echo "::error::Existing VM frontend image '$FRONTEND_REPO' does not identify a supported frontend flavor (-react or -legacy)."
+            exit 1
+          fi
+
+          echo "backend_repo=$BACKEND_REPO" >> "$GITHUB_OUTPUT"
+          echo "frontend_repo=$FRONTEND_REPO" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+          echo "source=$SOURCE" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "TF_VAR_dockerhub_backend_image=$BACKEND_REPO"
+            echo "TF_VAR_dockerhub_frontend_image=$FRONTEND_REPO"
+            echo "TF_VAR_frontend_build_target=$RESOLVED_FRONTEND_TARGET"
+            echo "TF_VAR_initial_image_tag=$IMAGE_TAG"
+          } >> "$GITHUB_ENV"
 
       - name: terraform fmt -check
         # Formatting is enforced so the workflow never reports a hidden
@@ -687,6 +816,20 @@ jobs:
         # above plus GitHub Environment protection rules provide the safety
         # gate before this step can run.
         run: terraform destroy -input=false -auto-approve
+
+      - name: Pull preserved application images on the VM after infra apply
+        if: inputs.action == 'apply' && steps.vm_state.outputs.exists == 'true'
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_SSH_USER: ${{ secrets.VM_SSH_USER }}
+          BACKEND_IMAGE: ${{ steps.current_images.outputs.backend_repo }}
+          FRONTEND_IMAGE: ${{ steps.current_images.outputs.frontend_repo }}
+          IMAGE_TAG: ${{ steps.current_images.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/deploy_key "$VM_SSH_USER@$VM_HOST" \
+            "docker pull '${BACKEND_IMAGE}:${IMAGE_TAG}' && docker pull '${FRONTEND_IMAGE}:${IMAGE_TAG}'"
+          echo "Preserved application images pulled: ${BACKEND_IMAGE}:${IMAGE_TAG} / ${FRONTEND_IMAGE}:${IMAGE_TAG}"
 
       - name: Print outputs
         if: inputs.action == 'apply'
