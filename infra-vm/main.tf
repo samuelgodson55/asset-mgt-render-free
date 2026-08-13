@@ -525,12 +525,12 @@ resource "azurerm_linux_virtual_machine" "this" {
   # transparently decompresses it before processing #cloud-config.
   custom_data = local.rendered_vm_cloud_init_base64gzip
 
-  precondition {
-    condition     = length(local.rendered_vm_cloud_init_base64gzip) <= 87380
-    error_message = "Rendered VM cloud-init custom_data is ${length(local.rendered_vm_cloud_init_base64gzip)} Base64 characters; Azure allows at most 87,380. Reduce the embedded first-boot payload before deploying."
-  }
-
   lifecycle {
+    precondition {
+      condition     = length(local.rendered_vm_cloud_init_base64gzip) <= 87380
+      error_message = "Rendered VM cloud-init custom_data is ${length(local.rendered_vm_cloud_init_base64gzip)} Base64 characters; Azure allows at most 87,380. Reduce the embedded first-boot payload before deploying."
+    }
+
     ignore_changes = [
       # cloud-init's custom_data only runs on FIRST boot -- Azure won't
       # even let you change it on a running VM without a rebuild/reset.
