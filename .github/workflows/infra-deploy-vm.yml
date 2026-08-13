@@ -870,6 +870,25 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "Next: set VM_HOST to the exact \`ssh_hostname\` value (NOT public_ip_address/azure_fqdn for normal access), plus CF_ACCESS_CLIENT_ID/CF_ACCESS_CLIENT_SECRET from the Terraform outputs, then run deploy-azure-vm.yml -- see DEPLOYMENT_VM.md steps 7-9." >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Prepare Cloudflare CI service token recovery
+        if: inputs.action == 'apply' && success()
+        run: |
+          set -euo pipefail
+          mkdir -p cloudflare-ci-token-recovery
+          terraform output -raw cloudflare_ci_service_token_id > cloudflare-ci-token-recovery/client-id.txt
+          terraform output -raw cloudflare_ci_service_token_secret > cloudflare-ci-token-recovery/client-secret.txt
+          chmod 600 cloudflare-ci-token-recovery/client-id.txt cloudflare-ci-token-recovery/client-secret.txt
+          echo "Cloudflare CI service-token credentials were written to a short-retention artifact. Do not print these files or commit them."
+
+      - name: Upload Cloudflare CI service token recovery
+        if: inputs.action == 'apply' && success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudflare-ci-token-recovery-${{ github.run_id }}
+          path: infra-vm/cloudflare-ci-token-recovery/
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Upload VM connection details
         if: inputs.action == 'apply' && success()
         uses: actions/upload-artifact@v4
