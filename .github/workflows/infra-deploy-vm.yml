@@ -278,6 +278,40 @@ jobs:
             echo "No existing VM in Terraform state; using initial image defaults."
           fi
 
+      - name: Resolve existing-VM connection values from Terraform state
+        if: steps.vm_state.outputs.exists == 'true'
+        run: |
+          set -euo pipefail
+
+          # Existing-VM preservation must not depend on GitHub Environment values
+          # that this workflow is about to create/update. Read the already-existing
+          # connection values directly from the same Terraform state instead.
+          SSH_HOSTNAME="$(terraform output -raw ssh_hostname)"
+          SSH_COMMAND="$(terraform output -raw ssh_command)"
+          CF_CLIENT_ID="$(terraform output -raw cloudflare_ci_service_token_id)"
+          CF_CLIENT_SECRET="$(terraform output -raw cloudflare_ci_service_token_secret)"
+
+          SSH_USER="$(printf '%s\n' "$SSH_COMMAND" | sed -E 's#.* ([^ @]+)@[^ @]+$#\1#')"
+
+          [[ -n "$SSH_HOSTNAME" ]] || { echo "::error::Terraform state has no ssh_hostname; cannot preserve the existing VM."; exit 1; }
+          [[ -n "$SSH_USER" ]] || { echo "::error::Could not derive VM SSH username from Terraform output ssh_command."; exit 1; }
+          [[ -n "$CF_CLIENT_ID" ]] || { echo "::error::Terraform state has no Cloudflare CI service-token ID."; exit 1; }
+          [[ -n "$CF_CLIENT_SECRET" ]] || { echo "::error::Terraform state has no Cloudflare CI service-token secret."; exit 1; }
+
+          # Keep these values job-local. They are not printed, uploaded, or written
+          # to GitHub until the post-apply synchronization step.
+          echo "::add-mask::$CF_CLIENT_ID"
+          echo "::add-mask::$CF_CLIENT_SECRET"
+          echo "::add-mask::$SSH_HOSTNAME"
+
+          {
+            echo "VM_HOST=$SSH_HOSTNAME"
+            echo "VM_SSH_USER=$SSH_USER"
+            echo "CF_ACCESS_CLIENT_ID=$CF_CLIENT_ID"
+            echo "CF_ACCESS_CLIENT_SECRET=$CF_CLIENT_SECRET"
+          } >> "$GITHUB_ENV"
+
+          echo "Existing-VM connection values resolved from Terraform state."
       - name: Install cloudflared for existing-VM image discovery
         if: steps.vm_state.outputs.exists == 'true'
         env:
@@ -288,32 +322,26 @@ jobs:
           sudo dpkg -i /tmp/cloudflared.deb
           cloudflared --version
 
-      - name: Validate existing-VM SSH secrets
+      - name: Validate existing-VM SSH access
         if: steps.vm_state.outputs.exists == 'true'
         env:
-          VM_HOST: ${{ secrets.VM_HOST }}
-          VM_SSH_USER: ${{ secrets.VM_SSH_USER }}
           VM_SSH_PRIVATE_KEY: ${{ secrets.VM_SSH_PRIVATE_KEY }}
-          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
-          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
         run: |
           MISSING=()
-          [ -z "$VM_HOST" ] && MISSING+=("VM_HOST")
-          [ -z "$VM_SSH_USER" ] && MISSING+=("VM_SSH_USER")
+          [ -z "${VM_HOST:-}" ] && MISSING+=("Terraform output ssh_hostname")
+          [ -z "${VM_SSH_USER:-}" ] && MISSING+=("Terraform output ssh_command")
           [ -z "$VM_SSH_PRIVATE_KEY" ] && MISSING+=("VM_SSH_PRIVATE_KEY")
-          [ -z "$CF_ACCESS_CLIENT_ID" ] && MISSING+=("CF_ACCESS_CLIENT_ID")
-          [ -z "$CF_ACCESS_CLIENT_SECRET" ] && MISSING+=("CF_ACCESS_CLIENT_SECRET")
+          [ -z "${CF_ACCESS_CLIENT_ID:-}" ] && MISSING+=("Terraform output cloudflare_ci_service_token_id")
+          [ -z "${CF_ACCESS_CLIENT_SECRET:-}" ] && MISSING+=("Terraform output cloudflare_ci_service_token_secret")
+
           if [ "${#MISSING[@]}" -gt 0 ]; then
-            echo "::error::Existing VM image preservation requires these secrets in GitHub Environment '${{ inputs.environment }}': ${MISSING[*]}"
+            echo "::error::Existing VM preservation is missing: ${MISSING[*]}"
             exit 1
           fi
-
       - name: Set up SSH for existing-VM image discovery
         if: steps.vm_state.outputs.exists == 'true'
         env:
-          VM_HOST: ${{ secrets.VM_HOST }}
-          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
-          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          VM_SSH_PRIVATE_KEY: ${{ secrets.VM_SSH_PRIVATE_KEY }}
         run: |
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
@@ -330,8 +358,6 @@ jobs:
         id: current_images
         if: inputs.action == 'plan' || inputs.action == 'apply'
         env:
-          VM_HOST: ${{ secrets.VM_HOST }}
-          VM_SSH_USER: ${{ secrets.VM_SSH_USER }}
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
           ENV_SUFFIX: ${{ inputs.environment == 'vm-staging' && '-staging' || '' }}
