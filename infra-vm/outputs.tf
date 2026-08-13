@@ -19,36 +19,43 @@ output "vm_name" {
 output "public_ip_address" {
   description = "Static public IP of the VM. Not used for normal traffic anymore -- both the app and SSH go through the Cloudflare Tunnel instead (see app_url/ssh_command below) -- kept here purely for the break-glass path (ssh_command_break_glass) and for reference in Azure's own tooling."
   value       = azurerm_public_ip.this.ip_address
+  sensitive   = false
 }
 
 output "azure_fqdn" {
   description = "Azure-issued FQDN for the public IP (<label>.<region>.cloudapp.azure.com). Nothing routes here in normal operation (see public_ip_address above); kept only as a break-glass reference."
   value       = azurerm_public_ip.this.fqdn
+  sensitive   = false
 }
 
 output "app_domain" {
   description = "The domain Cloudflare terminates TLS for and proxies to Caddy -- your custom_domain."
   value       = local.effective_domain
+  sensitive   = false
 }
 
 output "app_url" {
   description = "The URL to open in a browser once deploy-azure-vm.yml's first run finishes."
   value       = "https://${local.effective_domain}"
+  sensitive   = false
 }
 
 output "ssh_hostname" {
   description = "The hostname Cloudflare Access gates SSH behind -- this is what ssh_command below connects to, proxied through the Tunnel rather than resolving to a real IP of its own."
   value       = local.effective_ssh_domain
+  sensitive   = false
 }
 
 output "ssh_command" {
   description = "SSH command to use once `cloudflared` is installed locally (https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) and your ~/.ssh/config has the ProxyCommand entry from DEPLOYMENT_VM.md's \"Set up Cloudflare Tunnel\" section. First connection opens a browser for Access SSO login (must be one of ssh_access_allowed_emails); cached for session_duration after that. Works with ZERO inbound ports open on the NSG."
   value       = "ssh -i ./snipeit_vm_deploy_key ${var.admin_username}@${local.effective_ssh_domain}"
+  sensitive   = false
 }
 
 output "ssh_command_break_glass" {
   description = "Direct SSH over the public IP -- only works if ssh_allowed_source_ips is currently non-empty (it's empty, meaning NO direct path in, by default). Intended purely as a documented fallback if Cloudflare's network is ever unreachable from where you are -- see DEPLOYMENT_VM.md's Troubleshooting section."
   value       = "ssh -i ./snipeit_vm_deploy_key ${var.admin_username}@${azurerm_public_ip.this.ip_address}"
+  sensitive   = false
 }
 
 output "cloudflare_ci_service_token_id" {

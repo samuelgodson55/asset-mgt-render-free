@@ -843,7 +843,38 @@ jobs:
       - name: Print outputs
         if: inputs.action == 'apply'
         run: |
+          # GitHub Actions masks any output value that happens to match a
+          # registered secret. The VM connection values are NOT secrets, but
+          # derived values can still be redacted if a component of them is
+          # registered elsewhere as a secret. Keep the normal Terraform output
+          # table, and also publish the non-sensitive connection details as an
+          # artifact so the exact values are always recoverable.
           echo "## Terraform outputs" >> "$GITHUB_STEP_SUMMARY"
           terraform output -json | jq -r 'to_entries[] | "- **\(.key)**: `\(.value.value)`"' >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Next: set VM_HOST to the ssh_hostname output above (NOT public_ip_address/azure_fqdn -- those are break-glass only, see infra-vm/outputs.tf), plus CF_ACCESS_CLIENT_ID/CF_ACCESS_CLIENT_SECRET (cloudflare_ci_service_token_id/_secret outputs above) as secrets for deploy-azure-vm.yml, then run that workflow -- see DEPLOYMENT_VM.md steps 7-9." >> "$GITHUB_STEP_SUMMARY"
+          echo "### VM connection details" >> "$GITHUB_STEP_SUMMARY"
+          echo "GitHub may redact derived values in the Summary if they match a registered secret. The exact non-sensitive SSH connection values are also attached as the \`vm-connection-details\` artifact." >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p vm-connection-details
+          {
+            echo "Snipe-It Lite VM connection details"
+            echo "================================="
+            echo
+            printf 'ssh_hostname: %s\n' "$(terraform output -raw ssh_hostname)"
+            printf 'ssh_command: %s\n' "$(terraform output -raw ssh_command)"
+            printf 'ssh_command_break_glass: %s\n' "$(terraform output -raw ssh_command_break_glass)"
+            printf 'public_ip_address: %s\n' "$(terraform output -raw public_ip_address)"
+            printf 'azure_fqdn: %s\n' "$(terraform output -raw azure_fqdn)"
+            printf 'app_domain: %s\n' "$(terraform output -raw app_domain)"
+            printf 'app_url: %s\n' "$(terraform output -raw app_url)"
+          } > vm-connection-details/connection-details.txt
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Next: set VM_HOST to the exact \`ssh_hostname\` value (NOT public_ip_address/azure_fqdn for normal access), plus CF_ACCESS_CLIENT_ID/CF_ACCESS_CLIENT_SECRET from the Terraform outputs, then run deploy-azure-vm.yml -- see DEPLOYMENT_VM.md steps 7-9." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload VM connection details
+        if: inputs.action == 'apply' && success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vm-connection-details
+          path: vm-connection-details/connection-details.txt
+          if-no-files-found: error
+          retention-days: 30
