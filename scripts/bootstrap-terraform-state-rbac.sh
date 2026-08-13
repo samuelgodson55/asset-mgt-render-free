@@ -20,6 +20,7 @@ SUBSCRIPTION_ID="${ARM_SUBSCRIPTION_ID:?ARM_SUBSCRIPTION_ID is required}"
 CLIENT_ID="${ARM_CLIENT_ID:?ARM_CLIENT_ID is required}"
 STATE_RG="${TF_STATE_RESOURCE_GROUP:-rg-snipeit-tfstate}"
 STATE_ACCOUNT_OVERRIDE="${TF_STATE_STORAGE_ACCOUNT:-}"
+STATE_CONTAINER="${TF_STATE_CONTAINER:-vm-state}"
 
 az account set --subscription "$SUBSCRIPTION_ID"
 
@@ -75,6 +76,26 @@ ROLE_ASSIGNMENT_ID="$(python -c 'import sys,uuid; print(uuid.uuid5(uuid.NAMESPAC
 ROLE_ASSIGNMENT_URL="https://management.azure.com${STATE_ID}/providers/Microsoft.Authorization/roleAssignments/${ROLE_ASSIGNMENT_ID}?api-version=2022-04-01"
 ROLE_BODY="{\"properties\":{\"roleDefinitionId\":\"${ROLE_DEFINITION_ID}\",\"principalId\":\"${OBJECT_ID}\",\"principalType\":\"ServicePrincipal\"}}"
 
+# The Terraform backend needs the blob container itself to exist before
+# `terraform init` can list workspaces. Creating the container with the storage
+# account key is intentional here: this script is the one-time privileged
+# bootstrap, so it can create the data-plane container immediately without
+# waiting for the newly-created GitHub OIDC data role to propagate. The key is
+# never printed and is not stored anywhere.
+ensure_state_container() {
+  local account_key
+  account_key="$(az storage account keys list     --name "$STATE_ACCOUNT"     --resource-group "$STATE_RG"     --subscription "$SUBSCRIPTION_ID"     --query '[0].value' -o tsv)"
+
+  if [[ -z "$account_key" ]]; then
+    echo "ERROR: Unable to retrieve a storage account key for '$STATE_ACCOUNT'." >&2
+    exit 1
+  fi
+
+  echo "Ensuring Terraform state container '$STATE_CONTAINER' exists..."
+  az storage container create     --name "$STATE_CONTAINER"     --account-name "$STATE_ACCOUNT"     --account-key "$account_key"     --fail-on-exist false     >/dev/null
+  echo "Terraform state container '$STATE_CONTAINER' is ready."
+}
+
 # Check effective assignments at the subscription, resource-group, and storage
 # account scopes before creating anything.
 for scope in \
@@ -87,7 +108,9 @@ do
     --query "value[?properties.principalId=='${OBJECT_ID}' && properties.roleDefinitionId=='${ROLE_DEFINITION_ID}'] | length(@)" \
     -o tsv 2>/dev/null || echo 0)"
   if [[ "$COUNT" != "0" ]]; then
-    echo "Storage Blob Data Contributor already exists at '$scope'. Nothing to change."
+    echo "Storage Blob Data Contributor already exists at '$scope'."
+    ensure_state_container
+    echo "Nothing else to change."
     exit 0
   fi
 done
@@ -104,4 +127,11 @@ if ! az rest \
 fi
 
 echo "Storage Blob Data Contributor granted successfully."
+
+# The role assignment may take time to propagate, but the privileged bootstrap
+# can create the container immediately with the storage account key. This makes
+# the initial bootstrap complete, rather than leaving Terraform init to discover
+# a missing container later.
+ensure_state_container
+
 echo "Normal GitHub Actions deployments now require no roleAssignments/write permission."

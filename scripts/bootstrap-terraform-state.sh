@@ -261,6 +261,27 @@ if [[ "$HAS_BLOB_ROLE" == "0" ]]; then
   exit 1
 fi
 
+# The azurerm backend does not create its blob container. Terraform init
+# therefore fails with ContainerNotFound if the storage account exists but
+# the container does not. Create/reconcile it here, before terraform init.
+# RBAC propagation can lag briefly after a role assignment, so retry this
+# data-plane operation just like the workflow retries terraform init.
+echo "Ensuring Terraform state container '$STATE_CONTAINER' exists in '$STATE_ACCOUNT'..." >&2
+for attempt in 1 2 3 4 5; do
+  if az storage container create       --name "$STATE_CONTAINER"       --account-name "$STATE_ACCOUNT"       --auth-mode login       --fail-on-exist false       >/dev/null; then
+    echo "Terraform state container '$STATE_CONTAINER' is ready." >&2
+    break
+  fi
+
+  if [[ "$attempt" == "5" ]]; then
+    echo "::error::Unable to create or access Terraform state container '$STATE_CONTAINER' after 5 attempts." >&2
+    exit 1
+  fi
+
+  echo "State container attempt $attempt/5 failed; waiting for Azure Storage RBAC propagation..." >&2
+  sleep 10
+done
+
 # Emit backend settings for the caller. Keep stdout machine-readable; all
 # diagnostics above intentionally go to stderr.
 printf 'TF_STATE_RESOURCE_GROUP=%s\n' "$STATE_RG"
