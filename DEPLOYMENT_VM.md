@@ -2633,33 +2633,71 @@ the two break-glass options above still work regardless of Access's own
 state, since they don't go through the Tunnel at all.
 
 
-## Terraform Provider Debugging for Failed Plans
+## Terraform Diagnostics for Failed Plans
 
-If the Cloudflare credential preflight passes but `terraform plan` still fails while refreshing a Cloudflare resource, the Deploy VM workflow automatically runs the plan with provider TRACE logging.
+The Deploy VM workflow performs **small, targeted diagnostics before Terraform
+plan**. The goal is to identify a bad GitHub Environment value (especially a
+Cloudflare account/zone mismatch) without generating a huge Terraform provider
+TRACE log.
 
-For a failed plan it:
+For Cloudflare it checks, in order:
 
-1. Writes the provider trace to `infra-vm/terraform-provider.log`.
-2. Captures the normal Terraform plan output in `infra-vm/terraform-plan-debug.log`.
-3. Redacts the known Cloudflare and Azure credential/account values.
-4. Uploads the sanitized files as the short-lived GitHub Actions artifact:
-   `terraform-provider-debug-<run-id>`.
+1. The API token is active.
+2. `CLOUDFLARE_ZONE_ID` resolves successfully.
+3. The returned zone's **actual owning account ID** matches
+   `CLOUDFLARE_ACCOUNT_ID`.
+4. `CLOUDFLARE_ZONE_NAME` matches the zone returned by Cloudflare.
+5. The configured account can access Cloudflare Access.
+6. The exact Access application-policy endpoints for the two Terraform-managed
+   SSH policies can be read using the IDs currently stored in Terraform state.
 
-This is intentionally a **failure-only diagnostic**. Successful plans do not upload provider TRACE logs.
-
-### Security
-
-Provider TRACE logs can contain sensitive request/response information. Terraform's own documentation warns that log redaction is best-effort rather than a security boundary. Do not commit the diagnostic files to Git, and only share the artifact with authorized deployment/repository administrators.
-
-The workflow does not modify Terraform state, remove resources, or re-import Cloudflare Access policies as part of this diagnostic.
-
-### What to look for
-
-For the current Cloudflare issue, inspect the lines around:
+This is important because a token can be valid while the account ID is wrong.
+In that situation the workflow now reports something like:
 
 ```text
-cloudflare_zero_trust_access_policy.ssh_humans
-cloudflare_zero_trust_access_policy.ssh_ci
+WRONG CLOUDFLARE_ACCOUNT_ID: configured='...', but zone 'multione.online'
+belongs to account='...'
+Update the 'prod' GitHub Environment secret CLOUDFLARE_ACCOUNT_ID to '...'.
 ```
 
-Look for the Cloudflare API request immediately before the provider reports error `1010`. The goal is to determine the exact provider request/response rather than guessing an endpoint from Terraform state.
+Account IDs and zone IDs are safe to display as configuration diagnostics. The
+API token itself is **never printed**; the diagnostic may show only a short
+SHA-256 fingerprint so you can tell whether two environments are using the
+same/different token without exposing the token.
+
+### Failure artifact
+
+A failed run uploads a short-lived artifact named
+`terraform-deployment-failure-<run-id>`. Start with:
+
+- `terraform-error-summary.txt` — the useful Terraform errors and final output.
+- `cloudflare-preflight.log` — token/account/zone checks and the exact mismatch,
+  when one exists.
+- `cloudflare-policy-probe.log` — results for the exact Access policy endpoints.
+- `terraform-cloudflare-state-summary.txt` — the account/application/policy IDs
+  currently in Terraform state.
+- `terraform-error-summary.txt` — the relevant Terraform error lines plus the
+  final 120 lines of normal Terraform output. The full plan output is not uploaded
+  unless you deliberately add it for a one-off investigation.
+
+Terraform provider TRACE logging is **not enabled by default anymore**. It was
+producing very large artifacts that were usually much less useful than the
+configuration and API preflight checks above. If a future provider-specific
+bug cannot be diagnosed with these targeted checks, TRACE can be re-enabled as
+a deliberate temporary debugging change rather than being generated on every
+failed plan.
+
+### What to do when the diagnostic reports a wrong value
+
+Fix the corresponding GitHub Environment secret/variable and rerun the
+workflow. Do **not** delete/recreate Cloudflare Access policies or manipulate
+Terraform state merely because the provider reports error `1010`.
+
+For example, if the zone lookup says `multione.online` belongs to account
+`6270aa4a...` but the workflow is configured with a different account ID,
+update `CLOUDFLARE_ACCOUNT_ID` in the selected GitHub Environment to the account
+ID returned by the zone lookup. The workflow will then verify Access before
+Terraform is invoked.
+
+The diagnostics are failure-focused and do not modify Terraform state or
+Cloudflare resources.
