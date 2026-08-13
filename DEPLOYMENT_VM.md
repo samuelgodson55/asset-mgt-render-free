@@ -71,6 +71,7 @@ git update-index --chmod=+x \
   .github/scripts/aca-deploy-status.sh \
   scripts/bootstrap-azure-github.sh \
   scripts/bootstrap-terraform-state.sh \
+  scripts/bootstrap-terraform-state-rbac.sh \
   scripts/blue-green-deploy.sh \
   scripts/health-check.sh \
   scripts/poll-live-endpoint.sh \

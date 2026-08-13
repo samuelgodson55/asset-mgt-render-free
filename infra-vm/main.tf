@@ -243,6 +243,77 @@ locals {
   # (record name "@") still gets the simple "ssh" record name.
   effective_ssh_dns_record_name = local.effective_dns_record_name == "@" ? "ssh" : "ssh-${local.effective_dns_record_name}"
   effective_ssh_domain          = "${local.effective_ssh_dns_record_name}.${var.cloudflare_zone_name}"
+
+  # Azure limits VM OS customData to 64 KiB after Base64 decoding. This
+  # cloud-init payload embeds the Compose file, Caddy configuration, deploy
+  # status assets, certificates, and secrets, so the rendered YAML is larger
+  # than that limit. Gzip it before Base64 encoding: cloud-init automatically
+  # detects gzip-compressed user-data and decompresses it before processing.
+  # Keeping the rendered payload in a local also lets the VM resource below
+  # enforce Azure's 87,380-character Base64 ceiling before ARM is called.
+  rendered_vm_cloud_init = templatefile("${path.module}/cloud-init.yaml", {
+    docker_compose_vm_yml      = file("${path.module}/../docker-compose.vm.yml")
+    caddyfile                  = file("${path.module}/../Caddyfile")
+    caddy_weights_conf         = file("${path.module}/../caddy/weights.conf")
+    deploy_status_index_html   = file("${path.module}/../scripts/deploy-status/index.html")
+    deploy_status_seed_json    = file("${path.module}/../scripts/deploy-status/status.json")
+    admin_username             = var.admin_username
+    domain                     = local.effective_domain
+    cloudflare_tunnel_token    = cloudflare_zero_trust_tunnel_cloudflared.this.tunnel_token
+    cloudflare_origin_cert     = var.cloudflare_origin_cert
+    cloudflare_origin_cert_key = var.cloudflare_origin_cert_key
+    dockerhub_backend_image    = var.dockerhub_backend_image
+    dockerhub_frontend_image   = var.dockerhub_frontend_image
+    frontend_build_target      = var.frontend_build_target
+    initial_image_tag          = var.initial_image_tag
+    dockerhub_username         = var.dockerhub_username
+    dockerhub_token            = var.dockerhub_token
+    postgres_user              = var.postgres_user
+    postgres_password          = var.postgres_password
+    postgres_user_urlencoded   = urlencode(var.postgres_user)
+    postgres_password_urlencoded = urlencode(var.postgres_password)
+    postgres_db                = var.postgres_db
+    jwt_secret_key             = var.jwt_secret_key
+    root_admin_bootstrap_password = var.root_admin_bootstrap_password
+    deploy_status_user         = var.deploy_status_user
+    deploy_status_password_hash = local.effective_deploy_status_password_hash
+    site_name                  = var.site_name
+    enable_api_docs            = var.enable_api_docs
+    notifications_enabled     = var.notifications_enabled
+    smtp_host                  = var.smtp_host
+    smtp_port                  = var.smtp_port
+    smtp_username              = var.smtp_username
+    smtp_password              = var.smtp_password
+    smtp_from_email            = var.smtp_from_email
+    email_provider             = var.email_provider
+    brevo_api_key              = var.brevo_api_key
+    resend_api_key             = var.resend_api_key
+    admin_notification_emails  = var.admin_notification_emails
+    overdue_digest_hours_utc  = var.overdue_digest_hours_utc
+    due_soon_digest_hours_utc = var.due_soon_digest_hours_utc
+    extension_request_sla_hours = var.extension_request_sla_hours
+    quotation_sla_hours       = var.quotation_sla_hours
+    approval_sla_check_interval_minutes = var.approval_sla_check_interval_minutes
+    approval_sla_escalation_repeat_hours = var.approval_sla_escalation_repeat_hours
+    send_quotation_recipient_emails = var.send_quotation_recipient_emails
+    display_timezone          = var.display_timezone
+    currency_code             = var.currency_code
+    enable_auto_backup        = var.enable_auto_backup
+    backup_gdrive_enabled     = var.backup_gdrive_enabled
+    backup_gdrive_oauth_client_id = var.backup_gdrive_oauth_client_id
+    backup_gdrive_oauth_client_secret = var.backup_gdrive_oauth_client_secret
+    backup_gdrive_oauth_refresh_token = var.backup_gdrive_oauth_refresh_token
+    backup_gdrive_credentials_json = var.backup_gdrive_credentials_json
+    backup_gdrive_folder_id   = var.backup_gdrive_folder_id
+    otel_enabled              = var.otel_enabled
+    otel_service_name         = var.otel_service_name
+    otel_exporter_otlp_endpoint = var.otel_exporter_otlp_endpoint
+    otel_exporter_otlp_headers = var.otel_exporter_otlp_headers
+    otel_traces_sample_ratio  = var.otel_traces_sample_ratio
+    otel_console_exporter     = var.otel_console_exporter
+    applicationinsights_connection_string = var.applicationinsights_connection_string
+  })
+  rendered_vm_cloud_init_base64gzip = base64gzip(local.rendered_vm_cloud_init)
 }
 
 # -----------------------------------------------------------------------------
@@ -447,78 +518,17 @@ resource "azurerm_linux_virtual_machine" "this" {
   # whole stack up on FIRST boot only -- every deploy after that is
   # deploy-azure-vm.yml SSHing in directly (see that workflow and
   # DEPLOYMENT_VM.md step 9), not a re-run of this file.
-  custom_data = base64encode(templatefile("${path.module}/cloud-init.yaml", {
-    docker_compose_vm_yml      = file("${path.module}/../docker-compose.vm.yml")
-    caddyfile                  = file("${path.module}/../Caddyfile")
-    caddy_weights_conf         = file("${path.module}/../caddy/weights.conf")
-    deploy_status_index_html   = file("${path.module}/../scripts/deploy-status/index.html")
-    deploy_status_seed_json    = file("${path.module}/../scripts/deploy-status/status.json")
-    admin_username             = var.admin_username
-    domain                     = local.effective_domain
-    cloudflare_tunnel_token    = cloudflare_zero_trust_tunnel_cloudflared.this.tunnel_token
-    cloudflare_origin_cert     = var.cloudflare_origin_cert
-    cloudflare_origin_cert_key = var.cloudflare_origin_cert_key
-    dockerhub_backend_image    = var.dockerhub_backend_image
-    dockerhub_frontend_image   = var.dockerhub_frontend_image
-    frontend_build_target      = var.frontend_build_target
-    initial_image_tag          = var.initial_image_tag
-    dockerhub_username         = var.dockerhub_username
-    dockerhub_token            = var.dockerhub_token
-    postgres_user              = var.postgres_user
-    postgres_password          = var.postgres_password
-    # DATABASE_URL-safe copies -- Terraform's urlencode() is this VM path's
-    # equivalent of infra/main.bicep's uriComponent(postgresPassword) (see
-    # that file's databaseUrl comment). Needed because
-    # openssl rand -base64 24 (DEPLOYMENT_VM.md step 4) routinely produces
-    # `+`/`/` (and occasionally `=`), any of which breaks postgresql://
-    # URL syntax if dropped in unescaped -- see docker-compose.vm.yml's
-    # DATABASE_URL comment and backend/services/backup_service.py's
-    # _db_connection_kwargs() docstring for the same class of bug on the
-    # read side. POSTGRES_USER is encoded too on the same principle, even
-    # though the default "admin" needs no escaping.
-    postgres_user_urlencoded              = urlencode(var.postgres_user)
-    postgres_password_urlencoded          = urlencode(var.postgres_password)
-    postgres_db                           = var.postgres_db
-    jwt_secret_key                        = var.jwt_secret_key
-    root_admin_bootstrap_password         = var.root_admin_bootstrap_password
-    deploy_status_user                    = var.deploy_status_user
-    deploy_status_password_hash           = local.effective_deploy_status_password_hash
-    site_name                             = var.site_name
-    enable_api_docs                       = var.enable_api_docs
-    notifications_enabled                 = var.notifications_enabled
-    smtp_host                             = var.smtp_host
-    smtp_port                             = var.smtp_port
-    smtp_username                         = var.smtp_username
-    smtp_password                         = var.smtp_password
-    smtp_from_email                       = var.smtp_from_email
-    email_provider                        = var.email_provider
-    brevo_api_key                         = var.brevo_api_key
-    resend_api_key                        = var.resend_api_key
-    admin_notification_emails             = var.admin_notification_emails
-    overdue_digest_hours_utc              = var.overdue_digest_hours_utc
-    due_soon_digest_hours_utc             = var.due_soon_digest_hours_utc
-    extension_request_sla_hours           = var.extension_request_sla_hours
-    quotation_sla_hours                   = var.quotation_sla_hours
-    approval_sla_check_interval_minutes   = var.approval_sla_check_interval_minutes
-    approval_sla_escalation_repeat_hours  = var.approval_sla_escalation_repeat_hours
-    send_quotation_recipient_emails       = var.send_quotation_recipient_emails
-    display_timezone                      = var.display_timezone
-    currency_code                         = var.currency_code
-    enable_auto_backup                    = var.enable_auto_backup
-    backup_gdrive_enabled                 = var.backup_gdrive_enabled
-    backup_gdrive_oauth_client_id         = var.backup_gdrive_oauth_client_id
-    backup_gdrive_oauth_client_secret     = var.backup_gdrive_oauth_client_secret
-    backup_gdrive_oauth_refresh_token     = var.backup_gdrive_oauth_refresh_token
-    backup_gdrive_credentials_json        = var.backup_gdrive_credentials_json
-    backup_gdrive_folder_id               = var.backup_gdrive_folder_id
-    otel_enabled                          = var.otel_enabled
-    otel_service_name                     = var.otel_service_name
-    otel_exporter_otlp_endpoint           = var.otel_exporter_otlp_endpoint
-    otel_exporter_otlp_headers            = var.otel_exporter_otlp_headers
-    otel_traces_sample_ratio              = var.otel_traces_sample_ratio
-    otel_console_exporter                 = var.otel_console_exporter
-    applicationinsights_connection_string = var.applicationinsights_connection_string
-  }))
+  # Azure's OSProfile customData limit is 64 KiB of decoded content
+  # (87,380 Base64 characters). The rendered cloud-init is larger than that
+  # when the embedded Compose/Caddy/status files are included, so send it as
+  # gzip-compressed Base64. cloud-init detects the gzip payload and
+  # transparently decompresses it before processing #cloud-config.
+  custom_data = local.rendered_vm_cloud_init_base64gzip
+
+  precondition {
+    condition     = length(local.rendered_vm_cloud_init_base64gzip) <= 87380
+    error_message = "Rendered VM cloud-init custom_data is ${length(local.rendered_vm_cloud_init_base64gzip)} Base64 characters; Azure allows at most 87,380. Reduce the embedded first-boot payload before deploying."
+  }
 
   lifecycle {
     ignore_changes = [
