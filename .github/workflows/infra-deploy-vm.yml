@@ -875,6 +875,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: vm-connection-details
-          path: vm-connection-details/connection-details.txt
+          path: infra-vm/vm-connection-details/connection-details.txt
           if-no-files-found: error
           retention-days: 30
