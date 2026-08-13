@@ -725,16 +725,13 @@ not you ever push an image).
 2. **Run the bootstrap helper after `az login` and `gh auth login`:**
    ```bash
    az account set --subscription "<subscription-id>"
-   ./scripts/bootstrap-azure-github.sh
+   ./scripts/bootstrap-azure-github.sh production
    ```
-   The helper registers the Azure providers used by the Bicep path, creates/reuses
-   the Microsoft Entra App Registration and service principal, grants subscription
-   Contributor, creates the exact GitHub Environment OIDC credentials used
-   by the workflows, and writes the three Azure OIDC values into the existing
-   GitHub Environments (`production`, `staging`, `prod`, `vm-staging`). The same
-   CI identity is reused across these four GitHub Environment subjects; it is
-   GitHub's environment-scoped OIDC subject that prevents an unrelated
-   environment from using the credential.
+   Replace `production` with the exact GitHub Environment you are provisioning.
+   The helper is **per-environment**: it configures only that environment's
+   OIDC federation and Azure secrets, creates/reuses only the shared Terraform
+   state backend needed by the deployment, and does not configure the other
+   environments.
 
    The helper is intentionally idempotent. Re-running it does not create
    duplicate identities or federated credentials. Subscription `Contributor`

@@ -491,315 +491,51 @@ A clean local validation does not guarantee a successful Azure deployment, but
 it removes the avoidable Terraform syntax, formatting, and dependency errors
 before GitHub Actions spends a runner and reaches Azure.
 
-## 1. One-time Azure setup
+## 1. One-time Azure/GitHub bootstrap
 
-The VM path is designed so you do **not** manually create the VM resource
-group, Terraform state resource group, Storage Account, blob container, NIC,
-network, public IP, VM, disks, or other Azure infrastructure. The only
-unavoidable bootstrap is establishing the Azure identity that GitHub Actions
-will use.
+Bootstrap **only the environment you are provisioning**. The repository supports multiple deployment environments, but the bootstrap never configures all of them at once.
 
-Run this once from your local CLI:
+Authenticate once on your operator machine:
 
 ```bash
 az login
-az account set --subscription "<subscription-id-or-name>"
 gh auth login
-./scripts/bootstrap-azure-github.sh
 ```
 
-The bootstrap helper is idempotent. It:
+Then bootstrap the exact target environment:
 
-1. Registers the Azure providers used by the Bicep and VM paths.
+```bash
+./scripts/bootstrap-azure-github.sh prod
+```
+
+For VM staging, use `vm-staging` instead. The script is idempotent. It creates or reuses the Azure/GitHub OIDC identity, configures only the selected GitHub Environment, creates or reuses the Terraform state backend, and grants the required `Storage Blob Data Contributor` role.
+
+You do **not** need to know or enter `ARM_CLIENT_ID`. The bootstrap discovers the Azure application itself.
+
+### One location setting
+
+`AZURE_LOCATION` is the single location setting for the environment. Newly created VM/ACA resources and newly created Terraform state resources use that same location. If the environment Variable is unset, the workflow/bootstrap default is used. Existing resources are reused in their existing Azure location and are never moved automatically.
+
+There is intentionally **no `TF_STATE_LOCATION` variable**.
+
+### What the one-time bootstrap does
+
+For the selected environment only, it:
+
+1. Registers the required Azure resource providers.
 2. Creates or reuses the Microsoft Entra application and service principal.
-3. Grants the CI identity subscription-level `Contributor`.
-4. Creates or reuses the exact GitHub OIDC federated credentials for
-   `production`, `staging`, `prod`, and `vm-staging`.
-5. Writes `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and
-   `AZURE_SUBSCRIPTION_ID` into those GitHub Environments.
+3. Ensures the CI identity has the subscription-level `Contributor` role.
+4. Creates or reuses that environment's GitHub OIDC federated credential.
+5. Writes `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and `AZURE_SUBSCRIPTION_ID` only to that GitHub Environment.
+6. Creates or reuses the Terraform state resource group, Storage Account, and container.
+7. Creates newly created state resources in the same `AZURE_LOCATION` as the environment.
+8. Grants `Storage Blob Data Contributor` to the CI identity on the state Storage Account.
 
-You therefore **do not** manually create an App Registration, service
-principal, federated credential, Azure resource group, or Terraform state
-storage. The VM state bootstrap also uses the ARM Authorization REST API for
-`Storage Blob Data Contributor`, with a deterministic role-assignment ID, so
-it does not depend on `az role assignment` working in the local tenant.
+After this, the normal GitHub **VM Infrastructure** workflow is fully automated. It only verifies the existing state RBAC and never attempts `Microsoft.Authorization/roleAssignments/write`.
 
-### Terraform state is bootstrapped by the workflow
+### Existing state
 
-Before `terraform init`, `.github/workflows/infra-deploy-vm.yml` runs
-`scripts/bootstrap-terraform-state.sh`. That script automatically creates or
-reuses:
-
-```text
-rg-snipeit-tfstate
-└── <subscription-specific Storage Account>
-    └── vm-state
-```
-
-The Storage Account name is deterministically derived from the Azure
-subscription ID (`snipeittfstate<10-char-sha256-prefix>`). The prefix is 14
-characters, so the 10-character suffix produces exactly 24 characters, which
-is Azure's Storage Account maximum. The workflow also grants the GitHub OIDC
-identity `Storage Blob Data Contributor` on that Storage Account.
-
-The bootstrap is idempotent and deliberately discovery-first:
-
-```text
-register Azure providers
-        ↓
-bootstrap Terraform state
-        ├─ find existing state RG
-        ├─ find existing state Storage Account
-        ├─ find existing vm-state container
-        └─ create only missing resources
-        ↓
-terraform init
-        └─ use the existing prod.tfstate/vm-staging.tfstate key
-```
-
-For existing environments, the bootstrap also recognizes the known legacy
-`snipeittfstate01` account and previously tagged/prefix-matching
-`snipeittfstate*` state accounts, so changing the deterministic naming formula
-does not strand an existing state backend. If multiple possible state
-accounts are found, set `TF_STATE_STORAGE_ACCOUNT` explicitly rather than
-risk attaching Terraform to the wrong state.
-
-No `TF_STATE_*` GitHub Environment variables are required for the normal
-case. The bootstrap script accepts `TF_STATE_RESOURCE_GROUP`,
-`TF_STATE_STORAGE_ACCOUNT`, and `TF_STATE_CONTAINER` only as optional
-advanced overrides.
-
-The state backend is deliberately **outside** the VM resource group. This is
-what makes the destroy path safe: Terraform can destroy the VM stack while
-retaining the state it needs to record that destruction. The environments use
-separate backend keys:
-
-```text
-vm-staging.tfstate
-prod.tfstate
-```
-
-The lifecycle is therefore:
-
-```text
-workflow
-  ├─ register providers
-  ├─ create/reuse Terraform state RG + Storage Account + container
-  ├─ grant Blob Data Contributor to CI identity via ARM Authorization API
-  ├─ terraform init
-  └─ terraform plan/apply/destroy
-```
-
-If the state backend already exists, the bootstrap step simply reuses it.
-There is no recurring scheduler and no manual storage maintenance.
-
-> **Important:** `terraform destroy` intentionally does **not** destroy the
-> Terraform state resource group or Storage Account. Those are bootstrap
-> infrastructure for the lifecycle itself.
-
-
-### Incorporating an existing Terraform state Storage Account
-
-If you are adding this VM deployment to an Azure environment that already has
-Terraform state, **do not create a second state Storage Account** and do not
-rename or copy the existing state blob. Point the bootstrap at the existing
-account and keep the existing environment key (`prod.tfstate` or
-`vm-staging.tfstate`).
-
-The known legacy account `snipeittfstate01` is discovered automatically. For
-any other existing account, set `TF_STATE_STORAGE_ACCOUNT` explicitly in the
-workflow environment or use the discovery commands below to identify the
-correct account first.
-
-#### 1. Sign in and identify the subscription
-
-Run from Azure CLI (Git Bash is fine):
-
-```bash
-az login
-az account set --subscription "<subscription-id>"
-az account show --query "{id:id,tenantId:tenantId,name:name}" -o json
-```
-
-#### 2. Find the existing state account
-
-List likely Terraform state accounts:
-
-```bash
-az storage account list \
-  --subscription "<subscription-id>" \
-  --query "[?starts_with(name, 'snipeittfstate')].{name:name,resourceGroup:resourceGroup,location:location}" \
-  -o table
-```
-
-For a known account, confirm it exists and record its resource group:
-
-```bash
-az storage account show \
-  --name "snipeittfstate01" \
-  --resource-group "rg-snipeit-tfstate" \
-  --subscription "<subscription-id>" \
-  --query "{id:id,name:name,resourceGroup:resourceGroup}" \
-  -o json
-```
-
-If the account has a different name, substitute that name in the commands and
-set `TF_STATE_STORAGE_ACCOUNT` to it.
-
-#### 3. Confirm the state container and state files
-
-The expected container is `vm-state`. Check it before changing anything:
-
-```bash
-az storage container exists \
-  --account-name "snipeittfstate01" \
-  --name "vm-state" \
-  --auth-mode login \
-  -o tsv
-```
-
-Then list the state blobs:
-
-```bash
-az storage blob list \
-  --account-name "snipeittfstate01" \
-  --container-name "vm-state" \
-  --auth-mode login \
-  --query "[].{name:name,size:properties.contentLength,lastModified:properties.lastModified}" \
-  -o table
-```
-
-For a production VM deployment you should normally see:
-
-```text
-prod.tfstate
-```
-
-For staging:
-
-```text
-vm-staging.tfstate
-```
-
-**Do not create an empty replacement `prod.tfstate` or copy the old state into
-a new account.** The backend key is the state identity. The workflow's
-`terraform init` opens the existing blob in place.
-
-#### 4. Verify or configure Blob RBAC
-
-The GitHub OIDC service principal needs `Storage Blob Data Contributor` on the
-existing state account, or inherited from its resource group/subscription.
-First identify the service principal object ID:
-
-```bash
-az ad sp show \
-  --id "<AZURE_CLIENT_ID>" \
-  --query "{objectId:id,appId:appId}" \
-  -o json
-```
-
-Because some Azure CLI versions/tenants can return `MissingSubscription` for
-`az role assignment`, use the ARM Authorization API for a reliable check:
-
-```bash
-az rest \
-  --method get \
-  --url "https://management.azure.com/subscriptions/<subscription-id>/resourceGroups/rg-snipeit-tfstate/providers/Microsoft.Storage/storageAccounts/snipeittfstate01/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01" \
-  --query "value[?properties.principalId=='<service-principal-object-id>']" \
-  -o table
-```
-
-The required role definition ID is:
-
-```text
-ba92f5b4-2d11-453d-a403-e96b0029c9fe
-```
-
-If the assignment is missing, perform the one-time assignment as an Azure
-Owner/User Access Administrator. In Git Bash, generate the role-assignment ID
-with PowerShell (no `uuidgen` package is required):
-
-```bash
-ROLE_ASSIGNMENT_ID="$(powershell.exe -NoProfile -Command "[guid]::NewGuid().ToString()")"
-```
-
-Then assign the role directly through ARM:
-
-```bash
-az rest \
-  --method put \
-  --url "https://management.azure.com/subscriptions/<subscription-id>/resourceGroups/rg-snipeit-tfstate/providers/Microsoft.Storage/storageAccounts/snipeittfstate01/providers/Microsoft.Authorization/roleAssignments/$ROLE_ASSIGNMENT_ID?api-version=2022-04-01" \
-  --body '{
-    "properties": {
-      "roleDefinitionId": "/subscriptions/<subscription-id>/providers/Microsoft.Authorization/roleDefinitions/ba92f5b4-2d11-453d-a403-e96b0029c9fe",
-      "principalId": "<service-principal-object-id>",
-      "principalType": "ServicePrincipal"
-    }
-  }'
-```
-
-Verify the assignment again before running GitHub Actions. RBAC propagation
-can take a few minutes.
-
-> **Do not grant the GitHub deployment identity `User Access Administrator`
-> just to make this bootstrap work.** The preferred model is that an Azure
-> Owner performs the one-time state RBAC setup and the GitHub identity retains
-> only the permissions it actually needs: subscription `Contributor` for the
-> infrastructure plus `Storage Blob Data Contributor` for Terraform state.
-
-#### 5. Tell the workflow to use the existing account when discovery is ambiguous
-
-The bootstrap automatically recognizes `snipeittfstate01` and the current
-`snipeittfstate<10-character-hash>` naming scheme. If your subscription has
-multiple `snipeittfstate*` accounts, explicitly provide the existing one:
-
-```text
-TF_STATE_RESOURCE_GROUP=rg-snipeit-tfstate
-TF_STATE_STORAGE_ACCOUNT=snipeittfstate01
-TF_STATE_CONTAINER=vm-state
-```
-
-Use these as GitHub Environment variables for the target environment, or pass
-them when running the bootstrap locally. Do **not** set them to a new account
-name merely to make the workflow pass; the value must be the account that
-already contains the state blob.
-
-#### 6. Run the VM deployment
-
-Once the existing account, `vm-state`, and Blob Data Contributor assignment
-are confirmed:
-
-1. Run **Deploy VM Infrastructure (Terraform)** with `environment=prod` (or
-   `vm-staging`).
-2. Start with `action=plan`.
-3. Confirm Terraform reports the existing state backend and does not attempt
-   to replace the state account/container.
-4. Only then run `action=apply`.
-
-The resulting path is:
-
-```text
-register Azure providers
-        ↓
-find existing rg-snipeit-tfstate
-        ↓
-find existing snipeittfstate01 (or explicit account)
-        ↓
-find existing vm-state
-        ↓
-verify Storage Blob Data Contributor
-        ↓
-terraform init
-        ↓
-use existing prod.tfstate / vm-staging.tfstate
-        ↓
-terraform plan/apply
-```
-
-If the state account exists but the Blob role is missing, the bootstrap should
-be treated as a **one-time Azure administration task**, not as a reason to
-create a second state account or give the deployment identity broad RBAC
-administration rights.
+The state bootstrap is discovery-first. If a compatible Terraform state Storage Account already exists, it is reused instead of creating another one. Existing state blobs and environment keys are preserved. Existing Azure resources are not moved just because `AZURE_LOCATION` changes.
 
 ## VM disk snapshot backup toggle
 
@@ -1409,8 +1145,11 @@ state and the run history both live in one place your whole team can see.
 
 ## 8. Provision the VM (`infra-deploy-vm.yml`)
 
-The workflow also bootstraps Terraform's remote state automatically. There is
-nothing to create manually for Terraform state. For `destroy`, the workflow
+The workflow also discovers/reuses Terraform's remote state automatically. On
+a brand-new environment, the one-time Azure-admin RBAC setup described above
+must be completed before the GitHub workflow can initialize Terraform state.
+After that, there is nothing to maintain manually for Terraform state. For
+`destroy`, the workflow
 requires an explicit confirmation string (`DESTROY vm-staging` or `DESTROY
 prod`) before Terraform is allowed to remove the tracked VM resources; the
 separate state resource group/storage account is retained.

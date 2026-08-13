@@ -9,6 +9,9 @@ set -euo pipefail
 #   ARM_CLIENT_ID, ARM_SUBSCRIPTION_ID, ARM_TENANT_ID
 # Optional:
 #   AZURE_LOCATION (default eastus)
+#   ALLOW_RBAC_BOOTSTRAP=true when invoked by the one-time privileged
+#   scripts/bootstrap-azure-github.sh. Normal GitHub Actions deployments
+#   must leave this unset.
 #   TF_STATE_RESOURCE_GROUP / TF_STATE_STORAGE_ACCOUNT / TF_STATE_CONTAINER
 #
 # Discovery rules:
@@ -27,6 +30,7 @@ set -euo pipefail
 SUBSCRIPTION_ID="${ARM_SUBSCRIPTION_ID:?ARM_SUBSCRIPTION_ID is required}"
 CLIENT_ID="${ARM_CLIENT_ID:?ARM_CLIENT_ID is required}"
 LOCATION="${AZURE_LOCATION:-eastus}"
+ALLOW_RBAC_BOOTSTRAP="${ALLOW_RBAC_BOOTSTRAP:-false}"
 DEFAULT_STATE_RG="rg-snipeit-tfstate"
 STATE_RG="${TF_STATE_RESOURCE_GROUP:-$DEFAULT_STATE_RG}"
 STATE_CONTAINER="${TF_STATE_CONTAINER:-vm-state}"
@@ -152,7 +156,7 @@ validate_storage_account_name "$STATE_ACCOUNT"
 if az group show --name "$STATE_RG" --subscription "$SUBSCRIPTION_ID" >/dev/null 2>&1; then
   echo "Reusing existing Terraform state resource group '$STATE_RG'." >&2
 else
-  echo "Creating Terraform state resource group '$STATE_RG'." >&2
+  echo "Creating Terraform state resource group '$STATE_RG' in location '$LOCATION'." >&2
   az group create \
     --name "$STATE_RG" \
     --location "$LOCATION" \
@@ -176,7 +180,7 @@ else
     exit 1
   fi
 
-  echo "Creating storage account '$STATE_ACCOUNT'." >&2
+  echo "Creating storage account '$STATE_ACCOUNT' in location '$LOCATION'." >&2
   az storage account create \
     --name "$STATE_ACCOUNT" \
     --resource-group "$STATE_RG" \
@@ -197,14 +201,30 @@ STATE_ID="$(az storage account show \
   --query id -o tsv)"
 
 # ---------------------------------------------------------------------------
-# RBAC: idempotently ensure the GitHub OIDC service principal can read/write
-# blobs. Query Azure Resource Manager directly because `az role assignment`
-# can return `MissingSubscription` in some tenants even when the ARM
-# Authorization API is healthy. An assignment inherited from the subscription
-# or state resource group is sufficient; only create one when no effective
-# assignment exists.
+# RBAC: verify the GitHub OIDC service principal already has access to the
+# state blobs. Normal GitHub deployments deliberately do NOT create Azure RBAC
+# assignments: roleAssignments/write is a privileged control-plane permission
+# and should only be used during the one-time state bootstrap by an Azure Owner
+# or User Access Administrator.
+#
+# The separate scripts/bootstrap-terraform-state-rbac.sh performs that one-time
+# privileged operation. Keeping it out of this workflow prevents the deployment
+# identity from needing Owner/User Access Administrator merely to run Terraform.
 # ---------------------------------------------------------------------------
+if [[ "$ALLOW_RBAC_BOOTSTRAP" == "true" ]]; then
+  echo "Privileged bootstrap mode: deferring state RBAC grant to bootstrap-terraform-state-rbac.sh." >&2
+  printf 'TF_STATE_RESOURCE_GROUP=%s\n' "$STATE_RG"
+  printf 'TF_STATE_STORAGE_ACCOUNT=%s\n' "$STATE_ACCOUNT"
+  printf 'TF_STATE_CONTAINER=%s\n' "$STATE_CONTAINER"
+  exit 0
+fi
+
 OBJECT_ID="$(az ad sp show --id "$CLIENT_ID" --query id -o tsv)"
+if [[ -z "$OBJECT_ID" ]]; then
+  echo "::error::Unable to resolve the GitHub OIDC service principal '$CLIENT_ID' in Entra ID." >&2
+  exit 1
+fi
+
 STORAGE_BLOB_DATA_CONTRIBUTOR_ROLE_ID="ba92f5b4-2d11-453d-a403-e96b0029c9fe"
 STORAGE_ROLE_DEFINITION_ID="/subscriptions/${SUBSCRIPTION_ID}/providers/Microsoft.Authorization/roleDefinitions/${STORAGE_BLOB_DATA_CONTRIBUTOR_ROLE_ID}"
 
@@ -234,55 +254,15 @@ do
 done
 
 if [[ "$HAS_BLOB_ROLE" == "0" ]]; then
-  echo "No effective Storage Blob Data Contributor role found for '$CLIENT_ID'; attempting to grant it on '$STATE_ID'..." >&2
-
-  # Deterministic UUID: rerunning bootstrap for the same account/SP/role
-  # targets the same role-assignment resource instead of creating duplicates.
-  ROLE_ASSIGNMENT_ID="$(python -c 'import sys,uuid; print(uuid.uuid5(uuid.NAMESPACE_URL, sys.argv[1]))' \
-    "${STATE_ID}:${OBJECT_ID}:${STORAGE_BLOB_DATA_CONTRIBUTOR_ROLE_ID}")"
-
-  ROLE_ASSIGNMENT_URL="https://management.azure.com${STATE_ID}/providers/Microsoft.Authorization/roleAssignments/${ROLE_ASSIGNMENT_ID}?api-version=2022-04-01"
-  ROLE_BODY="{\"properties\":{\"roleDefinitionId\":\"${STORAGE_ROLE_DEFINITION_ID}\",\"principalId\":\"${OBJECT_ID}\",\"principalType\":\"ServicePrincipal\"}}"
-
-  if ! az rest \
-      --method put \
-      --url "$ROLE_ASSIGNMENT_URL" \
-      --body "$ROLE_BODY" \
-      >/dev/null; then
-    echo "::error::The GitHub OIDC identity '$CLIENT_ID' cannot create Azure role assignments." >&2
-    echo "::error::Grant this identity Owner or User Access Administrator on '$STATE_RG' (or the subscription), OR perform the one-time state RBAC setup as an Azure Owner." >&2
-    echo "::error::Required permission: Microsoft.Authorization/roleAssignments/write." >&2
-    exit 1
-  fi
-
-  echo "Storage Blob Data Contributor role granted on '$STATE_ID'." >&2
+  echo "::error::GitHub OIDC identity '$CLIENT_ID' does not have Storage Blob Data Contributor on '$STATE_ACCOUNT'." >&2
+  echo "::error::The normal deployment workflow will not create Azure role assignments." >&2
+  echo "::error::Run './scripts/bootstrap-terraform-state-rbac.sh' once while authenticated as an Azure Owner or User Access Administrator." >&2
+  echo "::error::Required data-plane role: Storage Blob Data Contributor on '$STATE_ID'." >&2
+  exit 1
 fi
 
-# ---------------------------------------------------------------------------
-# Container lifecycle: existing -> reuse; missing -> create.
-# Management-plane ARM is used deliberately, so container creation does not
-# depend on Blob data-plane RBAC propagation.
-# ---------------------------------------------------------------------------
-CONTAINER_ID="${STATE_ID}/blobServices/default/containers/${STATE_CONTAINER}"
-
-if az resource show --ids "$CONTAINER_ID" >/dev/null 2>&1; then
-  echo "Reusing existing Terraform state container '$STATE_CONTAINER'." >&2
-else
-  echo "Creating Terraform state container '$STATE_CONTAINER'." >&2
-  az resource create \
-    --ids "$CONTAINER_ID" \
-    --api-version 2023-01-03 \
-    --properties '{}' \
-    >/dev/null
-fi
-
-# The state blob itself is deliberately never recreated or copied here.
-# terraform init below uses the existing environment key, so prod.tfstate
-# remains the source of truth when it already exists.
-export TF_STATE_RESOURCE_GROUP="$STATE_RG"
-export TF_STATE_STORAGE_ACCOUNT="$STATE_ACCOUNT"
-export TF_STATE_CONTAINER="$STATE_CONTAINER"
-
-echo "TF_STATE_RESOURCE_GROUP=$STATE_RG"
-echo "TF_STATE_STORAGE_ACCOUNT=$STATE_ACCOUNT"
-echo "TF_STATE_CONTAINER=$STATE_CONTAINER"
+# Emit backend settings for the caller. Keep stdout machine-readable; all
+# diagnostics above intentionally go to stderr.
+printf 'TF_STATE_RESOURCE_GROUP=%s\n' "$STATE_RG"
+printf 'TF_STATE_STORAGE_ACCOUNT=%s\n' "$STATE_ACCOUNT"
+printf 'TF_STATE_CONTAINER=%s\n' "$STATE_CONTAINER"
