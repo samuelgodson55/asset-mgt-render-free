@@ -272,7 +272,7 @@ fi
 # they are left alone. This keeps reruns safe and fixes stale configuration.
 FED_NAME="github-${ENVIRONMENT}"
 FED_SUBJECT="repo:${REPO}:environment:${ENVIRONMENT}"
-FED_ISSUER="https://token.actions.githubusercontent.com/"
+FED_ISSUER="https://token.actions.githubusercontent.com"
 FED_AUDIENCE="api://AzureADTokenExchange"
 
 FED_ID="$(az ad app federated-credential list --id "$APP_ID" --query "[?name=='$FED_NAME'] | [0].id" -o tsv 2>/dev/null || true)"
