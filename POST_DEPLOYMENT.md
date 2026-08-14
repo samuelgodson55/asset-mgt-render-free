@@ -259,6 +259,7 @@ keep declaring it — no repeated manual step.
      --resource-group <your resource group> \
      --query properties.customDomainVerificationId -o tsv
    ```
+    az containerapp show  --name frontend --resource-group rg-snipeit-lite-prod --query properties.customDomainVerificationId -o tsv
 
 2. **Add two DNS records** at your domain registrar/DNS provider, for the
    (sub)domain you want to use (e.g. `assets.yourcompany.com`):
