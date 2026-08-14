@@ -240,15 +240,17 @@ jobs:
           if [ "$RAW_FRONTEND_TYPE_INPUT" = "react" ] || [ "$RAW_FRONTEND_TYPE_INPUT" = "legacy" ]; then
             echo "frontend_type=$RAW_FRONTEND_TYPE_INPUT" >> "$GITHUB_OUTPUT"
             echo "frontend_type_source=this run's frontend_type input" >> "$GITHUB_OUTPUT"
-          elif [ -z "$RAW_FRONTEND_BUILD_TARGET" ] || [ "$RAW_FRONTEND_BUILD_TARGET" = "react" ]; then
-            # Initial/default frontend flavor is React. Set the Environment
-            # variable to "legacy" explicitly when an environment needs the
-            # legacy frontend instead.
+          elif [ -z "$RAW_FRONTEND_BUILD_TARGET" ]; then
+            # React is the deliberate default when the Environment variable
+            # has not been configured yet.
             echo "frontend_type=react" >> "$GITHUB_OUTPUT"
-            echo "frontend_type_source=${RAW_FRONTEND_BUILD_TARGET:+this environment's FRONTEND_BUILD_TARGET variable; unset/default=react}" >> "$GITHUB_OUTPUT"
+            echo "frontend_type_source=default: react (FRONTEND_BUILD_TARGET is unset)" >> "$GITHUB_OUTPUT"
+          elif [ "$RAW_FRONTEND_BUILD_TARGET" = "react" ]; then
+            echo "frontend_type=react" >> "$GITHUB_OUTPUT"
+            echo "frontend_type_source=environment variable: FRONTEND_BUILD_TARGET=react" >> "$GITHUB_OUTPUT"
           elif [ "$RAW_FRONTEND_BUILD_TARGET" = "legacy" ]; then
             echo "frontend_type=legacy" >> "$GITHUB_OUTPUT"
-            echo "frontend_type_source=this environment's FRONTEND_BUILD_TARGET variable" >> "$GITHUB_OUTPUT"
+            echo "frontend_type_source=environment variable: FRONTEND_BUILD_TARGET=legacy" >> "$GITHUB_OUTPUT"
           else
             echo "::error::FRONTEND_BUILD_TARGET must be exactly 'react' or 'legacy' when set; got '$RAW_FRONTEND_BUILD_TARGET'."
             exit 1
