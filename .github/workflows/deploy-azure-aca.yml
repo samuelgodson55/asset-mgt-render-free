@@ -118,7 +118,7 @@ concurrency:
   # workflow_dispatch is the only trigger now, and its `environment` input
   # is required with a default, so this always carries a concrete "staging"
   # or "production".
-  group: deploy-aca-${{ inputs.environment || 'production' }}
+  group: aca-${{ inputs.environment || 'production' }}
   cancel-in-progress: false # never cancel a deploy mid-flight -- let it finish or fail cleanly
 
 permissions:

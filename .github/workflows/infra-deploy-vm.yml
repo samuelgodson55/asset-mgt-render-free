@@ -855,8 +855,6 @@ jobs:
       - name: Pull preserved application images on the VM after infra apply
         if: inputs.action == 'apply' && steps.vm_state.outputs.exists == 'true'
         env:
-          VM_HOST: ${{ secrets.VM_HOST }}
-          VM_SSH_USER: ${{ secrets.VM_SSH_USER }}
           BACKEND_IMAGE: ${{ steps.current_images.outputs.backend_repo }}
           FRONTEND_IMAGE: ${{ steps.current_images.outputs.frontend_repo }}
           IMAGE_TAG: ${{ steps.current_images.outputs.image_tag }}
@@ -874,40 +872,78 @@ jobs:
         run: |
           set -euo pipefail
 
+          # The Terraform state and the GitHub Environment are deliberately
+          # separate systems. Terraform can complete successfully even when the
+          # one-time GitHub management token has not yet been configured. Never
+          # fail/retry the Azure deployment just because this optional post-apply
+          # synchronization cannot run.
           if [[ -z "${GH_TOKEN:-}" ]]; then
-            echo "::error::GH_ADMIN_TOKEN is not configured. This one-time GitHub credential is required so the workflow can write the generated Terraform values back to the '${TARGET_ENV}' Environment."
-            echo "::error::Create a fine-grained PAT with Environments: Read and write for this repository, save it as the repository secret GH_ADMIN_TOKEN, then rerun this workflow."
-            exit 1
+            echo "::warning::GH_ADMIN_TOKEN is not configured; skipping automatic synchronization of Terraform-generated values to GitHub Environment '${TARGET_ENV}'."
+            echo "::warning::Configure repository secret GH_ADMIN_TOKEN once, with a fine-grained PAT scoped to this repository and Environments: Read and write. The next successful apply will populate the selected Environment automatically."
+            exit 0
           fi
+
+          # IMPORTANT: TARGET_ENV is the GitHub Environment selected by this
+          # workflow input: exactly 'prod' or 'vm-staging'. Do not map it to
+          # Terraform's internal environment_name here. Terraform maps
+          # vm-staging -> staging only for Azure resource naming. GitHub values
+          # must stay in the selected GitHub Environment.
+          case "$TARGET_ENV" in
+            prod|vm-staging) ;;
+            *)
+              echo "::error::Unsupported GitHub Environment '$TARGET_ENV'. Expected 'prod' or 'vm-staging'."
+              exit 1
+              ;;
+          esac
 
           # These values come directly from the SAME Terraform state that was just
           # successfully applied. Nothing is printed. gh secret set encrypts the
-          # values before storing them in the GitHub Environment.
+          # values before storing them in the selected GitHub Environment.
           SSH_HOSTNAME="$(terraform output -raw ssh_hostname)"
-          SSH_USER="$(terraform output -raw ssh_command | sed -E 's#.* ([^ @]+)@[^ @]+$#\1#')"
+          SSH_COMMAND="$(terraform output -raw ssh_command)"
+          SSH_COMMAND_BREAK_GLASS="$(terraform output -raw ssh_command_break_glass)"
+          SSH_USER="$(printf '%s\n' "$SSH_COMMAND" | sed -E 's#.* ([^ @]+)@[^ @]+$#\1#')"
+          PUBLIC_IP="$(terraform output -raw public_ip_address)"
+          AZURE_FQDN="$(terraform output -raw azure_fqdn)"
+          APP_URL="$(terraform output -raw app_url)"
           CF_CLIENT_ID="$(terraform output -raw cloudflare_ci_service_token_id)"
           CF_CLIENT_SECRET="$(terraform output -raw cloudflare_ci_service_token_secret)"
+          CF_TUNNEL_TOKEN="$(terraform output -raw cloudflare_tunnel_token)"
 
           [[ -n "$SSH_HOSTNAME" ]] || { echo "::error::Terraform returned an empty ssh_hostname."; exit 1; }
+          [[ -n "$SSH_COMMAND" ]] || { echo "::error::Terraform returned an empty ssh_command."; exit 1; }
           [[ -n "$SSH_USER" ]] || { echo "::error::Could not derive the VM SSH username from terraform output ssh_command."; exit 1; }
           [[ -n "$CF_CLIENT_ID" ]] || { echo "::error::Terraform returned an empty Cloudflare CI service-token ID."; exit 1; }
           [[ -n "$CF_CLIENT_SECRET" ]] || { echo "::error::Terraform returned an empty Cloudflare CI service-token secret."; exit 1; }
+          [[ -n "$CF_TUNNEL_TOKEN" ]] || { echo "::error::Terraform returned an empty Cloudflare Tunnel token."; exit 1; }
 
+          # Environment-scoped secrets. These are encrypted by GitHub and are
+          # consumed by deploy-azure-vm.yml/sync-secrets-vm.yml.
           gh secret set VM_HOST --env "$TARGET_ENV" --body "$SSH_HOSTNAME"
           gh secret set VM_SSH_USER --env "$TARGET_ENV" --body "$SSH_USER"
           gh secret set CF_ACCESS_CLIENT_ID --env "$TARGET_ENV" --body "$CF_CLIENT_ID"
           gh secret set CF_ACCESS_CLIENT_SECRET --env "$TARGET_ENV" --body "$CF_CLIENT_SECRET"
+          gh secret set CLOUDFLARE_TUNNEL_TOKEN --env "$TARGET_ENV" --body "$CF_TUNNEL_TOKEN"
 
-          # VM_HOST is also published as an Environment variable for human-visible
-          # configuration/reference. The deployment workflows continue using the
-          # secret above so existing authentication paths remain unchanged.
+          # Non-secret connection/reference values are stored as Environment
+          # Variables so YOU can open GitHub -> Settings -> Environments ->
+          # <selected environment> -> Variables and copy the exact SSH command
+          # without relying on Terraform logs (which GitHub may mask).
           gh variable set VM_HOST --env "$TARGET_ENV" --body "$SSH_HOSTNAME"
+          gh variable set VM_SSH_COMMAND --env "$TARGET_ENV" --body "$SSH_COMMAND"
+          gh variable set VM_SSH_COMMAND_BREAK_GLASS --env "$TARGET_ENV" --body "$SSH_COMMAND_BREAK_GLASS"
+          gh variable set VM_PUBLIC_IP --env "$TARGET_ENV" --body "$PUBLIC_IP"
+          gh variable set VM_AZURE_FQDN --env "$TARGET_ENV" --body "$AZURE_FQDN"
+          gh variable set APP_URL --env "$TARGET_ENV" --body "$APP_URL"
 
           echo "GitHub Environment '${TARGET_ENV}' updated automatically:"
-          echo "  VM_HOST                 = <set>"
-          echo "  VM_SSH_USER             = <set>"
-          echo "  CF_ACCESS_CLIENT_ID     = <set>"
-          echo "  CF_ACCESS_CLIENT_SECRET = <set>"
+          echo "  VM_HOST / VM_SSH_USER             = <set>"
+          echo "  VM_SSH_COMMAND                     = <set>"
+          echo "  VM_SSH_COMMAND_BREAK_GLASS        = <set>"
+          echo "  VM_PUBLIC_IP / VM_AZURE_FQDN       = <set>"
+          echo "  CF_ACCESS_CLIENT_ID                = <set>"
+          echo "  CF_ACCESS_CLIENT_SECRET            = <set>"
+          echo "  CLOUDFLARE_TUNNEL_TOKEN            = <set>"
 
       - name: Print outputs
         if: inputs.action == 'apply'
@@ -916,4 +952,5 @@ jobs:
           terraform output -json | jq -r 'to_entries[] | if .value.sensitive then "- **\(.key)**: `<sensitive>`" else "- **\(.key)**: `\(.value.value)`" end' >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "### GitHub Environment synchronization" >> "$GITHUB_STEP_SUMMARY"
-          echo "VM_HOST, VM_SSH_USER, CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET were written automatically to the selected GitHub Environment after a successful Terraform apply. Secrets are never printed or uploaded as artifacts." >> "$GITHUB_STEP_SUMMARY"
+          echo "Terraform-generated credentials are written automatically to the selected GitHub Environment; no sensitive values are printed or uploaded as artifacts." >> "$GITHUB_STEP_SUMMARY"
+          echo "The exact non-secret SSH command is also stored as the Environment Variable VM_SSH_COMMAND. Open GitHub → Settings → Environments → <selected environment> → Variables to copy it." >> "$GITHUB_STEP_SUMMARY"

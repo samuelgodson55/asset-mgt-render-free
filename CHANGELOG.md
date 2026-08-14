@@ -62,6 +62,7 @@ above the marker are yours to keep.
 
 <!-- release-notes-insertion-point -->
 ## Unreleased
+- Synchronized documentation with the current dual-frontend Docker/Vite architecture, current Azure deployment workflows, and current repository file layout; removed stale references to retired local helper scripts and added the missing VM runbook TOC.
 - CI can now be started manually from GitHub Actions in addition to push,
   pull request, and reusable workflow triggers.
 - Updated CI/deployment documentation to reflect the current workflow model.

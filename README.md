@@ -2,9 +2,10 @@
 
 A small, self-hosted **IT asset registry / equipment checkout system** —
 think "who currently has the MacBook Pool unit #12, and when is it due
-back?" Built with a **FastAPI + PostgreSQL** backend and a **plain
-HTML/JS (no framework, no build step)** frontend, all wired together with
-Docker Compose.
+back?" Built with a **FastAPI + PostgreSQL** backend and two mutually exclusive
+frontend options: a legacy vanilla HTML/JS site and a **React + TypeScript +
+Vite** Ledger SPA. Both are served through the same nginx-based container
+shape and wired together with Docker Compose.
 
 This README is a **complete guide for a beginner developer**. It assumes
 you can read code but may not have deployed a full-stack app before. It
@@ -572,14 +573,14 @@ Click your name in the navbar on any dashboard to:
   (`NOTIFICATIONS_ENABLED=false`); see [Due-Date Extensions &
   Notifications](#due-date-extensions--notifications) and [Environment
   Variables Reference](#environment-variables-reference).
-- **Frontend:** Plain HTML + vanilla JS ES Modules — **no React/Vue, no
-  app build step** — styled with Tailwind CSS, compiled locally ahead of
-  time to a single static `frontend/css/tailwind.css` (see
-  [`build-tailwind/README.md`](build-tailwind/README.md)) instead of being
-  pulled from a CDN and recompiled in every visitor's browser at runtime.
-  Served by an nginx reverse proxy built from
-  [`frontend/Dockerfile`](frontend/Dockerfile) (see
-  [Deploying Across Environments](#deploying-across-environments-nginx-reverse-proxy)).
+- **Frontend:** Two mutually exclusive builds are supported. The legacy site
+  under `frontend/` is vanilla HTML/JS with Tailwind CSS compiled ahead of time
+  into `frontend/css/tailwind.css`; the newer Ledger SPA under `frontend-app/`
+  is React + TypeScript + Vite with Tailwind CSS v4 and Recharts. Both are
+  packaged by [`frontend/Dockerfile`](frontend/Dockerfile), but a final image
+  contains exactly one frontend target: `frontend-react-only` or
+  `frontend-legacy-only`. See [`frontend-app/README.md`](frontend-app/README.md)
+  and [`build-tailwind/README.md`](build-tailwind/README.md).
 - **Infra:** Docker Compose, 6 services: `db` (Postgres), `redis`
   (Celery broker/result backend, and the shared counter store for the
   Redis-backed login rate limiter — see [Security
@@ -596,13 +597,13 @@ Click your name in the navbar on any dashboard to:
   site AND reverse-proxies `/api/*` to `backend`, the only
   publicly-exposed service).
 
-Because `frontend/css/tailwind.css` is a plain committed file (not
-generated inside the Docker build), **editing an `.html` or `.js` file
-and refreshing your browser is still the entire "deploy" cycle** while
-developing locally — nothing to compile, and `docker compose up` needs no
-`npm install` of its own. The only time you touch `build-tailwind/` is
-if you add/remove Tailwind utility classes and need to regenerate that
-one CSS file — see that folder's README for the one-line command.
+The legacy frontend keeps its compiled Tailwind CSS in the repository, so
+HTML/JS edits can be refreshed directly while working on that path. The React
+frontend is a real Vite application: use `npm install` + `npm run dev` inside
+`frontend-app/`, and use `npm run build` for a production bundle. The shared
+Dockerfile selects exactly one target at image-build time, so changing the
+frontend flavor is an explicit deployment choice rather than an accidental
+side effect.
 
 ## Project Structure
 
@@ -777,17 +778,13 @@ snipe-it-lite/
 ├── .dockerignore               # Keeps .env (and other junk) out of the build context too
 │
 ├── nginx/
-│   ├── Dockerfile                  # Builds the frontend/reverse-proxy image --
-│   │                                  # also runs build-frontend/ (below)
-│   │                                  # against frontend/js before this
-│   │                                  # image's final stage copies it in
-│   ├── default.conf.template        # nginx config template -- see "Deploying
-│   │                                  # Across Environments" section above
+│   ├── default.conf.template        # nginx config for the legacy frontend
+│   ├── default.react.conf.template   # nginx config with SPA fallback for React
 │   └── docker-entrypoint.d/
-│       └── 15-detect-resolver-ip.sh  # Auto-detects RESOLVER_IP from
-│                                       # /etc/resolv.conf if it isn't set
-│                                       # (must stay non-executable -- see
-│                                       # its own header comment for why)
+│       ├── 15-detect-resolver-ip.envsh # Auto-detects RESOLVER_IP from
+│       │                                  # /etc/resolv.conf when unset
+│       └── 25-fetch-deploy-status-htpasswd.sh # Fetches the protected
+│                                              # deployment-dashboard credentials
 │
 ├── build-frontend/              # Build tooling ONLY -- runs inside
 │   │                              # frontend/Dockerfile's build stage, never
@@ -962,10 +959,26 @@ snipe-it-lite/
 │           │                                      # year, plus a DEFAULT
 │           │                                      # catch-all) -- see
 │           │                                      # SRE_STRATEGY.md
-│           └── 0011_password_reset_tokens.py   # `password_reset_tokens`
-│                                                   # table backing the
-│                                                   # self-service "forgot
-│                                                   # password" email flow
+│           ├── 0011_password_reset_tokens.py   # Self-service password reset tokens
+│           ├── 0012_user_company.py            # User/company relationship
+│           ├── 0013_quotation_notifications.py # Quotation notification persistence
+│           ├── 0014_pending_approval_sla_nudges.py # Approval SLA tracking
+│           ├── 0015_asset_department.py        # Asset-pool department data
+│           └── 0016_quotation_paid_status.py   # Current `paid` quotation status
+│
+├── frontend-app/                # React + TypeScript Ledger SPA (Vite)
+│   ├── src/
+│   │   ├── components/          # Shared UI, drawers, modals, tables and status UI
+│   │   ├── pages/               # Dashboard, Assets, Checkouts, Quotations,
+│   │   │                          # My Items, Reports, Profile, Notifications,
+│   │   │                          # Login and admin panels
+│   │   ├── lib/                 # API client, auth, roles, custody/quote contexts,
+│   │   │                          # theme, search, pagination, receipts and types
+│   │   ├── App.tsx
+│   │   └── main.tsx
+│   ├── package.json             # Vite/React/TypeScript build and test scripts
+│   ├── vite.config.ts           # `/api` dev proxy + Vite configuration
+│   └── README.md                # React frontend architecture and deployment notes
 │
 ├── build-tailwind/              # Build tooling ONLY -- never shipped/run in
 │   │                              # Docker. Compiles frontend/css/tailwind.css.
@@ -1420,29 +1433,20 @@ export JWT_SECRET_KEY="any-random-string-for-local-dev"
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-For the frontend, since there's no build step, you can serve the
-`frontend/` folder with literally any static file server:
+For the frontend, use the React/Vite app directly during development:
 
 ```bash
-cd frontend
-python3 -m http.server 8080
-# now open http://localhost:8080
+cd frontend-app
+npm install
+npm run dev
 ```
 
-**One catch:** `frontend/js/api.js`'s `API_URL` is deliberately a *relative*
-path (`/api`) — see [Deploying Across Environments](#deploying-across-environments-nginx-reverse-proxy)
-above for why. That only resolves correctly when the frontend is served
-*behind the nginx reverse proxy* (which is what `docker compose up`
-gives you and does the `/api/*` → backend forwarding). A bare
-`python3 -m http.server` has no such proxy, so `/api/*` calls will 404
-against its own static file server. For this fully-Docker-free mode,
-either:
-- run `docker compose up frontend db` alongside the steps above so nginx
-  still fronts things (simplest — just skip starting `backend` via
-  Compose and run it with `uvicorn` instead, as shown), or
-- temporarily hardcode `API_URL` back to `http://localhost:8000` in
-  `frontend/js/api.js` while working this way, and revert it before
-  committing.
+`frontend-app/vite.config.ts` proxies `/api/*` to `http://localhost:8000` by
+default. Override that target with `VITE_DEV_API_PROXY_TARGET`, or set
+`VITE_API_BASE_URL` in a local `.env.local` file if you intentionally want to
+bypass the Vite proxy. For the production-shaped nginx path, use
+`docker compose up` so nginx owns the `/api/*` reverse proxy. The legacy
+`frontend/` site remains available for the `frontend-legacy-only` Docker target.
 
 ## Environment Variables Reference
 
@@ -1827,7 +1831,7 @@ disable it (`AUTO_INIT_DB=false`) and let `alembic upgrade head` be the
 only thing that ever changes your schema.
 
 **Current migrations** (`backend/alembic/versions/`, applied in order by
-`alembic upgrade head`) — eleven so far, each one additive-only (see the
+`alembic upgrade head`) — sixteen so far, each one additive-only (see the
 "migrate first, only ever ADD" rule in the CI/CD section below):
 
 | Revision | What it does |
@@ -1843,8 +1847,13 @@ only thing that ever changes your schema.
 | `0009_recovery_codes` | Adds the `recovery_codes` table (2FA backup codes). |
 | `0010_partition_audit_logs` | Converts `audit_logs` into a native Postgres RANGE-partitioned table (one partition per calendar year, plus a DEFAULT catch-all) — a no-op shape-wise against non-Postgres databases. See `SRE_STRATEGY.md`'s "Audit log partitioning & annual archive" section for the full rationale and the ongoing-maintenance/retirement runbook (`services/audit_partition_service.py`, `tasks/audit_partition_tasks.py`). |
 | `0011_password_reset_tokens` | Adds the `password_reset_tokens` table backing the self-service "Forgot password?" email flow — see [Account Security](#account-security-built-in-mostly-invisible-until-you-need-it). |
+| `0012_user_company` | Adds the company relationship/fields used by the current user model. |
+| `0013_quotation_notifications` | Adds quotation notification persistence used by the in-app quotation notification feed. |
+| `0014_pending_approval_sla_nudges` | Adds SLA tracking fields used by pending extension and quotation approval reminders. |
+| `0015_asset_department` | Adds department data to asset pools for the current inventory/department model. |
+| `0016_quotation_paid_status` | Adds the `paid` quotation status used by the current quotation workflow. |
 
-A fresh install just runs `alembic upgrade head` and applies all eleven in
+A fresh install just runs `alembic upgrade head` and applies all sixteen in
 order — nothing special to do. `backend/tests/test_migrations.py` runs
 this exact `upgrade head` → `downgrade` chain against a throwaway Postgres
 database in CI on every push (see `.github/workflows/ci.yml`), so a
@@ -1853,7 +1862,7 @@ reaches a real database.
 
 **Going forward, every schema change should be its own NEW migration**
 (via `alembic revision --autogenerate -m "description"`) layered on top of
-`0011_password_reset_tokens.py` — don't hand-edit an already-applied migration
+`0016_quotation_paid_status.py` — don't hand-edit an already-applied migration
 file once any real data exists anywhere; write a new one instead, even for
 a one-line fix.
 
@@ -2122,28 +2131,18 @@ there to dial down ingestion further if you ever do.
 
 ### Fast paths that don't require opening Jaeger at all
 
-Two scripts in `scripts/` cover the two most common "something's wrong,
-what happened?" moments without needing the Jaeger/Application Insights
-UI open first:
+The current repository does not contain the older `scripts/tail-errors.sh` or
+`scripts/trace-request.sh` helpers that earlier versions of this README
+described. Use the platform-native log paths instead:
 
-- **`scripts/tail-errors.sh`** — live-tails ERROR/CRITICAL structured logs
-  across every backend-side container (`backend`/`worker`/`beat`) as they
-  happen, with each line's `request_id` (and `trace_id`, once
-  `OTEL_ENABLED=true`) pulled to the front so you can copy it straight
-  into the next script.
-- **`scripts/trace-request.sh <id>`** — given a `request_id` (from a
-  user's error toast, a support ticket, or the `X-Request-ID` response
-  header) or a `trace_id`/`span_id` copied out of the Jaeger/Application
-  Insights UI, greps every backend-side container's logs for that exact
-  ID and prints the full story — request arriving, every SQL/service log
-  line in between, and the exact traceback if it errored — in order, in
-  one shot, whether the request stayed in `backend` or spilled into
-  `worker`. Supports `--since <duration>` and `--follow`.
+- **Local / Docker Compose:** `docker compose logs -f backend worker beat`
+- **Azure Container Apps:** `az containerapp logs show --name backend --resource-group <resource-group> --tail 500`
+- **Azure VM:** `docker compose -f docker-compose.vm.yml logs backend worker beat`
 
-Both work identically against `docker-compose.yml` (local dev) and
-`docker-compose.vm.yml` (the Azure VM path) — see `SRE_STRATEGY.md`'s
-"Fast request-ID triage without opening Jaeger" section for a worked
-example.
+Use the `request_id` or trace identifiers emitted by the backend logs to narrow
+the output. This matches the current `backend/logging_config.py`, request-context
+middleware, and OpenTelemetry implementation without depending on helper files
+that are not present in this repository.
 
 ### Using something other than Jaeger/Application Insights
 
@@ -3137,11 +3136,11 @@ the moment a checkout with a due date is involved.
 
 ### Frontend
 
-Since there's no build step, just refresh the page in your browser after
-saving a `.js`/`.html` file. Open your browser's DevTools Console while
-testing — `js/api.js` throws a real `Error` (with the backend's message)
-on any failed request, which will show up there if something goes wrong
-silently in the UI.
+For the React frontend, `npm run dev` gives Vite hot reload while you work.
+For the legacy frontend, changes to `.html`/`.js` are reflected after a
+refresh when you run the corresponding static/nginx development path. The
+React app's API client also falls back to its mock data when a backend fetch
+fails, while the legacy client surfaces request errors in the browser console.
 
 ## Security Model
 

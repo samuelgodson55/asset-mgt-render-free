@@ -31,7 +31,7 @@ on:
 concurrency:
   # Serialize manual cleanup with the matching deployment environment so a
   # human cannot accidentally reap a revision while its deployment is rolling.
-  group: deploy-aca-${{ inputs.environment || 'production' }}
+  group: aca-${{ inputs.environment || 'production' }}
   cancel-in-progress: false
 
 permissions:

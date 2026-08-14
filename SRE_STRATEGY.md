@@ -34,7 +34,7 @@ relevant flag on, not missing tooling. `docker-compose.yml`'s local
 `jaeger` service now runs current-stable Jaeger v2 (v1 is EOL as of
 2025-12-31 — see that service's own comment for the full migration
 note), and §6.6 below adds a request-ID-first fast path
-(`scripts/trace-request.sh` / `scripts/tail-errors.sh`) for triaging an
+(`docker compose logs`, `az containerapp logs show`, and request-ID/trace-ID queries) for triaging an
 error in seconds using nothing but `docker compose logs`, whether or not
 tracing itself is even turned on yet.
 
@@ -551,50 +551,33 @@ having logs/alerts in the first place.
 
 ### 6.6 Fast request-ID triage without opening Jaeger
 
-§6.5 above is the *full* answer once you're comfortable with tracing set
-up end-to-end. Day-to-day, especially locally or mid-incident when every
-second counts toward the zero-downtime goal, `scripts/trace-request.sh`
-and `scripts/tail-errors.sh` get you most of the way there using nothing
-but `docker compose logs` — no Jaeger/Application Insights required, and
-they work identically whether or not `OTEL_ENABLED` is even turned on
-(they just won't have a `trace=` ID to show you if it isn't).
+The current repository does not ship the older `scripts/trace-request.sh` or
+`scripts/tail-errors.sh` helpers. The same triage can be done directly with the
+logging tools already used by the deployment platforms.
 
-**Live triage while deploying, load-testing, or just keeping watch** —
-run this in a spare terminal:
+**Local / Docker Compose:**
+```bash
+docker compose logs -f backend worker beat
+docker compose logs backend worker beat | grep "<request_id_or_trace_id>"
 ```
-scripts/tail-errors.sh
-```
-Every ERROR/CRITICAL log line from `backend`/`worker`/`beat` prints the
-moment it happens, colorized, with its `request_id` (and `trace_id` if
-tracing is on) pulled to the front — so you see an incident starting
-within seconds, with the exact ID you need for the next step already in
-hand, instead of waiting for a user to report it.
 
-**Given one ID — from `tail-errors.sh` above, an alert's `Log_s`
-output (§2a), or a user/support ticket** (every error response body
-includes its own `request_id`, see `middleware/error_handling.py`):
+**Azure Container Apps:**
+```bash
+az containerapp logs show --name backend --resource-group <resource-group> --tail 500
 ```
-scripts/trace-request.sh <request_id_or_trace_id>
-scripts/trace-request.sh <request_id_or_trace_id> --since 2h   # further back
-scripts/trace-request.sh <request_id_or_trace_id> --follow      # keep watching for it
+Then filter the returned structured logs for the `request_id` or trace ID.
+
+**Azure VM:**
+```bash
+docker compose -f docker-compose.vm.yml logs backend worker beat
+docker compose -f docker-compose.vm.yml logs backend worker beat | grep "<request_id_or_trace_id>"
 ```
-This pulls every log line that request touched, in order, across
-`backend`/`worker`/`beat` — the request arriving, every service-layer log
-line in between, and the full exception traceback if it errored — in one
-command, whether it stayed in `backend` alone or spilled into a queued
-`worker` task. It matches a `request_id` from an error body just as
-well as a `trace_id`/`span_id` copied out of the Jaeger UI, so it's the
-same command either way you got the ID.
 
-**Where this fits relative to §6.5:** reach for these two scripts first
-— they need no setup and answer "what happened on this one request" in
-one command. Reach for the full Jaeger/Application Insights waterfall in
-§6.5 when the *log lines themselves* don't explain the slowness (e.g. a
-SQL span taking 600ms with nothing obviously wrong in the surrounding
-log messages) and you need to see actual nested span durations, not just
-the fact that something happened.
+The backend's request-context and error-handling middleware put request context
+on structured log records, so this remains useful even when OpenTelemetry is
+off. If tracing is enabled, use the emitted trace identifiers to continue the
+investigation in Jaeger or the configured OTLP/Application Insights backend.
 
----
 
 ## 7. Audit log partitioning & annual archive
 

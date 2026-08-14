@@ -92,6 +92,22 @@ param initialBackendImageTag string = ''
 @description('Image tag to use for the frontend during infrastructure creation/refresh. On refresh, the infra workflow passes the exact tag currently deployed instead of falling back to latest.')
 param initialFrontendImageTag string = ''
 
+@description('ACA backend ingress traffic to preserve during infrastructure deployment. The deployment workflow resolves latestRevision routing to explicit revision names before passing this value, so an infra refresh cannot redirect production traffic to an infra-created revision.')
+param backendTraffic array = [
+  {
+    latestRevision: true
+    weight: 100
+  }
+]
+
+@description('ACA frontend ingress traffic to preserve during infrastructure deployment. The deployment workflow resolves latestRevision routing to explicit revision names before passing this value, so an infra refresh cannot redirect production traffic to an infra-created revision.')
+param frontendTraffic array = [
+  {
+    latestRevision: true
+    weight: 100
+  }
+]
+
 @description('Set only if dockerHubBackendImage/dockerHubFrontendImage are PRIVATE Docker Hub repositories (same account for both). Leave empty if both are public (recommended -- zero credential management). NOTE: Docker Hub free plan includes only ONE private repo -- if you need both private, either upgrade your Docker Hub plan or keep one of the two public.')
 param dockerHubUsername string = ''
 
@@ -1062,20 +1078,14 @@ resource backendApp 'Microsoft.App/containerApps@2024-03-01' = {
         // set. Only affects traffic inside the environment -- `backend`
         // still has `external: false`, so it's never internet-reachable.
         allowInsecure: true
-        // Default rule for a brand-new environment / the very first
-        // revision ever created: 100% to whichever revision is newest, no
-        // deploy-pipeline intervention needed to bring the app up in the
-        // first place. From the SECOND deploy onward,
-        // aca-blue-green.sh's `rollout` subcommand takes over traffic
-        // control explicitly (pinning weight to named revisions instead
-        // of `latestRevision`) -- see that script's own comments. Re-
-        // running infra-deploy.yml (a rare, deliberate infra change, not
-        // part of the app deploy pipeline) resets this rule back to
-        // `latestRevision: true`; avoid re-running it while a blue-green
-        // rollout is mid-flight for the same app.
-        traffic: [
-          { latestRevision: true, weight: 100 }
-        ]
+        // Traffic is an explicit input, not an implicit "latest revision"
+        // rule. On refresh, infra-deploy.yml resolves any existing
+        // latestRevision routing to the concrete revision that is currently
+        // carrying traffic before this resource is PUT. That keeps Bicep
+        // from handing production traffic to a revision created by an
+        // infrastructure change. The application deployment workflow remains
+        // the sole owner of blue-green traffic changes.
+        traffic: backendTraffic
       }
     }
     template: {
@@ -1214,12 +1224,10 @@ resource frontendApp 'Microsoft.App/containerApps@2024-03-01' = {
         customDomains: (empty(customDomain) || empty(customDomainCertificateId)) ? [] : [
           { name: customDomain, bindingType: 'SniEnabled', certificateId: customDomainCertificateId }
         ]
-        // Same default-rule reasoning as `backendApp`'s `ingress.traffic`
-        // comment above -- 100% to the newest revision until
-        // aca-blue-green.sh's `rollout` takes over on the second deploy.
-        traffic: [
-          { latestRevision: true, weight: 100 }
-        ]
+        // Keep frontend routing explicit for the same reason as backend:
+        // infra refreshes must preserve the currently traffic-bearing
+        // revision instead of selecting the newly-created revision.
+        traffic: frontendTraffic
       }
     }
     template: {

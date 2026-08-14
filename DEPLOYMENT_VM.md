@@ -26,13 +26,13 @@ with no Azure resources yet.
 ## Table of Contents
 
 - [0. Prerequisites](#0-prerequisites)
-- [Terraform local validation & Terraform essentials](#terraform-local-validation--terraform-essentials)
 - [1. One-time Azure setup](#1-one-time-azure-setup)
 - [2. Set up Cloudflare Tunnel (no open ports, no Bastion)](#2-set-up-cloudflare-tunnel-no-open-ports-no-bastion)
 - [3. Generate the deploy SSH key pair](#3-generate-the-deploy-ssh-key-pair)
 - [4. Generate application secrets](#4-generate-application-secrets)
 - [5. Configure GitHub OIDC federation (automated)](#5-configure-github-oidc-federation-automated)
 - [6. Set GitHub Environment secrets/variables](#6-set-github-environment-secretsvariables)
+  - [6.1 Configure `GH_ADMIN_TOKEN`](#61-configure-gh_admin_token-for-automatic-terraform--github-synchronization)
 - [7. Review the Terraform plan locally (optional but recommended first time)](#7-review-the-terraform-plan-locally-optional-but-recommended-first-time)
 - [8. Provision the VM (`infra-deploy-vm.yml`)](#8-provision-the-vm-infra-deploy-vmyml)
 - [9. Point `deploy-azure-vm.yml` at the new VM](#9-point-deploy-azure-vmyml-at-the-new-vm)
@@ -53,6 +53,8 @@ with no Azure resources yet.
 
 ---
 
+> **Repository consistency note:** the VM deployment is intentionally split between GitHub Actions orchestration and repository scripts. `.github/workflows/` contains the workflow entry points, while `scripts/` contains the VM rollout/bootstrap helpers that those workflows invoke or copy to the VM. Both locations are part of the deployment implementation and must remain synchronized when deployment behavior changes.
+
 ## One-time repository script-permission setup (Windows/Git Bash)
 
 This is a **manual repository-maintenance step**, not a recurring VM deployment step. The VM path contains scripts that are executed on Linux runners or directly on the VM, so they must be committed to Git with executable mode `100755`.
@@ -69,14 +71,6 @@ If it is `false`, explicitly stage the executable mode:
 git update-index --chmod=+x \
   .github/scripts/aca-blue-green.sh \
   .github/scripts/aca-deploy-status.sh \
-  scripts/bootstrap-azure-github.sh \
-  scripts/bootstrap-terraform-state.sh \
-  scripts/bootstrap-terraform-state-rbac.sh \
-  scripts/blue-green-deploy.sh \
-  scripts/health-check.sh \
-  scripts/poll-live-endpoint.sh \
-  scripts/tail-errors.sh \
-  scripts/trace-request.sh \
   backend/docker-entrypoint.sh \
   backend/start.sh \
   nginx/test-config.sh \
@@ -125,451 +119,111 @@ creates and manages the VM resource group and Terraform state backend itself.
 
 ---
 
+## 1. One-time Azure setup
 
-## Terraform local validation & Terraform essentials
+The VM path is designed so you do **not** manually create the VM resource
+group, Terraform state resource group, Storage Account, blob container, NIC,
+network, public IP, VM, disks, or other Azure infrastructure. The only
+unavoidable bootstrap is establishing the Azure identity that GitHub Actions
+will use.
 
-Before pushing changes to the VM Terraform configuration, run the same
-formatting and validation gates locally that GitHub Actions runs. This section
-is intentionally separate from Azure provisioning: **formatting and static
-validation are local code-quality checks; `plan`/`apply` are infrastructure
-operations that can read or change real Azure resources.**
-
-The VM Terraform root is:
-
-```text
-infra-vm/
-├── main.tf
-├── variables.tf
-├── outputs.tf
-├── versions.tf
-└── terraform.tfvars.example
-```
-
-There is only one Terraform root in this repository. The commands below can
-therefore be run from the repository root or from `infra-vm/`, but the
-repository-wide CI formatting command is best run from the repository root.
-
-### 1. Check the Terraform version
-
-The VM stack requires Terraform `>= 1.7.0`:
-
-```bash
-terraform version
-```
-
-If Terraform is missing, install it before continuing. Do not substitute an
-older Terraform version just to make a local check pass.
-
-### 2. Format Terraform files
-
-**Fix formatting** with:
-
-```bash
-terraform fmt -recursive
-```
-
-This modifies Terraform files in place.
-
-Then run the exact CI check:
-
-```bash
-terraform fmt -check -recursive
-```
-
-A clean result prints no Terraform filenames and exits with code `0`.
-
-If the output looks like:
-
-```text
-main.tf
-versions.tf
-Error: Terraform exited with code 3.
-```
-
-that means those files are **not canonically formatted**. It is not a Terraform
-provider, Azure, or state error. Run:
-
-```bash
-terraform fmt -recursive
-terraform fmt -check -recursive
-```
-
-Then inspect the changes:
-
-```bash
-git diff -- main.tf versions.tf
-```
-
-or, for a change inside the VM directory:
-
-```bash
-git diff -- infra-vm/main.tf infra-vm/versions.tf
-```
-
-Do not use `|| true` on the CI formatting check. A formatting failure should
-fail the workflow so it gets fixed before deployment.
-
-### 3. Initialize providers without touching the remote Terraform state
-
-For local syntax/static validation, initialize the Terraform working directory
-without configuring the Azure remote backend:
-
-```bash
-cd infra-vm
-terraform init -backend=false
-```
-
-This downloads the providers required by `versions.tf` but does **not** connect
-to or create the remote `azurerm` state backend.
-
-It is safe to repeat. If provider metadata or cached modules need to be
-refreshed, use:
-
-```bash
-terraform init -backend=false -upgrade
-```
-
-Use `-upgrade` deliberately rather than on every run: provider versions are
-constrained by `versions.tf`, and changing the selected provider version can
-change the plan.
-
-### 4. Validate the Terraform configuration
-
-After initialization:
-
-```bash
-terraform validate
-```
-
-A successful result is:
-
-```text
-Success! The configuration is valid.
-```
-
-This catches structural and configuration errors before Azure is contacted.
-It does **not** prove that:
-
-- your Azure credentials are valid;
-- your Cloudflare credentials are valid;
-- the requested Azure SKU/region is available;
-- the remote state exists;
-- your intended resources can actually be created.
-
-Those require `terraform plan`.
-
-### 5. Check providers and dependency versions
-
-Use:
-
-```bash
-terraform providers
-```
-
-This is useful when a provider-related error appears after a change to
-`versions.tf` or a resource block.
-
-The authoritative provider constraints for this repo are in
-`infra-vm/versions.tf`. Do not casually run `terraform init -upgrade` and then
-commit a provider-version change without reviewing the resulting plan.
-
-The repository currently ignores `.terraform.lock.hcl`. If the team later
-decides to lock exact provider selections/checksums for stronger reproducibility,
-remove that ignore rule deliberately and commit the generated lock file. Never
-commit `.terraform/`, `*.tfstate`, `terraform.tfvars`, or plan files containing
-environment-specific information.
-
-### 5a. Diagnose Cloudflare Access policy refresh failures
-
-The `Deploy VM Infrastructure` workflow performs two Cloudflare checks before
-`terraform plan`: a general Access API check and then an exact GET request for
-each existing Terraform-managed Access policy. The second check matters because
-the general Access API can return HTTP 200 while the policy-specific endpoint
-returns an error such as Cloudflare HTTP 1010.
-
-The workflow derives the policy IDs from the existing Terraform state, so it
-does not hard-code policy IDs that could become stale after an import/recreate.
-The check is read-only and does not modify Terraform state or Cloudflare.
-
-To reproduce the exact policy checks locally, set the same Cloudflare account
-and token used by the selected GitHub Environment (never paste the token into
-Git or into chat):
-
-```bash
-export CLOUDFLARE_API_TOKEN='your-token'
-export CLOUDFLARE_ACCOUNT_ID='your-account-id'
-
-for POLICY_ID in \
-  'e9b06fe2-36d2-4054-b871-967f745e45d4' \
-  '5a999c0c-5339-4c19-af5d-8bff7b6220c9'; do
-  curl -sS -i \
-    -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-    -H 'Content-Type: application/json' \
-    "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/access/policies/${POLICY_ID}"
-done
-```
-
-For the GitHub Actions test, inspect the new **Test exact Cloudflare Access
-policy endpoints** step. If token verification and `/access/apps` succeed but
-these policy requests return HTTP 1010, do **not** remove or re-import the
-policies from Terraform state. That result isolates the problem to the
-policy-specific API request/Cloudflare-side handling rather than Terraform state
-or GitHub secret validity.
-
-### 6. Run a real local plan only when you intentionally want to inspect Azure
-
-A local `terraform validate` is not a substitute for a plan. A full plan needs
-Azure authentication, Cloudflare credentials, all required Terraform variables,
-and the correct remote state.
-
-First authenticate to Azure:
+Run this once from your local CLI:
 
 ```bash
 az login
-az account set --subscription "<subscription-id>"
-az account show --query "{id:id,tenantId:tenantId,name:name}" -o json
+az account set --subscription "<subscription-id-or-name>"
+gh auth login
+./scripts/bootstrap-azure-github.sh
 ```
 
-For local experimentation, copy the example variables file:
+The bootstrap helper is idempotent. It:
 
-```bash
-cp infra-vm/terraform.tfvars.example infra-vm/terraform.tfvars
+1. Registers the Azure providers used by the Bicep and VM paths.
+2. Creates or reuses the Microsoft Entra application and service principal.
+3. Grants the CI identity subscription-level `Contributor`.
+4. Creates or reuses the exact GitHub OIDC federated credentials for
+   `production`, `staging`, `prod`, and `vm-staging`.
+5. Writes `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and
+   `AZURE_SUBSCRIPTION_ID` into those GitHub Environments.
+
+You therefore **do not** manually create an App Registration, service
+principal, federated credential, Azure resource group, or Terraform state
+storage. The VM state bootstrap also uses the ARM Authorization REST API for
+`Storage Blob Data Contributor`, with a deterministic role-assignment ID, so
+it does not depend on `az role assignment` working in the local tenant.
+
+### Terraform state is bootstrapped by the workflow
+
+Before `terraform init`, `.github/workflows/infra-deploy-vm.yml` runs
+`the automated `infra-deploy-vm.yml` Terraform-state bootstrap`. That script automatically creates or
+reuses:
+
+```text
+rg-snipeit-tfstate
+└── <subscription-specific Storage Account>
+    └── vm-state
 ```
 
-Fill in the real values locally. `infra-vm/terraform.tfvars` is ignored by Git
-and **must never be committed**, because it can contain passwords, API tokens,
-private keys/certificates, and other secrets.
+The Storage Account name is deterministically derived from the Azure
+subscription ID (`snipeittfstate<10-char-sha256-prefix>`). The prefix is 14
+characters, so the 10-character suffix produces exactly 24 characters, which
+is Azure's Storage Account maximum. The workflow also grants the GitHub OIDC
+identity `Storage Blob Data Contributor` on that Storage Account.
 
-Then initialize against the real backend only after you have confirmed that
-you are targeting the correct environment/state:
+The bootstrap is idempotent and deliberately discovery-first:
 
-```bash
-cd infra-vm
-
-terraform init \
-  -backend-config="resource_group_name=<state-resource-group>" \
-  -backend-config="storage_account_name=<state-storage-account>" \
-  -backend-config="container_name=vm-state" \
-  -backend-config="key=prod.tfstate" \
-  -backend-config="use_azuread_auth=true"
+```text
+register Azure providers
+        ↓
+bootstrap Terraform state
+        ├─ find existing state RG
+        ├─ find existing state Storage Account
+        ├─ find existing vm-state container
+        └─ create only missing resources
+        ↓
+terraform init
+        └─ use the existing prod.tfstate/vm-staging.tfstate key
 ```
 
-For staging, use the staging state key:
+For existing environments, the bootstrap also recognizes the known legacy
+`snipeittfstate01` account and previously tagged/prefix-matching
+`snipeittfstate*` state accounts, so changing the deterministic naming formula
+does not strand an existing state backend. If multiple possible state
+accounts are found, set `TF_STATE_STORAGE_ACCOUNT` explicitly rather than
+risk attaching Terraform to the wrong state.
+
+No `TF_STATE_*` GitHub Environment variables are required for the normal
+case. The bootstrap script accepts `TF_STATE_RESOURCE_GROUP`,
+`TF_STATE_STORAGE_ACCOUNT`, and `TF_STATE_CONTAINER` only as optional
+advanced overrides.
+
+The state backend is deliberately **outside** the VM resource group. This is
+what makes the destroy path safe: Terraform can destroy the VM stack while
+retaining the state it needs to record that destruction. The environments use
+separate backend keys:
 
 ```text
 vm-staging.tfstate
+prod.tfstate
 ```
 
-**Be extremely careful with `key`.** It is the identity of the Terraform state
-for the environment. Pointing a production configuration at the wrong key can
-make Terraform plan against the wrong infrastructure.
-
-If the backend configuration changes between environments or you need to
-deliberately reconnect to a different existing backend, use:
-
-```bash
-terraform init -reconfigure \
-  -backend-config="resource_group_name=<state-resource-group>" \
-  -backend-config="storage_account_name=<state-storage-account>" \
-  -backend-config="container_name=vm-state" \
-  -backend-config="key=prod.tfstate" \
-  -backend-config="use_azuread_auth=true"
-```
-
-Do not use `-reconfigure` casually; it tells Terraform to accept the supplied
-backend configuration rather than relying on its previously initialized
-backend metadata.
-
-Then create and inspect a plan:
-
-```bash
-terraform plan -out=tfplan
-terraform show -no-color tfplan
-```
-
-`tfplan` is ignored by this repository. Do not commit it.
-
-For the normal GitHub deployment path, prefer the workflow's plan because it
-uses the same OIDC identity, backend configuration, environment variables,
-state key, and CI runner that will perform the eventual apply.
-
-### 7. The safe local Terraform sequence
-
-For ordinary Terraform code changes, the recommended local sequence is:
-
-```bash
-# From repository root
-terraform fmt -recursive
-terraform fmt -check -recursive
-
-# Static validation
-cd infra-vm
-terraform init -backend=false
-terraform validate
-terraform providers
-```
-
-Then, only when you deliberately need a real infrastructure preview:
-
-```bash
-terraform init \
-  -backend-config="resource_group_name=<state-resource-group>" \
-  -backend-config="storage_account_name=<state-storage-account>" \
-  -backend-config="container_name=vm-state" \
-  -backend-config="key=prod.tfstate" \
-  -backend-config="use_azuread_auth=true"
-
-terraform plan -out=tfplan
-terraform show -no-color tfplan
-```
-
-The deployment workflow then follows its own controlled:
+The lifecycle is therefore:
 
 ```text
-format check
-    ↓
-terraform init
-    ↓
-terraform validate
-    ↓
-terraform plan
-    ↓
-terraform apply
+workflow
+  ├─ register providers
+  ├─ create/reuse Terraform state RG + Storage Account + container
+  ├─ grant Blob Data Contributor to CI identity via ARM Authorization API
+  ├─ terraform init
+  └─ terraform plan/apply/destroy
 ```
 
-Never use `terraform apply` merely to find out whether a configuration is
-valid. `validate` and `plan` exist specifically to catch problems before an
-apply.
+If the state backend already exists, the bootstrap step simply reuses it.
+There is no recurring scheduler and no manual storage maintenance.
 
-### 8. What each Terraform command is for
-
-| Command | Purpose | Can contact Azure/state? | Can change infrastructure? |
-|---|---|---:|---:|
-| `terraform fmt` | Fix canonical formatting | No | No |
-| `terraform fmt -check` | CI formatting gate | No | No |
-| `terraform init -backend=false` | Install providers for local checks | No remote state | No |
-| `terraform validate` | Check Terraform configuration structure | Normally no | No |
-| `terraform providers` | Show provider dependency graph | No | No |
-| `terraform init` | Configure/install the real backend and providers | Yes | No |
-| `terraform plan` | Compare configuration with real state/Azure | Yes | No |
-| `terraform show tfplan` | Inspect a saved plan | No new changes | No |
-| `terraform apply` | Apply an approved plan | Yes | **Yes** |
-| `terraform destroy` | Remove managed infrastructure | Yes | **Yes — destructive** |
-
-### 9. Before pushing Terraform changes
-
-Run:
-
-```bash
-terraform fmt -recursive
-terraform fmt -check -recursive
-
-cd infra-vm
-terraform init -backend=false
-terraform validate
-terraform providers
-```
-
-Then review:
-
-```bash
-git status
-git diff
-```
-
-Make sure you are **not** about to commit:
-
-```text
-terraform.tfvars
-*.tfstate
-*.tfplan
-tfplan
-.terraform/
-crash.log
-```
-
-A clean local validation does not guarantee a successful Azure deployment, but
-it removes the avoidable Terraform syntax, formatting, and dependency errors
-before GitHub Actions spends a runner and reaches Azure.
-
-## 1. One-time Azure/GitHub bootstrap
-
-Bootstrap **only the environment you are provisioning**. The repository supports multiple deployment environments, but the bootstrap never configures all of them at once.
-
-Authenticate once on your operator machine:
-
-```bash
-az login
-gh auth login
-```
-
-Then bootstrap the exact target environment:
-
-```bash
-./scripts/bootstrap-azure-github.sh prod
-```
-
-For VM staging, use `vm-staging` instead. The script is idempotent. It creates or reuses the Azure/GitHub OIDC identity, configures only the selected GitHub Environment, creates or reuses the Terraform state backend, and grants the required `Storage Blob Data Contributor` role.
-
-You do **not** need to know or enter `ARM_CLIENT_ID`. The bootstrap discovers the Azure application itself.
-
-### One location setting
-
-`AZURE_LOCATION` is the single location setting for the environment. Newly created VM/ACA resources and newly created Terraform state resources use that same location. If the environment Variable is unset, the workflow/bootstrap default is used. Existing resources are reused in their existing Azure location and are never moved automatically.
-
-There is intentionally **no `TF_STATE_LOCATION` variable**.
-
-### What the one-time bootstrap does
-
-For the selected environment only, it:
-
-1. Registers the required Azure resource providers.
-2. Creates or reuses the Microsoft Entra application and service principal.
-3. Ensures the CI identity has the subscription-level `Contributor` role.
-4. Creates or reuses that environment's GitHub OIDC federated credential.
-5. Writes `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and `AZURE_SUBSCRIPTION_ID` only to that GitHub Environment.
-6. Creates or reuses the Terraform state resource group, Storage Account, and container.
-7. Creates newly created state resources in the same `AZURE_LOCATION` as the environment.
-8. Grants `Storage Blob Data Contributor` to the CI identity on the state Storage Account.
-
-After this, the normal GitHub **VM Infrastructure** workflow is fully automated. It only verifies the existing state RBAC and never attempts `Microsoft.Authorization/roleAssignments/write`.
-
-### Existing state
-
-The state bootstrap is discovery-first. If a compatible Terraform state Storage Account already exists, it is reused instead of creating another one. Existing state blobs and environment keys are preserved. Existing Azure resources are not moved just because `AZURE_LOCATION` changes.
-
-## VM disk snapshot backup toggle
-
-The VM stack's Azure Backup protection can be switched per GitHub Environment
-using **Variables** (not Secrets):
-
-| Variable | Values | Default |
-|---|---|---:|
-| `ENABLE_DATA_DISK_SNAPSHOTS` | `true` / `false` | `true` |
-| `SNAPSHOT_RETENTION_DAYS` | positive integer | `7` |
-
-In **Settings -> Environments -> prod (or vm-staging) -> Variables**, set for example:
-
-```text
-ENABLE_DATA_DISK_SNAPSHOTS=true
-SNAPSHOT_RETENTION_DAYS=7
-```
-
-To deactivate scheduled Azure Backup protection for that environment:
-
-```text
-ENABLE_DATA_DISK_SNAPSHOTS=false
-```
-
-The workflow passes these to Terraform as `TF_VAR_enable_data_disk_snapshots`
-and `TF_VAR_snapshot_retention_days`; no workflow edit is required. The
-Terraform variable defaults remain enabled/7 days if the GitHub Variables are
-absent, so existing deployments do not unexpectedly lose backup protection.
-
-**Important:** setting the toggle to `false` stops Terraform-managed backup
-protection; it is not a command to delete existing Azure recovery points. Do
-not use it as a data-erasure mechanism. Re-enable it before relying on future
-scheduled recovery points.
+> **Important:** `terraform destroy` intentionally does **not** destroy the
+> Terraform state resource group or Storage Account. Those are bootstrap
+> infrastructure for the lifecycle itself.
 
 ## 2. Set up Cloudflare Tunnel (no open ports, no Bastion)
 
@@ -633,50 +287,6 @@ Access application/policy that gates SSH:
   permissions directly.
 - Copy the generated token — this is `CLOUDFLARE_API_TOKEN` in step 6's
   secrets table. (Shown only once — if you lose it, create a new one.)
-
-**2b-1. Verify the token/account pair before Terraform** — a token can be
-valid and active while still being unable to access the Cloudflare account or
-Access API configured for this VM stack. The `Deploy VM Infrastructure
-(Terraform)` workflow now performs this same preflight automatically before
-Terraform tries to refresh the Cloudflare Access policies. It checks: token
-verification first, then the account-scoped Access Apps API. It never prints
-the token.
-
-From Git Bash, PowerShell, macOS/Linux, or WSL, you can run the equivalent
-checks locally with the same token/account pair (keep the token out of shell
-history where practical):
-
-```bash
-export CLOUDFLARE_API_TOKEN="<token>"
-export CLOUDFLARE_ACCOUNT_ID="<account-id>"
-
-curl -sS \
-  -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-  -H "Content-Type: application/json" \
-  "https://api.cloudflare.com/client/v4/user/tokens/verify" | jq .
-
-curl -sS \
-  -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-  -H "Content-Type: application/json" \
-  "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/access/apps" | jq .
-```
-
-The first response should report `success: true` and an active token. The
-second should also report `success: true`. If token verification succeeds but
-the Access API returns `Authentication error`, **do not touch Terraform state**
-and do not remove/re-import the Access policies. Check the GitHub Environment
-used by the workflow (`prod` or `vm-staging`) and make sure its
-`CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` belong to the same Cloudflare
-account. Also confirm the token still has **Account → Access: Apps and
-Policies → Edit**. Repository secrets and Environment secrets are separate;
-when the workflow declares `environment: prod`, a `prod` Environment secret
-can override a repository-level secret with the same name.
-
-This distinction matters because `/user/tokens/verify` proving that a token is
-active does **not** prove that it is authorized for the account-scoped Access
-API. The workflow deliberately tests both so a Cloudflare credential problem
-fails early with a clear message instead of surfacing later as Terraform's
-`error finding Access Policy ...` error.
 
 **2c. Generate an Origin CA certificate** — this is what Caddy presents
 for the inner hop from `cloudflared` to itself, instead of requesting one
@@ -844,6 +454,104 @@ is stored in the repository or required by the VM infrastructure workflow.
 > `gh auth login` + bootstrap command is the one-time local step. Once it has
 > run, Azure infrastructure provisioning and Terraform state provisioning are
 > owned by GitHub Actions.
+
+## 6.1 Configure `GH_ADMIN_TOKEN` for automatic Terraform → GitHub synchronization
+
+The VM infrastructure workflow can automatically write Terraform-generated connection and Cloudflare values back into the GitHub Environment selected for that run (`prod` or `vm-staging`). This is a **GitHub management credential**, not an Azure credential and not an SSH credential.
+
+The workflow reads it as:
+
+```yaml
+GH_TOKEN: ${{ secrets.GH_ADMIN_TOKEN }}
+```
+
+and then uses the GitHub CLI (`gh`) to update Environment secrets and variables after a successful Terraform apply. If `GH_ADMIN_TOKEN` is not configured, the Azure/Terraform deployment still succeeds, but this automatic synchronization step is skipped with a warning.
+
+GitHub recommends using the minimum permissions required for credentials. A fine-grained personal access token can be restricted to a specific repository and given repository-level `Environments: Read and write` permission. [GitHub fine-grained token permissions](https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens)
+
+### Create the token
+
+1. Open [GitHub Settings → Developer settings → Personal access tokens](https://github.com/settings/personal-access-tokens) and choose **Fine-grained personal access tokens**.
+2. Select **Generate new token**.
+3. Give it a descriptive name, for example `snipeit-vm-github-environment-sync`.
+4. Set an expiration. Prefer a limited lifetime rather than an unnecessarily long-lived credential.
+5. Under **Repository access**, select **Only select repositories** and select this repository.
+6. Under **Repository permissions**, find **Environments** and set it to **Read and write**. Do not grant broader repository permissions unless another workflow specifically requires them.
+7. Generate the token and copy it immediately. GitHub only shows the token value at creation time.
+
+> **Organization approval:** if this repository belongs to an organization that requires administrator approval for fine-grained personal access tokens, the token may need to be approved before it can access the repository. [GitHub personal access token approval policy](https://docs.github.com/en/organizations/managing-programmatic-access-to-your-organization/setting-a-personal-access-token-policy-for-your-organization)
+
+### Add it as a repository secret
+
+Add `GH_ADMIN_TOKEN` at the **repository** level, not inside `prod` or `vm-staging`.
+
+In GitHub, open:
+
+**Repository → Settings → Secrets and variables → Actions → Secrets → New repository secret**
+
+Use:
+
+| Field | Value |
+|---|---|
+| **Name** | `GH_ADMIN_TOKEN` |
+| **Secret** | The generated fine-grained PAT |
+
+GitHub Actions repository secrets are encrypted and are only exposed to workflows that explicitly reference them. [GitHub Actions secrets documentation](https://docs.github.com/en/actions/concepts/security/secrets)
+
+You can also set it from Git Bash with GitHub CLI:
+
+```bash
+gh secret set GH_ADMIN_TOKEN
+```
+
+`gh secret set` creates a repository secret by default; it also supports environment-scoped secrets with `--env`, but **do not use `--env` for `GH_ADMIN_TOKEN` here**. The VM infrastructure workflow needs the same management credential regardless of whether the run targets `prod` or `vm-staging`. [GitHub CLI `gh secret set`](https://cli.github.com/manual/gh_secret_set)
+
+### What happens after it is configured
+
+On the next successful `infra-deploy-vm.yml` run with `action=apply`, the workflow:
+
+```text
+Terraform apply
+      ↓
+Read Terraform outputs
+      ↓
+GH_ADMIN_TOKEN authenticates `gh`
+      ↓
+Update selected GitHub Environment
+      ↓
+prod or vm-staging receives the generated values
+```
+
+The workflow automatically updates values such as:
+
+- `VM_HOST`
+- `VM_SSH_USER`
+- `CF_ACCESS_CLIENT_ID`
+- `CF_ACCESS_CLIENT_SECRET`
+- `CLOUDFLARE_TUNNEL_TOKEN`
+- `VM_SSH_COMMAND`
+- `VM_SSH_COMMAND_BREAK_GLASS`
+- `VM_PUBLIC_IP`
+- `VM_AZURE_FQDN`
+- `APP_URL`
+
+The exact target is the GitHub Environment selected in the workflow dispatch input. `vm-staging` remains `vm-staging` on GitHub even though Terraform may use `staging` internally for Azure resource naming.
+
+### Verify it
+
+After a successful apply, open:
+
+**Repository → Settings → Environments → `prod` (or `vm-staging`)**
+
+Check that the generated secrets and variables have been populated. Do not print or echo secret values.
+
+If the workflow reports:
+
+```text
+GH_ADMIN_TOKEN is not configured; skipping automatic synchronization...
+```
+
+then the Azure deployment itself was not necessarily unsuccessful. Add or correct the repository secret and run `infra-deploy-vm.yml` with `action=apply` again.
 
 ## 6. Set GitHub Environment secrets/variables
 
@@ -1100,12 +808,49 @@ next invocation.
 
 ## 7. Review the Terraform plan locally (optional but recommended first time)
 
+Use this section to validate the VM Terraform code locally before allowing
+GitHub Actions to apply it. The local checks are deliberately read-only:
+`fmt`, `init`, `validate`, and `plan` do not change the VM infrastructure.
+
+### 7.1 Format check
+
+From the repository root:
+
+```bash
+terraform -chdir=infra-vm fmt -check -recursive
+```
+
+A clean result produces no formatting changes. If Terraform reports files
+that need formatting, run:
+
+```bash
+terraform -chdir=infra-vm fmt -recursive
+```
+
+Review the resulting diff before committing it.
+
+### 7.2 Authenticate to Azure
+
+```bash
+az login
+az account set --subscription "<subscription-id-or-name>"
+```
+
+Confirm that the selected subscription is the one intended for the VM
+environment:
+
+```bash
+az account show --query "{name:name,id:id,tenantId:tenantId}" -o table
+```
+
+### 7.3 Initialize the same remote state backend used by CI
+
+The GitHub Actions workflow bootstraps the Terraform state resource group,
+Storage Account, and `vm-state` container before running `terraform init`. A
+local plan can reuse that same backend after it exists.
+
 ```bash
 cd infra-vm
-az login   # if you haven't already in this shell
-# The CI workflow creates the remote backend automatically. For an optional
-# local plan, derive the same deterministic state-account name instead of
-# manually creating or looking up a storage account.
 SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
 STATE_ACCOUNT="snipeittfstate$(printf '%s' "$SUBSCRIPTION_ID" | sha256sum | cut -c1-10)"
 terraform init -input=false \
@@ -1113,8 +858,42 @@ terraform init -input=false \
   -backend-config="storage_account_name=$STATE_ACCOUNT" \
   -backend-config="container_name=vm-state" \
   -backend-config="key=prod.tfstate"
+```
 
-export TF_VAR_subscription_id="<from step 1>"
+For `vm-staging`, use the same backend but change the state key:
+
+```bash
+terraform init -input=false \
+  -backend-config="resource_group_name=rg-snipeit-tfstate" \
+  -backend-config="storage_account_name=$STATE_ACCOUNT" \
+  -backend-config="container_name=vm-state" \
+  -backend-config="key=vm-staging.tfstate"
+```
+
+If the state backend has not been bootstrapped yet, do **not** manually create
+a different backend. Run the GitHub Actions infrastructure workflow with
+`action: plan` first; it performs the supported state bootstrap.
+
+### 7.4 Validate Terraform
+
+After initialization:
+
+```bash
+terraform validate
+```
+
+This checks the Terraform configuration and provider/resource schemas without
+planning or changing infrastructure. Fix validation errors before continuing.
+
+### 7.5 Provide plan inputs
+
+Set the same values expected by the VM Terraform configuration. Do not commit
+these values to the repository. For secrets, prefer loading them from a local
+secret source or shell environment rather than placing real credentials in a
+`.tfvars` file.
+
+```bash
+export TF_VAR_subscription_id="<subscription-id>"
 export TF_VAR_ssh_public_key="$(cat ../snipeit_vm_deploy_key.pub)"
 export TF_VAR_postgres_password="<from step 4>"
 export TF_VAR_jwt_secret_key="<from step 4>"
@@ -1128,29 +907,78 @@ export TF_VAR_cloudflare_origin_cert_key="$(cat /path/to/origin-key.pem)"
 export TF_VAR_custom_domain="assets.example.com"
 export TF_VAR_dockerhub_backend_image="yourusername/snipeit-lite-backend"
 export TF_VAR_dockerhub_frontend_image="yourusername/snipeit-lite-frontend"
-
-terraform plan
 ```
 
-Read the plan. It should show ~10 Azure resources to add (resource group,
-vnet, subnet, NSG, public IP, NIC, managed disk, VM, disk attachment, plus
-the recovery vault/backup policy/protected-VM trio if
-`enable_data_disk_snapshots` is left at its default `true`) plus 8
-Cloudflare resources (the Tunnel, its ingress config, the two DNS records,
-the Access application, its two Access policies, and the CI service
-token), and nothing to change or destroy. Don't `terraform apply` locally
-for a real deployment — let `infra-deploy-vm.yml` do it (step 8), so the
-state and the run history both live in one place your whole team can see.
+### 7.6 Create and inspect the plan
+
+Run the plan with an output file so the exact reviewed plan can also be
+inspected with `terraform show`:
+
+```bash
+terraform plan -out=tfplan
+terraform show -no-color tfplan
+```
+
+For a first provisioning plan, expect the resources required by the current
+`infra-vm/` configuration to be created. The exact count can change when the
+Terraform code changes, so **do not use a fixed resource count as the success
+criterion**.
+
+Before allowing an apply, specifically check the plan for unexpected:
+
+- `-/+` replacement of the VM, managed disk, NIC, public IP, or other stateful resources
+- destruction of the Terraform state backend
+- unexpected network or NSG changes
+- changes to Cloudflare Tunnel, DNS, or Access configuration
+- removal of the managed identity or required role assignments
+- unexpected database/data-disk changes
+- resources being destroyed when you intended an update only
+
+A normal feature/configuration change should show only the resources you
+expect to change.
+
+### 7.7 Do not apply production locally
+
+The local plan is for validation and review. Do **not** run:
+
+```bash
+terraform apply tfplan
+```
+
+against the production environment as part of the normal process. Let
+`infra-deploy-vm.yml` perform the controlled GitHub Actions `plan`/`apply`,
+using the same remote state and preserving the deployment audit trail.
+
+The recommended flow is:
+
+```text
+local
+  ↓
+terraform fmt -check
+  ↓
+terraform init
+  ↓
+terraform validate
+  ↓
+terraform plan
+  ↓
+review changes
+  ↓
+commit / PR
+  ↓
+GitHub Actions: action=plan
+  ↓
+review CI plan
+  ↓
+GitHub Actions: action=apply
+```
 
 ---
 
 ## 8. Provision the VM (`infra-deploy-vm.yml`)
 
-The workflow also discovers/reuses Terraform's remote state automatically. On
-a brand-new environment, the one-time Azure-admin RBAC setup described above
-must be completed before the GitHub workflow can initialize Terraform state.
-After that, there is nothing to maintain manually for Terraform state. For
-`destroy`, the workflow
+The workflow also bootstraps Terraform's remote state automatically. There is
+nothing to create manually for Terraform state. For `destroy`, the workflow
 requires an explicit confirmation string (`DESTROY vm-staging` or `DESTROY
 prod`) before Terraform is allowed to remove the tracked VM resources; the
 separate state resource group/storage account is retained.
@@ -2404,73 +2232,3 @@ or the CI service token was rotated/deleted and `CF_ACCESS_CLIENT_ID`/
 `cloudflare_ci_service_token_id`/`_secret` Terraform outputs). Either way,
 the two break-glass options above still work regardless of Access's own
 state, since they don't go through the Tunnel at all.
-
-
-## Terraform Diagnostics for Failed Plans
-
-The Deploy VM workflow performs **small, targeted diagnostics before Terraform
-plan**. The goal is to identify a bad GitHub Environment value (especially a
-Cloudflare account/zone mismatch) without generating a huge Terraform provider
-TRACE log.
-
-For Cloudflare it checks, in order:
-
-1. The API token is active.
-2. `CLOUDFLARE_ZONE_ID` resolves successfully.
-3. The returned zone's **actual owning account ID** matches
-   `CLOUDFLARE_ACCOUNT_ID`.
-4. `CLOUDFLARE_ZONE_NAME` matches the zone returned by Cloudflare.
-5. The configured account can access Cloudflare Access.
-6. The exact Access application-policy endpoints for the two Terraform-managed
-   SSH policies can be read using the IDs currently stored in Terraform state.
-
-This is important because a token can be valid while the account ID is wrong.
-In that situation the workflow now reports something like:
-
-```text
-WRONG CLOUDFLARE_ACCOUNT_ID: configured='...', but zone 'multione.online'
-belongs to account='...'
-Update the 'prod' GitHub Environment secret CLOUDFLARE_ACCOUNT_ID to '...'.
-```
-
-Account IDs and zone IDs are safe to display as configuration diagnostics. The
-API token itself is **never printed**; the diagnostic may show only a short
-SHA-256 fingerprint so you can tell whether two environments are using the
-same/different token without exposing the token.
-
-### Failure artifact
-
-A failed run uploads a short-lived artifact named
-`terraform-deployment-failure-<run-id>`. Start with:
-
-- `terraform-error-summary.txt` — the useful Terraform errors and final output.
-- `cloudflare-preflight.log` — token/account/zone checks and the exact mismatch,
-  when one exists.
-- `cloudflare-policy-probe.log` — results for the exact Access policy endpoints.
-- `terraform-cloudflare-state-summary.txt` — the account/application/policy IDs
-  currently in Terraform state.
-- `terraform-error-summary.txt` — the relevant Terraform error lines plus the
-  final 120 lines of normal Terraform output. The full plan output is not uploaded
-  unless you deliberately add it for a one-off investigation.
-
-Terraform provider TRACE logging is **not enabled by default anymore**. It was
-producing very large artifacts that were usually much less useful than the
-configuration and API preflight checks above. If a future provider-specific
-bug cannot be diagnosed with these targeted checks, TRACE can be re-enabled as
-a deliberate temporary debugging change rather than being generated on every
-failed plan.
-
-### What to do when the diagnostic reports a wrong value
-
-Fix the corresponding GitHub Environment secret/variable and rerun the
-workflow. Do **not** delete/recreate Cloudflare Access policies or manipulate
-Terraform state merely because the provider reports error `1010`.
-
-For example, if the zone lookup says `multione.online` belongs to account
-`6270aa4a...` but the workflow is configured with a different account ID,
-update `CLOUDFLARE_ACCOUNT_ID` in the selected GitHub Environment to the account
-ID returned by the zone lookup. The workflow will then verify Access before
-Terraform is invoked.
-
-The diagnostics are failure-focused and do not modify Terraform state or
-Cloudflare resources.

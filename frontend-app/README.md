@@ -60,7 +60,7 @@ behavior.
 `vite.config.ts` proxies `/api/*` to `http://localhost:8000` by default, so `npm run
 dev` talks to a locally running `uvicorn main:app` (or `docker compose up backend`)
 with zero config. Point it elsewhere with `VITE_DEV_API_PROXY_TARGET`, or bypass the
-proxy entirely with `VITE_API_BASE_URL` in `.env.local` (see `.env.local.example`).
+proxy entirely with `VITE_API_BASE_URL` in `.env.local`.
 
 ## Connecting to the real backend
 

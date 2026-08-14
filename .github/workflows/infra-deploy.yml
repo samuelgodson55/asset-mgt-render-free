@@ -66,6 +66,14 @@ permissions:
   id-token: write # required for OIDC federated login (azure/login) -- no client secret stored anywhere
   contents: read
 
+# All ACA mutations for a target share one lock. Infrastructure, application
+# rollout, secret sync, and manual revision cleanup must never modify the same
+# Container Apps concurrently because each operation can create revisions or
+# change ingress traffic.
+concurrency:
+  group: aca-${{ github.event.inputs.target || 'production' }}
+  cancel-in-progress: false
+
 jobs:
   deploy-infra:
     if: ${{ github.event.inputs.action != 'destroy' }}
@@ -349,42 +357,83 @@ jobs:
             echo "::notice::No existing managed certificate found for '${{ vars.CUSTOM_DOMAIN }}' yet -- frontend will deploy on its default *.azurecontainerapps.io FQDN this run. Provision the certificate for this domain (Portal 'Add custom domain' wizard, or 'az containerapp env certificate create' / 'hostname bind'), then re-run this workflow to bind it going forward."
           fi
 
-      # BLUE-GREEN SAFETY: this workflow is infrastructure/configuration
-      # management, not an application release. Container Apps in Multiple
-      # revision mode use ingress traffic as application-scope state. A full
-      # Bicep PUT currently contains the baseline `latestRevision: true`
-      # traffic rule, which can overwrite the explicit revision pin created
-      # by aca-blue-green.sh. Snapshot the live routing BEFORE Bicep and
-      # restore it immediately AFTER. This means an infra refresh cannot
-      # silently move production traffic to an infra-created revision or
-      # leave the next blue-green deploy with the wrong "active" revision.
-      - name: Snapshot current ACA traffic before infra deployment
-        if: ${{ github.event.inputs.action == 'apply' }}
+      # BLUE-GREEN SAFETY: infrastructure is not an application release.
+      # Container Apps ingress traffic is application-scope state, so Bicep
+      # receives the exact traffic topology that existed immediately before
+      # this run. Any legacy `latestRevision: true` rule is first resolved to
+      # the concrete revision that is actually carrying traffic. Bicep
+      # therefore cannot redirect production to the revision it creates.
+      - name: Snapshot and normalize current ACA traffic
+        if: ${{ github.event.inputs.action == 'plan' || github.event.inputs.action == 'apply' }}
         id: traffic_before
         run: |
+          set -euo pipefail
           mkdir -p "$RUNNER_TEMP/aca-traffic"
+
           for APP in backend frontend; do
+            RAW="$RUNNER_TEMP/aca-traffic/${APP}-raw.json"
+            EFFECTIVE="$RUNNER_TEMP/aca-traffic/${APP}.json"
+
+            if ! az containerapp show --name "$APP" --resource-group "$RESOURCE_GROUP" \
+                --query "name" -o tsv >/dev/null 2>&1; then
+              echo '[{"latestRevision":true,"weight":100}]' > "$EFFECTIVE"
+              echo "${APP}_live_revision=" >> "$GITHUB_OUTPUT"
+              : > "$RUNNER_TEMP/aca-traffic/${APP}-active-before.txt"
+              echo "No existing $APP Container App -- using the first-deployment 100%-to-latest traffic default."
+              continue
+            fi
+
             az containerapp show --name "$APP" --resource-group "$RESOURCE_GROUP" \
-              --query "properties.configuration.ingress.traffic" -o json \
-              > "$RUNNER_TEMP/aca-traffic/${APP}.json" 2>/dev/null || echo '[]' > "$RUNNER_TEMP/aca-traffic/${APP}.json"
+              --query "properties.configuration.ingress.traffic" -o json > "$RAW"
 
             LIVE_REV=$(az containerapp show --name "$APP" --resource-group "$RESOURCE_GROUP" \
               --query "properties.configuration.ingress.traffic[?revisionName && weight > \`0\`].revisionName | [0]" \
               -o tsv 2>/dev/null || true)
 
+            # `latestRevision: true` is dangerous during a Bicep PUT because
+            # the newest revision may be the one Bicep just created. Resolve
+            # it to the revision that is actually live before passing traffic
+            # to Bicep.
+            if jq -e 'any(.[]; .latestRevision == true and ((.weight // 0) > 0))' "$RAW" >/dev/null; then
+              if [ -z "$LIVE_REV" ]; then
+                echo "::error::$APP uses latestRevision traffic but no concrete traffic-bearing revision could be resolved. Refusing to run Bicep because traffic ownership cannot be preserved safely."
+                exit 1
+              fi
+
+              jq --arg live "$LIVE_REV" '
+                map(if .latestRevision == true
+                    then (. + {revisionName: $live} | del(.latestRevision))
+                    else .
+                    end)
+              ' "$RAW" > "$EFFECTIVE"
+            else
+              cp "$RAW" "$EFFECTIVE"
+            fi
+
             if [ -z "$LIVE_REV" ]; then
-              LIVE_REV=$(az containerapp revision list --name "$APP" --resource-group "$RESOURCE_GROUP" \
-                --query "sort_by([?properties.active], &properties.createdTime)[-1].name" \
-                -o tsv 2>/dev/null || true)
+              LIVE_REV=$(jq -r '[.[] | select(.revisionName != null and (.weight // 0) > 0) | .revisionName][0] // empty' "$EFFECTIVE")
             fi
 
             az containerapp revision list --name "$APP" --resource-group "$RESOURCE_GROUP" \
               --query "[?properties.active].name" -o tsv 2>/dev/null \
               > "$RUNNER_TEMP/aca-traffic/${APP}-active-before.txt" || true
 
-            echo "${APP}_live_revision=${LIVE_REV}" >> "$GITHUB_OUTPUT"
-            echo "${APP}: preserving live revision '${LIVE_REV:-<none>}'"
-            cat "$RUNNER_TEMP/aca-traffic/${APP}.json"
+            echo "${APP}_live_revision=${LIVE_REV:-}" >> "$GITHUB_OUTPUT"
+            echo "$APP effective traffic passed to Bicep:"
+            cat "$EFFECTIVE"
+          done
+
+          # Existing apps must have a known routing state. First provisioning
+          # has no app to snapshot, so the Bicep parameter defaults provide
+          # the initial 100%-to-latest rule.
+          for APP in backend frontend; do
+            if az containerapp show --name "$APP" --resource-group "$RESOURCE_GROUP" \
+                --query "name" -o tsv >/dev/null 2>&1; then
+              if ! jq -e 'length > 0' "$RUNNER_TEMP/aca-traffic/${APP}.json" >/dev/null; then
+                echo "::error::Existing $APP has no usable ingress traffic configuration. Refusing to refresh infrastructure without a known routing state."
+                exit 1
+              fi
+            fi
           done
 
       - name: Bicep What-If plan and GitHub Summary
@@ -409,6 +458,8 @@ jobs:
               initialImageTag="latest" \
               initialBackendImageTag="${{ steps.current.outputs.backend_tag }}" \
               initialFrontendImageTag="${{ steps.current.outputs.frontend_tag }}" \
+              backendTraffic="$(cat "$RUNNER_TEMP/aca-traffic/backend.json")" \
+              frontendTraffic="$(cat "$RUNNER_TEMP/aca-traffic/frontend.json")" \
               dockerHubUsername="${{ secrets.DOCKERHUB_USERNAME }}" \
               dockerHubToken="${{ secrets.DOCKERHUB_TOKEN }}" \
               backendMinReplicas=${{ steps.replicas.outputs.backend_min }} \
@@ -546,6 +597,8 @@ jobs:
               initialImageTag="latest" \
               initialBackendImageTag="${{ steps.current.outputs.backend_tag }}" \
               initialFrontendImageTag="${{ steps.current.outputs.frontend_tag }}" \
+              backendTraffic="$(cat "$RUNNER_TEMP/aca-traffic/backend.json")" \
+              frontendTraffic="$(cat "$RUNNER_TEMP/aca-traffic/frontend.json")" \
               dockerHubUsername="${{ secrets.DOCKERHUB_USERNAME }}" \
               dockerHubToken="${{ secrets.DOCKERHUB_TOKEN }}" \
               backendMinReplicas=${{ steps.replicas.outputs.backend_min }} \
@@ -658,6 +711,8 @@ jobs:
               initialImageTag="latest" \
               initialBackendImageTag="${{ steps.current.outputs.backend_tag }}" \
               initialFrontendImageTag="${{ steps.current.outputs.frontend_tag }}" \
+              backendTraffic="$(cat "$RUNNER_TEMP/aca-traffic/backend.json")" \
+              frontendTraffic="$(cat "$RUNNER_TEMP/aca-traffic/frontend.json")" \
               dockerHubUsername="${{ secrets.DOCKERHUB_USERNAME }}" \
               dockerHubToken="${{ secrets.DOCKERHUB_TOKEN }}" \
               backendMinReplicas=${{ steps.replicas.outputs.backend_min }} \
@@ -718,72 +773,73 @@ jobs:
               otelTracesSampleRatio="${{ vars.OTEL_TRACES_SAMPLE_RATIO || '1.0' }}" \
               otelAzureMonitorEnabled=${{ vars.OTEL_AZURE_MONITOR_ENABLED == 'true' }}
 
-      # Restore the exact pre-infra traffic target. If the snapshot used
-      # explicit revision weights (the normal blue-green production state),
-      # restore those weights. If it used latestRevision=true (first-ever
-      # deployment / legacy state), restore the exact revision that was live
-      # before Bicep rather than blindly keeping whatever Bicep made newest.
-      # This is intentionally done AFTER Bicep has completed and before this
-      # workflow exits, so the subsequent Deploy to ACA starts from the same
-      # known-good traffic topology it had before the infra refresh.
-      - name: Restore ACA traffic after infra deployment
-        if: always()
+      # Bicep was given the exact pre-infra traffic topology, so there is no
+      # post-deployment traffic flip. Verify the invariant instead.
+      - name: Verify ACA traffic was preserved
+        if: ${{ github.event.inputs.action == 'apply' }}
         run: |
-          restore_traffic() {
-            local app="$1" snapshot="$RUNNER_TEMP/aca-traffic/${1}.json" fallback_rev="$2"
-            [ -f "$snapshot" ] || { echo "::warning::No traffic snapshot for $app; leaving Azure's current routing unchanged."; return 0; }
+          set -euo pipefail
+          for APP in backend frontend; do
+            EXPECTED="$RUNNER_TEMP/aca-traffic/${APP}.json"
+            ACTUAL="$RUNNER_TEMP/aca-traffic/${APP}-after.json"
 
-            mapfile -t weights < <(jq -r '.[] | select(.revisionName != null and (.weight // 0) > 0) | "\(.revisionName)=\(.weight)"' "$snapshot")
-            if [ "${#weights[@]}" -gt 0 ]; then
-              echo "Restoring explicit traffic for $app: ${weights[*]}"
-              local args=()
-              for weight in "${weights[@]}"; do
-                args+=(--revision-weight "$weight")
-              done
-              az containerapp ingress traffic set --name "$app" --resource-group "$RESOURCE_GROUP" "${args[@]}"
-              return $?
+            # First provisioning has no app to verify.
+            if ! az containerapp show --name "$APP" --resource-group "$RESOURCE_GROUP" \
+                --query "name" -o tsv >/dev/null 2>&1; then
+              continue
             fi
 
-            if [ -n "$fallback_rev" ]; then
-              echo "Restoring $app to its pre-infra live revision: $fallback_rev (100%)"
-              az containerapp ingress traffic set --name "$app" --resource-group "$RESOURCE_GROUP" \
-                --revision-weight "${fallback_rev}=100"
-              return $?
+            az containerapp show --name "$APP" --resource-group "$RESOURCE_GROUP" \
+              --query "properties.configuration.ingress.traffic" -o json > "$ACTUAL"
+
+            EXPECTED_JSON=$(cat "$EXPECTED")
+            ACTUAL_JSON=$(cat "$ACTUAL")
+
+            if ! jq -n --argjson expected "$EXPECTED_JSON" --argjson actual "$ACTUAL_JSON" '
+              def normalized:
+                map({
+                  revisionName: (.revisionName // null),
+                  latestRevision: (.latestRevision // false),
+                  weight: (.weight // 0)
+                }) | sort_by((.revisionName // ""), (.latestRevision|tostring), .weight);
+              ($expected | normalized) == ($actual | normalized)
+            '; then
+              echo "::error::$APP ingress traffic changed unexpectedly during infrastructure deployment."
+              echo "Expected:"
+              cat "$EXPECTED"
+              echo "Actual:"
+              cat "$ACTUAL"
+              exit 1
             fi
+            echo "$APP ingress traffic preserved."
+          done
 
-            echo "$app had no established traffic target before infra deployment (first provisioning); leaving the baseline routing in place."
-          }
-
-          restore_traffic backend "${{ steps.traffic_before.outputs.backend_live_revision }}"
-          restore_traffic frontend "${{ steps.traffic_before.outputs.frontend_live_revision }}"
-
-      # Bicep can legitimately create a revision when a value under
-      # `properties.template` changes. That revision is NOT the application
-      # release; Deploy to ACA owns application revisions. Once the original
-      # traffic target is restored, any NEW infra-only revision with 0% traffic
-      # is safe to deactivate. This prevents an infra refresh immediately
-      # followed by an ACA deploy from leaving a third active slot around,
-      # while still allowing the next ACA deployment to inherit the latest
-      # template/secrets state. Never touch a revision that existed before
-      # this infra run, and never touch anything carrying traffic.
+      # An infra refresh can create a revision because a value under
+      # `properties.template` changed. It is not an application release and
+      # has 0% traffic because Bicep preserved the pre-run routing. Deactivate
+      # only revisions that did not exist before this run and carry no traffic.
       - name: Deactivate infra-only zero-traffic revisions
-        if: ${{ success() }}
+        if: ${{ github.event.inputs.action == 'apply' }}
         run: |
+          set -euo pipefail
           cleanup_new_zero_traffic() {
             local app="$1"
             local before="$RUNNER_TEMP/aca-traffic/${app}-active-before.txt"
-            [ -f "$before" ] || return 0
 
-            mapfile -t new_zero < <(az containerapp revision list --name "$app" --resource-group "$RESOURCE_GROUP" \
-              --query "[?properties.active && properties.trafficWeight == \`0\`].name" -o tsv)
+            mapfile -t new_zero < <(
+              az containerapp revision list --name "$app" --resource-group "$RESOURCE_GROUP" \
+                --query "[?properties.active && properties.trafficWeight == \`0\`].name" -o tsv
+            )
 
             for rev in "${new_zero[@]}"; do
               [ -z "$rev" ] && continue
-              if grep -Fxq "$rev" "$before"; then
+              if grep -Fxq "$rev" "$before" 2>/dev/null; then
                 continue
               fi
+
               echo "Deactivating infra-created zero-traffic revision $app/$rev"
-              az containerapp revision deactivate --name "$app" --resource-group "$RESOURCE_GROUP" --revision "$rev" || \
+              az containerapp revision deactivate \
+                --name "$app" --resource-group "$RESOURCE_GROUP" --revision "$rev" || \
                 echo "::warning::Could not deactivate infra-created revision $app/$rev; it remains at 0% traffic."
             done
           }

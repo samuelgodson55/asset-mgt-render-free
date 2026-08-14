@@ -48,7 +48,7 @@ summarizes.
 | Traffic steps | 10% → 25% → 50% → 75% → 100% (production) / straight to 100% (staging, scale-to-zero) | 10% → 25% → 50% → 75% → 100%, then a same-image handoff back to green (see below) |
 | Rollback | Instant traffic-weight flip back to the still-active green revision | Instant Caddy reweight back to the still-active green slot |
 | Live status (deployment's own view) | `bash .github/scripts/aca-blue-green.sh status <app> <rg> --watch`, or `https://<domain>/_deploy/` (dashboard shell baked into `frontend`'s image, data proxied live from Blob Storage) | `https://<domain>/_deploy/` (dashboard, served by Caddy from local disk) |
-| Zero-downtime evidence (client's-eye view) | `scripts/poll-live-endpoint.sh` against the public frontend FQDN, backgrounded on the runner for the whole rollout | `scripts/poll-live-endpoint.sh` against `https://<domain>/`, backgrounded on the runner for the whole rollout |
+| Zero-downtime evidence (client's-eye view) | The deploy workflow starts its live-endpoint polling step against the public frontend FQDN | The deploy workflow starts its live-endpoint polling step against `https://<domain>/` |
 
 ---
 
@@ -199,7 +199,7 @@ stopped only after both slots are spun down — so every deploy produces a
 timestamped CSV of every request the live domain answered (or didn't)
 for the full rollout window, uploaded as the `zero-downtime-poll-evidence-*`
 workflow artifact. A `FAIL`/`ERROR` row anywhere in that CSV fails the job
-even if every internal health gate passed — see `scripts/poll-live-endpoint.sh`'s
+even if every internal health gate passed — see the live-endpoint polling step in the deploy workflow's
 own header comment for why that's a meaningfully different check than the
 platform's own readiness probes.
 
@@ -334,7 +334,7 @@ Like the ACA path, this dashboard is the **deployment's own view** — the
 rollout script's phase and each health check it ran against the slot
 directly. It's not proof a real client-facing request was uninterrupted
 while `blue-green-deploy.sh` was actually ramping Caddy's weights. That's
-what `scripts/poll-live-endpoint.sh` is for:
+what the live-endpoint polling step in the deploy workflow is for:
 
 ```bash
 scripts/poll-live-endpoint.sh --url https://<domain>/

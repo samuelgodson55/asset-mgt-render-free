@@ -528,7 +528,7 @@ resource "azurerm_linux_virtual_machine" "this" {
   lifecycle {
     precondition {
       condition     = length(local.rendered_vm_cloud_init_base64gzip) <= 87380
-      error_message = "Rendered VM cloud-init custom_data is ${length(local.rendered_vm_cloud_init_base64gzip)} Base64 characters; Azure allows at most 87,380. Reduce the embedded first-boot payload before deploying."
+      error_message = "Rendered VM cloud-init custom_data is ${nonsensitive(length(local.rendered_vm_cloud_init_base64gzip))} Base64 characters; Azure allows at most 87,380. Reduce the embedded first-boot payload before deploying."
     }
 
     ignore_changes = [
