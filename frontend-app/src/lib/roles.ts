@@ -28,9 +28,9 @@ export function isPrivileged(role: string | undefined | null): boolean {
 }
 
 // Mirrors services/user_service.py's MANAGER_PROVISIONABLE_ROLES: a
-// Manager may create a new login, edit an existing one, or revoke one
-// (convert-to-outsider) for a "staff" or "customer" account ONLY -- never
-// for another Manager, an Admin, or the Super Admin. A Super Admin/Admin
+// Manager may create/edit/revoke only Staff/Customer accounts and may only
+// switch their role within that Staff/Customer boundary. Admin/Super Admin
+// can manage any non-root account and assign Manager/Admin privileges. A Super Admin/Admin
 // has no such restriction and can act on any account (see deps.py's
 // require_privileged_role for the create/edit/revoke routes themselves,
 // and update_user()/convert_user_to_outsider()'s own extra per-row check

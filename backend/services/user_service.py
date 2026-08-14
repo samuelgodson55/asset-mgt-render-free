@@ -204,20 +204,23 @@ def create_user(db: Session, req: UserCreateRequest, user: dict) -> dict:
 
 def update_user(db: Session, user_id: int, req: UserUpdateRequest, user: dict) -> dict:
     """
-    Edits an existing account's identity details (name, username, email).
+    Edits an existing account's identity details and RBAC role.
     Distinct from create_user() (provisioning a brand-new login) and
     reset_user_password() (credential recovery) -- this never touches
-    role, department, or password_hash.
+    password_hash.
 
     PERMISSIONS:
       - A Super Admin/Admin (see deps.py's require_privileged_role, which
         the route sits behind) may edit ANY account, including other
         Admins and Managers.
-      - A Manager may only edit "staff" or "customer" accounts -- the same
-        MANAGER_PROVISIONABLE_ROLES boundary create_user() already
-        enforces when PROVISIONING a new login applies equally here when
-        EDITING an existing one, so a Manager can never touch a Manager or
-        Admin account's details, even via a raw API call.
+      - A Manager may only edit "staff" or "customer" accounts, and may
+        only change their role between those two roles.
+      - An Admin may edit any non-root account and may promote/demote it
+        among Staff, Manager, Admin, and Customer.
+      - The root Super Admin is never editable through this route and the
+        "super_admin" role can never be assigned to another account.
+      - No caller can use this endpoint to change another account into the
+        hidden root identity or to create a second Super Admin.
 
     Only the fields actually present on the request are touched (Pydantic
     `exclude_unset`) -- omitting a field leaves it exactly as it was rather
@@ -263,6 +266,29 @@ def update_user(db: Session, user_id: int, req: UserUpdateRequest, user: dict) -
             raise HTTPException(status_code=400, detail="That username is already taken.")
         target.username = candidate
 
+    if "role" in updates and updates["role"] != target.role:
+        if str(target.id) == str(user.get("sub")):
+            raise HTTPException(
+                status_code=400,
+                detail="You cannot change your own RBAC role. Ask another authorized Admin to make that change.",
+            )
+        requested_role = updates["role"].strip().lower()
+        if requested_role == SUPER_ADMIN_ROLE:
+            raise HTTPException(
+                status_code=400,
+                detail="The 'super_admin' role is reserved for the hardcoded root account and cannot be assigned.",
+            )
+        if requested_role not in {"staff", "manager", "admin", "customer"}:
+            raise HTTPException(status_code=400, detail="Invalid user role.")
+        if user["role"] == "manager" and requested_role not in MANAGER_PROVISIONABLE_ROLES:
+            raise HTTPException(
+                status_code=403,
+                detail="Managers may only assign Staff or Customer roles.",
+            )
+        target.role = requested_role
+        if requested_role == "customer":
+            target.department = None
+
     if "name" in updates:
         target.name = updates["name"]
 
@@ -274,14 +300,16 @@ def update_user(db: Session, user_id: int, req: UserUpdateRequest, user: dict) -
 
     db.add(models.AuditLog(
         operator=user["email"], action="USER_UPDATED", target_type="User", target_id=target.id,
-        details=f"Updated account details for {target.name}.",
+        details=f"Updated account details for {target.name}." + (
+            f" Role changed to {target.role}." if "role" in updates else ""
+        ),
     ))
     db.commit()
     db.refresh(target)
     return {
         "message": f"User {target.name} updated successfully.",
         "id": target.id, "name": target.name, "username": target.username, "email": target.email,
-        "phone_number": target.phone_number, "company": target.company,
+        "phone_number": target.phone_number, "company": target.company, "role": target.role,
     }
 
 

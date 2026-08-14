@@ -102,3 +102,45 @@ def test_super_admin_can_view_backup_status_and_list(as_super_admin):
 
     listing = client.get("/api/backup/list", headers=headers)
     assert listing.status_code == 200
+
+
+def test_admin_can_change_user_rbac_role(client, as_admin, db_session):
+    """Admin can promote/demote non-root accounts among normal RBAC roles."""
+    _, headers = as_admin
+    from models import User
+
+    target = db_session.query(User).filter(User.role == "staff", User.email != "r.adeyemi@corp.io").first()
+    assert target is not None
+
+    response = client.patch(f"/api/users/{target.id}", headers=headers, json={"role": "manager"})
+    assert response.status_code == 200, response.text
+    db_session.expire_all()
+    assert db_session.get(User, target.id).role == "manager"
+
+    response = client.patch(f"/api/users/{target.id}", headers=headers, json={"role": "admin"})
+    assert response.status_code == 200, response.text
+    db_session.expire_all()
+    assert db_session.get(User, target.id).role == "admin"
+
+
+def test_admin_cannot_grant_super_admin_role(client, as_admin, db_session):
+    """The hardcoded root Super Admin role remains non-assignable."""
+    _, headers = as_admin
+    from models import User
+
+    target = db_session.query(User).filter(User.role == "staff").first()
+    assert target is not None
+    response = client.patch(f"/api/users/{target.id}", headers=headers, json={"role": "super_admin"})
+    assert response.status_code == 400
+
+
+def test_manager_cannot_promote_staff_to_manager_or_admin(client, as_manager, db_session):
+    """Managers stay capped at Staff/Customer even when calling the API directly."""
+    _, headers = as_manager
+    from models import User
+
+    target = db_session.query(User).filter(User.role == "staff").first()
+    assert target is not None
+    for role in ("manager", "admin"):
+        response = client.patch(f"/api/users/{target.id}", headers=headers, json={"role": role})
+        assert response.status_code == 403, response.text

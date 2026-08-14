@@ -13,6 +13,7 @@ import { CreatePoolModal } from "../components/CreatePoolModal";
 import { AssetExportModal } from "../components/AssetExportModal";
 import { PaginationBar, RowsPerPageSelect } from "../components/PaginationBar";
 import { DEFAULT_PAGE_SIZE } from "../lib/pagination";
+import { readAssetSearchParams } from "../lib/assetSearchParams";
 
 const STATUS_TABS: { key: "all" | AssetType["status"]; label: string }[] = [
   { key: "all", label: "Any status" },
@@ -52,6 +53,22 @@ export function Assets() {
   );
   const [categories, setCategories] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
+
+  // The global header search can navigate to /assets with a new ?search=
+  // value while this page is already mounted. In that case React Router
+  // updates the URL but does not remount Assets, so the old local search
+  // would otherwise remain visible and keep filtering the previous query.
+  // Keep the page filters synchronized with URL changes from either source:
+  // the local controls or the global header search.
+  useEffect(() => {
+    const { search: nextSearch, category: nextCategory, status: nextStatus } =
+      readAssetSearchParams(searchParams);
+
+    setSearch((current) => (current === nextSearch ? current : nextSearch));
+    setCategory((current) => (current === nextCategory ? current : nextCategory));
+    setStatus((current) => (current === nextStatus ? current : nextStatus));
+    setOffset(0);
+  }, [searchParams]);
 
   const [selected, setSelected] = useState<{ id: number; name: string } | null>(null);
   const [dispatching, setDispatching] = useState<{ id: number; name: string; available_quantity: number } | null>(null);

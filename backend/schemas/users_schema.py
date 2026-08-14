@@ -30,9 +30,9 @@ class UserCreateRequest(BaseModel):
 class UserUpdateRequest(BaseModel):
     """
     Body for PATCH /users/{user_id} -- edits an existing account's basic
-    identity details (name, username, email). Distinct from
-    UserCreateRequest (provisioning) and UserPasswordResetRequest
-    (credential recovery): this never touches role, department, or
+    identity details (name, username, email) and, when authorized, the RBAC
+    role. Distinct from UserCreateRequest (provisioning) and
+    UserPasswordResetRequest (credential recovery): this never touches
     password_hash.
 
     Every field is optional so a caller only needs to send the ones that
@@ -46,6 +46,7 @@ class UserUpdateRequest(BaseModel):
     email: Optional[str] = None
     phone_number: Optional[str] = None
     company: Optional[str] = None
+    role: Optional[str] = None
 
     # A field that IS present must not be an empty/whitespace-only string --
     # that would silently blank out someone's name/username/email, which is
@@ -60,6 +61,17 @@ class UserUpdateRequest(BaseModel):
 
     # phone_number/company ARE nullable -- an explicit empty string clears
     # them, same as OutsiderUpdateRequest's email/phone_number/company.
+    @field_validator("role")
+    @classmethod
+    def _validate_role(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        normalized = value.strip().lower()
+        allowed = {"staff", "manager", "admin", "customer"}
+        if normalized not in allowed:
+            raise ValueError("Invalid role. Choose Staff, Manager, Admin, or Customer.")
+        return normalized
+
     @field_validator("phone_number", "company")
     @classmethod
     def _strip_phone(cls, value: Optional[str]) -> Optional[str]:

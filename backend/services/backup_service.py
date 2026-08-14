@@ -834,167 +834,148 @@ def _detect_schema_revision(conn) -> str:
 
 
 def _reconcile_post_restore_credentials(engine, pre_restore_users: list) -> dict:
-    """
-    ENTERPRISE HARDENING -- credential (and account) continuity across a
-    restore. Runs once, right after the restored schema is confirmed fully
-    at head (see this function's caller), against `pre_restore_users`: the
-    snapshot of every account's FULL pre-restore `users` row, captured by
-    _restore_backup_impl() while the live database was still intact,
-    before the destructive DROP SCHEMA below it ever ran.
+    """Preserve current user identities/credentials across a database restore.
 
-    Matches by lower(email) -- the same unique key models.User.email
-    already enforces -- against whatever `users` rows the restore just
-    brought back, and handles three distinct cases:
+    Email is the primary identity key, case-insensitively.  When the same
+    email exists before and after the restore, the CURRENT account wins for
+    every mutable profile field, including name, username, role and password.
+    Names are deliberately never used as an identity key: a renamed person is
+    still the same account when their email is unchanged.
 
-    1. DUPLICATES (matched in both): the account existed both before and
-       after the restore. The entire pre-restore profile wins here, not
-       just the password -- every column (name, phone, username, role,
-       department, is_active/is_verified flags, etc.) is overwritten with
-       the pre-restore snapshot's values, keeping the restored row's own
-       `id` intact (foreign keys like AssetCheckout.user_id already point
-       at it, so the id itself must never move for a row that already
-       existed post-restore). This is "most current profile used": the
-       person's CURRENT password is the one they actually know and can
-       use right now, and reverting ANY of their profile (not just the
-       password) to whatever was live back when the backup was taken
-       would be a silent, unannounced regression for anyone who's updated
-       it since.
+    Username collisions are handled as a separate reconciliation problem.
+    A backup may contain a different account occupying a username that belongs
+    to a current account.  Before applying current usernames we temporarily
+    move those backup-only occupants to generated collision-safe usernames,
+    and temporarily clear usernames on matched rows.  This also handles
+    username swaps (A currently owns B's old username and vice versa) without
+    ever violating the unique users.username constraint.
 
-    2. BUG FIX -- MISSING-FROM-RESTORE (existed pre-restore, absent from
-       the restored backup entirely): previously silently dropped ("has
-       nothing to reconcile" -- wrong). This is exactly the case of a
-       user created/invited AFTER the backup was taken: their current
-       password was snapshotted, but there was never a row for them in
-       the restored backup to overwrite, so the account simply vanished
-       post-restore even though its credentials were "preserved". Fixed
-       by re-inserting the full pre-restore snapshot as a new row,
-       verbatim, preserving its original `id` when that id is not already
-       taken by a genuinely different account the restore brought back
-       (id continuity matters here too). If the id DOES collide with an
-       unrelated restored row, the row is still re-inserted -- just
-       letting Postgres assign it a fresh id instead of forcing the
-       collision -- so the account is never dropped outright merely
-       because of an id clash. Either way, the `users_id_seq` sequence is
-       bumped past whatever id ends up used, so the very next INSERT
-       elsewhere in the app can't turn around and collide with it.
-
-    3. RESTORE-ONLY (present in the restored backup, absent from the
-       pre-restore snapshot): the account was deleted (or the whole
-       `users` table didn't exist yet) before this restore ran. Left
-       completely unchanged -- the restored backup's own data for it is
-       all there is, and "restore to an earlier point in time"
-       legitimately bringing back a since-deleted account is expected,
-       not a bug.
-
-    Every matched account (case 1) whose role is SUPER_ADMIN_ROLE,
-    additionally: clears `totp_secret_encrypted` / sets
-    `totp_enabled = false`, and deletes every row in `recovery_codes` for
-    that account. This is the opposite of case 1's "keep the current
-    value" -- here we NEVER trust whatever the restored backup says about
-    MFA, even if it looks superficially fine, because a TOTP secret is
-    only useful if the Super Admin's CURRENT authenticator app can still
-    produce matching codes for it, and a restored backup has no way to
-    know whether that's still true. Forcing fresh enrollment is a normal,
-    guided next-login step (see services/auth_service.py's login()'s
-    `mfa_setup_required` path); silently inheriting a secret that might
-    not work anymore is a trap. This is paired with the caller bumping
-    AUTH_EPOCH_SETTING_KEY (see restore_backup()) to force that next
-    login to actually happen -- and thanks to case 1 above, the
-    password/profile it happens with is always the current one, never
-    the backup's. A re-inserted missing-from-restore account (case 2)
-    that happens to be a Super Admin gets the same MFA-clearing
-    treatment, for the identical reason.
-
-    Returns a small JSON-safe summary (counts only, no credentials) that
-    restore_backup() surfaces to the caller so an Admin doing the restore
-    can see this happened, and writes ONE audit-log row (operator
-    "system:restore") documenting the same for the permanent record.
+    Accounts that existed before the restore but are absent from the backup
+    are reinserted.  Restore-only accounts remain untouched unless they own a
+    username required by a preserved current account; in that case only their
+    username is changed to a generated unique value so the current identity
+    can be restored safely.
     """
     from sqlalchemy import text as sa_text
     from security import SUPER_ADMIN_ROLE
 
     if not pre_restore_users:
-        return {"users_reconciled": 0, "users_reinserted": 0, "super_admins_reset": 0, "preserved_user_ids": []}
+        return {
+            "users_reconciled": 0, "users_reinserted": 0,
+            "super_admins_reset": 0, "preserved_user_ids": [],
+            "username_conflicts_resolved": 0,
+        }
 
-    # Every column on the `users` table a pre-restore snapshot might carry
-    # and that this function is willing to write back. Excludes `id`
-    # (handled separately -- an identity, not a profile field to
-    # overwrite) and `email` (that's the join key itself).
     PROFILE_COLUMNS = [
-        "name", "phone_number", "username", "role", "password_hash",
-        "is_verified", "is_active", "failed_login_attempts", "locked_until",
+        "name", "phone_number", "role", "password_hash", "is_verified",
+        "is_active", "failed_login_attempts", "locked_until",
         "totp_secret_encrypted", "totp_enabled", "is_deleted", "deleted_at",
         "purged_at", "department", "department_role", "converted_to_outsider_id",
     ]
 
-    by_email = {u["email_lc"]: u for u in pre_restore_users if u.get("email_lc")}
+    def email_lc(snapshot: dict) -> Optional[str]:
+        value = snapshot.get("email_lc") or snapshot.get("email")
+        return value.strip().lower() if value else None
 
+    by_email = {email_lc(u): u for u in pre_restore_users if email_lc(u)}
     users_reconciled = 0
     users_reinserted = 0
-    super_admins_reset = []  # emails, for the audit log detail string only
-    reinserted_emails = []
-    # Every account this function is guaranteeing continuity for -- case 1
-    # (matched) keeps its existing id, case 2 (reinserted) gets a (usually
-    # original) id assigned above. Handed back to the caller so
-    # _reconcile_post_restore_asset_activity() below can extend the exact
-    # same "preserve this account's current reality" guarantee to their
-    # checkouts/quotations too, without re-deriving this set itself.
-    preserved_user_ids = set()
+    username_conflicts_resolved = 0
+    super_admins_reset: list[str] = []
+    reinserted_emails: list[str] = []
+    preserved_user_ids: set[int] = set()
 
     with engine.begin() as conn:
         restored_rows = conn.execute(
-            sa_text("SELECT id, lower(email) AS email_lc FROM users")
+            sa_text("SELECT id, lower(email) AS email_lc, username FROM users")
         ).mappings().all()
-        restored_emails = {row["email_lc"] for row in restored_rows}
+        restored_by_email = {row["email_lc"]: row for row in restored_rows}
         restored_ids = {row["id"] for row in restored_rows}
 
-        # --- Case 1: duplicates -- matched accounts, most-current-profile-wins ---
-        for row in restored_rows:
-            snapshot = by_email.get(row["email_lc"])
-            if snapshot is None:
-                continue  # case 3: restore-only, deliberately left untouched
+        matched_snapshots = [
+            (restored_by_email[e], snapshot)
+            for e, snapshot in by_email.items()
+            if e in restored_by_email
+        ]
 
+        # Current usernames are authoritative.  This includes the current
+        # root Super Admin username, so an older backup cannot steal it.
+        desired_usernames: dict[str, str] = {}
+        for snapshot in by_email.values():
+            username = snapshot.get("username")
+            if username:
+                desired_usernames[email_lc(snapshot)] = username.strip().lower()
+
+        # 1) Move backup-only rows that currently occupy a username needed by
+        #    a preserved current account.  Generated names are intentionally
+        #    ugly and internal; they are never shown as a meaningful login.
+        for row in restored_rows:
+            username = (row["username"] or "").strip().lower()
+            if not username:
+                continue
+            owner_email = row["email_lc"]
+            if desired_usernames.get(owner_email) == username:
+                continue
+            if username not in desired_usernames.values():
+                continue
+            while True:
+                temporary = f"__restore_conflict_{uuid.uuid4().hex[:24]}"
+                exists = conn.execute(
+                    sa_text("SELECT 1 FROM users WHERE lower(username) = :u LIMIT 1"),
+                    {"u": temporary},
+                ).first()
+                if not exists:
+                    break
+            conn.execute(
+                sa_text("UPDATE users SET username = :temporary WHERE id = :uid"),
+                {"temporary": temporary, "uid": row["id"]},
+            )
+            username_conflicts_resolved += 1
+
+        # 2) Clear usernames on matched rows before writing current values.
+        #    This handles swaps without transient unique-key failures.
+        for row, snapshot in matched_snapshots:
+            if row["username"] is not None:
+                conn.execute(
+                    sa_text("UPDATE users SET username = NULL WHERE id = :uid"),
+                    {"uid": row["id"]},
+                )
+
+        # 3) Apply every current profile field except username.  The restored
+        #    row's id remains untouched because all foreign keys still point at it.
+        for row, snapshot in matched_snapshots:
             present_cols = [c for c in PROFILE_COLUMNS if c in snapshot]
             set_clause = ", ".join(f"{col} = :{col}" for col in present_cols)
             params = {col: snapshot[col] for col in present_cols}
             params["uid"] = row["id"]
-            conn.execute(sa_text(f"UPDATE users SET {set_clause} WHERE id = :uid"), params)
+            if set_clause:
+                conn.execute(sa_text(f"UPDATE users SET {set_clause} WHERE id = :uid"), params)
             users_reconciled += 1
             preserved_user_ids.add(row["id"])
 
-            if snapshot.get("role") == SUPER_ADMIN_ROLE:
-                conn.execute(
-                    sa_text(
-                        "UPDATE users SET totp_secret_encrypted = NULL, totp_enabled = false "
-                        "WHERE id = :uid"
-                    ),
-                    {"uid": row["id"]},
-                )
-                conn.execute(
-                    sa_text("DELETE FROM recovery_codes WHERE user_id = :uid"),
-                    {"uid": row["id"]},
-                )
-                super_admins_reset.append(snapshot["email_lc"])
-
-        # --- BUG FIX -- Case 2: missing-from-restore accounts, re-inserted ---
+        # 4) Reinsert current accounts that did not exist in the backup.
+        #    Their original id is retained when available and free.
         for snapshot in pre_restore_users:
-            email_lc = snapshot.get("email_lc")
-            if not email_lc or email_lc in restored_emails:
-                continue  # matched above (case 1), or no email to key on
+            e = email_lc(snapshot)
+            if not e or e in restored_by_email:
+                continue
 
             present_cols = [c for c in PROFILE_COLUMNS if c in snapshot]
             insert_cols = ["email"] + present_cols
             params = {c: snapshot.get(c) for c in present_cols}
-            # Prefer the original-case email captured in the full-row
-            # snapshot; fall back to the lowercased join key for any
-            # snapshot shape that only ever carried that (e.g. a direct
-            # unit-test call into this function with a hand-built dict).
-            params["email"] = snapshot.get("email", email_lc)
+            params["email"] = snapshot.get("email") or e
 
             original_id = snapshot.get("id")
             if original_id is not None and original_id not in restored_ids:
-                insert_cols = ["id"] + insert_cols
+                insert_cols.insert(0, "id")
                 params["id"] = original_id
+
+            # Username is assigned after insertion so it participates in the
+            # same collision-safe assignment phase as matched accounts.
+            desired_username = (snapshot.get("username") or "").strip().lower() or None
+            if desired_username:
+                insert_cols.append("username")
+                params["username"] = None
 
             columns_sql = ", ".join(insert_cols)
             values_sql = ", ".join(f":{c}" for c in insert_cols)
@@ -1004,47 +985,77 @@ def _reconcile_post_restore_credentials(engine, pre_restore_users: list) -> dict
             ).mappings().first()
             new_id = new_row["id"]
             restored_ids.add(new_id)
+            restored_by_email[e] = {"id": new_id, "email_lc": e, "username": None}
             users_reinserted += 1
-            reinserted_emails.append(email_lc)
+            reinserted_emails.append(e)
             preserved_user_ids.add(new_id)
 
+        # 5) Assign authoritative current usernames.  The only rows that may
+        #    own these values now are the preserved current accounts themselves.
+        for e, username in desired_usernames.items():
+            row = restored_by_email.get(e)
+            if not row:
+                continue
+            conn.execute(
+                sa_text("UPDATE users SET username = :username WHERE id = :uid"),
+                {"username": username, "uid": row["id"]},
+            )
+
+        # 6) Super Admin MFA is never restored from backup data.  Force fresh
+        #    enrollment while preserving the current password/profile.
+        for row, snapshot in matched_snapshots:
             if snapshot.get("role") == SUPER_ADMIN_ROLE:
                 conn.execute(
                     sa_text(
                         "UPDATE users SET totp_secret_encrypted = NULL, totp_enabled = false "
                         "WHERE id = :uid"
                     ),
-                    {"uid": new_id},
+                    {"uid": row["id"]},
                 )
-                super_admins_reset.append(email_lc)
+                conn.execute(sa_text("DELETE FROM recovery_codes WHERE user_id = :uid"), {"uid": row["id"]})
+                super_admins_reset.append(email_lc(snapshot))
+
+        for snapshot in pre_restore_users:
+            e = email_lc(snapshot)
+            if e in reinserted_emails and snapshot.get("role") == SUPER_ADMIN_ROLE:
+                row = restored_by_email[e]
+                conn.execute(
+                    sa_text(
+                        "UPDATE users SET totp_secret_encrypted = NULL, totp_enabled = false "
+                        "WHERE id = :uid"
+                    ),
+                    {"uid": row["id"]},
+                )
+                conn.execute(sa_text("DELETE FROM recovery_codes WHERE user_id = :uid"), {"uid": row["id"]})
+                super_admins_reset.append(e)
 
         if users_reinserted:
-            # Bump the sequence past the current max id so the next
-            # ordinary INSERT elsewhere in the app can't collide with a
-            # re-inserted row (whether or not its original id was reused).
             conn.execute(sa_text(
                 "SELECT setval(pg_get_serial_sequence('users', 'id'), "
                 "COALESCE((SELECT MAX(id) FROM users), 1))"
             ))
 
-        if users_reconciled or users_reinserted:
+        if users_reconciled or users_reinserted or username_conflicts_resolved:
             detail_parts = []
             if users_reconciled:
                 detail_parts.append(
-                    f"Restore reconciled {users_reconciled} account(s)' profiles (including "
-                    f"password) to their pre-restore (current) values instead of the restored "
-                    f"backup's."
+                    f"Restore reconciled {users_reconciled} account(s) to their current "
+                    f"pre-restore profiles and credentials."
                 )
             if users_reinserted:
                 detail_parts.append(
-                    f"Restore re-inserted {users_reinserted} account(s) that existed before the "
-                    f"restore but were absent from the restored backup (created/invited since "
-                    f"it was taken): {', '.join(reinserted_emails)}."
+                    f"Restore re-inserted {users_reinserted} current account(s) absent from "
+                    f"the backup: {', '.join(reinserted_emails)}."
+                )
+            if username_conflicts_resolved:
+                detail_parts.append(
+                    f"Restore resolved {username_conflicts_resolved} username collision(s) "
+                    f"without aborting the restore."
                 )
             if super_admins_reset:
                 detail_parts.append(
-                    f"Super Admin account(s) also had TOTP/recovery codes cleared and will "
-                    f"be required to re-enroll 2FA on next login: {', '.join(super_admins_reset)}."
+                    f"Super Admin MFA was cleared and requires fresh enrollment: "
+                    f"{', '.join(super_admins_reset)}."
                 )
             conn.execute(
                 sa_text(
@@ -1062,8 +1073,8 @@ def _reconcile_post_restore_credentials(engine, pre_restore_users: list) -> dict
         "users_reinserted": users_reinserted,
         "super_admins_reset": len(super_admins_reset),
         "preserved_user_ids": sorted(preserved_user_ids),
+        "username_conflicts_resolved": username_conflicts_resolved,
     }
-
 
 def _reconcile_post_restore_outsiders(engine, pre_restore_outsiders: list) -> dict:
     """

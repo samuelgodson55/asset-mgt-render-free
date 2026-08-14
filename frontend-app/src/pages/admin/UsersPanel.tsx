@@ -116,14 +116,14 @@ function ResetPasswordModal({ target, onClose, onDone }: { target: UserRow | nul
   );
 }
 
-function EditUserModal({ target, onClose, onDone }: { target: UserRow | null; onClose: () => void; onDone: () => void }) {
-  const [form, setForm] = useState({ name: "", username: "", email: "", phone_number: "", company: "" });
+function EditUserModal({ target, onClose, onDone, roleOptions }: { target: UserRow | null; onClose: () => void; onDone: () => void; roleOptions: string[] }) {
+  const [form, setForm] = useState({ name: "", username: "", email: "", phone_number: "", company: "", role: "staff" });
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     if (target) {
-      setForm({ name: target.name, username: target.username ?? "", email: target.email, phone_number: target.phone_number ?? "", company: target.company ?? "" });
+      setForm({ name: target.name, username: target.username ?? "", email: target.email, phone_number: target.phone_number ?? "", company: target.company ?? "", role: target.role });
       setError(null);
     }
   }, [target]);
@@ -153,6 +153,9 @@ function EditUserModal({ target, onClose, onDone }: { target: UserRow | null; on
         <input required type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="Email" className={formInputClass} />
         <input value={form.phone_number} onChange={(e) => setForm({ ...form, phone_number: e.target.value })} placeholder="Phone (optional)" className={formInputClass} />
         <input value={form.company} onChange={(e) => setForm({ ...form, company: e.target.value })} placeholder="Company (optional)" className={formInputClass} />
+        <select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })} className={formInputClass}>
+          {roleOptions.map((r) => <option key={r} value={r}>{r}</option>)}
+        </select>
         {error && <ErrorBanner>{error}</ErrorBanner>}
         <button type="submit" disabled={submitting} className="bg-brass hover:bg-brass-soft disabled:opacity-60 text-ink font-medium text-[13px] rounded-[3px] py-2.5 transition-colors">
           {submitting ? "Saving…" : "Save changes"}
@@ -255,6 +258,7 @@ export function UsersPanel({
   // Manager/Admin option, and services/user_service.py's own enforcement
   // of the same limit.
   const createRoleOptions = demo || isFullAdmin(actorRole) ? ROLE_OPTIONS : ["staff", "customer"];
+  const editRoleOptions = demo || isFullAdmin(actorRole) ? ROLE_OPTIONS : ["staff", "customer"];
 
   const refresh = () => {
     setLoading(true);
@@ -336,7 +340,7 @@ export function UsersPanel({
 
       <CreateUserModal open={creating} onClose={() => setCreating(false)} onCreated={() => { setCreating(false); refresh(); }} roleOptions={createRoleOptions} />
       <ResetPasswordModal target={resetting} onClose={() => setResetting(null)} onDone={() => { setResetting(null); alert("Password reset."); }} />
-      <EditUserModal target={editing} onClose={() => setEditing(null)} onDone={() => { setEditing(null); refresh(); }} />
+      <EditUserModal target={editing} onClose={() => setEditing(null)} onDone={() => { setEditing(null); refresh(); }} roleOptions={editRoleOptions} />
       <RevokeUserModal target={revoking} onClose={() => setRevoking(null)} onDone={() => { setRevoking(null); refresh(); }} />
     </div>
   );

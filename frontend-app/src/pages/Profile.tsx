@@ -1,10 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import { UserRound, KeyRound, ShieldCheck, Download, Check } from "lucide-react";
 import { profileApi, ApiError } from "../lib/api";
 import { useAuth } from "../lib/useAuth";
 import { isTrueSuperAdmin } from "../lib/roles";
 import type { ProfileDetail } from "../lib/types";
+
+type ProfileTab = "account" | "security" | "two-factor";
 
 function errMsg(err: unknown, fallback: string): string {
   if (err instanceof ApiError) return err.message;
@@ -45,8 +47,8 @@ function ChangePasswordCard({ userId }: { userId: number }) {
   };
 
   return (
-    <div className="border border-border-soft bg-surface rounded-[3px] p-5">
-      <div className="flex items-start gap-3 mb-4">
+    <div className="border border-border-soft bg-surface rounded-[3px] p-5 max-w-3xl">
+      <div className="flex items-start gap-3 mb-5">
         <div className="w-9 h-9 rounded-full bg-brass/10 flex items-center justify-center shrink-0">
           <KeyRound size={16} className="text-brass-soft" />
         </div>
@@ -68,14 +70,6 @@ function ChangePasswordCard({ userId }: { userId: number }) {
   );
 }
 
-// Shown for EVERY role, same as legacy admin.html/manager.html/staff.html/
-// customer.html's #profileIdentitySection (see that markup's comment in
-// e.g. customer.html): PATCH /auth/me (backend/services/auth_service.py's
-// update_identity()) is generic self-service and was never actually
-// role-restricted on the backend. Every role gets this exact same
-// self-service path here, on top of an Admin/Super Admin still being able
-// to fix a DIFFERENT account's name/email/username via the User
-// Directory's Edit action.
 function UpdateIdentityCard({ profile, onUpdated }: { profile: ProfileDetail; onUpdated: (p: ProfileDetail) => void }) {
   const [name, setName] = useState(profile.name);
   const [email, setEmail] = useState(profile.email);
@@ -103,14 +97,14 @@ function UpdateIdentityCard({ profile, onUpdated }: { profile: ProfileDetail; on
   };
 
   return (
-    <div className="border border-border-soft bg-surface rounded-[3px] p-5">
-      <div className="flex items-start gap-3 mb-4">
+    <div className="border border-border-soft bg-surface rounded-[3px] p-5 max-w-3xl">
+      <div className="flex items-start gap-3 mb-5">
         <div className="w-9 h-9 rounded-full bg-brass/10 flex items-center justify-center shrink-0">
           <UserRound size={16} className="text-brass-soft" />
         </div>
         <div>
           <h2 className="font-display text-[15px] font-medium text-text">Account details</h2>
-          <p className="text-[12.5px] text-text-muted mt-0.5">Re-enter your password to confirm any change.</p>
+          <p className="text-[12.5px] text-text-muted mt-0.5">Update your personal account information. Re-enter your current password to confirm any change.</p>
         </div>
       </div>
       <form onSubmit={submit} className="flex flex-col gap-3">
@@ -128,7 +122,6 @@ function UpdateIdentityCard({ profile, onUpdated }: { profile: ProfileDetail; on
     </div>
   );
 }
-
 
 function RecoveryCodesCard() {
   const [password, setPassword] = useState("");
@@ -166,28 +159,18 @@ function RecoveryCodesCard() {
   };
 
   return (
-    <div className="border border-border-soft bg-surface rounded-[3px] p-5">
-      <div className="flex items-start gap-3 mb-4">
+    <div className="border border-border-soft bg-surface rounded-[3px] p-5 max-w-3xl">
+      <div className="flex items-start gap-3 mb-5">
         <div className="w-9 h-9 rounded-full bg-moss/10 flex items-center justify-center shrink-0">
           <ShieldCheck size={16} className="text-moss-soft" />
         </div>
         <div>
           <h2 className="font-display text-[15px] font-medium text-text">2FA recovery codes</h2>
-          <p className="text-[12.5px] text-text-muted mt-0.5">Regenerating invalidates every old code -- only the new batch shown below will work.</p>
+          <p className="text-[12.5px] text-text-muted mt-0.5">Regenerating invalidates every old code. Only the newly generated batch will work.</p>
         </div>
       </div>
 
-      {codes ? (
-        <>
-          <div className="grid grid-cols-2 gap-2 bg-ink-soft border border-border-soft rounded-[3px] p-4 mb-3 font-mono text-[12px] text-text">
-            {codes.map((c) => <span key={c} className="select-all">{c}</span>)}
-          </div>
-          <button onClick={download} className="w-full flex items-center justify-center gap-2 border border-border-soft hover:border-brass/50 text-text text-[13px] rounded-[3px] py-2.5 transition-colors">
-            {downloaded ? <Check size={13} /> : <Download size={13} />}
-            {downloaded ? "Downloaded" : "Download as .txt"}
-          </button>
-        </>
-      ) : (
+      {!codes ? (
         <form onSubmit={submit} className="flex flex-col gap-3">
           <input type="password" required autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Current password" className="bg-ink-soft border border-border-soft rounded-[3px] px-3 py-2.5 text-[13px] text-text placeholder:text-text-faint focus:border-moss/50 focus:outline-none transition-colors" />
           <button type="submit" disabled={submitting} className="bg-moss/90 hover:bg-moss disabled:opacity-60 text-white font-medium text-[13px] rounded-[3px] py-2.5 transition-colors">
@@ -195,6 +178,21 @@ function RecoveryCodesCard() {
           </button>
           {msg && <FieldMessage text={msg.text} ok={msg.ok} />}
         </form>
+      ) : (
+        <div>
+          <div className="rounded-[3px] border border-moss/30 bg-moss/5 p-4">
+            <div className="flex items-center gap-2 text-moss-soft text-[12px] font-medium mb-3">
+              <Check size={14} /> New recovery codes generated
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {codes.map((code) => <code key={code} className="rounded-[3px] border border-border-soft bg-ink-soft px-3 py-2 text-[12px] text-text font-mono">{code}</code>)}
+            </div>
+          </div>
+          <button type="button" onClick={download} className="mt-3 inline-flex items-center gap-2 border border-border-soft px-3 py-2 rounded-[3px] text-[12px] font-medium text-text-muted hover:text-text hover:border-border transition-colors">
+            {downloaded ? <Check size={13} /> : <Download size={13} />}
+            {downloaded ? "Downloaded" : "Download codes"}
+          </button>
+        </div>
       )}
     </div>
   );
@@ -203,10 +201,26 @@ function RecoveryCodesCard() {
 export function Profile() {
   const { user, demo } = useAuth();
   const [profile, setProfile] = useState<ProfileDetail | null>(null);
+  const [tab, setTab] = useState<ProfileTab>("account");
 
   useEffect(() => {
     profileApi.get().then(setProfile).catch(() => setProfile(null));
   }, []);
+
+  const tabs = useMemo(() => {
+    const list: Array<{ key: ProfileTab; label: string; icon: typeof UserRound }> = [
+      { key: "account", label: "Account Details", icon: UserRound },
+      { key: "security", label: "Security", icon: KeyRound },
+    ];
+    if (isTrueSuperAdmin(user?.role)) {
+      list.push({ key: "two-factor", label: "2FA & Recovery", icon: ShieldCheck });
+    }
+    return list;
+  }, [user?.role]);
+
+  useEffect(() => {
+    if (!tabs.some((item) => item.key === tab)) setTab(tabs[0]?.key ?? "account");
+  }, [tabs, tab]);
 
   if (demo) {
     return (
@@ -217,26 +231,41 @@ export function Profile() {
     );
   }
 
+  const roleLabel = profile?.department_role || profile?.role || "Loading…";
+
   return (
     <div>
-      <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }} className="mb-6">
-        <h1 className="font-display text-2xl font-semibold text-text">My Profile</h1>
-        <p className="text-text-muted text-sm mt-1">
-          {profile ? `${profile.name} · ${profile.department_role || profile.role}` : "Loading…"}
-        </p>
+      <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }} className="mb-6 flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <h1 className="font-display text-2xl font-semibold text-text">My Profile</h1>
+          <p className="text-text-muted text-sm mt-1">
+            {profile ? `${profile.name} · ${roleLabel}` : "Loading…"}
+          </p>
+        </div>
       </motion.div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 max-w-3xl">
-        {profile && <UpdateIdentityCard profile={profile} onUpdated={setProfile} />}
-        {profile && <ChangePasswordCard userId={profile.id} />}
-        {/* 2FA is Super-Admin-only end to end (see services/auth_service.py's
-            login() -- only role == SUPER_ADMIN_ROLE ever gets an mfa_required/
-            mfa_setup_required challenge in the first place), and
-            regenerate_recovery_codes() rejects anyone else server-side too --
-            so a plain Admin, despite being full-admin-equivalent everywhere
-            else, never sees this card. */}
-        {isTrueSuperAdmin(user?.role) && <RecoveryCodesCard />}
+      <div className="flex items-center gap-2 mb-5 flex-wrap">
+        {tabs.map((item) => (
+          <button
+            key={item.key}
+            type="button"
+            onClick={() => setTab(item.key)}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[12px] font-medium border transition-colors ${
+              tab === item.key
+                ? "bg-brass/15 border-brass/40 text-brass-soft"
+                : "border-border-soft text-text-muted hover:text-text hover:border-border"
+            }`}
+          >
+            <item.icon size={12} /> {item.label}
+          </button>
+        ))}
       </div>
+
+      <motion.div key={tab} initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2 }}>
+        {tab === "account" && profile && <UpdateIdentityCard profile={profile} onUpdated={setProfile} />}
+        {tab === "security" && profile && <ChangePasswordCard userId={profile.id} />}
+        {tab === "two-factor" && isTrueSuperAdmin(user?.role) && <RecoveryCodesCard />}
+      </motion.div>
     </div>
   );
 }

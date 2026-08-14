@@ -757,7 +757,7 @@ export const usersApi = {
   list: (limit: number, offset: number, search: string) => rawFetch<DirectoryPage<UserRow>>(`/users${qs({ limit, offset, search })}`),
   create: (req: { name: string; email: string; phone_number?: string; role: string; password: string; department?: string; department_role?: string }) =>
     rawFetch<UserRow>("/users", { method: "POST", body: JSON.stringify(req) }),
-  update: (id: number, req: Partial<{ name: string; username: string; email: string; phone_number: string; company: string }>) =>
+  update: (id: number, req: Partial<{ name: string; username: string; email: string; phone_number: string; company: string; role: string }>) =>
     rawFetch<UserRow>(`/users/${id}`, { method: "PATCH", body: JSON.stringify(req) }),
   resetPassword: (id: number, newPassword: string, adminPassword: string) =>
     rawFetch<{ message?: string }>(`/users/${id}/reset-password`, { method: "POST", body: JSON.stringify({ new_password: newPassword, admin_password: adminPassword }) }),

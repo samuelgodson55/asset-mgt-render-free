@@ -139,7 +139,7 @@ services:
       # Both builds are already in the image, so switching this value does
       # not require a new Docker build; Render redeploys the existing build.
       - key: FRONTEND_VARIANT
-        value: legacy
+        value: react
       # Launch `celery -A celery_app worker -B` as a background process
       # inside THIS container (see render-start.sh) instead of a separate
       # Background Worker service, which isn't available on the Free plan

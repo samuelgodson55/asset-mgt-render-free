@@ -128,10 +128,10 @@ def export_user_assigned_items(
 @router.patch("/{user_id}")
 def update_user(user_id: int, req: UserUpdateRequest, db: Session = Depends(get_db), user: dict = Depends(require_privileged_role)):
     """
-    Edits an existing account's name/username/email. Both a Super
-    Admin/Admin and a Manager may call this route -- services/user_service.py
-    -> update_user() enforces the narrower Manager boundary (Staff/Customer
-    accounts only) server-side.
+    Edits an existing account's identity details and RBAC role. Super
+    Admin/Admin may manage any non-root role; Managers remain limited to
+    Staff/Customer accounts and roles. All privilege boundaries are enforced
+    server-side by services/user_service.py.
     """
     return user_service.update_user(db, user_id, req, user)
 

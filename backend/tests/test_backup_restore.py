@@ -1218,3 +1218,99 @@ def test_reconcile_reinserts_missing_quotation_with_items(backup_env):
         ).mappings().all()
     assert len(items) == 1
     assert items[0]["quantity"] == 4
+
+
+def test_reconcile_resolves_restore_only_username_collision(backup_env):
+    """A backup-only account cannot block the current account's username."""
+    import services.backup_service as backup_service
+    from sqlalchemy import text as sa_text
+
+    engine = backup_env["engine"]
+    current_email = "current.username@example.com"
+    current_id = _insert_user(engine, email=current_email, username="current.user")
+    _insert_user(engine, email="backup.only@example.com", username="current.user2")
+
+    # Simulate the restored backup: the backup-only user has stolen the
+    # username that belongs to the current user.
+    with engine.begin() as conn:
+        conn.execute(
+            sa_text("UPDATE users SET username = :u WHERE email = :e"),
+            {"u": "current.user", "e": "backup.only@example.com"},
+        )
+        conn.execute(
+            sa_text("UPDATE users SET username = :u WHERE email = :e"),
+            {"u": "old.current", "e": current_email},
+        )
+
+    pre_restore_users = [{
+        "id": current_id, "email": current_email, "email_lc": current_email.lower(),
+        "name": "Current User", "phone_number": None, "username": "current.user",
+        "role": "staff", "password_hash": None,
+    }]
+    # Build the snapshot with a real password hash without depending on the
+    # helper's implementation details.
+    from security import hash_password
+    pre_restore_users[0]["password_hash"] = hash_password("CurrentPassword123!")
+    pre_restore_users[0].update({
+        "is_verified": True, "is_active": True, "failed_login_attempts": 0,
+        "locked_until": None, "totp_secret_encrypted": None, "totp_enabled": False,
+        "is_deleted": False, "deleted_at": None, "purged_at": None,
+        "department": None, "department_role": None, "converted_to_outsider_id": None,
+    })
+
+    result = backup_service._reconcile_post_restore_credentials(engine, pre_restore_users)
+    assert result["users_reconciled"] == 1
+    assert result["username_conflicts_resolved"] == 1
+
+    with engine.connect() as conn:
+        rows = conn.execute(
+            sa_text("SELECT email, username FROM users WHERE email IN (:a, :b) ORDER BY email"),
+            {"a": current_email, "b": "backup.only@example.com"},
+        ).mappings().all()
+    by_email = {r["email"]: r["username"] for r in rows}
+    assert by_email[current_email] == "current.user"
+    assert by_email["backup.only@example.com"] != "current.user"
+    assert by_email["backup.only@example.com"].startswith("__restore_conflict_")
+
+
+def test_reconcile_handles_swapped_current_usernames(backup_env):
+    """Username swaps between backup and current state must not hit the unique index."""
+    import services.backup_service as backup_service
+    from security import hash_password
+    from sqlalchemy import text as sa_text
+
+    engine = backup_env["engine"]
+    a = "swap.a@example.com"
+    b = "swap.b@example.com"
+    aid = _insert_user(engine, email=a, username="backup.b")
+    bid = _insert_user(engine, email=b, username="backup.a")
+
+    snapshots = []
+    for uid, email, username in [(aid, a, "current.a"), (bid, b, "current.b")]:
+        snapshots.append({
+            "id": uid, "email": email, "email_lc": email.lower(), "name": email,
+            "phone_number": None, "username": username, "role": "staff",
+            "password_hash": hash_password("CurrentPassword123!"), "is_verified": True,
+            "is_active": True, "failed_login_attempts": 0, "locked_until": None,
+            "totp_secret_encrypted": None, "totp_enabled": False, "is_deleted": False,
+            "deleted_at": None, "purged_at": None, "department": None,
+            "department_role": None, "converted_to_outsider_id": None,
+        })
+
+    # Force the restored rows into the opposite usernames to create a true
+    # swap scenario.
+    with engine.begin() as conn:
+        conn.execute(sa_text("UPDATE users SET username = NULL WHERE id IN (:a, :b)"), {"a": aid, "b": bid})
+        conn.execute(sa_text("UPDATE users SET username = :u WHERE id = :id"), {"u": "current.b", "id": aid})
+        conn.execute(sa_text("UPDATE users SET username = :u WHERE id = :id"), {"u": "current.a", "id": bid})
+
+    result = backup_service._reconcile_post_restore_credentials(engine, snapshots)
+    assert result["users_reconciled"] == 2
+
+    with engine.connect() as conn:
+        rows = conn.execute(
+            sa_text("SELECT id, username FROM users WHERE id IN (:a, :b) ORDER BY id"),
+            {"a": aid, "b": bid},
+        ).mappings().all()
+    assert rows[0]["username"] == "current.a"
+    assert rows[1]["username"] == "current.b"
