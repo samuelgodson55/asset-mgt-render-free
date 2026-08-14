@@ -96,6 +96,7 @@ jobs:
       # with an explicit bash if/else for the same reason -- that workflow
       # was never affected by this bug, only this one.
       ENV_SUFFIX: ${{ github.event.inputs.target == 'staging' && '-staging' || '' }}
+      AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
     steps:
       - uses: actions/checkout@v7
 
@@ -121,12 +122,30 @@ jobs:
             az provider register --namespace "$provider" --wait
           done
 
+      - name: Validate Azure location
+        run: |
+          set -euo pipefail
+          : "${AZURE_LOCATION:?GitHub Environment variable AZURE_LOCATION is required. Configure it before deploying ACA infrastructure.}"
+          if ! az account list-locations --query "[?name=='${AZURE_LOCATION}'].name | [0]" -o tsv | grep -qx "$AZURE_LOCATION"; then
+            echo "::error::AZURE_LOCATION '$AZURE_LOCATION' is not a valid Azure location for this subscription."
+            exit 1
+          fi
+          echo "Azure location: $AZURE_LOCATION"
+
       - name: Ensure resource group exists
         run: |
           set -euo pipefail
-          az group show --name "$RESOURCE_GROUP" >/dev/null 2>&1 || \
-            az group create --name "$RESOURCE_GROUP" \
-              --location "${{ vars.AZURE_LOCATION || 'eastus2' }}"
+          if az group show --name "$RESOURCE_GROUP" >/dev/null 2>&1; then
+            EXISTING_LOCATION="$(az group show --name "$RESOURCE_GROUP" --query location -o tsv)"
+            if [[ "$EXISTING_LOCATION" != "$AZURE_LOCATION" ]]; then
+              echo "::error::Resource group '$RESOURCE_GROUP' is in '$EXISTING_LOCATION', but AZURE_LOCATION is '$AZURE_LOCATION'. Refusing to continue."
+              exit 1
+            fi
+            echo "Reusing resource group '$RESOURCE_GROUP' in '$EXISTING_LOCATION'."
+          else
+            echo "Creating resource group '$RESOURCE_GROUP' in '$AZURE_LOCATION'."
+            az group create --name "$RESOURCE_GROUP" --location "$AZURE_LOCATION" >/dev/null
+          fi
 
       # main.bicep's alerting section (action group + 3 scheduled query
       # alert rules, see that file's "Alerting" comment) only deploys when

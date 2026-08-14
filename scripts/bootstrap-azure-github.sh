@@ -91,16 +91,28 @@ else
   echo "Reusing existing Microsoft Entra application: $APP_ID"
 fi
 
-mapfile -t SP_IDS < <(az ad sp list --filter "appId eq '$APP_ID'" --query '[].id' -o tsv)
+# Resolve the service principal by querying all service principals and
+# filtering locally with JMESPath. This deliberately avoids the Entra Graph
+# server-side `appId eq ...` filter, which is rejected by some Azure CLI/Entra
+# tenants. It also lets us distinguish "not found" from a failed Azure query.
+mapfile -t SP_IDS < <(
+  az ad sp list --all     --query "[?appId=='${APP_ID}'].id"     -o tsv
+)
 if [[ "${#SP_IDS[@]}" -gt 1 ]]; then
   echo "ERROR: Multiple service principals were found for application '$APP_ID'. Refusing to guess." >&2
   printf '%s\n' "${SP_IDS[@]}" >&2
   exit 1
 fi
+
 SP_ID="${SP_IDS[0]:-}"
 if [[ -z "$SP_ID" ]]; then
-  echo "Creating service principal..."
+  echo "No service principal exists for application '$APP_ID'; creating it..."
   SP_ID="$(az ad sp create --id "$APP_ID" --query id -o tsv)"
+  if [[ -z "$SP_ID" ]]; then
+    echo "ERROR: Service principal creation returned no object ID." >&2
+    exit 1
+  fi
+  echo "Created service principal: $SP_ID"
 else
   echo "Reusing existing service principal: $SP_ID"
 fi
@@ -130,10 +142,10 @@ create_federated_credential() {
     echo "Federated credential already exists: $name"
     return
   fi
-  local tmp
-  tmp="$(mktemp)"
-  trap 'rm -f "$tmp"' RETURN
-  cat >"$tmp" <<JSON
+  # Keep the JSON in a shell variable. This avoids the old RETURN trap around
+  # a function-local temp-file variable, which is unsafe with `set -u`.
+  local parameters
+  parameters="$(cat <<JSON
 {
   "name": "$name",
   "issuer": "https://token.actions.githubusercontent.com",
@@ -142,8 +154,9 @@ create_federated_credential() {
   "audiences": ["api://AzureADTokenExchange"]
 }
 JSON
+)"
   echo "Creating federated credential: $name"
-  az ad app federated-credential create --id "$APP_ID" --parameters "@$tmp" >/dev/null
+  az ad app federated-credential create --id "$APP_ID" --parameters "$parameters" >/dev/null
 }
 
 FED_NAME="github-${ENVIRONMENT}"
@@ -168,6 +181,14 @@ set_github_environment_secret() {
 set_github_environment_secret AZURE_CLIENT_ID "$APP_ID"
 set_github_environment_secret AZURE_TENANT_ID "$TENANT_ID"
 set_github_environment_secret AZURE_SUBSCRIPTION_ID "$SUBSCRIPTION_ID"
+
+# Persist the resolved region as a GitHub Environment variable. This makes
+# the selected Environment self-contained for future GitHub Actions runs.
+echo "Setting GitHub Environment variable: AZURE_LOCATION=$LOCATION"
+gh variable set AZURE_LOCATION \
+  --repo "$REPO" \
+  --env "$ENVIRONMENT" \
+  --body "$LOCATION" >/dev/null
 
 # Create/reuse Terraform state, grant the state data-plane role, and create
 # the state container as part of this one-time privileged bootstrap.

@@ -508,6 +508,41 @@ its own explicit step (not on container boot — see the safety checklist)
 BEFORE rolling out backend code that depends on a new column/table, same
 as in a single-instance deployment.
 
+### Foolproof ACA environment bootstrap
+
+Before the first ACA infrastructure deployment for an environment, run the
+one-time local bootstrap for that exact GitHub Environment:
+
+```bash
+./scripts/bootstrap-azure-github.sh production
+```
+
+or:
+
+```bash
+./scripts/bootstrap-azure-github.sh staging
+```
+
+The bootstrap configures only the selected Environment. It reuses the shared
+Azure OIDC application/service principal, creates only the selected
+Environment's federated credential, writes the Azure OIDC secrets to that
+Environment, and persists `AZURE_LOCATION` as that Environment's variable.
+
+`AZURE_LOCATION` is the single source of truth. ACA infrastructure has no
+regional fallback. If the variable is missing, invalid, or an existing
+resource group is in another region, deployment stops instead of creating
+resources in an unexpected location.
+
+The ACA infrastructure workflow is safe to re-run. On an existing
+environment it reads the currently deployed backend/frontend images and
+preserves those exact image repositories and tags. On an initial deployment,
+`FRONTEND_BUILD_TARGET` defaults to `react`; set it to `legacy` only when that
+Environment intentionally uses the legacy frontend.
+
+After the one-time bootstrap succeeds, run **Deploy ACA Infrastructure
+(Bicep)** with `target=production` (or `staging`) and `action=apply`. Do not
+run the bootstrap again for every application deployment.
+
 ## Azure Container Apps Production Deployment (Cost-Optimized)
 
 This is the **primary production target**: Azure Container Apps (ACA), with
