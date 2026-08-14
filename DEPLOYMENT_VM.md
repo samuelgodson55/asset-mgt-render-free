@@ -434,8 +434,8 @@ Those are created/reused by:
 ```
 
 The script uses your current `az` subscription and `gh` repository context,
-then configures the four GitHub Environment subjects used by this repository.
-It is safe to run again; existing identities, role assignments, and federated
+then configures only the selected GitHub Environment. It is safe to run again;
+existing identities, role assignments, state resources, and federated
 credentials are reused.
 
 The only values you should expect to see in GitHub as Azure bootstrap values
@@ -448,6 +448,9 @@ are:
 The VM Terraform workflow authenticates to both Azure Resource Manager and the
 Terraform `azurerm` backend using GitHub Actions OIDC. No Azure client secret
 is stored in the repository or required by the VM infrastructure workflow.
+
+The local bootstrap command takes the environment as its argument. It configures
+only that environment; it does not configure the other GitHub Environments.
 
 > **Bootstrap boundary:** GitHub Actions cannot create the first Azure
 > identity it needs to authenticate. That is why the `az login` +
