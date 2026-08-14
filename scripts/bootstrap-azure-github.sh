@@ -91,31 +91,45 @@ else
   echo "Reusing existing Microsoft Entra application: $APP_ID"
 fi
 
-# Resolve the service principal by querying all service principals and
-# filtering locally with JMESPath. This deliberately avoids the Entra Graph
-# server-side `appId eq ...` filter, which is rejected by some Azure CLI/Entra
-# tenants. It also lets us distinguish "not found" from a failed Azure query.
-mapfile -t SP_IDS < <(
-  az ad sp list --all     --query "[?appId=='${APP_ID}'].id"     -o tsv
-)
-if [[ "${#SP_IDS[@]}" -gt 1 ]]; then
-  echo "ERROR: Multiple service principals were found for application '$APP_ID'. Refusing to guess." >&2
-  printf '%s\n' "${SP_IDS[@]}" >&2
+# Resolve/create the service principal through Microsoft Graph REST instead of
+# `az ad sp show/create`. Azure CLI's Entra/Graph wrapper can fail with
+# JSONDecodeError ("Expecting value: line 1 column 1") on otherwise-valid
+# applications. Direct Graph REST gives us the actual HTTP response and avoids
+# that CLI bug.
+get_service_principal_id() {
+  local app_id="$1"
+  local graph_url="https://graph.microsoft.com/v1.0/servicePrincipals?%24filter=appId%20eq%20%27${app_id}%27&%24select=id,appId"
+
+  az rest     --method get     --url "$graph_url"     --query 'value[0].id'     -o tsv     --only-show-errors     2>/tmp/bootstrap-sp-lookup.err
+}
+
+SP_ID=""
+if SP_ID="$(get_service_principal_id "$APP_ID")"; then
+  if [[ -z "$SP_ID" ]]; then
+    echo "No service principal exists for application '$APP_ID'; creating it..."
+    CREATE_BODY="{\"appId\":\"${APP_ID}\"}"
+    if ! SP_ID="$(az rest         --method post         --url "https://graph.microsoft.com/v1.0/servicePrincipals"         --headers Content-Type=application/json         --body "$CREATE_BODY"         --query id         -o tsv         --only-show-errors 2>/tmp/bootstrap-sp-create.err)"; then
+      echo "ERROR: Microsoft Graph could not create the service principal for application '$APP_ID'." >&2
+      cat /tmp/bootstrap-sp-create.err >&2 || true
+      rm -f /tmp/bootstrap-sp-create.err
+      exit 1
+    fi
+    rm -f /tmp/bootstrap-sp-create.err
+    if [[ -z "$SP_ID" ]]; then
+      echo "ERROR: Service principal creation returned no object ID." >&2
+      exit 1
+    fi
+    echo "Created service principal: $SP_ID"
+  else
+    echo "Reusing existing service principal: $SP_ID"
+  fi
+else
+  echo "ERROR: Microsoft Graph could not resolve service principals for application '$APP_ID'." >&2
+  cat /tmp/bootstrap-sp-lookup.err >&2 || true
+  rm -f /tmp/bootstrap-sp-lookup.err
   exit 1
 fi
-
-SP_ID="${SP_IDS[0]:-}"
-if [[ -z "$SP_ID" ]]; then
-  echo "No service principal exists for application '$APP_ID'; creating it..."
-  SP_ID="$(az ad sp create --id "$APP_ID" --query id -o tsv)"
-  if [[ -z "$SP_ID" ]]; then
-    echo "ERROR: Service principal creation returned no object ID." >&2
-    exit 1
-  fi
-  echo "Created service principal: $SP_ID"
-else
-  echo "Reusing existing service principal: $SP_ID"
-fi
+rm -f /tmp/bootstrap-sp-lookup.err
 
 CONTRIBUTOR_ROLE_ID="b24988ac-6180-42a0-ab88-20f7382dd24c"
 ROLE_DEFINITION_ID="$SCOPE/providers/Microsoft.Authorization/roleDefinitions/$CONTRIBUTOR_ROLE_ID"

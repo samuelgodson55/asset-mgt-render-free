@@ -96,7 +96,7 @@ jobs:
       # with an explicit bash if/else for the same reason -- that workflow
       # was never affected by this bug, only this one.
       ENV_SUFFIX: ${{ github.event.inputs.target == 'staging' && '-staging' || '' }}
-      AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+      AZURE_LOCATION: southafricanorth
     steps:
       - uses: actions/checkout@v7
 
@@ -107,10 +107,13 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Register Bicep resource providers
+      # Azure authentication only. The bootstrap script merely stores the
+      # existing OIDC coordinates in GitHub; this workflow owns ACA infrastructure.
+      - name: Register Azure resource providers required by ACA infrastructure
         run: |
           set -euo pipefail
           for provider in \
+            Microsoft.Resources \
             Microsoft.App \
             Microsoft.DBforPostgreSQL \
             Microsoft.Insights \
@@ -118,14 +121,13 @@ jobs:
             Microsoft.OperationalInsights \
             Microsoft.Storage
           do
-            echo "Registering $provider (already registered is a no-op)"
+            echo "Registering $provider..."
             az provider register --namespace "$provider" --wait
           done
 
       - name: Validate Azure location
         run: |
           set -euo pipefail
-          : "${AZURE_LOCATION:?GitHub Environment variable AZURE_LOCATION is required. Configure it before deploying ACA infrastructure.}"
           if ! az account list-locations --query "[?name=='${AZURE_LOCATION}'].name | [0]" -o tsv | grep -qx "$AZURE_LOCATION"; then
             echo "::error::AZURE_LOCATION '$AZURE_LOCATION' is not a valid Azure location for this subscription."
             exit 1

@@ -160,13 +160,13 @@ param jwtSecretKey string
 param rootAdminBootstrapPassword string = ''
 
 @description('Minimum `backend` replicas. 0 = scale-to-zero (cold start after idle, cheapest). 1 = always warm, small extra cost, no cold start. Independent of `frontend` -- that is the whole point of the split.')
-param backendMinReplicas int = 0
+param backendMinReplicas int = environmentName == 'prod' ? 1 : 0
 
 @description('Maximum `backend` replicas under load. NOTE: `backend` embeds Celery worker+beat in-process (see RUN_EMBEDDED_WORKER below) since there is no separate worker/beat Container App in this cost-optimized layout. That is safe at any replica count: celery_app.py configures RedBeat as the Beat scheduler, which keeps a distributed lock in Redis so only one replica is ever the active scheduler at a time (automatic failover if that replica dies) -- no per-replica configuration needed here.')
 param backendMaxReplicas int = 3
 
 @description('Minimum `frontend` replicas. 0 = scale-to-zero (cold start on first request after idle -- static-file + proxy responses are fast, so it\'s much shorter than `backend`\'s, but not zero). 1 = always warm, no cold start, small extra cost. `infra-deploy.yml` passes 1 here for production and 0 for staging -- see that workflow\'s "Resolve replica floors" step -- so this parameter\'s own default only applies to a manual/direct bicep deploy that skips the pipeline.')
-param frontendMinReplicas int = 0
+param frontendMinReplicas int = environmentName == 'prod' ? 1 : 0
 
 @description('Maximum `frontend` replicas under load.')
 param frontendMaxReplicas int = 3

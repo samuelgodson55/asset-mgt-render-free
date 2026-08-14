@@ -136,7 +136,7 @@ env:
   # job below from each target's own `ENVIRONMENT` Actions variable (see
   # that job's own comment for why).
   ENVIRONMENT: ${{ inputs.environment || 'production' }}
-  RESOURCE_GROUP: ${{ (inputs.environment || 'production') == 'production' && secrets.PROD_RESOURCE_GROUP || secrets.STAGING_RESOURCE_GROUP }}
+  RESOURCE_GROUP: rg-snipeit-lite-${{ (inputs.environment || 'production') == 'production' && 'prod' || 'staging' }}
   # A blank image_tag means "build fresh" -- fall back to the commit SHA of
   # whatever ref this run was dispatched against, so build-push below and
   # the rest of this pipeline always have a concrete tag to work with even
@@ -247,11 +247,11 @@ jobs:
         # dropdown alone reproduces this environment's standing
         # configuration exactly.
         env:
-          RAW_ENVIRONMENT_VAR: ${{ vars.ENVIRONMENT }}
+          TARGET_ENVIRONMENT: ${{ inputs.environment || 'production' }}
           RAW_FRONTEND_BUILD_TARGET: ${{ vars.FRONTEND_BUILD_TARGET }}
           RAW_FRONTEND_TYPE_INPUT: ${{ inputs.frontend_type }}
         run: |
-          if [ "$RAW_ENVIRONMENT_VAR" = "development" ]; then
+          if [ "$TARGET_ENVIRONMENT" = "staging" ]; then
             echo "build_env=development" >> "$GITHUB_OUTPUT"
             echo "image_suffix=-staging" >> "$GITHUB_OUTPUT"
           else
@@ -1038,7 +1038,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment || 'production' }}
     env:
-      RESOURCE_GROUP: ${{ (inputs.environment || 'production') == 'production' && secrets.PROD_RESOURCE_GROUP || secrets.STAGING_RESOURCE_GROUP }}
+      RESOURCE_GROUP: rg-snipeit-lite-${{ (inputs.environment || 'production') == 'production' && 'prod' || 'staging' }}
     steps:
       - uses: actions/checkout@v4
 

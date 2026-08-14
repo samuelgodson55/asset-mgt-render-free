@@ -514,24 +514,27 @@ Before the first ACA infrastructure deployment for an environment, run the
 one-time local bootstrap for that exact GitHub Environment:
 
 ```bash
-./scripts/bootstrap-azure-github.sh production
+./scripts/bootstrap-aca-github.sh production
 ```
 
 or:
 
 ```bash
-./scripts/bootstrap-azure-github.sh staging
+./scripts/bootstrap-aca-github.sh staging
 ```
 
-The bootstrap configures only the selected Environment. It reuses the shared
-Azure OIDC application/service principal, creates only the selected
-Environment's federated credential, writes the Azure OIDC secrets to that
-Environment, and persists `AZURE_LOCATION` as that Environment's variable.
+The bootstrap configures only the selected Environment. It creates or
+reuses the Microsoft Entra application and service principal, creates or
+reconciles the selected Environment's GitHub OIDC federated credential, grants
+the identity the Azure access required by the ACA infrastructure workflow,
+and writes `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and
+`AZURE_SUBSCRIPTION_ID` to that GitHub Environment.
 
-`AZURE_LOCATION` is the single source of truth. ACA infrastructure has no
-regional fallback. If the variable is missing, invalid, or an existing
-resource group is in another region, deployment stops instead of creating
-resources in an unexpected location.
+You do not pass Azure IDs to the script. After `az login` and `gh auth login`,
+the script discovers the current subscription and tenant automatically. It
+also does not touch Terraform state, VM resources, ACA providers, resource
+groups, Bicep, or Container Apps resources. Those remain the responsibility
+of the ACA infrastructure/deployment workflows.
 
 The ACA infrastructure workflow is safe to re-run. On an existing
 environment it reads the currently deployed backend/frontend images and
@@ -754,25 +757,19 @@ not you ever push an image).
 
 2. **Run the bootstrap helper after `az login` and `gh auth login`:**
    ```bash
-   az account set --subscription "<subscription-id>"
-   ./scripts/bootstrap-azure-github.sh production
+   ./scripts/bootstrap-aca-github.sh production
    ```
    Replace `production` with the exact GitHub Environment you are provisioning.
-   The helper is **per-environment**: it configures only that environment's
-   OIDC federation and Azure secrets, creates/reuses only the shared Terraform
-   state backend needed by the deployment, and does not configure the other
-   environments.
+   The helper is **per-environment**: it discovers the current Azure
+   subscription/tenant, creates or reuses the shared Entra application and
+   service principal, reconciles only that environment's OIDC federation,
+   ensures the required Azure RBAC is present, and writes the three Azure
+   login secrets to that Environment.
 
    The helper is intentionally idempotent. Re-running it does not create
-   duplicate identities or federated credentials. Subscription `Contributor`
-   RBAC is checked and created through the Azure Resource Manager
-   `Microsoft.Authorization` REST API rather than `az role assignment`; this
-   avoids the `MissingSubscription` failure that can occur in Azure CLI role
-   assignment commands even when the subscription and Authorization API are
-   accessible. The role-assignment ID is deterministic, so reruns reuse the
-   same assignment. The bootstrap uses Python 3 only for this deterministic
-   UUID generation.
-
+   duplicate identities or federated credentials. It does not create or
+   modify Terraform state, VM resources, ACA providers, resource groups,
+   Bicep, or Container Apps resources.
 3. **Do not create the ACA resource groups yourself.** `.github/workflows/
    infra-deploy.yml` derives them as:
    - `rg-snipeit-lite-staging`
