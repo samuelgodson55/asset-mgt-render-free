@@ -86,6 +86,9 @@ jobs:
       ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       ARM_USE_OIDC: "true"
+      # Single source of truth for Azure region. The state bootstrap
+      # must receive the same GitHub Environment Variable as Terraform.
+      AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
 
     steps:
       - uses: actions/checkout@v7
@@ -117,6 +120,7 @@ jobs:
         working-directory: .
         run: |
           set -euo pipefail
+          : "${AZURE_LOCATION:?GitHub Environment variable AZURE_LOCATION is required. Configure it before running infrastructure deployment.}"
           state_env_file="$(mktemp)"
           trap 'rm -f "$state_env_file"' EXIT
 

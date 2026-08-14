@@ -94,6 +94,9 @@ jobs:
       ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       ARM_USE_OIDC: "true"
+      # Single source of truth for Azure region. The state bootstrap
+      # must receive the same GitHub Environment Variable as Terraform.
+      AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
 
       # ---- Every infra-vm/variables.tf input, minus the ones with a
       # sensible default left alone (location, vm_size, disk sizes, etc --
@@ -121,7 +124,7 @@ jobs:
       # bare "LOCATION" here, so one Variable name means "which Azure
       # region" on both deploy paths instead of two different names for the
       # same thing.
-      TF_VAR_location: ${{ vars.AZURE_LOCATION || 'eastus' }}
+      TF_VAR_location: ${{ vars.AZURE_LOCATION }}
       TF_VAR_ssh_public_key: ${{ secrets.VM_SSH_PUBLIC_KEY }}
       # OPTIONAL break-glass only -- leave this secret unset entirely for
       # the normal case (no inbound port 22 on the NSG at all, reached
@@ -235,6 +238,7 @@ jobs:
         working-directory: .
         run: |
           set -euo pipefail
+          : "${AZURE_LOCATION:?GitHub Environment variable AZURE_LOCATION is required. Configure it before running infrastructure deployment.}"
           state_env_file="$(mktemp)"
           trap 'rm -f "$state_env_file"' EXIT
 
