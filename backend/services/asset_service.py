@@ -9,6 +9,7 @@ advanced checkout flow, and CSV batch import. Used by api/assets.py.
 import csv
 import io
 import datetime
+import re
 from decimal import Decimal, InvalidOperation
 from typing import Optional
 from fastapi import HTTPException, UploadFile
@@ -149,7 +150,7 @@ def create_asset_type(db: Session, asset: AssetTypeCreate, user: dict) -> dict:
     return {"message": "Asset type created successfully", "id": new_asset_type.id}
 
 
-def list_assets(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offset: int = 0, search: Optional[str] = None, category: Optional[str] = None) -> dict:
+def list_assets(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offset: int = 0, search: Optional[str] = None, category: Optional[str] = None, status: Optional[str] = None) -> dict:
     """
     Any authenticated user (admin, manager, staff, or customer) can view
     the pool list. Soft-deleted pools are excluded -- they're gone from
@@ -199,6 +200,24 @@ def list_assets(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offset: int
             # list_asset_categories below), so this only ever needs to
             # match one of those, not do substring search.
             query = query.filter(func.lower(models.AssetType.category) == cat_filter.lower())
+
+    if status:
+        if not _can_see_stock(user):
+            raise HTTPException(status_code=403, detail="Stock status filtering is not available for this account.")
+        normalized_status = status.strip().lower()
+        if normalized_status == "out":
+            query = query.filter(models.AssetType.available_quantity <= 0)
+        elif normalized_status == "low":
+            # Match frontend assetStatus(): positive stock at or below 25% of total.
+            query = query.filter(
+                models.AssetType.available_quantity > 0,
+                models.AssetType.total_quantity > 0,
+                models.AssetType.available_quantity * 4 <= models.AssetType.total_quantity,
+            )
+        elif normalized_status == "available":
+            query = query.filter(models.AssetType.available_quantity > 0)
+        else:
+            raise HTTPException(status_code=400, detail="status must be 'available', 'low', or 'out'.")
 
     query = query.order_by(models.AssetType.id)
     total = query.count()
@@ -992,24 +1011,22 @@ def checkout_advanced(db: Session, asset_id: int, req: AdvancedCheckoutRequest, 
 
 def import_assets_from_csv(db: Session, file: UploadFile, user: dict) -> dict:
     """
-    Bulk CSV import is a Super Admin-only action.
+    Import new asset pools and round-trip updates from Asset Inventory CSV
+    exports.
 
-    ERROR DIAGNOSTIC REPORT (Data Quality & Usability requirement #5): a row
-    that fails validation is no longer silently dropped with `continue` and
-    never mentioned again. Every rejected row is instead recorded in the
-    `errors` list below with its 1-based row number (counting the header as
-    row 1, exactly like opening the file in a spreadsheet app -- so the
-    first DATA row is "row 2"), the value that was rejected, and a
-    human-readable reason. The full report is returned in the response body
-    (see js/components/assets.js -> submitCsvImportForm() for how the
-    frontend surfaces it), so a Super Admin can immediately see and fix the
-    specific rows that didn't import instead of just noticing the "imported
-    count" looks lower than expected and having no idea why.
+    Two modes are supported in the same file:
+      * New pool: no Pool ID; `name`/`Asset Name` and `total_quantity`/`Total`
+        are required.
+      * Existing pool update: `Pool ID`/`pool_id` identifies the pool. The
+        editable columns (name, total quantity, category, department, price)
+        are applied to that exact pool. `Available` and `Status` are exported
+        for reference only and are intentionally ignored on import because
+        available stock is derived from live checkouts/exceptions.
+
+    Blank/"—" values for optional descriptive fields preserve the current
+    value on an update. Use `__CLEAR__` when a Super Admin intentionally
+    wants to clear category, department, or price.
     """
-    # SECURITY: read at most MAX_CSV_UPLOAD_BYTES + 1 bytes -- reading
-    # "one byte past the limit" is a cheap trick to detect an oversized
-    # file without ever having to hold the WHOLE (potentially huge) upload
-    # in memory just to measure it.
     raw_bytes = file.file.read(MAX_CSV_UPLOAD_BYTES + 1)
     if len(raw_bytes) > MAX_CSV_UPLOAD_BYTES:
         raise HTTPException(
@@ -1018,7 +1035,7 @@ def import_assets_from_csv(db: Session, file: UploadFile, user: dict) -> dict:
         )
 
     try:
-        contents = raw_bytes.decode("utf-8")
+        contents = raw_bytes.decode("utf-8-sig")
     except UnicodeDecodeError:
         raise HTTPException(
             status_code=400,
@@ -1026,137 +1043,240 @@ def import_assets_from_csv(db: Session, file: UploadFile, user: dict) -> dict:
         )
 
     try:
-        csv_file = io.StringIO(contents)
-        reader = csv.DictReader(csv_file)
+        reader = csv.DictReader(io.StringIO(contents))
+        if not reader.fieldnames:
+            raise HTTPException(status_code=400, detail="Invalid CSV format: the file has no header row.")
 
-        if not reader.fieldnames or "name" not in reader.fieldnames or "total_quantity" not in reader.fieldnames:
+        # Accept both the original import-template headers and the exact
+        # headers produced by Asset Inventory CSV export. This makes an
+        # export -> edit -> import round trip a first-class workflow.
+        aliases = {
+            "pool_id": ("pool id", "pool_id", "id"),
+            "name": ("name", "asset name", "asset_name"),
+            "total_quantity": ("total_quantity", "total quantity", "total"),
+            "category": ("category",),
+            "department": ("department",),
+            "price": ("price",),
+        }
+        normalized_headers = {
+            str(h or "").strip().lower().replace("-", " "): h
+            for h in reader.fieldnames
+        }
+
+        def source_key(field: str):
+            for alias in aliases[field]:
+                if alias in normalized_headers:
+                    return normalized_headers[alias]
+            return None
+
+        pool_id_key = source_key("pool_id")
+        name_key = source_key("name")
+        quantity_key = source_key("total_quantity")
+        category_key = source_key("category")
+        department_key = source_key("department")
+        price_key = source_key("price")
+
+        # A Pool ID column turns the file into an update-capable export. A
+        # template/new-pool import still uses name + total_quantity.
+        if not pool_id_key and (not name_key or not quantity_key):
             raise HTTPException(
                 status_code=400,
-                detail="Invalid CSV format: the file must have a header row containing 'name' and 'total_quantity' columns.",
+                detail=(
+                    "Invalid CSV format: use either an Asset Inventory export "
+                    "(with 'Pool ID' and 'Asset Name') or a new-pool template "
+                    "containing 'name' and 'total_quantity'."
+                ),
             )
 
         imported_count = 0
-        errors = []  # one entry per row that failed validation -- never silently skipped
+        updated_count = 0
+        errors = []
+        seen_pool_ids = set()
+        seen_names_this_file = {}
 
-        # DATA QUALITY FIX: a spreadsheet that lists the same asset name
-        # twice (e.g. "HP ProBook" entered once per delivery batch) is
-        # almost always a data-entry mistake, not two genuinely separate
-        # deliveries -- silently adding the two rows' quantities together
-        # hides that mistake instead of surfacing it. So a name that
-        # reappears LATER IN THE SAME FILE is now rejected outright as a
-        # duplicate row (see the `seen_names_this_file` check below) and
-        # reported in the diagnostic report with the row it first appeared
-        # on, e.g. `Duplicate item "HP ProBook" already exists in this
-        # import file (first seen on row 2).` -- so a Super Admin can spot
-        # and fix the mistake instead of getting a merged quantity they
-        # didn't ask for.
-        #
-        # A name that matches a pool that ALREADY EXISTED in the database
-        # BEFORE this import started (from a previous import or the UI) is
-        # rejected the same way -- see the `existing = db.query(...)` check
-        # further down -- instead of silently adding to that pool's
-        # total_quantity. A CSV import is for REGISTERING NEW pools, not
-        # for restocking existing ones; restocking has its own explicit
-        # "Update Quantity" action in the Properties Hub, which makes the
-        # new total visible and intentional instead of a side effect of a
-        # file upload that may just be re-listing something that's already
-        # on file.
-        seen_names_this_file = {}  # name -> the row it was first seen on
+        def cell(row, key):
+            return (row.get(key) or "").strip() if key else ""
 
-        # `enumerate(reader, start=2)`: row 1 is the header line the reader
-        # already consumed, so the first actual data row is "row 2" from
-        # the point of view of someone looking at the file in a text
-        # editor or spreadsheet program.
+        def is_preserve(value: str) -> bool:
+            return not value or value == "—"
+
+        def parse_pool_id(raw: str):
+            if not raw:
+                return None, None
+            try:
+                value = int(raw)
+            except ValueError:
+                return None, "Pool ID must be a whole number."
+            if value <= 0:
+                return None, "Pool ID must be greater than zero."
+            return value, None
+
+        def parse_quantity(raw: str):
+            if not raw:
+                return None, "Total quantity is required for a new pool or when changing an existing pool's capacity."
+            try:
+                value = int(raw)
+            except ValueError:
+                return None, f"'{raw}' is not a whole number for total quantity."
+            if value < 0:
+                return None, "Total quantity cannot be negative."
+            return value, None
+
+        def parse_price(raw: str):
+            if is_preserve(raw):
+                return None, None, False
+            if raw == "__CLEAR__":
+                return None, None, True
+            # Exported values may be formatted as "₦1,899.00" (or another
+            # configured currency symbol). Strip common presentation chars;
+            # the Decimal validator remains the authority on the result.
+            # Accept every display currency produced by export_service
+            # (₦, $, £, €, GH₵, KSh, R, or a configured ISO-code prefix)
+            # without making the importer depend on a particular deployment
+            # currency. Keep only the numeric representation.
+            cleaned = re.sub(r"[^0-9.\-]", "", raw)
+            price, price_error = _coerce_asset_price(cleaned)
+            if price_error:
+                return None, price_error, False
+            return price, None, True
+
         for line_number, row in enumerate(reader, start=2):
-
-            name = (row.get("name") or "").strip()
-            raw_qty = (row.get("total_quantity") or "").strip()
-
-            # OPTIONAL "category" column -- which internal category this
-            # row's equipment belongs to (e.g. "Engineering"). Entirely
-            # optional: a missing column, or a blank cell, never rejects the
-            # row -- it just leaves/keeps `category` unset for that pool
-            # (same "optional, not required" rule as the Create Stock Pool
-            # form's category field -- see schemas/assets.py's
-            # AssetTypeCreate.category).
-            raw_category = (row.get("category") or "").strip()
-            category = raw_category or None
-
-            # OPTIONAL "department" column -- kept separate from category.
-            raw_department = (row.get("department") or "").strip()
-            department = raw_department or None
-
-            # OPTIONAL "price" column -- the per-unit purchase/replacement
-            # price for this row's equipment (e.g. "1899.00"). Entirely
-            # optional, same "missing column or blank cell never rejects
-            # the row" rule as `category` above -- it just leaves/keeps
-            # `price` unset for that pool. A cell that IS present but isn't
-            # a valid non-negative number is a real error though (same
-            # treatment as an invalid total_quantity cell below), since a
-            # typo'd price silently becoming "no price set" would be a
-            # worse surprise than rejecting the row outright.
-            raw_price = (row.get("price") or "").strip()
-            price = None
-            if raw_price:
-                price, price_error = _coerce_asset_price(raw_price)
-                if price_error:
-                    errors.append({
-                        "row": line_number, "name": name,
-                        "reason": price_error,
-                    })
-                    continue
-
-            if not name:
-                errors.append({"row": line_number, "name": row.get("name"), "reason": "Missing asset name."})
+            raw_pool_id = cell(row, pool_id_key)
+            pool_id, pool_id_error = parse_pool_id(raw_pool_id)
+            if pool_id_error:
+                errors.append({"row": line_number, "name": cell(row, name_key), "reason": pool_id_error})
                 continue
 
-            # REJECT (don't merge) a name that already appeared earlier in
-            # THIS SAME FILE -- see the `seen_names_this_file` comment
-            # above for why this is an error now instead of a silent
-            # quantity merge.
+            if pool_id is not None:
+                if pool_id in seen_pool_ids:
+                    errors.append({"row": line_number, "name": cell(row, name_key), "reason": f"Pool ID {pool_id} appears more than once in this import file."})
+                    continue
+                seen_pool_ids.add(pool_id)
+
+                asset = db.query(models.AssetType).filter(
+                    models.AssetType.id == pool_id,
+                    ~models.AssetType.is_deleted,
+                ).first()
+                if not asset:
+                    errors.append({"row": line_number, "name": cell(row, name_key), "reason": f"Pool ID {pool_id} was not found in active inventory."})
+                    continue
+
+                raw_name = cell(row, name_key)
+                if raw_name and raw_name != "—":
+                    duplicate = db.query(models.AssetType).filter(
+                        func.lower(models.AssetType.name) == raw_name.lower(),
+                        models.AssetType.id != pool_id,
+                        ~models.AssetType.is_deleted,
+                    ).first()
+                    if duplicate:
+                        errors.append({"row": line_number, "name": raw_name, "reason": f'Asset name "{raw_name}" already belongs to Pool ID {duplicate.id}.'})
+                        continue
+
+                raw_qty = cell(row, quantity_key)
+                qty = None
+                if raw_qty and raw_qty != "—":
+                    qty, qty_error = parse_quantity(raw_qty)
+                    if qty_error:
+                        errors.append({"row": line_number, "name": raw_name or asset.name, "reason": qty_error})
+                        continue
+                    stock = recalculate_asset_stock(db, asset)
+                    allocated_items = stock["outbound"] + stock["isolated"]
+                    if qty < allocated_items:
+                        errors.append({
+                            "row": line_number,
+                            "name": raw_name or asset.name,
+                            "reason": f"Cannot reduce total below {allocated_items} ({stock['outbound']} outbound + {stock['isolated']} isolated).",
+                        })
+                        continue
+
+                parsed_price = None
+                price_provided = False
+                if price_key:
+                    raw_price = cell(row, price_key)
+                    parsed_price, price_error, price_provided = parse_price(raw_price)
+                    if price_error:
+                        errors.append({"row": line_number, "name": raw_name or asset.name, "reason": price_error})
+                        continue
+
+                if qty is not None:
+                    asset.total_quantity = qty
+                    recalculate_asset_stock(db, asset)
+
+                if raw_name and raw_name != "—" and raw_name != asset.name:
+                    asset.name = raw_name
+
+                if category_key:
+                    raw_category = cell(row, category_key)
+                    if raw_category == "__CLEAR__":
+                        asset.category = None
+                    elif not is_preserve(raw_category):
+                        asset.category = raw_category
+
+                if department_key:
+                    raw_department = cell(row, department_key)
+                    if raw_department == "__CLEAR__":
+                        asset.department = None
+                    elif not is_preserve(raw_department):
+                        asset.department = raw_department
+
+                if price_provided:
+                    asset.price = parsed_price
+
+                updated_count += 1
+                continue
+
+            # No Pool ID: this remains the original new-pool import mode.
+            name = cell(row, name_key)
+            if not name:
+                errors.append({"row": line_number, "name": row.get(name_key) if name_key else None, "reason": "Missing asset name."})
+                continue
             if name in seen_names_this_file:
-                errors.append({
-                    "row": line_number, "name": name,
-                    "reason": f'Duplicate item "{name}" already exists in this import file '
-                              f'(first seen on row {seen_names_this_file[name]}).',
-                })
+                errors.append({"row": line_number, "name": name, "reason": f'Duplicate item "{name}" already exists in this import file (first seen on row {seen_names_this_file[name]}).'})
                 continue
             seen_names_this_file[name] = line_number
 
-            try:
-                qty = int(raw_qty)
-            except ValueError:
-                errors.append({
-                    "row": line_number, "name": name,
-                    "reason": f"'{raw_qty}' is not a whole number for total_quantity.",
-                })
+            qty, qty_error = parse_quantity(cell(row, quantity_key))
+            if qty_error:
+                errors.append({"row": line_number, "name": name, "reason": qty_error})
                 continue
 
-            if qty < 0:
-                errors.append({"row": line_number, "name": name, "reason": "total_quantity cannot be negative."})
-                continue
-
-            # A name already appearing in THIS file was already rejected as
-            # a duplicate above, so this second check is specifically for a
-            # pool that already existed in the database BEFORE this import
-            # started (from a previous import or the UI). Same "flag it,
-            # don't silently merge" treatment as the in-file duplicate
-            # case above -- see the `seen_names_this_file` comment for why.
             existing = db.query(models.AssetType).filter(models.AssetType.name == name).first()
             if existing:
                 errors.append({
-                    "row": line_number, "name": name,
-                    "reason": f'Item "{name}" already exists in the system (Pool ID {existing.id}). '
-                              f'Update its quantity directly from the Asset Inventory table instead of '
-                              f're-importing it.',
+                    "row": line_number,
+                    "name": name,
+                    "reason": f'Item "{name}" already exists in the system (Pool ID {existing.id}). Use an exported inventory CSV with Pool ID to update it.',
                 })
                 continue
 
-            new_asset_type = models.AssetType(name=name, total_quantity=qty, available_quantity=qty, category=category, department=department, price=price)
-            db.add(new_asset_type)
+            category = None
+            if category_key and not is_preserve(cell(row, category_key)):
+                category = cell(row, category_key) or None
+            department = None
+            if department_key and not is_preserve(cell(row, department_key)):
+                department = cell(row, department_key) or None
+
+            price = None
+            if price_key:
+                raw_price = cell(row, price_key)
+                parsed_price, price_error, provided = parse_price(raw_price)
+                if price_error:
+                    errors.append({"row": line_number, "name": name, "reason": price_error})
+                    continue
+                if provided:
+                    price = parsed_price
+
+            db.add(models.AssetType(
+                name=name,
+                total_quantity=qty,
+                available_quantity=qty,
+                category=category,
+                department=department,
+                price=price,
+            ))
             imported_count += 1
 
-        summary = f"Spreadsheet processed. Registered {imported_count} update(s), {len(errors)} row(s) rejected."
+        summary = f"CSV processed. Updated {updated_count} pool(s), registered {imported_count} new pool(s), {len(errors)} row(s) rejected."
         db.add(models.AuditLog(
             operator=user["email"], action="BATCH_IMPORT", target_type="AssetType", target_id=0,
             details=summary,
@@ -1164,16 +1284,16 @@ def import_assets_from_csv(db: Session, file: UploadFile, user: dict) -> dict:
         db.commit()
         return {
             "message": summary,
-            "imported_count": imported_count,
+            "imported_count": imported_count + updated_count,
+            "updated_count": updated_count,
+            "created_count": imported_count,
             "error_count": len(errors),
-            # Full diagnostic report -- one object per rejected row, so the
-            # caller can pinpoint and fix exactly what went wrong instead of
-            # guessing why the imported count came in lower than expected.
             "errors": errors,
         }
     except HTTPException:
         raise
     except Exception as e:
+        db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1247,7 +1367,13 @@ def export_assets_inventory(db: Session, user: dict, category: Optional[str], fm
 
     rows = []
     for p in pools:
-        row = [p.id, p.name, p.category or "—", p.department or "—", export_service.format_money(p.price) if p.price is not None else "—"]
+        price_for_export = export_service.format_money(p.price) if p.price is not None else "—"
+        price_for_csv = f"{float(p.price):.2f}" if p.price is not None else "—"
+        row_tail = [p.id, p.name, p.category or "—", p.department or "—"]
+        if fmt == "pdf":
+            row = row_tail + [price_for_export]
+        else:
+            row = row_tail + [price_for_csv]
         if show_stock:
             row += [p.available_quantity, p.total_quantity, _inventory_status_label(p.available_quantity)]
         rows.append(row)

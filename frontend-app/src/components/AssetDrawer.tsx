@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 import { X, Tag, DollarSign, Layers, Pencil, Check, Loader2, Trash2, PackageCheck, Wrench, ShieldAlert, ShoppingCart } from "lucide-react";
 import type { AssetDetails, AssetActiveAssignment, AssetExceptionItem } from "../lib/types";
 import { assetsApi, checkoutsApi, quotationsApi, formatPrice, ApiError } from "../lib/api";
+import { useRequestGuard } from "../lib/useRequestGuard";
 
 function errMsg(err: unknown, fallback: string): string {
   if (err instanceof ApiError) return err.message;
@@ -474,16 +475,17 @@ export function AssetDrawer({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const beginRequest = useRequestGuard();
 
   const refresh = () => {
     if (!asset) return;
+    const isCurrent = beginRequest();
     setLoading(true);
     setError(null);
-    assetsApi
-      .details(asset.id)
-      .then((d) => setDetails(d))
-      .catch((err) => setError(errMsg(err, "Couldn't load pool details.")))
-      .finally(() => setLoading(false));
+    assetsApi.details(asset.id)
+      .then((d) => { if (isCurrent()) setDetails(d); })
+      .catch((err) => { if (isCurrent()) setError(errMsg(err, "Couldn't load pool details.")); })
+      .finally(() => { if (isCurrent()) setLoading(false); });
   };
 
   useEffect(() => {

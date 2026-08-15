@@ -10,6 +10,7 @@ import { usersApi } from "../../lib/api";
 import type { DeletedUserRow } from "../../lib/types";
 import { PaginationBar, RowsPerPageSelect } from "../../components/PaginationBar";
 import { DEFAULT_PAGE_SIZE } from "../../lib/pagination";
+import { useRequestGuard } from "../../lib/useRequestGuard";
 import { ErrorBanner } from "../../components/ui/ErrorBanner";
 import { SearchInput } from "../../components/ui/SearchInput";
 import { TableShell, TableHead, TablePlaceholderRow } from "../../components/ui/TableShell";
@@ -24,21 +25,23 @@ export function DeletedUsersPanel() {
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const beginRequest = useRequestGuard();
 
   const refresh = () => {
+    const isCurrent = beginRequest();
     setLoading(true);
     setError(null);
-    usersApi
-      .listDeleted(perPage, offset, search)
-      .then((res) => {
-        setRows(res.items);
-        setTotal(res.total);
-      })
-      .catch((err) => setError(errMsg(err, "Couldn't load deleted accounts.")))
-      .finally(() => setLoading(false));
+    usersApi.listDeleted(perPage, offset, search)
+      .then((res) => { if (isCurrent()) { setRows(res.items); setTotal(res.total); } })
+      .catch((err) => { if (isCurrent()) setError(errMsg(err, "Couldn't load deleted accounts.")); })
+      .finally(() => { if (isCurrent()) setLoading(false); });
   };
 
   useEffect(refresh, [offset, perPage, search]);
+
+  useEffect(() => {
+    if (offset > 0 && offset >= total) setOffset(Math.max(0, Math.floor(Math.max(total - 1, 0) / perPage) * perPage));
+  }, [offset, total, perPage]);
 
   const handlePerPageChange = (n: number) => {
     setPerPage(n);

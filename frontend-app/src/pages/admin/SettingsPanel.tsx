@@ -19,6 +19,7 @@ import { useEffect, useState } from "react";
 import { Mail, Plus, X, Percent } from "lucide-react";
 import { digestApi, quotationsApi } from "../../lib/api";
 import { errMsg } from "./sharedHelpers";
+import { useRequestGuard } from "../../lib/useRequestGuard";
 
 // Lives on the Settings tab (Super Admin AND a plain Admin, via
 // canSettings/isFullAdmin below) rather than the System Backups tab --
@@ -34,15 +35,12 @@ function DigestRecipients() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    let cancelled = false;
     digestApi.list()
-      .then((e) => {
-        setEmails(e);
-        setLoading(false);
-      })
-      .catch((err) => {
-        console.error("Failed to load digest recipients:", err);
-        setLoading(false);
-      });
+      .then((e) => { if (!cancelled) setEmails(e); })
+      .catch((err) => { if (!cancelled) console.error("Failed to load digest recipients:", err); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
   }, []);
 
   const save = async (next: string[], successMessage: string) => {
@@ -123,10 +121,12 @@ export function SettingsPanel() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ text: string; ok: boolean } | null>(null);
+  const beginRequest = useRequestGuard();
 
   useEffect(() => {
-    quotationsApi.getVat().then((data) => setVatPercent(String(data.vat_percent))).finally(() => setLoading(false));
-  }, []);
+    const isCurrent = beginRequest();
+    quotationsApi.getVat().then((data) => { if (isCurrent()) setVatPercent(String(data.vat_percent)); }).catch(() => {}).finally(() => { if (isCurrent()) setLoading(false); });
+  }, [beginRequest]);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();

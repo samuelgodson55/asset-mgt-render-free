@@ -82,8 +82,10 @@ export function DispatchModal({
     setDispatched(null);
     setReceiptOpen(false);
     setRosterLoading(true);
+    let cancelled = false;
     Promise.all([assetsApi.staffRoster(), assetsApi.customerRoster(), assetsApi.outsiderRoster()])
       .then(([s, c, o]) => {
+        if (cancelled) return;
         setStaff(s);
         setCustomers(c);
         setOutsiders(o);
@@ -91,7 +93,8 @@ export function DispatchModal({
       .catch(() => {
         // Non-fatal -- the dispatch form still renders, just with empty rosters.
       })
-      .finally(() => setRosterLoading(false));
+      .finally(() => { if (!cancelled) setRosterLoading(false); });
+    return () => { cancelled = true; };
   }, [asset]);
 
   if (!asset) return null;

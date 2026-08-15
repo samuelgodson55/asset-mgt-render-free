@@ -7,6 +7,7 @@ import type { MyItem } from "../lib/types";
 import { ExportButtons } from "../components/ExportButtons";
 import { PaginationBar, RowsPerPageSelect } from "../components/PaginationBar";
 import { DEFAULT_PAGE_SIZE } from "../lib/pagination";
+import { useRequestGuard } from "../lib/useRequestGuard";
 import { ReceiptModal } from "../components/ReceiptModal";
 import type { ReceiptTarget } from "../lib/receipt";
 
@@ -136,9 +137,13 @@ export function MyItems() {
   // even off the default first page -- see the effect further down that
   // resolves it against the FULL list before landing on the right offset.
   const [highlightId, setHighlightId] = useState<number | null>(null);
+  const beginListRequest = useRequestGuard();
+  const beginReceiptRequest = useRequestGuard();
+  const beginHighlightRequest = useRequestGuard();
   const rowRefs = useRef<Record<number, HTMLTableRowElement | null>>({});
 
   const changeFilter = (f: (typeof filterTabs)[number]) => {
+    setOffset(0);
     setFilter(f);
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev);
@@ -148,11 +153,9 @@ export function MyItems() {
     }, { replace: true });
   };
 
-  const visibleItems = items.filter((i) => {
-    if (filter === "overdue") return i.overdue;
-    if (filter === "due_soon") return i.due_soon && !i.overdue;
-    return true;
-  });
+  // The server already applies the selected filter BEFORE pagination, so every page
+  // represents the complete filtered result set rather than only the current slice.
+  const visibleItems = items;
 
   // TRUE server-side pagination (same `limit`/`offset` pattern as the
   // Asset Inventory table -- see pages/Assets.tsx) -- every page turn or
@@ -160,19 +163,25 @@ export function MyItems() {
   // GET /users/me/items?limit=&offset= instead of downloading the whole
   // custody ledger and paging through it in memory.
   const refresh = () => {
+    const isCurrent = beginListRequest();
     setLoading(true);
     myItemsApi
-      .list(perPage, offset)
+      .list(perPage, offset, filter === "all" ? undefined : filter)
       .then((data) => {
+        if (!isCurrent()) return;
         setItems(data.assigned_items);
         setTotal(data.total);
         setHolderName(data.name);
       })
-      .catch(() => { setItems([]); setTotal(0); })
-      .finally(() => setLoading(false));
+      .catch(() => { if (isCurrent()) { setItems([]); setTotal(0); } })
+      .finally(() => { if (isCurrent()) setLoading(false); });
   };
 
-  useEffect(refresh, [perPage, offset]);
+  useEffect(refresh, [perPage, offset, filter]);
+
+  useEffect(() => {
+    if (offset > 0 && offset >= total) setOffset(Math.max(0, Math.floor(Math.max(total - 1, 0) / perPage) * perPage));
+  }, [offset, total, perPage]);
 
   // Single-item receipt for whatever page is currently loaded -- opens
   // straight from the row, same as Checkouts.tsx's per-row receipt.
@@ -189,10 +198,12 @@ export function MyItems() {
   // everything", see lib/api.ts), same call the Notification Bell/
   // Dashboard already make for the same reason.
   const openFullReceipt = () => {
+    const isCurrent = beginReceiptRequest();
     setFullReceiptLoading(true);
     myItemsApi
       .list()
       .then((data) => {
+        if (!isCurrent()) return;
         setHolderName(data.name);
         setReceipt({
           holderName: data.name,
@@ -207,7 +218,7 @@ export function MyItems() {
         });
       })
       .catch(() => { /* Non-fatal -- the person can still use the per-row receipt buttons. */ })
-      .finally(() => setFullReceiptLoading(false));
+      .finally(() => { if (isCurrent()) setFullReceiptLoading(false); });
   };
 
   // Called from the "Rows per page" <select> -- always jumps back to the
@@ -245,16 +256,18 @@ export function MyItems() {
     if (!raw) return;
     const checkoutId = Number(raw);
     if (!Number.isFinite(checkoutId)) return;
+    const isCurrent = beginHighlightRequest();
     myItemsApi
       .list()
       .then((data) => {
+        if (!isCurrent()) return;
         const idx = data.assigned_items.findIndex((i) => i.checkout_id === checkoutId);
         if (idx === -1) return;
         setOffset(Math.floor(idx / perPage) * perPage);
         setHighlightId(checkoutId);
+        setSearchParams((prev) => { const next = new URLSearchParams(prev); next.delete("highlight"); return next; }, { replace: true });
       })
       .catch(() => {});
-    setSearchParams((prev) => { const next = new URLSearchParams(prev); next.delete("highlight"); return next; }, { replace: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

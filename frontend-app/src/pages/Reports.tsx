@@ -9,6 +9,7 @@ import { StatCard } from "../components/StatCard";
 import { TableShell, TableHead, TablePlaceholderRow } from "../components/ui/TableShell";
 import { PaginationBar, RowsPerPageSelect } from "../components/PaginationBar";
 import { DEFAULT_PAGE_SIZE } from "../lib/pagination";
+import { useRequestGuard } from "../lib/useRequestGuard";
 import { useTheme } from "../lib/useTheme";
 import type { ReportsDashboard } from "../lib/types";
 
@@ -45,15 +46,17 @@ export function Reports() {
   const [offset, setOffset] = useState(0);
   const { theme } = useTheme();
   const chart = CHART_COLORS[theme];
+  const beginRequest = useRequestGuard();
 
   useEffect(() => {
+    const isCurrent = beginRequest();
     setLoading(true);
     reportsApi
       .dashboard(startDate || undefined, endDate || undefined, category || undefined)
-      .then(setData)
-      .catch((err) => console.error("Failed to load reports dashboard:", err))
-      .finally(() => setLoading(false));
-  }, [startDate, endDate, category]);
+      .then((result) => { if (isCurrent()) setData(result); })
+      .catch((err) => { if (isCurrent()) console.error("Failed to load reports dashboard:", err); })
+      .finally(() => { if (isCurrent()) setLoading(false); });
+  }, [startDate, endDate, category, beginRequest]);
 
   // Filters changed the underlying rows -- reset back to page one so we
   // don't strand the user on an offset past the end of the new list.
@@ -68,6 +71,10 @@ export function Reports() {
 
   const utilizationRows = data?.utilization_by_asset_type ?? [];
   const pagedUtilizationRows = utilizationRows.slice(offset, offset + perPage);
+
+  useEffect(() => {
+    if (offset > 0 && offset >= utilizationRows.length) setOffset(Math.max(0, Math.floor(Math.max(utilizationRows.length - 1, 0) / perPage) * perPage));
+  }, [offset, perPage, utilizationRows.length]);
 
   const categories = useMemo(() => {
     const set = new Set<string>();

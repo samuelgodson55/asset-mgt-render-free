@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { auth, quotationsApi, DEMO_FLAG_KEY, type AuthUser } from "./api";
 import { canSeeStock as computeCanSeeStock } from "./roles";
 import { AuthContext, type MfaChallenge } from "./auth-context";
@@ -12,30 +12,56 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Safe-by-default (false) until GET /config/public resolves -- see
   // canSeeStock's docstring above.
   const [catalogShowStock, setCatalogShowStock] = useState(false);
+  const authRequestGeneration = useRef(0);
 
   useEffect(() => {
     // Public, unauthenticated-safe endpoint (also powers the Login page's
     // site_name) -- fetched once per app load, independent of sign-in
     // state, so it's ready by the time `user`/`demo` settle.
+    let cancelled = false;
     quotationsApi.publicConfig().then((config) => {
-      setCatalogShowStock(!!config.show_stock_to_staff_customer);
-    });
+      if (!cancelled) setCatalogShowStock(!!config.show_stock_to_staff_customer);
+    }).catch(() => {});
+    return () => { cancelled = true; };
   }, []);
 
   const refresh = useCallback(async () => {
+    const generation = ++authRequestGeneration.current;
     try {
       const me = await auth.me();
+      if (generation !== authRequestGeneration.current) return;
+      // A real authenticated session always takes precedence over demo mode.
+      // This prevents a stale demo flag from ever causing bundled mock data to
+      // appear underneath a valid login after a refresh/redeploy.
+      sessionStorage.removeItem(DEMO_FLAG_KEY);
+      setDemo(false);
       setUser(me);
     } catch {
+      if (generation !== authRequestGeneration.current) return;
       setUser(null);
     } finally {
-      setLoading(false);
+      if (generation === authRequestGeneration.current) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    const handleAuthExpired = () => {
+      // A restore bumps the backend auth epoch, so an older cookie can still
+      // physically exist in the browser while being invalid to the server.
+      // Never leave the UI looking signed in in that state: clear the local
+      // session immediately and let RequireAuth send the user to Login.
+      sessionStorage.removeItem(DEMO_FLAG_KEY);
+      setDemo(false);
+      setUser(null);
+      setMfaChallenge(null);
+    };
+    window.addEventListener("asset-app:auth-expired", handleAuthExpired);
+    return () => window.removeEventListener("asset-app:auth-expired", handleAuthExpired);
+  }, []);
 
   const settle = useCallback(async () => {
     // Shared tail end of every path that lands on a real session cookie
@@ -112,10 +138,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const logout = useCallback(async () => {
-    await auth.logout();
-    setUser(null);
-    sessionStorage.removeItem(DEMO_FLAG_KEY);
-    setDemo(false);
+    try {
+      await auth.logout();
+    } catch {
+      // Logout must always clear the local UI state. After a restore the
+      // old session may already be rejected with 401, and that response must
+      // not strand the browser in a visually authenticated state.
+    } finally {
+      setUser(null);
+      sessionStorage.removeItem(DEMO_FLAG_KEY);
+      setDemo(false);
+      setMfaChallenge(null);
+    }
   }, []);
 
   const continueAsDemo = useCallback(() => {

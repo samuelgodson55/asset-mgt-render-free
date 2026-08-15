@@ -3,6 +3,7 @@ import { motion } from "framer-motion";
 import { UserRound, KeyRound, ShieldCheck, Download, Check } from "lucide-react";
 import { profileApi, ApiError } from "../lib/api";
 import { useAuth } from "../lib/useAuth";
+import { useRequestGuard } from "../lib/useRequestGuard";
 import { isTrueSuperAdmin } from "../lib/roles";
 import type { ProfileDetail } from "../lib/types";
 
@@ -202,10 +203,12 @@ export function Profile() {
   const { user, demo } = useAuth();
   const [profile, setProfile] = useState<ProfileDetail | null>(null);
   const [tab, setTab] = useState<ProfileTab>("account");
+  const beginRequest = useRequestGuard();
 
   useEffect(() => {
-    profileApi.get().then(setProfile).catch(() => setProfile(null));
-  }, []);
+    const isCurrent = beginRequest();
+    profileApi.get().then((data) => { if (isCurrent()) setProfile(data); }).catch(() => { if (isCurrent()) setProfile(null); });
+  }, [beginRequest]);
 
   const tabs = useMemo(() => {
     const list: Array<{ key: ProfileTab; label: string; icon: typeof UserRound }> = [

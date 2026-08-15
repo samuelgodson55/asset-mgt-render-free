@@ -2,7 +2,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import { LayoutGrid, Boxes, ClipboardList, Bell, Search, LogOut, ShieldCheck, PackageCheck, FileText, Menu, X, BarChart3 } from "lucide-react";
 import { Suspense, useEffect, useState } from "react";
-import { api, quotationsApi, myItemsApi, setCurrencyCode } from "../lib/api";
+import { api, quotationsApi, auth as authApi, myItemsApi, setCurrencyCode } from "../lib/api";
 import { useAuth } from "../lib/useAuth";
 import { isPrivileged } from "../lib/roles";
 import { useNotificationCount } from "../lib/useNotificationCount";
@@ -184,7 +184,9 @@ export function Layout() {
   // instance) -- rather than on every authenticated page load.
   useEffect(() => {
     if (quoteDetailId == null || quoteCatalog.length > 0) return;
-    quotationsApi.catalog().then(setQuoteCatalog).catch(() => {});
+    let cancelled = false;
+    quotationsApi.catalog().then((data) => { if (!cancelled) setQuoteCatalog(data); }).catch(() => {});
+    return () => { cancelled = true; };
   }, [quoteDetailId, quoteCatalog.length]);
 
   // Below `lg` the sidebar becomes an off-canvas drawer -- close it
@@ -234,22 +236,27 @@ export function Layout() {
   // which meant a price shown on, say, /assets before ever visiting
   // /quotations in that session could be in the wrong currency entirely.
   useEffect(() => {
-    quotationsApi.publicConfig().then((config) => setCurrencyCode(config.currency_code));
+    let cancelled = false;
+    quotationsApi.publicConfig().then((config) => { if (!cancelled) setCurrencyCode(config.currency_code); });
+    return () => { cancelled = true; };
   }, []);
 
-  // This call's own result no longer feeds the sidebar badge (see `unread`
-  // below) -- it's kept purely so lib/api.ts's tryLoad() records whether
-  // the backend actually responded, which is what the "Live — connected to
-  // backend" / "Demo data" indicator in the header reflects.
+  // Connection status is based on the authenticated session itself, not on
+  // a particular panel succeeding. A single audit/checkouts/report error
+  // must not make the whole app claim the backend is unavailable when
+  // /auth/me is healthy. A restore-invalidated session is handled centrally
+  // by the 401 event in lib/api.ts + AuthProvider.
   useEffect(() => {
-    api.getNotifications(privileged)
-      .then(() => setLive(api.isLive()))
-      .catch((err) => {
-        console.error("Failed to load notifications:", err);
-        setLive(api.isLive());
-      });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    let cancelled = false;
+    if (demo) {
+      setLive(false);
+      return () => { cancelled = true; };
+    }
+    authApi.me()
+      .then(() => { if (!cancelled) setLive(true); })
+      .catch(() => { if (!cancelled) setLive(false); });
+    return () => { cancelled = true; };
+  }, [demo, user?.id]);
 
   // Same shared calculation as the header Bell badge (components/
   // NotificationBell.tsx) -- see lib/useNotificationCount.ts for why this
@@ -433,9 +440,9 @@ export function Layout() {
                 <span className={`absolute inline-flex h-full w-full rounded-full opacity-60 animate-ping ${live ? "bg-moss" : "bg-brass"}`} />
                 <span className={`relative inline-flex rounded-full h-1.5 w-1.5 ${live ? "bg-moss" : "bg-brass"}`} />
               </span>
-              {live ? "Live — connected to backend" : "Demo data — backend unreachable"}
+              {demo ? "Demo mode — local demo data" : live ? "Live — connected to backend" : "Backend unavailable — live data not loaded"}
             </div>
-            <span className="relative flex h-1.5 w-1.5 md:hidden" title={live ? "Live — connected to backend" : "Demo data — backend unreachable"}>
+            <span className="relative flex h-1.5 w-1.5 md:hidden" title={demo ? "Demo mode — local demo data" : live ? "Live — connected to backend" : "Backend unavailable — live data not loaded"}>
               <span className={`absolute inline-flex h-full w-full rounded-full opacity-60 animate-ping ${live ? "bg-moss" : "bg-brass"}`} />
               <span className={`relative inline-flex rounded-full h-1.5 w-1.5 ${live ? "bg-moss" : "bg-brass"}`} />
             </span>

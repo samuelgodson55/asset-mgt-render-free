@@ -309,6 +309,61 @@ def test_upgrade_head_in_production_bootstraps_exactly_one_root_admin(database_u
     assert "ROOT ADMIN ACCOUNT BOOTSTRAPPED" not in result.stderr
 
 
+def test_single_super_admin_invariant_repairs_duplicate_and_blocks_future_duplicates(database_url):
+    """Migration 0017 repairs a database containing a backup-only second
+    super_admin, then the PostgreSQL unique partial index rejects any later
+    attempt to create another root account."""
+    result = _run_alembic(
+        "upgrade", "0016_quotation_paid_status",
+        database_url=database_url,
+        environment="production",
+        bootstrap_password="TestBootstrap123!",
+    )
+    assert result.returncode == 0, result.stderr
+
+    conn = psycopg2.connect(database_url)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO users (name, email, username, role, password_hash, is_verified, is_active, is_deleted) "
+                "VALUES (%s, %s, %s, %s, %s, true, true, false)",
+                ("Backup Root", "backup.root@example.com", "backup.root", "super_admin", "hash"),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = _run_alembic(
+        "upgrade", "head",
+        database_url=database_url,
+        environment="production",
+        bootstrap_password="TestBootstrap123!",
+    )
+    assert result.returncode == 0, result.stderr
+
+    users = _query_users(database_url)
+    root_admins = [u for u in users if u["role"] == "super_admin"]
+    assert len(root_admins) == 1
+    assert root_admins[0]["username"] == "test_root_admin"
+
+    backup_row = next(u for u in users if u["email"] == "backup.root@example.com")
+    assert backup_row["role"] != "super_admin"
+    assert backup_row["is_active"] is False
+    assert backup_row["is_deleted"] is True
+
+    conn = psycopg2.connect(database_url)
+    try:
+        with conn.cursor() as cur:
+            with pytest.raises(psycopg2.errors.UniqueViolation):
+                cur.execute(
+                    "INSERT INTO users (name, email, username, role, password_hash, is_verified, is_active, is_deleted) "
+                    "VALUES ('Third Root', 'third.root@example.com', 'third.root', 'super_admin', 'hash', true, true, false)"
+                )
+            conn.rollback()
+    finally:
+        conn.close()
+
+
 def test_upgrade_head_in_production_generates_password_when_none_supplied(database_url):
     """
     When ROOT_ADMIN_BOOTSTRAP_PASSWORD is left unset, the migration must

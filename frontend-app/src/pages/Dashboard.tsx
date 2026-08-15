@@ -10,6 +10,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../lib/useAuth";
 import { useTheme } from "../lib/useTheme";
 import { isPrivileged } from "../lib/roles";
+import { useRequestGuard } from "../lib/useRequestGuard";
 import { useCustody } from "../lib/useCustody";
 
 // recharts needs literal color strings (SVG attrs, not the app's CSS
@@ -41,28 +42,23 @@ export function Dashboard() {
   // attempt the privileged endpoints and let a 403 fall through to mock
   // data).
   const privileged = demo || isPrivileged(user?.role);
+  const beginRequest = useRequestGuard();
 
   useEffect(() => {
-    // On a real account, api.getStats()/getCheckouts() now throw (rather
-    // than silently returning demo data) if the backend request fails --
-    // see lib/api.ts's tryLoad() docstring. Catch here so a transient
-    // failure just leaves the dashboard on its loading/empty state
-    // instead of an unhandled rejection; it never falls back to
-    // fabricated numbers.
-    api.getStats(privileged).then(setStats).catch((err) => console.error("Failed to load dashboard stats:", err));
+    const isCurrent = beginRequest();
+    api.getStats(privileged).then((data) => { if (isCurrent()) setStats(data); }).catch((err) => { if (isCurrent()) console.error("Failed to load dashboard stats:", err); });
     if (privileged) {
-      api.getCheckouts(privileged).then(setCheckouts).catch((err) => console.error("Failed to load checkouts:", err));
+      api.getCheckouts(privileged).then((data) => { if (isCurrent()) setCheckouts(data); }).catch((err) => { if (isCurrent()) console.error("Failed to load checkouts:", err); });
     } else {
       myItemsApi.list()
-        .then((d) => { setMyItems(d.assigned_items); setMyItemsLoaded(true); })
-        .catch(() => { setMyItems([]); setMyItemsLoaded(true); });
+        .then((d) => { if (!isCurrent()) return; setMyItems(d.assigned_items); setMyItemsLoaded(true); })
+        .catch(() => { if (!isCurrent()) return; setMyItems([]); setMyItemsLoaded(true); });
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [privileged]);
+  }, [privileged, beginRequest]);
 
   const attention = privileged
     ? checkouts
-        .filter((c) => c.status === "overdue" || (new Date(c.due_at).getTime() - Date.now()) / 86400000 <= 2)
+        .filter((c) => c.status === "overdue" || c.due_soon)
         .sort((a, b) => new Date(a.due_at).getTime() - new Date(b.due_at).getTime())
         .slice(0, 5)
     : [];

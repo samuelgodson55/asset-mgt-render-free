@@ -6,6 +6,7 @@ import type { CustodyItem } from "../lib/types";
 import { ExportButtons } from "./ExportButtons";
 import { ReceiptModal } from "./ReceiptModal";
 import type { ReceiptTarget } from "../lib/receipt";
+import { useRequestGuard } from "../lib/useRequestGuard";
 
 function errMsg(err: unknown, fallback: string): string {
   if (err instanceof ApiError) return err.message;
@@ -179,6 +180,7 @@ export function CustodyDrawer({
 }) {
   const [items, setItems] = useState<CustodyItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const beginRequest = useRequestGuard();
   const [returningId, setReturningId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -234,10 +236,12 @@ export function CustodyDrawer({
 
   const refresh = () => {
     if (!target) return;
+    const isCurrent = beginRequest();
     setLoading(true);
     const call = target.type === "user" ? usersApi.items(target.id) : outsidersApi.items(target.id);
     call
       .then((data) => {
+        if (!isCurrent()) return;
         setItems(data.assigned_items);
         setQtyByCheckout((prev) => {
           const next: Record<number, number> = {};
@@ -251,8 +255,8 @@ export function CustodyDrawer({
           return new Set(Array.from(prev).filter((id) => ids.has(id)));
         });
       })
-      .catch((err) => setError(errMsg(err, "Couldn't load custody items.")))
-      .finally(() => setLoading(false));
+      .catch((err) => { if (isCurrent()) setError(errMsg(err, "Couldn't load custody items.")); })
+      .finally(() => { if (isCurrent()) setLoading(false); });
   };
 
   useEffect(() => {

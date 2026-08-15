@@ -14,6 +14,7 @@ import { useCustody } from "../../lib/useCustody";
 import { ExportButtons } from "../../components/ExportButtons";
 import { PaginationBar, RowsPerPageSelect } from "../../components/PaginationBar";
 import { DEFAULT_PAGE_SIZE } from "../../lib/pagination";
+import { useRequestGuard } from "../../lib/useRequestGuard";
 import { Modal, ModalHeader } from "../../components/ui/Modal";
 import { ErrorBanner } from "../../components/ui/ErrorBanner";
 import { SearchInput } from "../../components/ui/SearchInput";
@@ -240,6 +241,7 @@ export function UsersPanel({
   const [resetting, setResetting] = useState<UserRow | null>(null);
   const [editing, setEditing] = useState<UserRow | null>(null);
   const [revoking, setRevoking] = useState<UserRow | null>(null);
+  const beginRequest = useRequestGuard();
   // Custody Ledger drawer is now shared app-wide (see lib/custodyContext.tsx)
   // so the Notification Bell's "View ->" click-through can open it without
   // navigating here first -- this panel's own "Custody" button just opens
@@ -261,15 +263,27 @@ export function UsersPanel({
   const editRoleOptions = demo || isFullAdmin(actorRole) ? ROLE_OPTIONS : ["staff", "customer"];
 
   const refresh = () => {
+    const isCurrent = beginRequest();
     setLoading(true);
     usersApi.list(perPage, offset, search).then((res) => {
+      if (!isCurrent()) return;
       setRows(res.items);
       setTotal(res.total);
+      setLoading(false);
+    }).catch((err) => {
+      if (!isCurrent()) return;
+      console.error("Failed to load users:", err);
+      setRows([]);
+      setTotal(0);
       setLoading(false);
     });
   };
 
   useEffect(refresh, [offset, perPage, search]);
+
+  useEffect(() => {
+    if (offset > 0 && offset >= total) setOffset(Math.max(0, Math.floor(Math.max(total - 1, 0) / perPage) * perPage));
+  }, [offset, total, perPage]);
 
   const handlePerPageChange = (n: number) => {
     setPerPage(n);

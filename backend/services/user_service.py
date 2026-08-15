@@ -475,7 +475,7 @@ def _group_assigned_items(checkouts: list["models.AssetCheckout"], include_outso
     return grouped_items
 
 
-def get_my_assigned_items(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offset: int = 0) -> dict:
+def get_my_assigned_items(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offset: int = 0, status_filter: Optional[str] = None) -> dict:
     """
     Self-service version of get_user_assigned_items: lets ANY logged-in
     account (staff, customer, manager, super_admin) see their own
@@ -504,6 +504,11 @@ def get_my_assigned_items(db: Session, user: dict, limit: int = DEFAULT_LIMIT, o
         models.AssetCheckout.user_id == target.id, models.AssetCheckout.status == "active"
     ).all()
     items = _group_assigned_items(active_checkouts, include_outsourced_details=False)
+
+    if status_filter == "overdue":
+        items = [item for item in items if item["overdue"]]
+    elif status_filter == "due_soon":
+        items = [item for item in items if item["due_soon"] and not item["overdue"]]
 
     limit = max(1, min(limit, MAX_LIMIT))
     offset = max(0, offset)

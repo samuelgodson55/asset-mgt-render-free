@@ -1327,7 +1327,7 @@ whole app fits on a single free Web Service.
 *both* the legacy multi-page static site and the React "Ledger" SPA into
 this same image unconditionally; `render.yaml`'s `FRONTEND_VARIANT`
 environment variable picks which one this service actually serves
-(`legacy`, the default, or `react`). Switching is just a value change in
+(`react`, the default, or `legacy`). Switching is just a value change in
 the Render Dashboard's Environment tab (or `render.yaml`) followed by a
 redeploy — since nothing about the image itself changes, that's a plain
 restart, not a rebuild. See `backend/config.py`'s `FRONTEND_VARIANT`
@@ -1335,6 +1335,13 @@ docstring and `backend/main.py`'s "STATIC FRONTEND" section for how the
 choice is applied (`middleware/clean_urls.py`'s clean-URL rewrite for
 `legacy`, `middleware/spa_fallback.py`'s client-side-route fallback for
 `react`).
+
+**Render secrets are intentionally persistent.** The Blueprint marks the
+JWT signing secret, Brevo/Resend API keys, SMTP credentials/sender settings,
+admin notification recipients, and all Google Drive OAuth/service-account
+credentials plus the Drive folder ID with `sync: false`. Render therefore
+leaves those Dashboard-managed values untouched on later Blueprint syncs, so
+a normal deploy does not force you to re-enter or rotate those credentials.
 
 <details>
 <summary>Need a paid, multi-service, horizontally-scalable deployment instead? Click to expand.</summary>

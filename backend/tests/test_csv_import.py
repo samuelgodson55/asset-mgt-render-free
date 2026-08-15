@@ -192,3 +192,116 @@ def test_missing_required_columns_rejected_before_any_row_processing(as_super_ad
     response = _upload(client, headers, "name,quantity\nWidget,5\n")  # wrong header name
     assert response.status_code == 400
     assert "name" in response.json()["detail"] and "total_quantity" in response.json()["detail"]
+
+
+def test_exported_inventory_csv_can_update_existing_pool(as_super_admin, db_session):
+    """The Asset Inventory export is intentionally round-trippable: Pool ID
+    identifies the exact pool, editable columns update it, and Available/
+    Status are ignored because stock is derived from live records."""
+    client, headers = as_super_admin
+    create = client.post(
+        "/api/assets", headers=headers,
+        json={
+            "name": "Production Camera Pool",
+            "total_quantity": 10,
+            "category": "Cameras",
+            "department": None,
+            "price": 1200.0,
+        },
+    )
+    assert create.status_code == 200, create.text
+    pool_id = create.json()["id"]
+
+    csv_text = (
+        "Pool ID,Asset Name,Category,Department,Price,Available,Total,Status\n"
+        f'{pool_id},Production Camera Pool,Cameras,Production,"₦1,350.00",999,10,In Stock\n'
+    )
+    response = _upload(client, headers, csv_text)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["updated_count"] == 1
+    assert body["created_count"] == 0
+    assert body["error_count"] == 0
+
+    db_session.expire_all()
+    pool = db_session.query(models.AssetType).filter(models.AssetType.id == pool_id).one()
+    assert pool.department == "Production"
+    assert pool.category == "Cameras"
+    assert float(pool.price) == 1350.0
+    assert pool.total_quantity == 10
+    assert pool.available_quantity == 10
+
+
+def test_exported_inventory_blank_optional_fields_preserve_values_and_clear_is_explicit(as_super_admin, db_session):
+    client, headers = as_super_admin
+    create = client.post(
+        "/api/assets", headers=headers,
+        json={
+            "name": "Lighting Pool",
+            "total_quantity": 5,
+            "category": "Lighting",
+            "department": "Studio",
+            "price": 500.0,
+        },
+    )
+    pool_id = create.json()["id"]
+
+    preserve_csv = (
+        "Pool ID,Asset Name,Category,Department,Price,Available,Total,Status\n"
+        f"{pool_id},Lighting Pool,—,—,—,5,5,In Stock\n"
+    )
+    response = _upload(client, headers, preserve_csv)
+    assert response.status_code == 200, response.text
+    db_session.expire_all()
+    pool = db_session.query(models.AssetType).filter(models.AssetType.id == pool_id).one()
+    assert pool.category == "Lighting"
+    assert pool.department == "Studio"
+    assert float(pool.price) == 500.0
+
+    clear_csv = (
+        "Pool ID,Asset Name,Category,Department,Price,Available,Total,Status\n"
+        f"{pool_id},Lighting Pool,__CLEAR__,__CLEAR__,__CLEAR__,5,5,In Stock\n"
+    )
+    response = _upload(client, headers, clear_csv)
+    assert response.status_code == 200, response.text
+    db_session.expire_all()
+    pool = db_session.query(models.AssetType).filter(models.AssetType.id == pool_id).one()
+    assert pool.category is None
+    assert pool.department is None
+    assert pool.price is None
+
+
+def test_exported_inventory_quantity_update_respects_allocated_stock(as_super_admin, db_session):
+    client, headers = as_super_admin
+    create = client.post(
+        "/api/assets", headers=headers,
+        json={"name": "Allocated Pool", "total_quantity": 5},
+    )
+    pool_id = create.json()["id"]
+
+    # Simulate an allocated unit directly so this test focuses on the import
+    # guard rather than the checkout workflow.
+    checkout = models.AssetCheckout(
+        asset_id=pool_id,
+        quantity=2,
+        quantity_returned=0,
+        status="active",
+        checkout_date=models.utc_now(),
+    )
+    db_session.add(checkout)
+    db_session.commit()
+
+    csv_text = (
+        "Pool ID,Asset Name,Category,Department,Price,Available,Total,Status\n"
+        f"{pool_id},Allocated Pool,—,—,—,3,1,Low\n"
+    )
+    response = _upload(client, headers, csv_text)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["updated_count"] == 0
+    assert body["error_count"] == 1
+    assert "Cannot reduce total below 2" in body["errors"][0]["reason"]
+
+    db_session.expire_all()
+    pool = db_session.query(models.AssetType).filter(models.AssetType.id == pool_id).one()
+    assert pool.total_quantity == 5

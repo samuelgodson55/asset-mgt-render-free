@@ -12,6 +12,7 @@ import { DEFAULT_PAGE_SIZE, MOBILE_DEFAULT_PAGE_SIZE, MOBILE_PAGE_SIZE_OPTIONS, 
 import { useAuth } from "../lib/useAuth";
 import { isPrivileged } from "../lib/roles";
 import { useIsMobile } from "../lib/useIsMobile";
+import { useRequestGuard } from "../lib/useRequestGuard";
 
 function errMsg(err: unknown, fallback: string): string {
   if (err instanceof ApiError) return err.message;
@@ -108,9 +109,18 @@ export function Quotations() {
   const [assignMatches, setAssignMatches] = useState<UserRow[]>([]);
   const [assigning, setAssigning] = useState(false);
   const [assignMessage, setAssignMessage] = useState<string | null>(null);
+  const beginCartRequest = useRequestGuard();
+  const beginHistoryRequest = useRequestGuard();
+  const beginCatalogRequest = useRequestGuard();
 
-  const refreshCart = () => quotationsApi.myCart().then(setCart).catch((err) => setError(errMsg(err, "Couldn't refresh your cart.")));
-  const refreshHistory = () => quotationsApi.myHistory().then(setHistory).catch((err) => setError(errMsg(err, "Couldn't refresh your order history.")));
+  const refreshCart = () => {
+    const isCurrent = beginCartRequest();
+    quotationsApi.myCart().then((data) => { if (isCurrent()) setCart(data); }).catch((err) => { if (isCurrent()) setError(errMsg(err, "Couldn't refresh your cart.")); });
+  };
+  const refreshHistory = () => {
+    const isCurrent = beginHistoryRequest();
+    quotationsApi.myHistory().then((data) => { if (isCurrent()) setHistory(data); }).catch((err) => { if (isCurrent()) setError(errMsg(err, "Couldn't refresh your order history.")); });
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -128,18 +138,25 @@ export function Quotations() {
   }, []);
 
   const refreshCatalog = () => {
+    const isCurrent = beginCatalogRequest();
     setCatalogLoading(true);
     quotationsApi.catalogPage(catalogPerPage, catalogOffset, search).then((res) => {
+      if (!isCurrent()) return;
       setCatalog(res.items);
       setCatalogTotal(res.total);
       setCatalogLoading(false);
     }).catch((err) => {
+      if (!isCurrent()) return;
       setError(errMsg(err, "Couldn't load the Asset Catalog."));
       setCatalogLoading(false);
     });
   };
 
   useEffect(refreshCatalog, [catalogOffset, catalogPerPage, search]);
+
+  useEffect(() => {
+    if (catalogOffset > 0 && catalogOffset >= catalogTotal) setCatalogOffset(Math.max(0, Math.floor(Math.max(catalogTotal - 1, 0) / catalogPerPage) * catalogPerPage));
+  }, [catalogOffset, catalogTotal, catalogPerPage]);
 
   // Always jumps back to the first page on a page-size or search change
   // (mirrors Assets.tsx's handlePerPageChange()/search onChange).

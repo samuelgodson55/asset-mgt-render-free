@@ -144,3 +144,14 @@ def test_manager_cannot_promote_staff_to_manager_or_admin(client, as_manager, db
     for role in ("manager", "admin"):
         response = client.patch(f"/api/users/{target.id}", headers=headers, json={"role": role})
         assert response.status_code == 403, response.text
+
+
+def test_super_admin_can_view_seeded_audit_trail(client, as_super_admin):
+    """The Audit Trail endpoint must return the seeded ledger rows to a privileged user."""
+    _, headers = as_super_admin
+    response = client.get("/api/audit-logs?limit=5&offset=0", headers=headers)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["total"] >= 2
+    assert len(body["items"]) >= 2
+    assert {row["action"] for row in body["items"]} >= {"POOL_CREATED", "CHECKOUT"}

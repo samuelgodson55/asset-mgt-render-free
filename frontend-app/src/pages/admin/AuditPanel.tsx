@@ -2,12 +2,13 @@
 // Audit Trail -- ported from js/components/audit.js. Export runs async on a
 // Celery worker: enqueue -> poll status every ~1.5s -> download when ready.
 // =============================================================================
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { X, Download, Loader2 } from "lucide-react";
 import { auditApi } from "../../lib/api";
 import type { AuditLogEntry } from "../../lib/types";
 import { PaginationBar, RowsPerPageSelect } from "../../components/PaginationBar";
 import { DEFAULT_PAGE_SIZE } from "../../lib/pagination";
+import { useRequestGuard } from "../../lib/useRequestGuard";
 import { Modal } from "../../components/ui/Modal";
 import { ErrorBanner } from "../../components/ui/ErrorBanner";
 import { TableShell, TableHead, TablePlaceholderRow } from "../../components/ui/TableShell";
@@ -24,15 +25,34 @@ export function AuditPanel() {
   const [endDate, setEndDate] = useState("");
   const [exporting, setExporting] = useState<"csv" | "pdf" | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const beginListRequest = useRequestGuard();
+  const mountedRef = useRef(true);
+
+  useEffect(() => () => { mountedRef.current = false; }, []);
 
   useEffect(() => {
+    const isCurrent = beginListRequest();
     setLoading(true);
+    setLoadError(null);
     auditApi.list(perPage, offset).then((res) => {
+      if (!isCurrent()) return;
       setRows(res.items);
       setTotal(res.total);
       setLoading(false);
+    }).catch((err) => {
+      if (!isCurrent()) return;
+      console.error("Failed to load audit ledger:", err);
+      setRows([]);
+      setTotal(0);
+      setLoadError(errMsg(err, "Audit Trail could not be loaded."));
+      setLoading(false);
     });
-  }, [offset, perPage]);
+  }, [offset, perPage, beginListRequest]);
+
+  useEffect(() => {
+    if (offset > 0 && offset >= total) setOffset(Math.max(0, Math.floor(Math.max(total - 1, 0) / perPage) * perPage));
+  }, [offset, total, perPage]);
 
   const handlePerPageChange = (n: number) => {
     setPerPage(n);
@@ -61,6 +81,7 @@ export function AuditPanel() {
       const deadline = Date.now() + 60_000;
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 1500));
+        if (!mountedRef.current) return;
         const status = await auditApi.exportStatus(task_id);
         if (status.state === "SUCCESS") {
           const a = document.createElement("a");
@@ -73,9 +94,9 @@ export function AuditPanel() {
       }
       throw new Error("Export is taking longer than expected -- try again shortly.");
     } catch (err) {
-      setExportError(errMsg(err, "Export failed."));
+      if (mountedRef.current) setExportError(errMsg(err, "Export failed."));
     } finally {
-      setExporting(null);
+      if (mountedRef.current) setExporting(null);
     }
   };
 
@@ -90,6 +111,7 @@ export function AuditPanel() {
           </button>
         </div>
       </div>
+      {loadError && <ErrorBanner>{loadError}</ErrorBanner>}
       {exportError && !exportModalOpen && <ErrorBanner>{exportError}</ErrorBanner>}
 
       <TableShell>

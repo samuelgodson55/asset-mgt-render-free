@@ -13,6 +13,7 @@ import { Modal, ModalEyebrow } from "../../components/ui/Modal";
 import { ErrorBanner } from "../../components/ui/ErrorBanner";
 import { TableShell, TableHead, TablePlaceholderRow } from "../../components/ui/TableShell";
 import { errMsg, formatWhen, formatBytes } from "./sharedHelpers";
+import { useRequestGuard } from "../../lib/useRequestGuard";
 
 const TRIGGER_LABELS: Record<BackupEntry["triggered_by"], string> = {
   manual: "Manual",
@@ -161,17 +162,20 @@ export function SystemBackupsPanel() {
   const [restoreResult, setRestoreResult] = useState<RestoreResult | null>(null);
   const { logout } = useAuth();
   const navigate = useNavigate();
+  const beginRequest = useRequestGuard();
 
   const refresh = async () => {
+    const isCurrent = beginRequest();
     setLoadingList(true);
     try {
       const [s, list] = await Promise.all([backupApi.status(), backupApi.list()]);
+      if (!isCurrent()) return;
       setStatus(s);
       setBackups(list);
     } catch (err) {
-      console.error("Failed to load backup status/list:", err);
+      if (isCurrent()) console.error("Failed to load backup status/list:", err);
     } finally {
-      setLoadingList(false);
+      if (isCurrent()) setLoadingList(false);
     }
   };
 

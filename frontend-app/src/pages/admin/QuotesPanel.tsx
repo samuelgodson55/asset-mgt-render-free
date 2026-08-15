@@ -14,6 +14,7 @@ import type { QuotationListRow, CatalogAsset, FulfillmentQueueRow, QuotationLine
 import { QuoteDetailDrawer } from "../../components/QuoteDetailDrawer";
 import { PaginationBar, RowsPerPageSelect } from "../../components/PaginationBar";
 import { DEFAULT_PAGE_SIZE } from "../../lib/pagination";
+import { useRequestGuard } from "../../lib/useRequestGuard";
 import { ErrorBanner } from "../../components/ui/ErrorBanner";
 import { SearchInput } from "../../components/ui/SearchInput";
 import { TableShell, TableHead, TablePlaceholderRow } from "../../components/ui/TableShell";
@@ -58,15 +59,19 @@ function FulfillmentPanel({ onCheckedOut }: { onCheckedOut: () => void }) {
   // refresh() pulls a fresh queue (a checked-out/no-longer-approved quote
   // just stops appearing, no separate cleanup needed).
   const [shortfall, setShortfall] = useState<Record<string, ShortfallItemState>>({});
+  const beginRequest = useRequestGuard();
 
   const refresh = () => {
+    const isCurrent = beginRequest();
     setLoading(true);
     quotationsApi.fulfillmentQueue().then((items) => {
+      if (!isCurrent()) return;
       setError(null);
       setRows(items);
       setShortfall({});
       setLoading(false);
     }).catch((err) => {
+      if (!isCurrent()) return;
       setError(errMsg(err, "Couldn't load the fulfillment queue."));
       setLoading(false);
     });
@@ -280,6 +285,7 @@ export function QuotesPanel() {
   const [loading, setLoading] = useState(true);
   const [catalog, setCatalog] = useState<CatalogAsset[]>([]);
   const [openQuoteId, setOpenQuoteId] = useState<number | null>(null);
+  const beginListRequest = useRequestGuard();
   const [approvingId, setApprovingId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [fulfillmentTick, setFulfillmentTick] = useState(0);
@@ -301,13 +307,16 @@ export function QuotesPanel() {
   }, []);
 
   const refresh = () => {
+    const isCurrent = beginListRequest();
     setLoading(true);
     quotationsApi.list(perPage, offset, search).then((res) => {
+      if (!isCurrent()) return;
       setError(null);
       setRows(res.items);
       setTotal(res.total);
       setLoading(false);
     }).catch((err) => {
+      if (!isCurrent()) return;
       setError(errMsg(err, "Couldn't load quotations."));
       setLoading(false);
     });
@@ -315,8 +324,12 @@ export function QuotesPanel() {
 
   useEffect(refresh, [offset, perPage, search]);
   useEffect(() => {
-    quotationsApi.catalog().then(setCatalog).catch((err) => console.error("Failed to load catalog:", err));
-  }, []);
+    const isCurrent = beginListRequest();
+    quotationsApi.catalog().then((data) => { if (isCurrent()) setCatalog(data); }).catch((err) => { if (isCurrent()) console.error("Failed to load catalog:", err); });
+  }, [beginListRequest]);
+  useEffect(() => {
+    if (offset > 0 && offset >= total) setOffset(Math.max(0, Math.floor(Math.max(total - 1, 0) / perPage) * perPage));
+  }, [offset, total, perPage]);
 
   const handlePerPageChange = (n: number) => {
     setPerPage(n);

@@ -141,11 +141,11 @@ _CURRENCY_SYMBOLS = {
 
 def format_money(value, currency_code: Optional[str] = None) -> str:
     """
-    Formats a numeric amount as a "₦1,899.00"-style string for CSV/PDF
-    exports, using settings.CURRENCY_CODE (see config.py) by default.
-    Shared by every exporter that prints a price/total (Asset Inventory
-    export, Quotation PDF export) so the symbol/format never drifts
-    between them -- mirrors js/ui.js's formatPrice() on the frontend.
+    Formats a numeric amount as a "₦1,899.00"-style display value, using
+    settings.CURRENCY_CODE (see config.py) by default. PDF/quotation
+    exporters use this presentation form; the Asset Inventory CSV export
+    deliberately emits plain numeric values so Excel treats the Price
+    column as numbers instead of currency-formatted text.
     """
     if value is None:
         return "—"

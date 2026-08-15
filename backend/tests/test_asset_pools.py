@@ -139,6 +139,29 @@ def test_manager_sees_custody_but_staff_export_hides_stock_columns(as_manager, a
     assert "Pool ID" in header_line
 
 
+def test_inventory_csv_price_is_numeric_while_pdf_keeps_currency_format(as_admin):
+    client, headers = as_admin
+    create = client.post(
+        "/api/assets", headers=headers,
+        json={"name": "CSV Price Format Pool", "total_quantity": 2, "price": 5000},
+    )
+    assert create.status_code == 200, create.text
+
+    csv_response = client.get("/api/assets/export?format=csv", headers=headers)
+    assert csv_response.status_code == 200, csv_response.text
+    csv_text = csv_response.content.decode()
+    row = next(line for line in csv_text.splitlines()[1:] if "CSV Price Format Pool" in line)
+    assert "5000.00" in row
+    assert "₦" not in row
+
+    pdf_response = client.get("/api/assets/export?format=pdf", headers=headers)
+    assert pdf_response.status_code == 200, pdf_response.text
+    assert pdf_response.headers["content-type"].startswith("application/pdf")
+    from pypdf import PdfReader
+    from io import BytesIO
+    pdf_text = "\n".join(page.extract_text() or "" for page in PdfReader(BytesIO(pdf_response.content)).pages)
+    assert "₦5,000.00" in pdf_text
+
 def test_update_quantity_recalculates_available(as_admin):
     client, headers = as_admin
     create = client.post("/api/assets", headers=headers, json={"name": "Resizable Pool", "total_quantity": 5})
@@ -301,3 +324,31 @@ def test_list_assets_category_filter_composes_with_pagination(as_admin):
     assert page3.json()["total"] == 5
     all_names = {a["name"] for a in page1.json()["items"]} | {a["name"] for a in page2.json()["items"]} | {a["name"] for a in page3.json()["items"]}
     assert all_names == {f"Paged Category Item {i}" for i in range(5)}
+
+
+def test_list_assets_stock_status_filter_is_server_side_and_paginates(as_admin):
+    client, headers = as_admin
+    client.post("/api/assets", headers=headers, json={"name": "Status Filter Available", "total_quantity": 10})
+    client.post("/api/assets", headers=headers, json={"name": "Status Filter Low", "total_quantity": 10})
+    low = client.post("/api/assets", headers=headers, json={"name": "Status Filter Low 2", "total_quantity": 10}).json()["id"]
+    client.put(f"/api/assets/{low}/quantity", headers=headers, json={"new_total": 10})
+    # Two units available is exactly 20%, which belongs to the low bucket.
+    client.post(f"/api/assets/{low}/checkout_advanced", headers=headers, json={"assignee_type": "outsider", "quantity": 8, "outsider_name": "Status Test Holder", "outsider_email": "status-test@example.com", "due_date": "2030-01-01"})
+    out = client.post("/api/assets", headers=headers, json={"name": "Status Filter Out", "total_quantity": 0}).json()["id"]
+
+    low_page = client.get("/api/assets", headers=headers, params={"status": "low", "limit": 1, "offset": 0})
+    assert low_page.status_code == 200
+    assert low_page.json()["total"] >= 1
+    assert all(0 < item["available_quantity"] * 4 <= item["total_quantity"] for item in low_page.json()["items"])
+
+    out_page = client.get("/api/assets", headers=headers, params={"status": "out", "limit": 1000})
+    assert out_page.status_code == 200
+    out_ids = {item["id"] for item in out_page.json()["items"]}
+    assert out in out_ids
+    assert all(item["available_quantity"] <= 0 for item in out_page.json()["items"])
+
+
+def test_staff_cannot_use_stock_status_filter(as_staff):
+    client, headers = as_staff
+    response = client.get("/api/assets", headers=headers, params={"status": "out"})
+    assert response.status_code == 403

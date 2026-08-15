@@ -1,4 +1,4 @@
-import type { AssetType, Checkout, ExtensionRequest, NotificationItem, DashboardStats, BackupEntry, BackupStatus, CatalogAsset, QuotationCartOrDetail, ReportsDashboard } from "./types";
+import type { AssetType, Checkout, ExtensionRequest, NotificationItem, DashboardStats, BackupEntry, BackupStatus, CatalogAsset, QuotationCartOrDetail, ReportsDashboard, AuditLogEntry } from "./types";
 
 const categories = ["Field Radios", "Optics", "Power", "Networking", "Fabrication", "Safety"];
 const assetDepartments = ["Camera", "Lighting", "Grip", "Audio", "Power", "Production"];
@@ -96,6 +96,46 @@ export const mockBackupStatus: BackupStatus = {
 };
 
 export const mockDigestRecipients: string[] = ["ops@ledger.example.com"];
+
+
+export const mockAuditLogs: AuditLogEntry[] = [
+  {
+    id: 1,
+    target_type: "AssetType",
+    target_id: 1,
+    timestamp: new Date(Date.now() - 30 * 60e3).toISOString(),
+    operator: "r.adeyemi@corp.io",
+    action: "POOL_CREATED",
+    details: "Created asset pool 'MacBook Pro 14\" M3 Pool' with initial quantity of 15.",
+  },
+  {
+    id: 2,
+    target_type: "AssetType",
+    target_id: 1,
+    timestamp: new Date(Date.now() - 65 * 60e3).toISOString(),
+    operator: "s.chen@corp.io",
+    action: "CHECKOUT",
+    details: "Assigned 1 unit of 'MacBook Pro 14\" M3 Pool' to Staff: T. Okafor.",
+  },
+  {
+    id: 3,
+    target_type: "User",
+    target_id: 4,
+    timestamp: new Date(Date.now() - 2 * 3600e3).toISOString(),
+    operator: "r.adeyemi@corp.io",
+    action: "USER_PROVISIONED",
+    details: "Created account for A. Bello (staff).",
+  },
+  {
+    id: 4,
+    target_type: "AssetCheckout",
+    target_id: 102,
+    timestamp: new Date(Date.now() - 4 * 3600e3).toISOString(),
+    operator: "s.chen@corp.io",
+    action: "EXTENSION_REQUESTED",
+    details: "Requested a return-date extension for a checkout.",
+  },
+];
 
 // Demo data for the self-service Quotation Catalog/cart (see
 // pages/Quotations.tsx) -- reuses mockAssets' own names/prices/stock so

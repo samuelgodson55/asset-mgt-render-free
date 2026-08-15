@@ -1,4 +1,4 @@
-import { mockAssets, mockCheckouts, mockExtensions, mockNotifications, mockStats, mockBackups, mockBackupStatus, mockDigestRecipients, mockCatalog, mockQuotationCart, mockReportsDashboard } from "./mock";
+import { mockAssets, mockCheckouts, mockExtensions, mockNotifications, mockStats, mockBackups, mockBackupStatus, mockDigestRecipients, mockAuditLogs, mockCatalog, mockQuotationCart, mockReportsDashboard } from "./mock";
 import type { AssetType, Checkout, ExtensionRequest, NotificationItem, DashboardStats, BackupEntry, BackupStatus, RestoreResult, ImportResult, MyItem, ProfileDetail, UserRow, OutsiderRow, CustodyItem, AuditLogEntry, PublicConfig, CatalogAsset, QuotationCartOrDetail, QuotationListRow, FulfillmentQueueRow, QuotationOutsourcedItemCreate, QuotationOutsourceShortfallItem, AssetDetails, DeletedAssetRow, DeletedUserRow, RosterUser, BulkExtendResult, MyExtensionDecision, QuotationNotification, ReportsDashboard } from "./types";
 
 
@@ -77,6 +77,9 @@ async function rawFetch<T = unknown>(path: string, init?: RequestInit): Promise<
     } catch {
       // body wasn't JSON -- keep the status text
     }
+    if (res.status === 401 && !path.startsWith("/auth/login") && !path.startsWith("/auth/mfa") && typeof window !== "undefined") {
+      window.dispatchEvent(new Event("asset-app:auth-expired"));
+    }
     throw new ApiError(res.status, message);
   }
   if (res.status === 204) return null as T;
@@ -105,6 +108,9 @@ async function rawFetchMultipart<T = unknown>(path: string, formData: FormData, 
       message = extractErrorMessage(body, fallback);
     } catch {
       // body wasn't JSON -- keep the status text
+    }
+    if (res.status === 401 && !path.startsWith("/auth/login") && !path.startsWith("/auth/mfa") && typeof window !== "undefined") {
+      window.dispatchEvent(new Event("asset-app:auth-expired"));
     }
     throw new ApiError(res.status, message);
   }
@@ -276,6 +282,7 @@ interface RawCheckout {
   quantity: number;
   outstanding: number;
   due_date: string | null; // "YYYY-MM-DD", null for an open-ended checkout
+  checkout_date?: string | null;
   is_overdue: boolean;
   is_due_soon: boolean;
   entity_id?: number | null;
@@ -292,11 +299,7 @@ function mapCheckout(raw: RawCheckout): Checkout {
     checked_out_to: raw.assignee_name,
     checked_out_by: raw.assignee_type,
     due_at: raw.due_date ?? "",
-    // GET /checkouts (this endpoint) returns due_date but not the
-    // original checkout_date, so there's no real value to put here --
-    // due_at is reused rather than inventing a timestamp (same tradeoff
-    // mapCheckoutAlert below already makes for the overdue/due-soon feeds).
-    checked_out_at: raw.due_date ?? "",
+    checked_out_at: raw.checkout_date ?? raw.due_date ?? "",
     status: raw.is_overdue ? "overdue" : "active",
     due_soon: raw.is_due_soon,
     entity_id: raw.entity_id ?? null,
@@ -313,6 +316,7 @@ interface RawCheckoutAlert {
   quantity: number;
   outstanding: number;
   due_date: string; // "YYYY-MM-DD"
+  checkout_date?: string | null;
   entity_id?: number | null;
   entity_type?: "user" | "outsider" | null;
 }
@@ -327,11 +331,7 @@ function mapCheckoutAlert(raw: RawCheckoutAlert, status: Checkout["status"]): Ch
     checked_out_to: raw.assignee_name,
     checked_out_by: raw.assignee_type,
     due_at: raw.due_date,
-    // GET /checkouts/overdue and /checkouts/due-soon (the only checkout
-    // feeds this app's role is guaranteed to reach) return due_date but
-    // not the original checkout_date, so there's no real value to put
-    // here -- due_at is reused rather than inventing a timestamp.
-    checked_out_at: raw.due_date,
+    checked_out_at: raw.checkout_date ?? raw.due_date,
     status,
     entity_id: raw.entity_id ?? null,
     entity_type: raw.entity_type ?? null,
@@ -374,7 +374,7 @@ function mapExtension(raw: RawExtensionRequest): ExtensionRequest {
 // ---------------------------------------------------------------------------
 
 async function loadAssets(): Promise<AssetType[]> {
-  const data = await rawFetch<{ items: RawAssetType[] }>("/assets?limit=200");
+  const data = await rawFetch<{ items: RawAssetType[] }>("/assets?limit=1000");
   return (data.items ?? []).map(mapAsset);
 }
 
@@ -428,12 +428,8 @@ export const alertsApi = {
 // moment a live backend is linked, which is exactly the failure mode the
 // demo dataset is meant to never cause.
 async function loadMyItems(): Promise<MyItem[]> {
-  try {
-    const data = await rawFetch<{ assigned_items: MyItem[] }>("/users/me/items");
-    return data.assigned_items ?? [];
-  } catch {
-    return [];
-  }
+  const data = await rawFetch<{ assigned_items: MyItem[] }>("/users/me/items?limit=1000");
+  return data.assigned_items ?? [];
 }
 
 // Mutable module-level cache of the LAST-SEEN settings.DUE_SOON_REMINDER_DAYS
@@ -463,7 +459,7 @@ async function loadCheckouts(privileged: boolean): Promise<Checkout[]> {
   // legacy's admin.html/manager.html (system-wide) vs staff.html/
   // customer.html (personal only).
   if (!privileged) return [];
-  const data = await rawFetch<{ items: RawCheckout[]; total: number; due_soon_reminder_days: number }>("/checkouts?limit=500");
+  const data = await rawFetch<{ items: RawCheckout[]; total: number; due_soon_reminder_days: number }>("/checkouts?limit=1000");
   if (typeof data.due_soon_reminder_days === "number") {
     lastKnownDueSoonReminderDays = data.due_soon_reminder_days;
   }
@@ -471,7 +467,7 @@ async function loadCheckouts(privileged: boolean): Promise<Checkout[]> {
 }
 
 async function loadExtensionRequests(): Promise<ExtensionRequest[]> {
-  const data = await rawFetch<{ items: RawExtensionRequest[] }>("/checkouts/extension-requests?status=pending&limit=100");
+  const data = await rawFetch<{ items: RawExtensionRequest[] }>("/checkouts/extension-requests?status=pending&limit=1000");
   return (data.items ?? []).map(mapExtension);
 }
 
@@ -557,7 +553,7 @@ async function loadStats(privileged: boolean): Promise<DashboardStats> {
     loadAssets(),
     privileged ? loadOverdue().then((r) => r.length) : loadMyItems().then((items) => items.filter((i) => i.overdue).length),
     privileged ? loadDueSoon().then((r) => r.length) : loadMyItems().then((items) => items.filter((i) => i.due_soon && !i.overdue).length),
-    rawFetch<{ date: string; checkouts: number; returns: number }[]>("/assets/activity").catch(() => []),
+    rawFetch<{ date: string; checkouts: number; returns: number }[]>("/assets/activity"),
   ]);
 
   const totalAssets = assets.reduce((sum, a) => sum + a.total_quantity, 0);
@@ -663,9 +659,9 @@ export const myItemsApi = {
   // page, effectively "everything" for one person's custody ledger), while
   // the My Items table (see pages/MyItems.tsx) passes them explicitly for
   // TRUE server-side pagination, same pattern as assetsApi.list/usersApi.list.
-  list: (limit?: number, offset?: number) =>
+  list: (limit?: number, offset?: number, filter?: "overdue" | "due_soon") =>
     rawFetch<{ name: string; department_role?: string | null; assigned_items: MyItem[]; total: number; limit: number; offset: number }>(
-      `/users/me/items${qs({ limit, offset })}`
+      `/users/me/items${qs({ limit, offset, filter })}`
     ),
   // Not a JSON round trip -- GET /users/me/items/export streams the file
   // directly (same pattern as assetsApi.exportUrl below). Ported from the
@@ -802,7 +798,11 @@ export const outsidersApi = {
 // ---------------------------------------------------------------------------
 
 export const auditApi = {
-  list: (limit: number, offset: number) => rawFetch<DirectoryPage<AuditLogEntry>>(`/audit-logs${qs({ limit, offset })}`),
+  list: (limit: number, offset: number) =>
+    tryLoad(
+      () => rawFetch<DirectoryPage<AuditLogEntry>>(`/audit-logs${qs({ limit, offset })}`),
+      { items: mockAuditLogs.slice(offset, offset + limit), total: mockAuditLogs.length, limit, offset }
+    ),
   startExport: (format: "csv" | "pdf", startDate?: string, endDate?: string) =>
     rawFetch<{ task_id: string }>(`/audit-logs/export${qs({ format, start_date: startDate, end_date: endDate })}`, { method: "POST" }),
   exportStatus: (taskId: string) => rawFetch<{ state: string; ready: boolean; error?: string }>(`/audit-logs/export/${taskId}/status`),
@@ -910,9 +910,9 @@ export const assetsApi = {
   // page -- reachable by every role, including someone just browsing demo
   // data with no backend session -- keeps working with client-paginated
   // mock data, same spirit as api.getAssets() above.
-  list: (limit: number, offset: number, search: string, category?: string): Promise<DirectoryPage<AssetType>> =>
+  list: (limit: number, offset: number, search: string, category?: string, status?: "available" | "low" | "out"): Promise<DirectoryPage<AssetType>> =>
     tryLoad(async () => {
-      const data = await rawFetch<{ items: RawAssetType[]; total: number; limit: number; offset: number }>(`/assets${qs({ limit, offset, search, category })}`);
+      const data = await rawFetch<{ items: RawAssetType[]; total: number; limit: number; offset: number }>(`/assets${qs({ limit, offset, search, category, status })}`);
       return { items: (data.items ?? []).map(mapAsset), total: data.total, limit: data.limit, offset: data.offset };
     }, (() => {
       // Same filter behavior as backend/services/asset_service.py's
@@ -925,6 +925,9 @@ export const assetsApi = {
         : mockAssets;
       if (cat && cat.toLowerCase() !== "all") {
         filtered = filtered.filter((a) => (a.category ?? "Uncategorized").toLowerCase() === cat.toLowerCase());
+      }
+      if (status) {
+        filtered = filtered.filter((a) => a.status === status);
       }
       return { items: filtered.slice(offset, offset + limit), total: filtered.length, limit, offset };
     })()),

@@ -834,35 +834,31 @@ def _detect_schema_revision(conn) -> str:
 
 
 def _reconcile_post_restore_credentials(engine, pre_restore_users: list) -> dict:
-    """Preserve current user identities/credentials across a database restore.
+    """Preserve the current accounts across a restore, with one root account.
 
-    Email is the primary identity key, case-insensitively.  When the same
-    email exists before and after the restore, the CURRENT account wins for
-    every mutable profile field, including name, username, role and password.
-    Names are deliberately never used as an identity key: a renamed person is
-    still the same account when their email is unchanged.
+    Every normal account follows the existing email-keyed reconciliation rules:
+    the CURRENT profile wins when the same account exists in the backup, current
+    accounts missing from the backup are reinserted, and backup-only ordinary
+    accounts remain untouched.
 
-    Username collisions are handled as a separate reconciliation problem.
-    A backup may contain a different account occupying a username that belongs
-    to a current account.  Before applying current usernames we temporarily
-    move those backup-only occupants to generated collision-safe usernames,
-    and temporarily clear usernames on matched rows.  This also handles
-    username swaps (A currently owns B's old username and vice versa) without
-    ever violating the unique users.username constraint.
-
-    Accounts that existed before the restore but are absent from the backup
-    are reinserted.  Restore-only accounts remain untouched unless they own a
-    username required by a preserved current account; in that case only their
-    username is changed to a generated unique value so the current identity
-    can be restored safely.
+    SUPER_ADMIN is deliberately different. There is exactly ONE authoritative
+    root account: the one that existed immediately before the restore. A backup
+    copy of that role is never allowed to survive as another super admin. If the
+    current root was absent from the backup, it is reinserted; if the backup
+    contains another super_admin identity, that restored copy is revoked by
+    demoting it to staff + soft-deleting it. This is the restore invariant that
+    prevents an older backup from resurrecting a second root account.
     """
     from sqlalchemy import text as sa_text
     from security import SUPER_ADMIN_ROLE
 
     if not pre_restore_users:
         return {
-            "users_reconciled": 0, "users_reinserted": 0,
-            "super_admins_reset": 0, "preserved_user_ids": [],
+            "users_reconciled": 0,
+            "users_reinserted": 0,
+            "super_admins_reset": 0,
+            "super_admins_revoked": 0,
+            "preserved_user_ids": [],
             "username_conflicts_resolved": 0,
         }
 
@@ -878,16 +874,27 @@ def _reconcile_post_restore_credentials(engine, pre_restore_users: list) -> dict
         return value.strip().lower() if value else None
 
     by_email = {email_lc(u): u for u in pre_restore_users if email_lc(u)}
+    current_super_admins = [u for u in pre_restore_users if u.get("role") == SUPER_ADMIN_ROLE]
+    if len(current_super_admins) != 1:
+        raise RuntimeError(
+            "Restore aborted: the database being restored already has "
+            f"{len(current_super_admins)} current super_admin account(s); exactly one "
+            "is required before a restore can safely select the authoritative root account."
+        )
+    authoritative_super_admin = current_super_admins[0]
+    authoritative_super_admin_email = email_lc(authoritative_super_admin)
+
     users_reconciled = 0
     users_reinserted = 0
     username_conflicts_resolved = 0
     super_admins_reset: list[str] = []
+    super_admins_revoked: list[str] = []
     reinserted_emails: list[str] = []
     preserved_user_ids: set[int] = set()
 
     with engine.begin() as conn:
         restored_rows = conn.execute(
-            sa_text("SELECT id, lower(email) AS email_lc, username FROM users")
+            sa_text("SELECT id, lower(email) AS email_lc, username, role FROM users")
         ).mappings().all()
         restored_by_email = {row["email_lc"]: row for row in restored_rows}
         restored_ids = {row["id"] for row in restored_rows}
@@ -898,17 +905,14 @@ def _reconcile_post_restore_credentials(engine, pre_restore_users: list) -> dict
             if e in restored_by_email
         ]
 
-        # Current usernames are authoritative.  This includes the current
-        # root Super Admin username, so an older backup cannot steal it.
         desired_usernames: dict[str, str] = {}
         for snapshot in by_email.values():
             username = snapshot.get("username")
             if username:
                 desired_usernames[email_lc(snapshot)] = username.strip().lower()
 
-        # 1) Move backup-only rows that currently occupy a username needed by
-        #    a preserved current account.  Generated names are intentionally
-        #    ugly and internal; they are never shown as a meaningful login.
+        # 1) Move backup-only rows that currently occupy usernames needed by
+        #    preserved current accounts.
         for row in restored_rows:
             username = (row["username"] or "").strip().lower()
             if not username:
@@ -933,7 +937,6 @@ def _reconcile_post_restore_credentials(engine, pre_restore_users: list) -> dict
             username_conflicts_resolved += 1
 
         # 2) Clear usernames on matched rows before writing current values.
-        #    This handles swaps without transient unique-key failures.
         for row, snapshot in matched_snapshots:
             if row["username"] is not None:
                 conn.execute(
@@ -941,8 +944,29 @@ def _reconcile_post_restore_credentials(engine, pre_restore_users: list) -> dict
                     {"uid": row["id"]},
                 )
 
-        # 3) Apply every current profile field except username.  The restored
-        #    row's id remains untouched because all foreign keys still point at it.
+        # 3) Revoke any backup-only Super Admin rows BEFORE applying the
+        #    authoritative current profile. The production database now also
+        #    has a partial unique index on role=super_admin, so leaving a
+        #    second backup root in place would make the authoritative update
+        #    fail with a unique-constraint error.
+        for row in restored_rows:
+            if row["email_lc"] == authoritative_super_admin_email:
+                continue
+            if row["role"] != SUPER_ADMIN_ROLE:
+                continue
+            conn.execute(
+                sa_text(
+                    "UPDATE users SET role = 'staff', is_active = false, is_deleted = true, "
+                    "deleted_at = NOW(), totp_secret_encrypted = NULL, totp_enabled = false "
+                    "WHERE id = :uid"
+                ),
+                {"uid": row["id"]},
+            )
+            conn.execute(sa_text("DELETE FROM recovery_codes WHERE user_id = :uid"), {"uid": row["id"]})
+            conn.execute(sa_text("DELETE FROM password_reset_tokens WHERE user_id = :uid"), {"uid": row["id"]})
+            super_admins_revoked.append(row["email_lc"])
+
+        # 4) Apply authoritative CURRENT profile data to matched rows.
         for row, snapshot in matched_snapshots:
             present_cols = [c for c in PROFILE_COLUMNS if c in snapshot]
             set_clause = ", ".join(f"{col} = :{col}" for col in present_cols)
@@ -953,8 +977,7 @@ def _reconcile_post_restore_credentials(engine, pre_restore_users: list) -> dict
             users_reconciled += 1
             preserved_user_ids.add(row["id"])
 
-        # 4) Reinsert current accounts that did not exist in the backup.
-        #    Their original id is retained when available and free.
+        # 4) Reinsert CURRENT accounts absent from the restored backup.
         for snapshot in pre_restore_users:
             e = email_lc(snapshot)
             if not e or e in restored_by_email:
@@ -970,8 +993,6 @@ def _reconcile_post_restore_credentials(engine, pre_restore_users: list) -> dict
                 insert_cols.insert(0, "id")
                 params["id"] = original_id
 
-            # Username is assigned after insertion so it participates in the
-            # same collision-safe assignment phase as matched accounts.
             desired_username = (snapshot.get("username") or "").strip().lower() or None
             if desired_username:
                 insert_cols.append("username")
@@ -985,13 +1006,12 @@ def _reconcile_post_restore_credentials(engine, pre_restore_users: list) -> dict
             ).mappings().first()
             new_id = new_row["id"]
             restored_ids.add(new_id)
-            restored_by_email[e] = {"id": new_id, "email_lc": e, "username": None}
+            restored_by_email[e] = {"id": new_id, "email_lc": e, "username": None, "role": snapshot.get("role")}
             users_reinserted += 1
             reinserted_emails.append(e)
             preserved_user_ids.add(new_id)
 
-        # 5) Assign authoritative current usernames.  The only rows that may
-        #    own these values now are the preserved current accounts themselves.
+        # 5) Assign authoritative current usernames.
         for e, username in desired_usernames.items():
             row = restored_by_email.get(e)
             if not row:
@@ -1001,33 +1021,31 @@ def _reconcile_post_restore_credentials(engine, pre_restore_users: list) -> dict
                 {"username": username, "uid": row["id"]},
             )
 
-        # 6) Super Admin MFA is never restored from backup data.  Force fresh
-        #    enrollment while preserving the current password/profile.
-        for row, snapshot in matched_snapshots:
-            if snapshot.get("role") == SUPER_ADMIN_ROLE:
-                conn.execute(
-                    sa_text(
-                        "UPDATE users SET totp_secret_encrypted = NULL, totp_enabled = false "
-                        "WHERE id = :uid"
-                    ),
-                    {"uid": row["id"]},
-                )
-                conn.execute(sa_text("DELETE FROM recovery_codes WHERE user_id = :uid"), {"uid": row["id"]})
-                super_admins_reset.append(email_lc(snapshot))
+        # 6) Enforce the single-root invariant inside THIS restore.
+        #    The authoritative current root is always the one that survives.
+        root_row = restored_by_email.get(authoritative_super_admin_email)
+        if not root_row:
+            raise RuntimeError("Restore failed: authoritative current Super Admin could not be reconciled.")
 
-        for snapshot in pre_restore_users:
-            e = email_lc(snapshot)
-            if e in reinserted_emails and snapshot.get("role") == SUPER_ADMIN_ROLE:
-                row = restored_by_email[e]
-                conn.execute(
-                    sa_text(
-                        "UPDATE users SET totp_secret_encrypted = NULL, totp_enabled = false "
-                        "WHERE id = :uid"
-                    ),
-                    {"uid": row["id"]},
-                )
-                conn.execute(sa_text("DELETE FROM recovery_codes WHERE user_id = :uid"), {"uid": row["id"]})
-                super_admins_reset.append(e)
+        conn.execute(
+            sa_text(
+                "UPDATE users SET role = :role, is_deleted = false, is_active = true, deleted_at = NULL "
+                "WHERE id = :uid"
+            ),
+            {"role": SUPER_ADMIN_ROLE, "uid": root_row["id"]},
+        )
+
+        # 7) Super Admin MFA is never restored from backup data. Force fresh
+        #    enrollment while preserving the current password/profile.
+        conn.execute(
+            sa_text(
+                "UPDATE users SET totp_secret_encrypted = NULL, totp_enabled = false "
+                "WHERE id = :uid"
+            ),
+            {"uid": root_row["id"]},
+        )
+        conn.execute(sa_text("DELETE FROM recovery_codes WHERE user_id = :uid"), {"uid": root_row["id"]})
+        super_admins_reset.append(authoritative_super_admin_email)
 
         if users_reinserted:
             conn.execute(sa_text(
@@ -1035,27 +1053,28 @@ def _reconcile_post_restore_credentials(engine, pre_restore_users: list) -> dict
                 "COALESCE((SELECT MAX(id) FROM users), 1))"
             ))
 
-        if users_reconciled or users_reinserted or username_conflicts_resolved:
+        if users_reconciled or users_reinserted or username_conflicts_resolved or super_admins_revoked:
             detail_parts = []
             if users_reconciled:
                 detail_parts.append(
-                    f"Restore reconciled {users_reconciled} account(s) to their current "
-                    f"pre-restore profiles and credentials."
+                    f"Restore reconciled {users_reconciled} account(s) to their current pre-restore profiles and credentials."
                 )
             if users_reinserted:
                 detail_parts.append(
-                    f"Restore re-inserted {users_reinserted} current account(s) absent from "
-                    f"the backup: {', '.join(reinserted_emails)}."
+                    f"Restore re-inserted {users_reinserted} current account(s) absent from the backup: {', '.join(reinserted_emails)}."
                 )
             if username_conflicts_resolved:
                 detail_parts.append(
-                    f"Restore resolved {username_conflicts_resolved} username collision(s) "
-                    f"without aborting the restore."
+                    f"Restore resolved {username_conflicts_resolved} username collision(s) without aborting the restore."
+                )
+            if super_admins_revoked:
+                detail_parts.append(
+                    "Restore revoked backup-only Super Admin account(s): " + ", ".join(super_admins_revoked) + "."
                 )
             if super_admins_reset:
                 detail_parts.append(
-                    f"Super Admin MFA was cleared and requires fresh enrollment: "
-                    f"{', '.join(super_admins_reset)}."
+                    "Current Super Admin MFA was cleared and requires fresh enrollment: "
+                    + ", ".join(super_admins_reset) + "."
                 )
             conn.execute(
                 sa_text(
@@ -1072,6 +1091,7 @@ def _reconcile_post_restore_credentials(engine, pre_restore_users: list) -> dict
         "users_reconciled": users_reconciled,
         "users_reinserted": users_reinserted,
         "super_admins_reset": len(super_admins_reset),
+        "super_admins_revoked": len(super_admins_revoked),
         "preserved_user_ids": sorted(preserved_user_ids),
         "username_conflicts_resolved": username_conflicts_resolved,
     }
@@ -1568,6 +1588,128 @@ def _reconcile_post_restore_asset_activity(
     return result
 
 
+
+def _snapshot_audit_logs(engine) -> list[dict]:
+    """Capture the live audit ledger before the destructive restore.
+
+    AuditLog is append-only and therefore unlike users/checkouts/quotations
+    should never lose post-backup history merely because the database was
+    rolled back to an older snapshot. The restore merge below compares exact
+    immutable row content against the restored ledger and re-inserts only
+    rows that are missing, letting Postgres assign fresh ids safely.
+
+    The snapshot is deliberately read through a dedicated connection before
+    pg_terminate_backend() so no ORM transaction survives into the destructive
+    DROP SCHEMA window.
+    """
+    from sqlalchemy import text as sa_text
+
+    try:
+        with engine.connect() as conn:
+            return [
+                dict(row)
+                for row in conn.execute(
+                    sa_text(
+                        'SELECT operator, action, target_type, target_id, details, "timestamp" '
+                        'FROM audit_logs ORDER BY "timestamp", id'
+                    )
+                ).mappings().all()
+            ]
+    except Exception as exc:
+        logger.exception("backup_service: could not snapshot audit logs before restore")
+        raise RuntimeError(
+            "Restore aborted because the current audit ledger could not be snapshotted. "
+            "The restore will not proceed when doing so could erase audit history."
+        ) from exc
+
+
+def _reconcile_post_restore_audit_logs(engine, pre_restore_audit_logs: list[dict]) -> dict:
+    """Preserve the immutable audit history that existed before restore.
+
+    Restore replaces the whole schema with the selected backup. That is valid
+    for mutable business state, but it must not erase audit history created
+    after the backup was taken. Existing backup rows are retained as-is; any
+    pre-restore row whose immutable content is absent from the restored
+    ledger is inserted after restore. The audit id is intentionally NOT
+    restored because ids are internal bookkeeping fields and the restored
+    database may already contain the same id for a different row.
+    """
+    if not pre_restore_audit_logs:
+        return {"audit_logs_preserved": 0, "audit_logs_skipped": 0}
+
+    from sqlalchemy import text as sa_text
+
+    # A row's identity for this merge is its immutable business content. The
+    # timestamp is included because the same operator/action/detail can be a
+    # legitimate repeated action at different times.
+    def fingerprint(row: dict) -> tuple:
+        return (
+            row.get("operator"),
+            row.get("action"),
+            row.get("target_type"),
+            row.get("target_id"),
+            row.get("details"),
+            row.get("timestamp"),
+        )
+
+    preserved = 0
+    skipped = 0
+    with engine.begin() as conn:
+        restored = {
+            fingerprint(dict(row))
+            for row in conn.execute(
+                sa_text(
+                    'SELECT operator, action, target_type, target_id, details, "timestamp" '
+                    'FROM audit_logs'
+                )
+            ).mappings().all()
+        }
+
+        for row in pre_restore_audit_logs:
+            fp = fingerprint(row)
+            if fp in restored:
+                continue
+            try:
+                conn.execute(
+                    sa_text(
+                        'INSERT INTO audit_logs '
+                        '(operator, action, target_type, target_id, details, "timestamp") '
+                        'VALUES (:operator, :action, :target_type, :target_id, :details, :timestamp)'
+                    ),
+                    {
+                        "operator": row.get("operator"),
+                        "action": row.get("action"),
+                        "target_type": row.get("target_type"),
+                        "target_id": row.get("target_id"),
+                        "details": row.get("details"),
+                        "timestamp": row.get("timestamp"),
+                    },
+                )
+                restored.add(fp)
+                preserved += 1
+            except Exception:
+                logger.exception(
+                    "backup_service: failed to preserve one pre-restore audit row "
+                    "(%s, %s, %s, %s)",
+                    row.get("operator"), row.get("action"), row.get("target_type"), row.get("target_id"),
+                )
+                skipped += 1
+
+        # The sequence may have existed in the restored backup at a lower
+        # value than the rows we just inserted. Make the next generated id
+        # strictly greater than the current maximum so the next business
+        # action can always append another audit row.
+        conn.execute(
+            sa_text(
+                "SELECT setval('audit_logs_id_seq', "
+                "COALESCE((SELECT MAX(id) FROM audit_logs), 1), "
+                "(SELECT MAX(id) FROM audit_logs) IS NOT NULL)"
+            )
+        )
+
+    return {"audit_logs_preserved": preserved, "audit_logs_skipped": skipped}
+
+
 def _restore_backup_impl(filepath: str, take_safety_backup: bool = True) -> dict:
     """
     Destructive: drops and recreates the `public` schema, then replays the
@@ -1720,6 +1862,11 @@ def _restore_backup_impl(filepath: str, take_safety_backup: bool = True) -> dict
         _pre_restore_quotations = _safe_snapshot_table("quotations")
         _pre_restore_quotation_items = _safe_snapshot_table("quotation_items")
         _pre_restore_quotation_outsourced_items = _safe_snapshot_table("quotation_outsourced_items")
+
+        # AUDIT HISTORY IS IMMUTABLE. Snapshot it before the destructive
+        # schema replacement so entries created after the selected backup
+        # cannot disappear merely because restore rolled mutable tables back.
+        _pre_restore_audit_logs = _snapshot_audit_logs(database_module.engine)
 
         conn = _db_connection_kwargs()
 
@@ -2066,6 +2213,16 @@ def _restore_backup_impl(filepath: str, take_safety_backup: bool = True) -> dict
             outsider_reconciliation["preserved_outsider_ids"],
         )
 
+        # AUDIT TRAIL CONTINUITY -- unlike mutable business tables, the
+        # append-only ledger must survive a rollback-style database restore.
+        # Reinsert only pre-restore entries that are not already present in
+        # the restored backup. This also preserves the audit rows describing
+        # post-backup checkouts/returns/user changes that the continuity
+        # reconciliation keeps alive in their source tables.
+        audit_reconciliation = _reconcile_post_restore_audit_logs(
+            database_module.engine, _pre_restore_audit_logs,
+        )
+
         # ENTERPRISE HARDENING -- force EVERY existing session (including
         # whoever just triggered this restore) to log back in, so nobody
         # -- anywhere in the app, not just the Super Admin -- keeps
@@ -2116,6 +2273,7 @@ def _restore_backup_impl(filepath: str, take_safety_backup: bool = True) -> dict
             "credential_reconciliation": credential_reconciliation,
             "outsider_reconciliation": outsider_reconciliation,
             "asset_activity_reconciliation": asset_activity_reconciliation,
+            "audit_reconciliation": audit_reconciliation,
         }
     finally:
         _release_backup_lock(_restore_window_lock_token)

@@ -799,7 +799,7 @@ def test_reconcile_leaves_restore_only_accounts_untouched(backup_env):
 
     result = backup_service._reconcile_post_restore_credentials(engine, pre_restore_users=[])
     assert result == {
-        "users_reconciled": 0, "users_reinserted": 0, "super_admins_reset": 0, "preserved_user_ids": [],
+        "users_reconciled": 0, "users_reinserted": 0, "super_admins_reset": 0, "super_admins_revoked": 0, "preserved_user_ids": [],
     }
 
     row = _get_user_by_email(engine, "restore.only@example.com")
@@ -857,69 +857,102 @@ def test_reconcile_writes_audit_log_with_all_three_counts(backup_env):
     assert missing_email in audit_row["details"]
 
 
-def test_reconcile_super_admin_reset_applies_to_both_duplicate_and_reinserted(backup_env):
-    """The existing super-admin TOTP/recovery-code hardening must keep
-    working for case 1 (duplicate) AND now also apply to a re-inserted
-    (case 2) Super Admin account -- MFA can't be trusted from an old
-    backup or from a pre-restore snapshot either."""
+def test_reconcile_restore_revokes_backup_only_super_admin_and_preserves_current_root(backup_env):
+    """A restore may contain an older second root account, but the current
+    root that existed immediately before restore is authoritative and the
+    backup-only super_admin must be revoked."""
     import services.backup_service as backup_service
     from security import hash_password, SUPER_ADMIN_ROLE
     from sqlalchemy import text as sa_text
+    import subprocess
+    import os
+    from pathlib import Path
 
     engine = backup_env["engine"]
+    backend_dir = str(Path(__file__).resolve().parent.parent)
 
-    dup_email = "dup.super.admin@example.com"
-    dup_id = _insert_user(
-        engine, email=dup_email, role=SUPER_ADMIN_ROLE,
+    # The normal head schema enforces one root. Drop only the final invariant
+    # for this test so we can model the older restored database that contained
+    # a second backup root, then put the invariant back afterwards.
+    env = {
+        **os.environ,
+        "ENVIRONMENT": "production",
+        "DATABASE_URL": backup_env["database_url"],
+        "SUPER_ADMIN_USERNAME": "test_root_admin",
+        "SUPER_ADMIN_NAME": "Test Root Admin",
+        "ROOT_ADMIN_BOOTSTRAP_PASSWORD": "TestBootstrap123!",
+    }
+    result = subprocess.run(
+        ["python", "-m", "alembic", "downgrade", "0016_quotation_paid_status"],
+        cwd=backend_dir, env=env, capture_output=True, text=True, timeout=120,
     )
-    with engine.begin() as conn:
-        conn.execute(
-            sa_text("UPDATE users SET totp_secret_encrypted = 'restored-secret', totp_enabled = true WHERE id = :uid"),
-            {"uid": dup_id},
-        )
-        conn.execute(
-            sa_text("INSERT INTO recovery_codes (user_id, code_hash) VALUES (:uid, 'somehash')"),
-            {"uid": dup_id},
-        )
+    assert result.returncode == 0, result.stderr
 
-    missing_email = "missing.super.admin@example.com"
-    pre_restore_users = [
-        {
-            "id": dup_id, "email": dup_email, "email_lc": dup_email.lower(),
-            "name": "Dup Super Admin", "phone_number": None, "username": None,
-            "role": SUPER_ADMIN_ROLE, "password_hash": hash_password("Whatever123!"),
-            "is_verified": True, "is_active": True, "failed_login_attempts": 0,
-            "locked_until": None, "totp_secret_encrypted": "current-secret", "totp_enabled": True,
-            "is_deleted": False, "deleted_at": None, "purged_at": None,
-            "department": None, "department_role": None, "converted_to_outsider_id": None,
-        },
-        {
-            "id": 77777, "email": missing_email, "email_lc": missing_email.lower(),
-            "name": "Missing Super Admin", "phone_number": None, "username": None,
-            "role": SUPER_ADMIN_ROLE, "password_hash": hash_password("Whatever123!"),
-            "is_verified": True, "is_active": True, "failed_login_attempts": 0,
-            "locked_until": None, "totp_secret_encrypted": "current-secret", "totp_enabled": True,
-            "is_deleted": False, "deleted_at": None, "purged_at": None,
-            "department": None, "department_role": None, "converted_to_outsider_id": None,
-        },
-    ]
+    current_email = "current.root@example.com"
+    with engine.begin() as conn:
+        current_id = conn.execute(
+            sa_text(
+                "UPDATE users SET email = :email, username = :username, name = :name "
+                "WHERE role = :role RETURNING id"
+            ),
+            {
+                "email": current_email, "username": "current.root",
+                "name": "Current Root", "role": SUPER_ADMIN_ROLE,
+            },
+        ).scalar()
+    assert current_id is not None
+
+    backup_email = "old.root.from.backup@example.com"
+    backup_id = _insert_user(
+        engine,
+        email=backup_email,
+        username="old.root",
+        role=SUPER_ADMIN_ROLE,
+        name="Old Backup Root",
+    )
+
+    pre_restore_users = [{
+        "id": current_id, "email": current_email, "email_lc": current_email.lower(),
+        "name": "Current Root", "phone_number": None, "username": "current.root",
+        "role": SUPER_ADMIN_ROLE, "password_hash": hash_password("CurrentPassword123!"),
+        "is_verified": True, "is_active": True, "failed_login_attempts": 0,
+        "locked_until": None, "totp_secret_encrypted": "current-secret", "totp_enabled": True,
+        "is_deleted": False, "deleted_at": None, "purged_at": None,
+        "department": None, "department_role": None, "converted_to_outsider_id": None,
+    }]
 
     result = backup_service._reconcile_post_restore_credentials(engine, pre_restore_users)
-    assert result["super_admins_reset"] == 2
 
-    dup_row = _get_user_by_email(engine, dup_email)
-    assert dup_row["totp_enabled"] is False
-    assert dup_row["totp_secret_encrypted"] is None
+    assert result["super_admins_revoked"] == 1
+    assert result["super_admins_reset"] == 1
 
-    missing_row = _get_user_by_email(engine, missing_email)
-    assert missing_row["totp_enabled"] is False
-    assert missing_row["totp_secret_encrypted"] is None
+    current_row = _get_user_by_email(engine, current_email)
+    assert current_row["id"] == current_id
+    assert current_row["role"] == SUPER_ADMIN_ROLE
+    assert current_row["is_active"] is True
+    assert current_row["is_deleted"] is False
+    assert current_row["totp_enabled"] is False
+    assert current_row["totp_secret_encrypted"] is None
+
+    backup_row = _get_user_by_email(engine, backup_email)
+    assert backup_row["id"] == backup_id
+    assert backup_row["role"] != SUPER_ADMIN_ROLE
+    assert backup_row["is_active"] is False
+    assert backup_row["is_deleted"] is True
 
     with engine.connect() as conn:
-        remaining_codes = conn.execute(
-            sa_text("SELECT COUNT(*) FROM recovery_codes WHERE user_id = :uid"), {"uid": dup_id},
+        count = conn.execute(
+            sa_text("SELECT COUNT(*) FROM users WHERE role = :role"), {"role": SUPER_ADMIN_ROLE}
         ).scalar()
-    assert remaining_codes == 0
+    assert count == 1
+
+    # Reinstall the DB-level invariant and verify it can be applied cleanly
+    # after the restore reconciliation has removed the duplicate root.
+    result = subprocess.run(
+        ["python", "-m", "alembic", "upgrade", "head"],
+        cwd=backend_dir, env=env, capture_output=True, text=True, timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 # ---------------------------------------------------------------------------

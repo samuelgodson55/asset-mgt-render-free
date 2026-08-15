@@ -5,6 +5,7 @@ import { useNavigate } from "react-router-dom";
 import { alertsApi, extensionsApi, myItemsApi, quotationsApi, formatDate } from "../lib/api";
 import { useAuth } from "../lib/useAuth";
 import { isPrivileged } from "../lib/roles";
+import { useRequestGuard } from "../lib/useRequestGuard";
 import {
   readDismissedSet,
   dismissDecisionIds,
@@ -108,30 +109,29 @@ export function Notifications() {
   const [quotationNotifications, setQuotationNotifications] = useState<QuotationNotification[]>([]);
 
   const privileged = demo || isPrivileged(user?.role);
+  const beginRequest = useRequestGuard();
 
   const refresh = () => {
+    const isCurrent = beginRequest();
     setLoading(true);
     const dismissed = readDismissedSet();
     const dismissedQuotationNotifications = readDismissedQuotationNotificationSet();
     const tasks: Promise<void>[] = [
-      myItemsApi.list().then((d) => setMyItems(d.assigned_items)).catch(() => setMyItems([])),
-      extensionsApi.myDecisions(10).then((items) => setDecisions(items.filter((d) => !dismissed.has(d.id)))).catch(() => setDecisions([])),
-      quotationsApi.myNotifications()
-        .then((items) => setQuotationNotifications(items.filter((n) => !dismissedQuotationNotifications.has(n.id))))
-        .catch(() => setQuotationNotifications([])),
+      myItemsApi.list().then((d) => { if (isCurrent()) setMyItems(d.assigned_items); }).catch(() => { if (isCurrent()) setMyItems([]); }),
+      extensionsApi.myDecisions(10).then((items) => { if (isCurrent()) setDecisions(items.filter((d) => !dismissed.has(d.id))); }).catch(() => { if (isCurrent()) setDecisions([]); }),
+      quotationsApi.myNotifications().then((items) => { if (isCurrent()) setQuotationNotifications(items.filter((n) => !dismissedQuotationNotifications.has(n.id))); }).catch(() => { if (isCurrent()) setQuotationNotifications([]); }),
     ];
     if (privileged) {
-      tasks.push(alertsApi.overdue(20).then(setOverdue).catch((err) => { console.error("Failed to load overdue alerts:", err); setOverdue({ items: [], total: 0 }); }));
-      tasks.push(alertsApi.dueSoon(20).then(setDueSoon).catch((err) => { console.error("Failed to load due-soon alerts:", err); setDueSoon({ items: [], total: 0 }); }));
-      tasks.push(extensionsApi.listPending().then((items) => setExtensions(items.filter((e) => e.status === "pending"))).catch((err) => { console.error("Failed to load pending extension requests:", err); setExtensions([]); }));
-    } else {
+      tasks.push(alertsApi.overdue(20).then((data) => { if (isCurrent()) setOverdue(data); }).catch((err) => { if (isCurrent()) { console.error("Failed to load overdue alerts:", err); setOverdue({ items: [], total: 0 }); } }));
+      tasks.push(alertsApi.dueSoon(20).then((data) => { if (isCurrent()) setDueSoon(data); }).catch((err) => { if (isCurrent()) { console.error("Failed to load due-soon alerts:", err); setDueSoon({ items: [], total: 0 }); } }));
+      tasks.push(extensionsApi.listPending().then((items) => { if (isCurrent()) setExtensions(items.filter((e) => e.status === "pending")); }).catch((err) => { if (isCurrent()) { console.error("Failed to load pending extension requests:", err); setExtensions([]); } }));
+    } else if (isCurrent()) {
       setOverdue({ items: [], total: 0 });
       setDueSoon({ items: [], total: 0 });
       setExtensions([]);
     }
-    Promise.all(tasks).finally(() => setLoading(false));
+    Promise.all(tasks).finally(() => { if (isCurrent()) setLoading(false); });
   };
-
   useEffect(refresh, [privileged]);
 
   const myOverdue = myItems.filter((i) => i.overdue);

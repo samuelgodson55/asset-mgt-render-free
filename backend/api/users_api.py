@@ -5,7 +5,7 @@ System-user account provisioning, directory listing, self-service items,
 per-user custody lookup, properties-assigned exports, and delete.
 """
 
-from typing import Optional
+from typing import Optional, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.orm import Session
 
@@ -64,6 +64,7 @@ def get_deleted_users(
 def get_my_assigned_items(
     limit: int = Query(user_service.DEFAULT_LIMIT, ge=1, le=user_service.MAX_LIMIT, description="Max rows to return"),
     offset: int = Query(0, ge=0, description="Rows to skip (for paging through My Items)"),
+    status_filter: Optional[Literal["overdue", "due_soon"]] = Query(None, alias="filter", description="Narrow My Items to overdue or due-soon items."),
     db: Session = Depends(get_db),
     user: dict = Depends(get_current_user),
 ):
@@ -76,7 +77,7 @@ def get_my_assigned_items(
     callers which don't care about paging -- the Notification Bell,
     Dashboard, and the CSV/PDF export -- keep seeing everything).
     """
-    return user_service.get_my_assigned_items(db, user, limit, offset)
+    return user_service.get_my_assigned_items(db, user, limit, offset, status_filter)
 
 
 @router.get("/me/items/export")

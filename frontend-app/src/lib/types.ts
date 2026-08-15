@@ -214,6 +214,9 @@ export interface ImportRowError {
 
 export interface ImportResult {
   imported_count: number;
+  updated_count?: number;
+  created_count?: number;
+  error_count?: number;
   errors: ImportRowError[];
   message?: string;
 }

@@ -14,6 +14,7 @@ import { AssetExportModal } from "../components/AssetExportModal";
 import { PaginationBar, RowsPerPageSelect } from "../components/PaginationBar";
 import { DEFAULT_PAGE_SIZE } from "../lib/pagination";
 import { readAssetSearchParams } from "../lib/assetSearchParams";
+import { useRequestGuard } from "../lib/useRequestGuard";
 
 const STATUS_TABS: { key: "all" | AssetType["status"]; label: string }[] = [
   { key: "all", label: "Any status" },
@@ -48,9 +49,7 @@ export function Assets() {
   const [perPage, setPerPage] = useState(DEFAULT_PAGE_SIZE);
   const [search, setSearch] = useState(() => searchParams.get("search") ?? "");
   const [category, setCategory] = useState<string>(() => searchParams.get("category") ?? "All");
-  const [status, setStatus] = useState<(typeof STATUS_TABS)[number]["key"]>(
-    () => (searchParams.get("status") as (typeof STATUS_TABS)[number]["key"]) || "all"
-  );
+  const [status, setStatus] = useState<(typeof STATUS_TABS)[number]["key"]>(() => readAssetSearchParams(searchParams).status);
   const [categories, setCategories] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -75,21 +74,29 @@ export function Assets() {
   const [creating, setCreating] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const beginRequest = useRequestGuard();
 
   const refresh = () => {
+    const isCurrent = beginRequest();
     setLoading(true);
-    assetsApi.list(perPage, offset, search, category).then((res) => {
+    assetsApi.list(perPage, offset, search, category, status === "all" ? undefined : status).then((res) => {
+      if (!isCurrent()) return;
       setError(null);
       setAssets(res.items);
       setTotal(res.total);
       setLoading(false);
     }).catch((err) => {
+      if (!isCurrent()) return;
       setError(err instanceof Error ? err.message : "Couldn't load the asset inventory.");
       setLoading(false);
     });
   };
 
-  useEffect(refresh, [offset, perPage, search, category]);
+  useEffect(refresh, [offset, perPage, search, category, status]);
+
+  useEffect(() => {
+    if (offset > 0 && offset >= total) setOffset(Math.max(0, Math.floor(Math.max(total - 1, 0) / perPage) * perPage));
+  }, [offset, total, perPage]);
 
   // Called from the "Rows per page" <select> -- always jumps back to the
   // first page on a page-size change (mirrors js/ui.js's setPerPage()).
@@ -99,18 +106,18 @@ export function Assets() {
   };
 
   useEffect(() => {
+    let cancelled = false;
     assetsApi
       .categories()
-      .then((res) => setCategories(res.categories ?? []))
-      .catch(() => setCategories([]));
+      .then((res) => { if (!cancelled) setCategories(res.categories ?? []); })
+      .catch(() => { if (!cancelled) setCategories([]); });
+    return () => { cancelled = true; };
   }, []);
 
-  // Category is now a true server-side filter (GET /assets?category=...,
-  // same pattern as `search`) -- see backend/services/asset_service.py's
-  // list_assets(). `assets` already IS the category-narrowed page, so it's
-  // rendered directly. Status has no backend equivalent yet, so it stays a
-  // client-side narrowing of the current page, same as before.
-  const filtered = assets.filter((a) => status === "all" || a.status === status);
+  // Search, category, and stock status are all server-side filters. The page
+  // therefore renders the returned slice directly; no filter is applied
+  // after pagination, so totals and later pages remain correct.
+  const filtered = assets;
 
   // Pill/tab clicks (and the search box) update both local state and the
   // URL together, so the address bar always mirrors what's currently on

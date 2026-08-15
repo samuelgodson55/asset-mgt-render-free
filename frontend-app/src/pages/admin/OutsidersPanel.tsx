@@ -11,6 +11,7 @@ import { useCustody } from "../../lib/useCustody";
 import { ExportButtons } from "../../components/ExportButtons";
 import { PaginationBar, RowsPerPageSelect } from "../../components/PaginationBar";
 import { DEFAULT_PAGE_SIZE } from "../../lib/pagination";
+import { useRequestGuard } from "../../lib/useRequestGuard";
 import { Modal, ModalHeader } from "../../components/ui/Modal";
 import { ErrorBanner } from "../../components/ui/ErrorBanner";
 import { SearchInput } from "../../components/ui/SearchInput";
@@ -134,6 +135,7 @@ export function OutsidersPanel({
   // Custody Ledger drawer is shared app-wide -- see lib/custodyContext.tsx
   // and UsersPanel.tsx's matching comment.
   const { openCustody } = useCustody();
+  const beginRequest = useRequestGuard();
 
   // Same Manager role ceiling as UsersPanel's createRoleOptions above --
   // mirrors manager.html's "Convert to user" role select and
@@ -141,15 +143,27 @@ export function OutsidersPanel({
   const convertRoleOptions = demo || isFullAdmin(actorRole) ? ROLE_OPTIONS : ["staff", "customer"];
 
   const refresh = () => {
+    const isCurrent = beginRequest();
     setLoading(true);
     outsidersApi.list(perPage, offset, search).then((res) => {
+      if (!isCurrent()) return;
       setRows(res.items);
       setTotal(res.total);
+      setLoading(false);
+    }).catch((err) => {
+      if (!isCurrent()) return;
+      console.error("Failed to load ad-hoc profiles:", err);
+      setRows([]);
+      setTotal(0);
       setLoading(false);
     });
   };
 
   useEffect(refresh, [offset, perPage, search]);
+
+  useEffect(() => {
+    if (offset > 0 && offset >= total) setOffset(Math.max(0, Math.floor(Math.max(total - 1, 0) / perPage) * perPage));
+  }, [offset, total, perPage]);
 
   const handlePerPageChange = (n: number) => {
     setPerPage(n);

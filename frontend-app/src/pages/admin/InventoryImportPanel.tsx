@@ -85,6 +85,8 @@ export function InventoryImportPanel() {
   };
 
   const total = (result?.imported_count ?? 0) + (result?.errors.length ?? 0);
+  const updated = result?.updated_count ?? 0;
+  const created = result?.created_count ?? Math.max(0, (result?.imported_count ?? 0) - updated);
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
@@ -96,7 +98,7 @@ export function InventoryImportPanel() {
           <div>
             <h2 className="font-display text-[15px] font-medium text-text">Bulk import asset inventory</h2>
             <p className="text-[12.5px] text-text-muted mt-0.5">
-              Upload a CSV of <span className="font-mono text-[11.5px]">name, total_quantity, category, department, price</span> rows. Matching pool names <span className="text-text">add</span> to the existing quantity rather than replacing it.
+              Upload a new-pool template, or export the Asset Inventory as CSV, edit the values, and import it back. Exported rows use <span className="font-mono text-[11.5px]">Pool ID</span> to update the exact pool instead of creating a duplicate.
             </p>
           </div>
         </div>
@@ -127,6 +129,10 @@ export function InventoryImportPanel() {
           </div>
         )}
 
+        <p className="mt-4 text-[11.5px] leading-5 text-text-faint">
+          Tip: the CSV downloaded from <span className="text-text-muted">Asset Inventory → Export → CSV</span> can be edited directly and imported here. Pool ID is the stable identity. Available and Status are informational and are never written back.
+        </p>
+
         <button
           type="button"
           disabled={!file || submitting}
@@ -146,7 +152,7 @@ export function InventoryImportPanel() {
                 }`}
               >
                 {result.errors.length ? <TriangleAlert size={14} /> : <CheckCircle2 size={14} />}
-                Import complete: {result.imported_count} of {total} records saved ({result.errors.length} failed)
+                Import complete: {updated} updated, {created} created, {result.errors.length} failed ({total} rows processed)
               </div>
 
               {result.errors.length > 0 && (
@@ -187,14 +193,14 @@ export function InventoryImportPanel() {
       </motion.div>
 
       <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.35, delay: 0.08 }} className="lg:col-span-2 border border-border-soft bg-surface rounded-[3px] p-5">
-        <h2 className="font-display text-[15px] font-medium text-text mb-3">Expected columns</h2>
+        <h2 className="font-display text-[15px] font-medium text-text mb-3">CSV columns</h2>
         <div className="flex flex-col gap-3 text-[12.5px]">
           {[
-            ["name", "Pool name -- matches an existing pool by exact name, or creates a new one."],
-            ["total_quantity", "Whole number. Added to the existing total if the pool already exists."],
-            ["category", "Existing category. Preserved independently from department."],
-            ["department", "Optional asset department, e.g. Camera, Lighting, Grip."],
-            ["price", "Optional unit price, e.g. 899.00."],
+            ["Pool ID / Asset Name", "Pool ID updates an existing exported pool. Asset Name is used for new pools; Available and Status are read-only reference columns."],
+            ["Total / total_quantity", "Whole number. For an exported row this replaces total capacity, while live checkout/exception allocations are preserved."],
+            ["Category", "Editable on an existing pool. Blank or — preserves the current value; use __CLEAR__ to remove it."],
+            ["Department", "Editable on an existing pool, e.g. Camera, Lighting, Grip. Blank or — preserves the current value; use __CLEAR__ to remove it."],
+            ["Price", "Editable unit price. Exported currency formatting is accepted. Blank or — preserves the current value; use __CLEAR__ to remove it."],
           ].map(([col, desc]) => (
             <div key={col} className="border-l-2 border-border-soft pl-3">
               <p className="font-mono text-[11.5px] text-brass-soft">{col}</p>

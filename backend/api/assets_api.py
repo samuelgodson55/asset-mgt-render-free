@@ -5,7 +5,7 @@ Everything under /assets: pool CRUD, capacity, maintenance exceptions,
 reconciliation check-in, the advanced checkout flow, and CSV batch import.
 """
 
-from typing import Optional
+from typing import Optional, Literal
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query, Response
 from sqlalchemy.orm import Session
 
@@ -39,10 +39,11 @@ def list_assets(
     offset: int = Query(0, ge=0, description="Rows to skip (for paging through a large inventory)"),
     search: Optional[str] = Query(None, description="Case-insensitive substring match against asset pool name"),
     category: Optional[str] = Query(None, description="Narrow to one category (exact, case-insensitive). 'Uncategorized' matches pools with no category set; omit or pass 'all' for every pool."),
+    status: Optional[Literal["available", "low", "out"]] = Query(None, description="Narrow by stock status. Requires stock visibility."),
     db: Session = Depends(get_db),
     user: dict = Depends(get_current_user),
 ):
-    return asset_service.list_assets(db, user, limit, offset, search, category)
+    return asset_service.list_assets(db, user, limit, offset, search, category, status)
 
 
 @router.get("/deleted")

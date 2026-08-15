@@ -132,12 +132,10 @@ services:
       # relying on a separate nginx service -- see top-of-file comment.
       - key: SERVE_FRONTEND
         value: true
-      # FRONTEND SELECTOR: change ONLY the value below.
-      # Allowed values:
-      #   legacy = classic multi-page frontend
-      #   react  = React "Ledger" SPA
-      # Both builds are already in the image, so switching this value does
-      # not require a new Docker build; Render redeploys the existing build.
+      # FRONTEND SELECTOR: React is the default Render frontend. Change ONLY
+      # this environment variable to `legacy` if the classic frontend is ever
+      # needed. Both builds are already in the image, so switching this value
+      # does not require a new Docker build; Render redeploys the existing build.
       - key: FRONTEND_VARIANT
         value: react
       # Launch `celery -A celery_app worker -B` as a background process
@@ -147,11 +145,11 @@ services:
       # with the web service, doesn't scale past one instance).
       - key: RUN_EMBEDDED_WORKER
         value: true
+      # Long-lived application signing secret. Render must preserve the
+      # Dashboard value across Blueprint syncs/redeploys; rotating this
+      # would invalidate every existing JWT. Set it once in Render.
       - key: JWT_SECRET_KEY
-        generateValue: true # Random 256-bit value -- comfortably over the
-                            # 32-char minimum config.py enforces once
-                            # ENVIRONMENT=production (see config.py's
-                            # startup check).
+        sync: false
       - key: JWT_ALGORITHM
         value: HS256
       - key: JWT_EXPIRY_HOURS
@@ -257,26 +255,30 @@ services:
         value: true
       - key: EMAIL_PROVIDER
         value: brevo
+      # Provider credentials are Dashboard-managed. `sync: false` means a
+      # later Blueprint sync never replaces/clears a working key.
       - key: BREVO_API_KEY
-        value: ""
+        sync: false
       - key: RESEND_API_KEY
-        value: ""
+        sync: false
       - key: SMTP_HOST
         value: ""
       - key: SMTP_PORT
         value: 587
       - key: SMTP_USERNAME
-        value: ""
+        sync: false
       - key: SMTP_PASSWORD
-        value: ""
+        sync: false
       - key: SMTP_USE_TLS
         value: true
       - key: SMTP_USE_SSL
         value: false
+      # Sender/admin routing is operator configuration; preserve it too so
+      # a Blueprint sync cannot silently clear notification destinations.
       - key: SMTP_FROM_EMAIL
-        value: ""
+        sync: false
       - key: ADMIN_NOTIFICATION_EMAILS
-        value: ""
+        sync: false
       - key: OVERDUE_DIGEST_HOURS_UTC
         value: 7
       - key: DUE_SOON_REMINDER_DAYS

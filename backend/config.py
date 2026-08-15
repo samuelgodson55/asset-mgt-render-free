@@ -701,9 +701,9 @@ class Settings(BaseSettings):
     SERVE_FRONTEND: bool = False
     FRONTEND_DIR: str = "/app/frontend"
 
-    # Which frontend to serve when SERVE_FRONTEND is on: "legacy" (default
-    # -- the multi-page static site, frontend/) or "react" (the "Ledger"
-    # SPA, frontend-app/). Dockerfile.render bakes BOTH builds into the
+    # Which frontend to serve when SERVE_FRONTEND is on: "react" (the "Ledger"
+    # SPA, frontend-app/) by default, or "legacy" (the multi-page static
+    # site, frontend/). Dockerfile.render bakes BOTH builds into the
     # image unconditionally (at FRONTEND_DIR and FRONTEND_REACT_DIR below,
     # respectively) specifically so switching between them is a plain
     # environment-variable change -- flip this in render.yaml/the Render
@@ -717,7 +717,7 @@ class Settings(BaseSettings):
     # as frontend/Dockerfile's own frontend-legacy-only/frontend-react-only
     # split for the multi-service deployment shape. Any value other than
     # exactly "react" is treated as "legacy".
-    FRONTEND_VARIANT: str = "legacy"
+    FRONTEND_VARIANT: str = "react"
     # Where Dockerfile.render's frontend-app-build stage's Vite output
     # (frontend-app/'s built dist/) lives in the image -- only read when
     # FRONTEND_VARIANT="react". Kept as its own separate directory (rather

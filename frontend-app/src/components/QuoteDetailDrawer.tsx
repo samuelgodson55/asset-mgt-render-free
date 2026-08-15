@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useRequestGuard } from "../lib/useRequestGuard";
 import { motion, AnimatePresence } from "framer-motion";
 import { X, Loader2, Trash2, Plus, Search, UserPlus, CheckCircle2, CreditCard } from "lucide-react";
 import { quotationsApi, usersApi, outsidersApi, formatPrice, formatDate, ApiError } from "../lib/api";
@@ -100,23 +101,26 @@ export function QuoteDetailDrawer({
   const [adhocCompany, setAdhocCompany] = useState("");
   const [adhocEmail, setAdhocEmail] = useState("");
   const [adhocPhone, setAdhocPhone] = useState("");
+  const beginRequest = useRequestGuard();
 
   const refresh = async () => {
     if (quotationId == null) return;
+    const isCurrent = beginRequest();
     setLoading(true);
     setError(null);
     try {
       const detail = mode === "self" ? await quotationsApi.myQuoteDetail(quotationId) : await quotationsApi.detail(quotationId);
+      if (!isCurrent()) return;
       setData(detail);
       setNotes(detail.notes ?? "");
       setDiscount(String(detail.discount_percent ?? 0));
-    setPaymentMethod(detail.payment_method ?? "bank_transfer");
-    setPaymentReference(detail.payment_reference ?? "");
-    setPaymentConfirmed(false);
+      setPaymentMethod(detail.payment_method ?? "bank_transfer");
+      setPaymentReference(detail.payment_reference ?? "");
+      setPaymentConfirmed(false);
     } catch (err) {
-      setError(errMsg(err, "Couldn't load this quotation."));
+      if (isCurrent()) setError(errMsg(err, "Couldn't load this quotation."));
     } finally {
-      setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
   };
 
@@ -153,7 +157,9 @@ export function QuoteDetailDrawer({
   // first time the assign panel is opened in the Ad-Hoc tab.
   useEffect(() => {
     if (mode !== "admin" || assignTab !== "outsider" || existingOutsiders.length > 0) return;
-    outsidersApi.list(100, 0, "").then((page) => setExistingOutsiders(page.items)).catch(() => {});
+    let cancelled = false;
+    outsidersApi.list(100, 0, "").then((page) => { if (!cancelled) setExistingOutsiders(page.items); }).catch(() => {});
+    return () => { cancelled = true; };
   }, [mode, assignTab, existingOutsiders.length]);
 
   if (quotationId == null) return null;

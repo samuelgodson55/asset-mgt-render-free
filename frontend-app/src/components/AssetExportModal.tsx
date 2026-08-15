@@ -9,11 +9,13 @@ export function AssetExportModal({ open, onClose }: { open: boolean; onClose: ()
 
   useEffect(() => {
     if (!open) return;
+    let cancelled = false;
     setCategory("all");
     assetsApi
       .categories()
-      .then((res) => setCategories(res.categories ?? []))
-      .catch(() => setCategories([])); // non-fatal -- "Download All" still works
+      .then((res) => { if (!cancelled) setCategories(res.categories ?? []); })
+      .catch(() => { if (!cancelled) setCategories([]); });
+    return () => { cancelled = true; };
   }, [open]);
 
   if (!open) return null;

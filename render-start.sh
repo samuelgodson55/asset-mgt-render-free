@@ -33,9 +33,9 @@
 #     uvicorn even gets a chance to start serving requests.
 # =============================================================================
 
-case "${FRONTEND_VARIANT:-legacy}" in
+case "${FRONTEND_VARIANT:-react}" in
     legacy|react)
-        echo "render-start.sh: FRONTEND_VARIANT=${FRONTEND_VARIANT:-legacy}"
+        echo "render-start.sh: FRONTEND_VARIANT=${FRONTEND_VARIANT:-react}"
         ;;
     *)
         echo "render-start.sh: ERROR: FRONTEND_VARIANT must be 'legacy' or 'react'; got '${FRONTEND_VARIANT}'" >&2

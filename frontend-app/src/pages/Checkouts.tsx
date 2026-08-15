@@ -7,6 +7,7 @@ import type { Checkout, ExtensionRequest } from "../lib/types";
 import { StatusPill } from "../components/StatusPill";
 import { PaginationBar, RowsPerPageSelect } from "../components/PaginationBar";
 import { DEFAULT_PAGE_SIZE } from "../lib/pagination";
+import { useRequestGuard } from "../lib/useRequestGuard";
 import { useCustody } from "../lib/useCustody";
 import { ReceiptModal } from "../components/ReceiptModal";
 import type { ReceiptTarget } from "../lib/receipt";
@@ -124,23 +125,33 @@ export function Checkouts() {
   // response, so this has to be re-read once that request lands rather
   // than assumed up front.
   const [dueSoonDays, setDueSoonDays] = useState(getDueSoonReminderDays());
+  const beginCheckoutsRequest = useRequestGuard();
+  const beginExtensionsRequest = useRequestGuard();
 
   const refreshCheckouts = () => {
+    const isCurrent = beginCheckoutsRequest();
     checkoutsApi.list(perPage, offset, FILTER_FOR_TAB[tab])
       .then(({ items, total }) => {
+        if (!isCurrent()) return;
         setCheckouts(items);
         setCheckoutsTotal(total);
         setDueSoonDays(getDueSoonReminderDays());
       })
-      .catch((err) => console.error("Failed to load checkouts:", err));
+      .catch((err) => {
+        if (isCurrent()) console.error("Failed to load checkouts:", err);
+      });
   };
   const refreshExtensions = () => {
+    const isCurrent = beginExtensionsRequest();
     extensionsApi.list(extPerPage, extOffset)
       .then(({ items, total }) => {
+        if (!isCurrent()) return;
         setExtensions(items);
         setExtensionsTotal(total);
       })
-      .catch((err) => console.error("Failed to load extension requests:", err));
+      .catch((err) => {
+        if (isCurrent()) console.error("Failed to load extension requests:", err);
+      });
   };
 
   // Re-fetch whenever the tab, page size, or offset changes -- each of
@@ -183,8 +194,12 @@ export function Checkouts() {
   // than stranding the panel on a now-empty page. Resetting `extOffset`
   // here re-triggers the refetch above via its own effect.
   useEffect(() => {
-    if (extOffset > 0 && extOffset >= extensionsTotal) setExtOffset(0);
-  }, [extensionsTotal, extOffset]);
+    if (offset > 0 && offset >= checkoutsTotal) setOffset(Math.max(0, Math.floor(Math.max(checkoutsTotal - 1, 0) / perPage) * perPage));
+  }, [checkoutsTotal, offset, perPage]);
+
+  useEffect(() => {
+    if (extOffset > 0 && extOffset >= extensionsTotal) setExtOffset(Math.max(0, Math.floor(Math.max(extensionsTotal - 1, 0) / extPerPage) * extPerPage));
+  }, [extensionsTotal, extOffset, extPerPage]);
 
   const paged = checkouts;
   const pagedExtensions = extensions;
