@@ -20,20 +20,8 @@ import { readDismissedSet, readDismissedQuotationNotificationSet } from "./notif
 // hook lifts that same formula out so every place showing a count agrees
 // with what a person would actually count on that page.
 //
-// REGRESSION THIS ALSO FIXES: the bell's old inline version fetched
-// quotationsApi.myNotifications() without a .catch(), unlike every other
-// call in the same Promise.all. tryLoad() (see lib/api.ts) only swallows a
-// failed request in demo mode -- on a real, logged-in session any hiccup
-// fetching that one endpoint (network blip, a transient 5xx, etc.) rejected
-// the whole Promise.all, so the surrounding async function threw, `setCount`
-// was never called, and the badge silently stayed hidden at 0 forever after
-// that, even once everything else on the page loaded fine. Every request
-// below is now caught with its own fallback so one flaky request can never
-// blank out the whole count.
-// =============================================================================
-
-export function useNotificationCount(privileged: boolean): number {
-  const [count, setCount] = useState(0);
+export function useNotificationCount(privileged: boolean): number | null {
+  const [count, setCount] = useState<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -42,12 +30,12 @@ export function useNotificationCount(privileged: boolean): number {
 
     const run = async () => {
       const [myItemsRes, decisions, overdue, dueSoon, extensions, quotationNotifications] = await Promise.all([
-        myItemsApi.list().catch(() => ({ assigned_items: [] })),
-        extensionsApi.myDecisions(10).catch(() => []),
+        myItemsApi.list(),
+        extensionsApi.myDecisions(10),
         privileged ? alertsApi.overdue(5) : Promise.resolve({ items: [], total: 0 }),
         privileged ? alertsApi.dueSoon(5) : Promise.resolve({ items: [], total: 0 }),
-        privileged ? extensionsApi.listPending().catch(() => []) : Promise.resolve([]),
-        quotationsApi.myNotifications().catch(() => []),
+        privileged ? extensionsApi.listPending() : Promise.resolve([]),
+        quotationsApi.myNotifications(),
       ]);
       if (cancelled) return;
 
@@ -67,9 +55,10 @@ export function useNotificationCount(privileged: boolean): number {
     };
 
     run().catch((err) => {
-      // Belt-and-suspenders only -- every request above already has its
-      // own .catch(), so this should never actually fire.
-      console.error("Failed to compute notification count:", err);
+      if (!cancelled) {
+        setCount(null);
+        console.error("Failed to compute notification count:", err);
+      }
     });
 
     return () => {

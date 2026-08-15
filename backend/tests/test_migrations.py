@@ -325,8 +325,8 @@ def test_single_super_admin_invariant_repairs_duplicate_and_blocks_future_duplic
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO users (name, email, username, role, password_hash, is_verified, is_active, is_deleted) "
-                "VALUES (%s, %s, %s, %s, %s, true, true, false)",
+                "INSERT INTO users (name, email, username, role, password_hash, is_verified, is_active, is_deleted, totp_enabled) "
+                "VALUES (%s, %s, %s, %s, %s, true, true, false, false)",
                 ("Backup Root", "backup.root@example.com", "backup.root", "super_admin", "hash"),
             )
         conn.commit()
@@ -356,8 +356,8 @@ def test_single_super_admin_invariant_repairs_duplicate_and_blocks_future_duplic
         with conn.cursor() as cur:
             with pytest.raises(psycopg2.errors.UniqueViolation):
                 cur.execute(
-                    "INSERT INTO users (name, email, username, role, password_hash, is_verified, is_active, is_deleted) "
-                    "VALUES ('Third Root', 'third.root@example.com', 'third.root', 'super_admin', 'hash', true, true, false)"
+                    "INSERT INTO users (name, email, username, role, password_hash, is_verified, is_active, is_deleted, totp_enabled) "
+                    "VALUES ('Third Root', 'third.root@example.com', 'third.root', 'super_admin', 'hash', true, true, false, false)"
                 )
             conn.rollback()
     finally:

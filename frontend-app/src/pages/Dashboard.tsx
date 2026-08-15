@@ -12,6 +12,7 @@ import { useTheme } from "../lib/useTheme";
 import { isPrivileged } from "../lib/roles";
 import { useRequestGuard } from "../lib/useRequestGuard";
 import { useCustody } from "../lib/useCustody";
+import { errMsg } from "./admin/sharedHelpers";
 
 // recharts needs literal color strings (SVG attrs, not the app's CSS
 // custom properties), so the two palettes are mirrored here by hand.
@@ -24,7 +25,7 @@ export function Dashboard() {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [checkouts, setCheckouts] = useState<Checkout[]>([]);
   const [myItems, setMyItems] = useState<MyItem[]>([]);
-  const [myItemsLoaded, setMyItemsLoaded] = useState(false);
+  const [myItemsLoaded, setMyItemsLoaded] = useState(false);\n  const [myItemsError, setMyItemsError] = useState<string | null>(null);\n  const [statsError, setStatsError] = useState<string | null>(null);
   const { user, demo, canSeeStock } = useAuth();
   const { theme } = useTheme();
   const navigate = useNavigate();
@@ -46,13 +47,15 @@ export function Dashboard() {
 
   useEffect(() => {
     const isCurrent = beginRequest();
-    api.getStats(privileged).then((data) => { if (isCurrent()) setStats(data); }).catch((err) => { if (isCurrent()) console.error("Failed to load dashboard stats:", err); });
+    api.getStats(privileged)
+      .then((data) => { if (!isCurrent()) return; setStatsError(null); setStats(data); })
+      .catch((err) => { if (isCurrent()) { setStatsError(errMsg(err, "Couldn't load dashboard statistics.")); console.error("Failed to load dashboard stats:", err); } });
     if (privileged) {
       api.getCheckouts(privileged).then((data) => { if (isCurrent()) setCheckouts(data); }).catch((err) => { if (isCurrent()) console.error("Failed to load checkouts:", err); });
     } else {
       myItemsApi.list()
-        .then((d) => { if (!isCurrent()) return; setMyItems(d.assigned_items); setMyItemsLoaded(true); })
-        .catch(() => { if (!isCurrent()) return; setMyItems([]); setMyItemsLoaded(true); });
+        .then((d) => { if (!isCurrent()) return; setMyItemsError(null); setMyItems(d.assigned_items); setMyItemsLoaded(true); })
+        .catch((err) => { if (!isCurrent()) return; setMyItemsError(errMsg(err, "Couldn't load your checked-out items.")); setMyItemsLoaded(false); });
     }
   }, [privileged, beginRequest]);
 
@@ -97,6 +100,11 @@ export function Dashboard() {
 
   return (
     <div>
+      {(statsError || myItemsError) && (
+        <div className="mb-4 rounded-[3px] border border-rust/40 bg-rust/10 px-4 py-3 text-[12px] text-rust-soft">
+          {statsError ?? myItemsError}
+        </div>
+      )}
       <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }} className="mb-6">
         <p className="font-mono text-[11px] text-brass-soft tracking-widest">{formatDate(new Date().toISOString())}</p>
         <h1 className="font-display text-2xl font-semibold text-text mt-1">Good to see you{firstName ? `, ${firstName}` : ""}.</h1>

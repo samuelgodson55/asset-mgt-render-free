@@ -156,14 +156,6 @@ async function tryLoad<T>(loader: () => Promise<T>, fallback: T): Promise<T> {
  * request of the session can't reach the backend, before demo/real-login
  * has even been decided.
  */
-async function tryLoadPublicDefault<T>(loader: () => Promise<T>, fallback: T): Promise<T> {
-  try {
-    return await loader();
-  } catch {
-    return fallback;
-  }
-}
-
 // ---------------------------------------------------------------------------
 // auth -- POST /auth/login sets an httpOnly session cookie itself (see
 // backend/api/auth_api.py's _set_session_cookie); there's no token for the
@@ -979,11 +971,7 @@ export const assetsApi = {
 // ---------------------------------------------------------------------------
 
 export const quotationsApi = {
-  // Deliberately NOT tryLoad -- see tryLoadPublicDefault's own docstring
-  // just above: this is a safe UI default (currency/site name), never a
-  // fabricated demo dataset, and it needs to fall back even for a real
-  // account since it's fetched before login/demo mode is known.
-  publicConfig: () => tryLoadPublicDefault(() => rawFetch<PublicConfig>("/config/public"), { currency_code: "NGN", site_name: "Ledger", show_stock_to_staff_customer: true }),
+  publicConfig: () => rawFetch<PublicConfig>("/config/public"),
   // Omitting limit/offset/search returns the WHOLE active catalog in one
   // response (backend default -- see services/quotation_service.py's
   // list_catalog()), which is what every full-catalog consumer still

@@ -86,3 +86,4 @@ azure-monitor-opentelemetry-exporter==1.0.0b34
 # pkg_resources outright, per this comment's own opening paragraph) isn't
 # close.
 setuptools<81
+pypdf==5.9.0

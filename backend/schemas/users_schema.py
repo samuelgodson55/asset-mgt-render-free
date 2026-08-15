@@ -67,9 +67,9 @@ class UserUpdateRequest(BaseModel):
         if value is None:
             return value
         normalized = value.strip().lower()
-        allowed = {"staff", "manager", "admin", "customer"}
+        allowed = {"staff", "manager", "admin", "customer", "super_admin"}
         if normalized not in allowed:
-            raise ValueError("Invalid role. Choose Staff, Manager, Admin, or Customer.")
+            raise ValueError("Invalid role. Choose Staff, Manager, Admin, Customer, or Super Admin.")
         return normalized
 
     @field_validator("phone_number", "company")
