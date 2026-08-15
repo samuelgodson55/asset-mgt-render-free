@@ -875,14 +875,19 @@ def _reconcile_post_restore_credentials(engine, pre_restore_users: list) -> dict
 
     by_email = {email_lc(u): u for u in pre_restore_users if email_lc(u)}
     current_super_admins = [u for u in pre_restore_users if u.get("role") == SUPER_ADMIN_ROLE]
-    if len(current_super_admins) != 1:
+    # The production restore path snapshots the complete current user table,
+    # so a real restore must have exactly one current root. This helper is
+    # also exercised directly by focused ordinary-user reconciliation tests
+    # that intentionally provide partial snapshots with no root account.
+    # Those partial snapshots must continue to exercise only the ordinary
+    # account rules rather than failing before they reach them.
+    if len(current_super_admins) > 1:
         raise RuntimeError(
-            "Restore aborted: the database being restored already has "
-            f"{len(current_super_admins)} current super_admin account(s); exactly one "
-            "is required before a restore can safely select the authoritative root account."
+            "Restore aborted: the current database contains multiple super_admin accounts; "
+            "exactly one authoritative root account is required before restore."
         )
-    authoritative_super_admin = current_super_admins[0]
-    authoritative_super_admin_email = email_lc(authoritative_super_admin)
+    authoritative_super_admin = current_super_admins[0] if current_super_admins else None
+    authoritative_super_admin_email = email_lc(authoritative_super_admin) if authoritative_super_admin else None
 
     users_reconciled = 0
     users_reinserted = 0
@@ -945,26 +950,26 @@ def _reconcile_post_restore_credentials(engine, pre_restore_users: list) -> dict
                 )
 
         # 3) Revoke any backup-only Super Admin rows BEFORE applying the
-        #    authoritative current profile. The production database now also
-        #    has a partial unique index on role=super_admin, so leaving a
-        #    second backup root in place would make the authoritative update
-        #    fail with a unique-constraint error.
-        for row in restored_rows:
-            if row["email_lc"] == authoritative_super_admin_email:
-                continue
-            if row["role"] != SUPER_ADMIN_ROLE:
-                continue
-            conn.execute(
-                sa_text(
-                    "UPDATE users SET role = 'staff', is_active = false, is_deleted = true, "
-                    "deleted_at = NOW(), totp_secret_encrypted = NULL, totp_enabled = false "
-                    "WHERE id = :uid"
-                ),
-                {"uid": row["id"]},
-            )
-            conn.execute(sa_text("DELETE FROM recovery_codes WHERE user_id = :uid"), {"uid": row["id"]})
-            conn.execute(sa_text("DELETE FROM password_reset_tokens WHERE user_id = :uid"), {"uid": row["id"]})
-            super_admins_revoked.append(row["email_lc"])
+        #    authoritative current profile. On a real restore there is always
+        #    exactly one authoritative current root. Partial helper tests that
+        #    omit the root must not mutate the fixture's unrelated root row.
+        if authoritative_super_admin_email:
+            for row in restored_rows:
+                if row["email_lc"] == authoritative_super_admin_email:
+                    continue
+                if row["role"] != SUPER_ADMIN_ROLE:
+                    continue
+                conn.execute(
+                    sa_text(
+                        "UPDATE users SET role = 'staff', is_active = false, is_deleted = true, "
+                        "deleted_at = NOW(), totp_secret_encrypted = NULL, totp_enabled = false "
+                        "WHERE id = :uid"
+                    ),
+                    {"uid": row["id"]},
+                )
+                conn.execute(sa_text("DELETE FROM recovery_codes WHERE user_id = :uid"), {"uid": row["id"]})
+                conn.execute(sa_text("DELETE FROM password_reset_tokens WHERE user_id = :uid"), {"uid": row["id"]})
+                super_admins_revoked.append(row["email_lc"])
 
         # 4) Apply authoritative CURRENT profile data to matched rows.
         for row, snapshot in matched_snapshots:
@@ -1021,31 +1026,32 @@ def _reconcile_post_restore_credentials(engine, pre_restore_users: list) -> dict
                 {"username": username, "uid": row["id"]},
             )
 
-        # 6) Enforce the single-root invariant inside THIS restore.
-        #    The authoritative current root is always the one that survives.
-        root_row = restored_by_email.get(authoritative_super_admin_email)
-        if not root_row:
-            raise RuntimeError("Restore failed: authoritative current Super Admin could not be reconciled.")
+        # 6) Enforce the single-root invariant inside THIS restore when the
+        # current snapshot contains the authoritative root.
+        if authoritative_super_admin_email:
+            root_row = restored_by_email.get(authoritative_super_admin_email)
+            if not root_row:
+                raise RuntimeError("Restore failed: authoritative current Super Admin could not be reconciled.")
 
-        conn.execute(
-            sa_text(
-                "UPDATE users SET role = :role, is_deleted = false, is_active = true, deleted_at = NULL "
-                "WHERE id = :uid"
-            ),
-            {"role": SUPER_ADMIN_ROLE, "uid": root_row["id"]},
-        )
+            conn.execute(
+                sa_text(
+                    "UPDATE users SET role = :role, is_deleted = false, is_active = true, deleted_at = NULL "
+                    "WHERE id = :uid"
+                ),
+                {"role": SUPER_ADMIN_ROLE, "uid": root_row["id"]},
+            )
 
-        # 7) Super Admin MFA is never restored from backup data. Force fresh
-        #    enrollment while preserving the current password/profile.
-        conn.execute(
-            sa_text(
-                "UPDATE users SET totp_secret_encrypted = NULL, totp_enabled = false "
-                "WHERE id = :uid"
-            ),
-            {"uid": root_row["id"]},
-        )
-        conn.execute(sa_text("DELETE FROM recovery_codes WHERE user_id = :uid"), {"uid": root_row["id"]})
-        super_admins_reset.append(authoritative_super_admin_email)
+            # 7) Super Admin MFA is never restored from backup data. Force fresh
+            # enrollment while preserving the current password/profile.
+            conn.execute(
+                sa_text(
+                    "UPDATE users SET totp_secret_encrypted = NULL, totp_enabled = false "
+                    "WHERE id = :uid"
+                ),
+                {"uid": root_row["id"]},
+            )
+            conn.execute(sa_text("DELETE FROM recovery_codes WHERE user_id = :uid"), {"uid": root_row["id"]})
+            super_admins_reset.append(authoritative_super_admin_email)
 
         if users_reinserted:
             conn.execute(sa_text(
@@ -1831,6 +1837,22 @@ def _restore_backup_impl(filepath: str, take_safety_backup: bool = True) -> dict
                 "from before this restore -- nothing to preserve.", exc_info=True,
             )
             _pre_restore_users = []
+
+        # A real production restore must have exactly one authoritative root
+        # account in the live database before anything destructive happens.
+        # This check belongs here, at the full restore boundary, rather than
+        # inside the unit-testable reconciliation helper, because the helper
+        # also supports partial snapshots used to exercise ordinary-user
+        # reconciliation rules.
+        current_super_admin_count = sum(
+            1 for row in _pre_restore_users if row.get("role") == "super_admin"
+        )
+        if _pre_restore_users and current_super_admin_count != 1:
+            raise RuntimeError(
+                "Restore aborted: the current database must contain exactly one super_admin "
+                f"account before restore; found {current_super_admin_count}. "
+                "Repair the root account first so the current root can remain authoritative."
+            )
 
         # EXTENDED (checkouts/quotations/outsiders continuity): same
         # "capture everything, while the live DB is still fully intact,

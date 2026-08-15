@@ -57,6 +57,14 @@ def upgrade() -> None:
         .order_by(users.c.id.asc())
     ).mappings().all()
 
+    # Some real databases can contain legacy NULLs because the application
+    # historically inserted users before the TOTP migration's NOT NULL
+    # default was enforced consistently. Normalize them before this migration
+    # touches root rows or creates the singleton constraint.
+    bind.execute(
+        sa.text("UPDATE users SET totp_enabled = false WHERE totp_enabled IS NULL")
+    )
+
     if rows:
         configured = _configured_root_username()
         survivor = next(

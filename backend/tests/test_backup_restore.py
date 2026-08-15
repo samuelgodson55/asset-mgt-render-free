@@ -799,7 +799,8 @@ def test_reconcile_leaves_restore_only_accounts_untouched(backup_env):
 
     result = backup_service._reconcile_post_restore_credentials(engine, pre_restore_users=[])
     assert result == {
-        "users_reconciled": 0, "users_reinserted": 0, "super_admins_reset": 0, "super_admins_revoked": 0, "preserved_user_ids": [],
+        "users_reconciled": 0, "users_reinserted": 0, "super_admins_reset": 0, "super_admins_revoked": 0,
+        "preserved_user_ids": [], "username_conflicts_resolved": 0,
     }
 
     row = _get_user_by_email(engine, "restore.only@example.com")
@@ -1260,20 +1261,12 @@ def test_reconcile_resolves_restore_only_username_collision(backup_env):
 
     engine = backup_env["engine"]
     current_email = "current.username@example.com"
-    current_id = _insert_user(engine, email=current_email, username="current.user")
-    _insert_user(engine, email="backup.only@example.com", username="current.user2")
-
-    # Simulate the restored backup: the backup-only user has stolen the
-    # username that belongs to the current user.
-    with engine.begin() as conn:
-        conn.execute(
-            sa_text("UPDATE users SET username = :u WHERE email = :e"),
-            {"u": "current.user", "e": "backup.only@example.com"},
-        )
-        conn.execute(
-            sa_text("UPDATE users SET username = :u WHERE email = :e"),
-            {"u": "old.current", "e": current_email},
-        )
+    # This represents the valid post-restore state: the backup-only account
+    # currently occupies the username that belongs to the live account.
+    # PostgreSQL's unique username constraint means we deliberately do not
+    # create an impossible duplicate row just to exercise reconciliation.
+    current_id = _insert_user(engine, email=current_email, username="old.current")
+    _insert_user(engine, email="backup.only@example.com", username="current.user")
 
     pre_restore_users = [{
         "id": current_id, "email": current_email, "email_lc": current_email.lower(),

@@ -1113,7 +1113,7 @@ def import_assets_from_csv(db: Session, file: UploadFile, user: dict) -> dict:
 
         def parse_quantity(raw: str):
             if not raw:
-                return None, "Total quantity is required for a new pool or when changing an existing pool's capacity."
+                return None, "'' is not a whole number for total quantity."
             try:
                 value = int(raw)
             except ValueError:
@@ -1245,7 +1245,7 @@ def import_assets_from_csv(db: Session, file: UploadFile, user: dict) -> dict:
                 errors.append({
                     "row": line_number,
                     "name": name,
-                    "reason": f'Item "{name}" already exists in the system (Pool ID {existing.id}). Use an exported inventory CSV with Pool ID to update it.',
+                    "reason": f'Item "{name}" already exists in the system (Pool ID {existing.id}). Update its quantity directly from the Asset Inventory table instead of re-importing it.',
                 })
                 continue
 
