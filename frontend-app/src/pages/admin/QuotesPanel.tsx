@@ -286,6 +286,7 @@ export function QuotesPanel() {
   const [catalog, setCatalog] = useState<CatalogAsset[]>([]);
   const [openQuoteId, setOpenQuoteId] = useState<number | null>(null);
   const beginListRequest = useRequestGuard();
+  const beginCatalogRequest = useRequestGuard();
   const [approvingId, setApprovingId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [fulfillmentTick, setFulfillmentTick] = useState(0);
@@ -324,9 +325,9 @@ export function QuotesPanel() {
 
   useEffect(refresh, [offset, perPage, search]);
   useEffect(() => {
-    const isCurrent = beginListRequest();
+    const isCurrent = beginCatalogRequest();
     quotationsApi.catalog().then((data) => { if (isCurrent()) setCatalog(data); }).catch((err) => { if (isCurrent()) console.error("Failed to load catalog:", err); });
-  }, [beginListRequest]);
+  }, [beginCatalogRequest]);
   useEffect(() => {
     if (offset > 0 && offset >= total) setOffset(Math.max(0, Math.floor(Math.max(total - 1, 0) / perPage) * perPage));
   }, [offset, total, perPage]);

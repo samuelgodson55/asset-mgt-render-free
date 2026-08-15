@@ -21,7 +21,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     let cancelled = false;
     quotationsApi.publicConfig().then((config) => {
       if (!cancelled) setCatalogShowStock(!!config.show_stock_to_staff_customer);
-    }).catch(() => {});
+    }).catch((err) => {
+      if (!cancelled) console.error("Failed to load public configuration:", err);
+    });
     return () => { cancelled = true; };
   }, []);
 
