@@ -13,7 +13,6 @@ from sqlalchemy import desc
 
 import models
 import services.export_service as export_service
-from security import SUPER_ADMIN_ROLE
 
 
 def _current_super_admin_email(db: Session) -> Optional[str]:
@@ -63,16 +62,7 @@ def get_audit_logs(db: Session, user: dict, limit: int = DEFAULT_LIMIT, offset: 
     here (they have small, sane defaults) and `total` tells the caller how
     many pages exist so it can render Prev/Next controls correctly.
 
-    HIDDEN ROOT ADMIN: entries whose `operator` matches the root admin's
-    CURRENT email (looked up live -- see _current_super_admin_email()
-    above, since that address is now rotatable) are excluded from this
-    UI-facing listing -- "it's a secure door for the developer" means its
-    actions shouldn't show up here even though a Super Admin/Admin/Manager
-    otherwise now sees the entire ledger. The row is still written to
-    `audit_logs` exactly like any other action (nothing is skipped at
-    write time) -- it's only ever filtered out of what THIS function and
-    the export functions below hand back, so the real, complete history
-    still exists at the database level for anyone with direct DB access.
+    No rows are hidden based on operator identity; the authenticated Audit Trail reflects the database ledger directly.
     """
     limit = max(1, min(limit, MAX_LIMIT))
     offset = max(0, offset)
