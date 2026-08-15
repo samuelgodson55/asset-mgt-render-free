@@ -32,9 +32,9 @@ export function NotificationBell() {
       className="relative p-1.5 rounded-[3px] hover:bg-surface transition-colors text-text-faint hover:text-text"
     >
       <Bell size={15} strokeWidth={1.75} />
-      {count > 0 && (
+      {(count ?? 0) > 0 && (
         <span className="absolute -top-0.5 -right-0.5 min-w-[15px] h-[15px] px-[3px] rounded-full bg-brass text-ink text-[9px] font-bold flex items-center justify-center leading-none">
-          {count > 99 ? "99+" : count}
+          {(count ?? 0) > 99 ? "99+" : (count ?? 0)}
         </span>
       )}
     </button>

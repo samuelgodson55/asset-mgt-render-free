@@ -339,9 +339,9 @@ export function Layout() {
                     )}
                     <item.icon size={15} strokeWidth={1.75} />
                     {item.label}
-                    {item.label === "Notifications" && unread > 0 && (
+                    {item.label === "Notifications" && (unread ?? 0) > 0 && (
                       <span className="ml-auto font-mono text-[10px] px-1.5 py-0.5 rounded-full bg-brass/15 text-brass-soft">
-                        {unread}
+                        {unread ?? 0}
                       </span>
                     )}
                   </>
