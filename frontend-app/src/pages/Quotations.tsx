@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { motion } from "framer-motion";
 import { ShoppingCart, Trash2, Loader2, Search, Send, History, UserPlus } from "lucide-react";
@@ -137,7 +137,7 @@ export function Quotations() {
     return () => { cancelled = true; };
   }, []);
 
-  const refreshCatalog = () => {
+  const refreshCatalog = useCallback(() => {
     const isCurrent = beginCatalogRequest();
     setCatalogLoading(true);
     quotationsApi.catalogPage(catalogPerPage, catalogOffset, search).then((res) => {
@@ -150,9 +150,9 @@ export function Quotations() {
       setError(errMsg(err, "Couldn't load the Asset Catalog."));
       setCatalogLoading(false);
     });
-  };
+  }, [beginCatalogRequest, catalogPerPage, catalogOffset, search]);
 
-  useEffect(refreshCatalog, [catalogOffset, catalogPerPage, search]);
+  useEffect(refreshCatalog, [refreshCatalog]);
 
   useEffect(() => {
     if (catalogOffset > 0 && catalogOffset >= catalogTotal) setCatalogOffset(Math.max(0, Math.floor(Math.max(catalogTotal - 1, 0) / catalogPerPage) * catalogPerPage));

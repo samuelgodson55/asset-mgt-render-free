@@ -25,7 +25,9 @@ export function Dashboard() {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [checkouts, setCheckouts] = useState<Checkout[]>([]);
   const [myItems, setMyItems] = useState<MyItem[]>([]);
-  const [myItemsLoaded, setMyItemsLoaded] = useState(false);\n  const [myItemsError, setMyItemsError] = useState<string | null>(null);\n  const [statsError, setStatsError] = useState<string | null>(null);
+  const [myItemsLoaded, setMyItemsLoaded] = useState(false);
+  const [myItemsError, setMyItemsError] = useState<string | null>(null);
+  const [statsError, setStatsError] = useState<string | null>(null);
   const { user, demo, canSeeStock } = useAuth();
   const { theme } = useTheme();
   const navigate = useNavigate();

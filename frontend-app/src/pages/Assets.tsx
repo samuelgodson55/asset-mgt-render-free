@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Search, SlidersHorizontal, Plus, Download } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
@@ -76,7 +76,7 @@ export function Assets() {
   const [error, setError] = useState<string | null>(null);
   const beginRequest = useRequestGuard();
 
-  const refresh = () => {
+  const refresh = useCallback(() => {
     const isCurrent = beginRequest();
     setLoading(true);
     assetsApi.list(perPage, offset, search, category, status === "all" ? undefined : status).then((res) => {
@@ -90,9 +90,9 @@ export function Assets() {
       setError(err instanceof Error ? err.message : "Couldn't load the asset inventory.");
       setLoading(false);
     });
-  };
+  }, [beginRequest, perPage, offset, search, category, status]);
 
-  useEffect(refresh, [offset, perPage, search, category, status]);
+  useEffect(refresh, [refresh]);
 
   useEffect(() => {
     if (offset > 0 && offset >= total) setOffset(Math.max(0, Math.floor(Math.max(total - 1, 0) / perPage) * perPage));

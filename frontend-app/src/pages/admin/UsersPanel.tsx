@@ -5,7 +5,7 @@
 // deps.py's _FULL_ADMIN_ROLES), so those affordances are hidden only for a
 // Manager, who can see the directory itself but not manage accounts in it.
 // =============================================================================
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Plus, KeyRound, Pencil, UserMinus, Trash2 } from "lucide-react";
 import { usersApi } from "../../lib/api";
 import type { UserRow } from "../../lib/types";
@@ -262,7 +262,7 @@ export function UsersPanel({
   const createRoleOptions = demo || isFullAdmin(actorRole) ? ROLE_OPTIONS : ["staff", "customer"];
   const editRoleOptions = demo || isFullAdmin(actorRole) ? ROLE_OPTIONS : ["staff", "customer"];
 
-  const refresh = () => {
+  const refresh = useCallback(() => {
     const isCurrent = beginRequest();
     setLoading(true);
     usersApi.list(perPage, offset, search).then((res) => {
@@ -277,9 +277,9 @@ export function UsersPanel({
       setTotal(0);
       setLoading(false);
     });
-  };
+  }, [beginRequest, perPage, offset, search]);
 
-  useEffect(refresh, [offset, perPage, search]);
+  useEffect(refresh, [refresh]);
 
   useEffect(() => {
     if (offset > 0 && offset >= total) setOffset(Math.max(0, Math.floor(Math.max(total - 1, 0) / perPage) * perPage));

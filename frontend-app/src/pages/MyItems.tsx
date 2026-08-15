@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { PackageCheck, CalendarClock, X, Send, QrCode } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
@@ -162,7 +162,7 @@ export function MyItems() {
   // "rows per page" change re-fetches just that slice from
   // GET /users/me/items?limit=&offset= instead of downloading the whole
   // custody ledger and paging through it in memory.
-  const refresh = () => {
+  const refresh = useCallback(() => {
     const isCurrent = beginListRequest();
     setLoading(true);
     myItemsApi
@@ -175,9 +175,9 @@ export function MyItems() {
       })
       .catch(() => { if (isCurrent()) { setItems([]); setTotal(0); } })
       .finally(() => { if (isCurrent()) setLoading(false); });
-  };
+  }, [beginListRequest, perPage, offset, filter]);
 
-  useEffect(refresh, [perPage, offset, filter]);
+  useEffect(refresh, [refresh]);
 
   useEffect(() => {
     if (offset > 0 && offset >= total) setOffset(Math.max(0, Math.floor(Math.max(total - 1, 0) / perPage) * perPage));

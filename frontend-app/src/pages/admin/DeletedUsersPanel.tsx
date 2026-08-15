@@ -5,7 +5,7 @@
 // Admin page only -- never shown on the Manager page, same tier as
 // System Backups (which, unlike this, stays Super-Admin-only).
 // =============================================================================
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { usersApi } from "../../lib/api";
 import type { DeletedUserRow } from "../../lib/types";
 import { PaginationBar, RowsPerPageSelect } from "../../components/PaginationBar";
@@ -27,7 +27,7 @@ export function DeletedUsersPanel() {
   const [error, setError] = useState<string | null>(null);
   const beginRequest = useRequestGuard();
 
-  const refresh = () => {
+  const refresh = useCallback(() => {
     const isCurrent = beginRequest();
     setLoading(true);
     setError(null);
@@ -35,9 +35,9 @@ export function DeletedUsersPanel() {
       .then((res) => { if (isCurrent()) { setRows(res.items); setTotal(res.total); } })
       .catch((err) => { if (isCurrent()) setError(errMsg(err, "Couldn't load deleted accounts.")); })
       .finally(() => { if (isCurrent()) setLoading(false); });
-  };
+  }, [beginRequest, perPage, offset, search]);
 
-  useEffect(refresh, [offset, perPage, search]);
+  useEffect(refresh, [refresh]);
 
   useEffect(() => {
     if (offset > 0 && offset >= total) setOffset(Math.max(0, Math.floor(Math.max(total - 1, 0) / perPage) * perPage));

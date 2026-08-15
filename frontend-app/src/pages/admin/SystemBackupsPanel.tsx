@@ -2,7 +2,7 @@
 // System Backups -- ported from the legacy frontend's admin.html "System
 // Backups" panel (js/components/backups.js). True Super Admin only.
 // =============================================================================
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { UploadCloud, DatabaseBackup, HardDrive, Cloud, CloudOff, RotateCcw, Trash2, ShieldAlert, Lock, Loader2, CheckCircle2 } from "lucide-react";
 import { useAuth } from "../../lib/useAuth";
@@ -164,7 +164,7 @@ export function SystemBackupsPanel() {
   const navigate = useNavigate();
   const beginRequest = useRequestGuard();
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     const isCurrent = beginRequest();
     setLoadingList(true);
     try {
@@ -177,11 +177,11 @@ export function SystemBackupsPanel() {
     } finally {
       if (isCurrent()) setLoadingList(false);
     }
-  };
+  }, [beginRequest]);
 
   useEffect(() => {
     refresh();
-  }, []);
+  }, [refresh]);
 
   const createNow = async () => {
     setBackingUp(true);

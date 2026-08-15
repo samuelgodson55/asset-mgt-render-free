@@ -2,7 +2,7 @@
 // Ad-Hoc (Unlinked) Directory -- ported from js/components/outsiders.js.
 // External individuals dispatched equipment without ever holding a login.
 // =============================================================================
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Pencil, ArrowRightLeft, Trash2 } from "lucide-react";
 import { outsidersApi } from "../../lib/api";
 import type { OutsiderRow } from "../../lib/types";
@@ -142,7 +142,7 @@ export function OutsidersPanel({
   // services/outsider_service.py's convert_outsider_to_user().
   const convertRoleOptions = demo || isFullAdmin(actorRole) ? ROLE_OPTIONS : ["staff", "customer"];
 
-  const refresh = () => {
+  const refresh = useCallback(() => {
     const isCurrent = beginRequest();
     setLoading(true);
     outsidersApi.list(perPage, offset, search).then((res) => {
@@ -157,9 +157,9 @@ export function OutsidersPanel({
       setTotal(0);
       setLoading(false);
     });
-  };
+  }, [beginRequest, perPage, offset, search]);
 
-  useEffect(refresh, [offset, perPage, search]);
+  useEffect(refresh, [refresh]);
 
   useEffect(() => {
     if (offset > 0 && offset >= total) setOffset(Math.max(0, Math.floor(Math.max(total - 1, 0) / perPage) * perPage));

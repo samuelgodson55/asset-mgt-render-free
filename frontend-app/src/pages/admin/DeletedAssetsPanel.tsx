@@ -5,7 +5,7 @@
 // -- Super Admin AND a plain Admin account, same as the main Asset Inventory
 // table's manage actions; still not shown to Manager.
 // =============================================================================
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { assetsApi } from "../../lib/api";
 import type { DeletedAssetRow } from "../../lib/types";
 import { PaginationBar, RowsPerPageSelect } from "../../components/PaginationBar";
@@ -27,7 +27,7 @@ export function DeletedAssetsPanel() {
   const [error, setError] = useState<string | null>(null);
   const beginRequest = useRequestGuard();
 
-  const refresh = () => {
+  const refresh = useCallback(() => {
     const isCurrent = beginRequest();
     setLoading(true);
     setError(null);
@@ -35,9 +35,9 @@ export function DeletedAssetsPanel() {
       .then((res) => { if (isCurrent()) { setRows(res.items); setTotal(res.total); } })
       .catch((err) => { if (isCurrent()) setError(errMsg(err, "Couldn't load deleted asset pools.")); })
       .finally(() => { if (isCurrent()) setLoading(false); });
-  };
+  }, [beginRequest, perPage, offset, search]);
 
-  useEffect(refresh, [offset, perPage, search]);
+  useEffect(refresh, [refresh]);
 
   useEffect(() => {
     if (offset > 0 && offset >= total) setOffset(Math.max(0, Math.floor(Math.max(total - 1, 0) / perPage) * perPage));

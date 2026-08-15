@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { X } from "lucide-react";
 import { useNavigate } from "react-router-dom";
@@ -111,7 +111,7 @@ export function Notifications() {
   const privileged = demo || isPrivileged(user?.role);
   const beginRequest = useRequestGuard();
 
-  const refresh = () => {
+  const refresh = useCallback(() => {
     const isCurrent = beginRequest();
     setLoading(true);
     const dismissed = readDismissedSet();
@@ -131,8 +131,8 @@ export function Notifications() {
       setExtensions([]);
     }
     Promise.all(tasks).finally(() => { if (isCurrent()) setLoading(false); });
-  };
-  useEffect(refresh, [privileged]);
+  }, [beginRequest, privileged]);
+  useEffect(refresh, [refresh]);
 
   const myOverdue = myItems.filter((i) => i.overdue);
   const myDueSoon = myItems.filter((i) => i.due_soon && !i.overdue);

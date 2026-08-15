@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { X, Send, QrCode } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
@@ -128,7 +128,7 @@ export function Checkouts() {
   const beginCheckoutsRequest = useRequestGuard();
   const beginExtensionsRequest = useRequestGuard();
 
-  const refreshCheckouts = () => {
+  const refreshCheckouts = useCallback(() => {
     const isCurrent = beginCheckoutsRequest();
     checkoutsApi.list(perPage, offset, FILTER_FOR_TAB[tab])
       .then(({ items, total }) => {
@@ -140,8 +140,8 @@ export function Checkouts() {
       .catch((err) => {
         if (isCurrent()) console.error("Failed to load checkouts:", err);
       });
-  };
-  const refreshExtensions = () => {
+  }, [beginCheckoutsRequest, perPage, offset, tab]);
+  const refreshExtensions = useCallback(() => {
     const isCurrent = beginExtensionsRequest();
     extensionsApi.list(extPerPage, extOffset)
       .then(({ items, total }) => {
@@ -152,13 +152,13 @@ export function Checkouts() {
       .catch((err) => {
         if (isCurrent()) console.error("Failed to load extension requests:", err);
       });
-  };
+  }, [beginExtensionsRequest, extPerPage, extOffset]);
 
   // Re-fetch whenever the tab, page size, or offset changes -- each of
   // those changes what the server should return, so there's no
   // client-side list left to just slice.
-  useEffect(refreshCheckouts, [tab, perPage, offset]);
-  useEffect(refreshExtensions, [extPerPage, extOffset]);
+  useEffect(refreshCheckouts, [refreshCheckouts]);
+  useEffect(refreshExtensions, [refreshExtensions]);
 
   const approve = async (id: number) => {
     await extensionsApi.decide(id, true, null);

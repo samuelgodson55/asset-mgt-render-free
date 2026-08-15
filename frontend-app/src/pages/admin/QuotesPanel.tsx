@@ -6,7 +6,7 @@
 // on the backend (Super Admin/Admin/Manager) -- same `canDirectory` gate
 // AdminOrManagerPage uses for User/Ad-Hoc Directory.
 // =============================================================================
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Loader2, CheckCircle, PackageCheck, X } from "lucide-react";
 import { quotationsApi, formatPrice, formatDate } from "../../lib/api";
@@ -61,7 +61,7 @@ function FulfillmentPanel({ onCheckedOut }: { onCheckedOut: () => void }) {
   const [shortfall, setShortfall] = useState<Record<string, ShortfallItemState>>({});
   const beginRequest = useRequestGuard();
 
-  const refresh = () => {
+  const refresh = useCallback(() => {
     const isCurrent = beginRequest();
     setLoading(true);
     quotationsApi.fulfillmentQueue().then((items) => {
@@ -75,9 +75,9 @@ function FulfillmentPanel({ onCheckedOut }: { onCheckedOut: () => void }) {
       setError(errMsg(err, "Couldn't load the fulfillment queue."));
       setLoading(false);
     });
-  };
+  }, [beginRequest]);
 
-  useEffect(refresh, []);
+  useEffect(refresh, [refresh]);
 
   const keyFor = (quoteId: number, itemId: number) => `${quoteId}:${itemId}`;
 
@@ -307,7 +307,7 @@ export function QuotesPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const refresh = () => {
+  const refresh = useCallback(() => {
     const isCurrent = beginListRequest();
     setLoading(true);
     quotationsApi.list(perPage, offset, search).then((res) => {
@@ -321,9 +321,9 @@ export function QuotesPanel() {
       setError(errMsg(err, "Couldn't load quotations."));
       setLoading(false);
     });
-  };
+  }, [beginListRequest, perPage, offset, search]);
 
-  useEffect(refresh, [offset, perPage, search]);
+  useEffect(refresh, [refresh]);
   useEffect(() => {
     const isCurrent = beginCatalogRequest();
     quotationsApi.catalog().then((data) => { if (isCurrent()) setCatalog(data); }).catch((err) => { if (isCurrent()) console.error("Failed to load catalog:", err); });
