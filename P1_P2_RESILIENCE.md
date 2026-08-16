@@ -121,16 +121,22 @@ The runner reports:
 - requests
 - concurrency
 - throughput (requests/sec)
+- expected HTTP status
+- HTTP status distribution
 - error rate
 - p50 latency
 - p95 latency
 - p99 latency
 
 The load runner uses persistent HTTP/1.1 connections by default, with one
-connection per worker thread. This avoids measuring a fresh TCP connection setup
-for every request, which is not representative of normal browser/API-client
-keep-alive traffic. Use `--no-keep-alive` only as a diagnostic comparison when
-investigating cold-connection or Docker/host networking behaviour.
+connection per worker thread. Responses are fully consumed before a connection
+is reused, including responses larger than 4 KiB, so unread response bytes
+cannot corrupt the next request. Stale/closed keep-alive connections are
+reconnected and retried once at the transport layer. HTTP 4xx/5xx responses are
+not retried and are counted as failures unless they match `--expected-status`.
+
+Use `--no-keep-alive` only as a diagnostic comparison when investigating
+cold-connection or Docker/host networking behaviour.
 
 Use the same command against the **staging ACA revision before 100% traffic**
 and against the inactive VM blue/green slot before cutover.

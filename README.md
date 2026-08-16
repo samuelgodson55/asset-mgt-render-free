@@ -22,6 +22,14 @@ real production deployment.
 
 ---
 
+
+### Load-test runner reliability
+
+`scripts/load-test.py` uses per-worker HTTP/1.1 keep-alive connections and fully
+drains each response before reuse. It also reports HTTP status distribution and
+treats responses that do not match `--expected-status` as load-test failures.
+Use `--no-keep-alive` only for diagnostics.
+
 ## Table of Contents
 
 1. [What This App Does](#what-this-app-does)

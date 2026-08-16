@@ -134,6 +134,12 @@ Because Telegram callbacks use outbound long polling, no public ErrorBeacon ingr
 
 Deploy the normal infrastructure workflow first, then the ACA application deployment as you already do. ErrorBeacon is not part of backend/frontend traffic switching.
 
+Unlike Compose/VM, the backend does not reach it at `http://errorbeacon:8000`. ACA apps with internal-only ingress are only reachable through the environment's ingress proxy (port 80/443, not the container's own port), so Bicep sets `ERRORBEACON_URL` to the internal FQDN instead, with no port suffix:
+
+```text
+http://errorbeacon.internal.<environment-default-domain>
+```
+
 # 7. Azure VM
 
 The integrated `docker-compose.vm.yml` includes ErrorBeacon as an isolated service:

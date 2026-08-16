@@ -1078,7 +1078,7 @@ against the wrong branch, or the image not actually being rebuilt.
 
 ### ErrorBeacon appears healthy but backend incidents are missing
 
-Check the backend configuration:
+Check the backend configuration. For Full-stack Docker Compose and the VM:
 
 ```env
 ERRORBEACON_URL=http://errorbeacon:8000
@@ -1094,6 +1094,15 @@ r = requests.get('http://errorbeacon:8000/healthz', timeout=5)
 print(r.status_code)
 "
 ```
+
+For ACA, `errorbeacon:8000` is the wrong form -- ACA apps don't expose their
+raw container port to other apps in the environment the way a Docker Compose
+bridge network does; only the ingress proxy's port (80/443) is reachable, and
+only via the app's FQDN. The Bicep template already sets this correctly for
+you (`ERRORBEACON_URL=http://errorbeacon.internal.<environment-default-domain>`,
+no port), so if you see this misconfigured, check that `infra/main.bicep`'s
+`errorBeaconInternalFqdn`/`sharedEnv` haven't been hand-edited back to the
+Compose-style `errorbeacon:8000` form.
 
 ---
 

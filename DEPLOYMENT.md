@@ -1578,7 +1578,7 @@ There is deliberately no `ERRORBEACON_OPENROUTER_SITE_URL` variable -- it would 
 
 `ERRORBEACON_APP` defaults to `asset-inventory-quotes` (matching `docker-compose.yml`/`docker-compose.vm.yml`'s own default) -- it's the identity string backend/worker/beat report themselves as, shown as the `app` field on every event ErrorBeacon receives. Only worth setting if you're running more than one ErrorBeacon-integrated app against the same monitor and want to tell their events apart.
 
-The backend receives `ERRORBEACON_URL=http://errorbeacon:8000` and the shared API key automatically through the Bicep deployment.
+The backend receives the shared API key and `ERRORBEACON_URL` automatically through the Bicep deployment. Because `errorbeacon` runs with `ingress.external: false`, it's only reachable through the environment's ingress proxy (port 80/443, not its container's port 8000), so `ERRORBEACON_URL` is set to the internal FQDN with no port suffix: `http://errorbeacon.internal.<environment-default-domain>`. This differs from the `http://errorbeacon:8000` short-name form used by `docker-compose.yml`/`docker-compose.vm.yml` -- that form is Docker Compose-specific bridge-network DNS and does not apply to ACA.
 
 ### VM
 

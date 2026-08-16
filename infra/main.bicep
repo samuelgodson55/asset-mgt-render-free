@@ -12,13 +12,15 @@
 //     type Container Apps uses for persistent storage) doesn't support the
 //     POSIX permissions Postgres's `initdb` requires on its data directory.
 //     Smallest Burstable SKU by default (see `postgresSkuName`).
-//   - 3 Container Apps, all in ONE environment (multiple environments hit a
+//   - 4 Container Apps, all in ONE environment (multiple environments hit a
 //     per-subscription quota on Free Trial/starter subscriptions):
 //       `redis`    -- redis:7-alpine, internal-only, 1 replica, no persistence
 //       `backend`  -- FastAPI + embedded Celery worker/beat, internal-only,
 //                     scales 0-N
-//       `frontend` -- static frontend + reverse proxy to `backend`, the ONLY
+//       `frontend`  -- static frontend + reverse proxy to `backend`, the ONLY
 //                     public-facing app, scales 0-N independently of `backend`
+//       `errorbeacon` -- isolated internal ErrorBeacon relay, not part of
+//                     backend/frontend blue-green traffic, min 1 replica
 //   - 1 Container Apps Job: `migrate` (runs `alembic upgrade head`, triggered
 //     by CI/CD before each backend rollout)
 //
@@ -974,6 +976,17 @@ resource redisApp 'Microsoft.App/containerApps@2024-03-01' = {
 var databaseUrl = 'postgresql://${postgresUsername}:${uriComponent(postgresPassword)}@${postgresServer.properties.fullyQualifiedDomainName}:5432/asset_db?sslmode=require'
 var redisUrl = 'redis://:${redisPassword}@redis:6379/0'
 var frontendFqdn = 'frontend.${env.properties.defaultDomain}'
+// ErrorBeacon is an internal-ingress Container App. Do not assume Docker-style
+// service DNS (`errorbeacon:8000`) works in ACA: the live ACA environment routes
+// reliably through the Container App's internal ingress FQDN instead. Resolve the
+// actual FQDN from the ErrorBeacon resource rather than reconstructing ACA's
+// internal DNS naming convention. The FQDN addresses ACA ingress, so there is no
+// `:8000` suffix here; ACA forwards ingress traffic to targetPort 8000.
+// When monitoring is deliberately disabled, leave the URL empty rather than
+// pointing the backend at a nonexistent ErrorBeacon app.
+var errorBeaconUrl = errorBeaconEnabled
+  ? 'http://${errorBeaconApp.properties.configuration.ingress.fqdn}'
+  : ''
 var publicOrigin = empty(customDomain) ? 'https://${frontendFqdn}' : 'https://${customDomain}'
 // Only a valid expression to evaluate when `appInsights` actually exists
 // (otelAzureMonitorEnabled=true) -- the ternary's false branch never
@@ -996,7 +1009,7 @@ var runtimeEnvironment = environmentName == 'prod' ? 'production' : 'development
 var sharedEnv = [
   { name: 'ENVIRONMENT', value: runtimeEnvironment }
   { name: 'EXPORT_RESULT_DIR', value: '/app/export_results' }
-  { name: 'ERRORBEACON_URL', value: 'http://errorbeacon:8000' }
+  { name: 'ERRORBEACON_URL', value: errorBeaconUrl }
   // Keep the same observability identity and timeout used by both Compose paths.
   { name: 'ERRORBEACON_APP', value: errorBeaconAppName }
   { name: 'APP_RELEASE', value: empty(initialBackendImageTag) ? initialImageTag : initialBackendImageTag }

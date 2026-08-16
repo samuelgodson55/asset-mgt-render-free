@@ -7,8 +7,12 @@ Examples:
 
 This intentionally uses only the Python standard library so it can run on a
 VM, CI runner, or production jump box without installing a load-test stack.
-It reports p50/p95/p99 and error rate. Use k6/Locust later for sustained,
-large-scale benchmarking; this is the repeatable smoke/load gate for this app.
+It reports p50/p95/p99, throughput, error rate, and HTTP status distribution.
+Keep-alive is enabled by default with one persistent connection per worker.
+Responses are fully drained before connection reuse so large response bodies do
+not poison the next request. Use --no-keep-alive only for diagnostic comparison.
+Use k6/Locust later for sustained, large-scale benchmarking; this is the
+repeatable smoke/load gate for this app.
 """
 
 from __future__ import annotations
@@ -82,24 +86,37 @@ class PersistentHTTPClient:
     def get(self, headers: dict[str, str]) -> int:
         if self.connection is None:
             self._connect()
-        assert self.connection is not None
+
         try:
-            self.connection.request("GET", self.path, headers={**headers, "Connection": "keep-alive"})
-            response = self.connection.getresponse()
-            status = response.status
-            response.read(4096)
-            return status
-        except (http.client.RemoteDisconnected, ConnectionResetError, BrokenPipeError, OSError):
-            # A keep-alive connection can legitimately become stale between jobs.
-            # Reconnect once; the failed attempt remains part of this request's
-            # measured latency and any second failure is surfaced to the test.
+            return self._request_once(headers)
+        except (
+            http.client.CannotSendRequest,
+            http.client.ResponseNotReady,
+            http.client.RemoteDisconnected,
+            ConnectionResetError,
+            BrokenPipeError,
+            OSError,
+        ):
+            # A keep-alive connection can become stale, or may still contain
+            # unread response bytes from a previous request. Reconnect once and
+            # retry the request. Only transport-level failures are retried;
+            # HTTP 4xx/5xx responses are returned to the caller.
             self._connect()
-            assert self.connection is not None
-            self.connection.request("GET", self.path, headers={**headers, "Connection": "keep-alive"})
-            response = self.connection.getresponse()
-            status = response.status
-            response.read(4096)
-            return status
+            return self._request_once(headers)
+
+    def _request_once(self, headers: dict[str, str]) -> int:
+        if self.connection is None:
+            self._connect()
+        assert self.connection is not None
+        self.connection.request("GET", self.path, headers={**headers, "Connection": "keep-alive"})
+        response = self.connection.getresponse()
+        status = response.status
+        # Drain the COMPLETE response before reusing the HTTP/1.1 connection.
+        # Reading only a fixed prefix leaves unread bytes in the socket and can
+        # cause the next request on the same connection to fail with
+        # CannotSendRequest/ResponseNotReady.
+        response.read()
+        return status
 
     def close(self) -> None:
         if self.connection is not None:
@@ -131,6 +148,12 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--login-email")
     parser.add_argument("--login-password")
+    parser.add_argument(
+        "--expected-status",
+        type=int,
+        default=200,
+        help="HTTP status expected for every request (default: 200).",
+    )
     parser.add_argument("--max-error-rate", type=float, default=0.0)
     parser.add_argument("--max-p95-ms", type=float, default=1000.0)
     parser.add_argument(
@@ -158,6 +181,7 @@ def main() -> int:
     semaphore = threading.BoundedSemaphore(args.concurrency)
     latencies: list[float] = []
     failures: list[str] = []
+    status_counts: dict[int, int] = {}
     lock = threading.Lock()
 
     def one(i: int) -> None:
@@ -171,14 +195,17 @@ def main() -> int:
                     req = Request(target, headers={**headers, "Connection": "close"}, method="GET")
                     with build_opener().open(req, timeout=args.timeout) as response:
                         status = response.status
-                        response.read(4096)
+                        response.read()
                 else:
                     status = get_client(target, args.timeout).get(headers)
                 elapsed = (time.perf_counter() - started) * 1000
                 with lock:
                     latencies.append(elapsed)
-                    if status >= 500:
-                        failures.append(f"#{i}: HTTP {status}")
+                    status_counts[status] = status_counts.get(status, 0) + 1
+                    if status != args.expected_status:
+                        failures.append(
+                            f"#{i}: HTTP {status} (expected {args.expected_status})"
+                        )
             except (HTTPError, URLError, TimeoutError, OSError) as exc:
                 with lock:
                     failures.append(f"#{i}: {exc}")
@@ -205,6 +232,8 @@ def main() -> int:
         "url": target,
         "requests": total,
         "concurrency": args.concurrency,
+        "expected_status": args.expected_status,
+        "status_counts": {str(code): count for code, count in sorted(status_counts.items())},
         "duration_s": round(elapsed_s, 3),
         "throughput_rps": round(throughput, 2),
         "errors": errors,
