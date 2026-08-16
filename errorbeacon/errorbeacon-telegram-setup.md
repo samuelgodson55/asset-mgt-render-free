@@ -589,6 +589,9 @@ req = urllib.request.Request(
 )
 print(urllib.request.urlopen(req).read())
 "
+
+# 3. If 2 doesn't work
+python3 -c "import os, urllib.request; req = urllib.request.Request('http://localhost:8000/v1/test', method='POST', headers={'x-api-key': os.environ['ERRORBEACON_API_KEY']}); print(urllib.request.urlopen(req).read())"
 ```
 
 Then check Telegram — the message should arrive within a couple of seconds
