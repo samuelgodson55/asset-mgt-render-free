@@ -1,3 +1,6 @@
+// Modal used to choose the export format and optional category filter.
+// It builds the download URL but leaves authentication to the same-origin
+// browser session established by the backend.
 import { useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { X, Download } from "lucide-react";

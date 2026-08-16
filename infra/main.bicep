@@ -989,6 +989,12 @@ var sharedEnv = [
   { name: 'ENVIRONMENT', value: runtimeEnvironment }
   { name: 'EXPORT_RESULT_DIR', value: '/app/export_results' }
   { name: 'ERRORBEACON_URL', value: 'http://errorbeacon:8000' }
+  // Keep the same observability identity and timeout used by both Compose paths.
+  { name: 'ERRORBEACON_APP', value: 'asset-inventory-quotes' }
+  { name: 'APP_RELEASE', value: empty(initialBackendImageTag) ? initialImageTag : initialBackendImageTag }
+  { name: 'ERRORBEACON_TIMEOUT', value: '0.75' }
+  // Embedded Celery worker/beat uses this to avoid broker connection retry loops.
+  { name: 'CELERY_BROKER_CONNECTION_MAX_RETRIES', value: 'none' }
   { name: 'JWT_ALGORITHM', value: 'HS256' }
   { name: 'JWT_EXPIRY_HOURS', value: '12' }
   { name: 'SITE_NAME', value: siteName }

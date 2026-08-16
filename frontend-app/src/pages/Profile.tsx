@@ -1,3 +1,6 @@
+// Profile page: displays the signed-in user's account information and the
+// account-management actions available to that user. API calls remain in the
+// shared lib/api.ts module so this page only handles presentation and state.
 import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import { UserRound, KeyRound, ShieldCheck, Download, Check } from "lucide-react";

@@ -347,8 +347,8 @@ def _expected_migration_heads() -> tuple[str, ...]:
     return tuple(sorted(ScriptDirectory.from_config(alembic_cfg).get_heads()))
 
 
-def _create_readiness_engine():
-    """Create a short-lived, unpooled engine dedicated to readiness checks.
+def _create_readiness_engine_from_url(source_url):
+    """Create a short-lived, unpooled engine for a supplied database URL.
 
     Readiness must never wait behind the application's normal SQLAlchemy pool.
     Under load, a full request pool could otherwise make /readyz appear hung
@@ -356,7 +356,7 @@ def _create_readiness_engine():
     connect/statement timeouts makes the probe deterministic: healthy DB =>
     fast 200; unreachable/slow DB => fast 503.
     """
-    url = make_url(DATABASE_URL)
+    url = make_url(str(source_url))
     kwargs = {"poolclass": NullPool}
     if url.get_backend_name().startswith("postgresql"):
         kwargs["connect_args"] = {
@@ -366,9 +366,27 @@ def _create_readiness_engine():
     return create_engine(url, **kwargs)
 
 
-# Never share the application's pooled engine with /readyz. This engine holds
-# no persistent connections and is used only for the tiny readiness query.
-readiness_engine = _create_readiness_engine()
+# Never share the application's pooled engine with /readyz. In production this
+# creates a separate unpooled connection path. The source-engine check also
+# matters in tests, where conftest.py swaps `database.engine` for a temporary
+# SQLite engine; readiness must follow that test database rather than the
+# original production-style engine created during module import.
+readiness_engine = None
+_readiness_engine_source = None
+
+def _get_readiness_engine():
+    """Return a readiness-only engine matching the current application engine."""
+    global readiness_engine, _readiness_engine_source
+
+    if readiness_engine is not None and _readiness_engine_source is engine:
+        return readiness_engine
+
+    if readiness_engine is not None:
+        readiness_engine.dispose()
+
+    readiness_engine = _create_readiness_engine_from_url(engine.url)
+    _readiness_engine_source = engine
+    return readiness_engine
 
 
 def get_schema_status() -> dict:
@@ -411,7 +429,7 @@ def get_schema_status() -> dict:
     expected_heads = set(_expected_migration_heads())
 
     try:
-        with readiness_engine.connect() as conn:
+        with _get_readiness_engine().connect() as conn:
             if not inspect(conn).has_table("alembic_version"):
                 # BUG FIX (silent readiness failures): every "not ready"
                 # branch below used to return straight to the caller with

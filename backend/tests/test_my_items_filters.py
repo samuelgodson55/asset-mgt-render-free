@@ -1,3 +1,9 @@
+"""Regression tests for the self-service My Items filters.
+
+Keeping these tests close to the feature makes it easier to see which backend
+query parameters and response rules must remain stable for staff/customers.
+"""
+
 
 def test_my_items_filters_are_server_side(as_staff):
     client, headers = as_staff

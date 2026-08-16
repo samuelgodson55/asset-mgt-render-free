@@ -1,3 +1,10 @@
+"""HTTP endpoint for receiving safe browser-side telemetry events.
+
+This module keeps the browser error-reporting path small and isolated. It rate
+limits by client IP, extracts the request ID for correlation, and forwards the
+sanitized event to the backend ErrorBeacon integration.
+"""
+
 import time
 from collections import defaultdict, deque
 

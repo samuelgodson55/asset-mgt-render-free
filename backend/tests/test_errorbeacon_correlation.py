@@ -1,3 +1,9 @@
+"""Contract tests for ErrorBeacon request-ID correlation.
+
+The important rule is simple: an incoming request ID is preserved when an
+incident is forwarded, while independent health probes receive independent IDs.
+"""
+
 import integrations.fastapi_errorbeacon as eb
 
 

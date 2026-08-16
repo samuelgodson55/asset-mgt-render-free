@@ -1,3 +1,10 @@
+"""Contract tests that protect the assumptions made by chaos-test.sh.
+
+These tests do not run the chaos experiment itself. They make sure future
+refactors do not accidentally remove the direct backend readiness check, Redis
+wait behavior, or ErrorBeacon outage safeguards that the experiment depends on.
+"""
+
 from pathlib import Path
 
 
@@ -8,7 +15,10 @@ COMPOSE = (ROOT / "docker-compose.yml").read_text()
 
 
 def test_backend_readiness_is_tested_inside_backend():
-    assert "http://127.0.0.1:8000' + sys.argv[1]" in CHAOS
+    # The chaos script deliberately probes the backend's private diagnostic
+    # port directly, so nginx/SPA fallback can never hide a broken /readyz.
+    assert 'curl -sS' in CHAOS
+    assert '"$BACKEND_URL$path"' in CHAOS
     assert "wait_backend 503" in CHAOS
     assert "localhost:8080/readyz" not in CHAOS
 

@@ -275,11 +275,11 @@ locals {
     postgres_db                           = var.postgres_db
     jwt_secret_key                        = var.jwt_secret_key
     errorbeacon_api_key                   = var.errorbeacon_api_key
-    errorbeacon_telegram_bot_token         = var.errorbeacon_telegram_bot_token
-    errorbeacon_telegram_chat_id           = var.errorbeacon_telegram_chat_id
-    errorbeacon_telegram_thread_id         = var.errorbeacon_telegram_thread_id
-    errorbeacon_gemini_api_key             = var.errorbeacon_gemini_api_key
-    errorbeacon_image                      = var.errorbeacon_image
+    errorbeacon_telegram_bot_token        = var.errorbeacon_telegram_bot_token
+    errorbeacon_telegram_chat_id          = var.errorbeacon_telegram_chat_id
+    errorbeacon_telegram_thread_id        = var.errorbeacon_telegram_thread_id
+    errorbeacon_gemini_api_key            = var.errorbeacon_gemini_api_key
+    errorbeacon_image                     = var.errorbeacon_image
     root_admin_bootstrap_password         = var.root_admin_bootstrap_password
     deploy_status_user                    = var.deploy_status_user
     deploy_status_password_hash           = local.effective_deploy_status_password_hash

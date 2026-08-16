@@ -1,3 +1,5 @@
+// Small presentation component that switches the application's light/dark
+// theme without mixing theme state into the larger page components.
 import { Sun, Moon } from "lucide-react";
 import { useTheme } from "../lib/useTheme";
 

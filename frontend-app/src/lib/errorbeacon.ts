@@ -50,27 +50,36 @@ export function reportClientError(error: unknown, context: Record<string, unknow
   lastReportAt = now;
 
   const err = error instanceof Error ? error : new Error(String(error));
-  fetch("/api/telemetry/client-error", {
-    method: "POST",
-    credentials: "include",
-    headers: { "Content-Type": "application/json" },
-    keepalive: true,
-    body: JSON.stringify({
-      message: String(err.message || err).slice(0, 5000),
-      stack: String(err.stack || "").slice(0, 12000),
-      path: window.location.pathname,
-      request_id: lastRequestId,
-      context: {
-        ...context,
-        url: sanitizeUrl(window.location.href),
-        userAgent: navigator.userAgent.slice(0, 500),
-        requestId: lastRequestId,
-      },
-    }),
-  }).catch(() => {
-    // Best-effort only -- a failed error report should never itself surface
-    // as an error to the user.
-  });
+  // Error reporting is deliberately best-effort. Tests and unusual browser
+  // environments can provide a fetch implementation that returns undefined
+  // instead of a Promise, so normalise the result before calling .catch().
+  try {
+    const reportResult = fetch("/api/telemetry/client-error", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      keepalive: true,
+      body: JSON.stringify({
+        message: String(err.message || err).slice(0, 5000),
+        stack: String(err.stack || "").slice(0, 12000),
+        path: window.location.pathname,
+        request_id: lastRequestId,
+        context: {
+          ...context,
+          url: sanitizeUrl(window.location.href),
+          userAgent: navigator.userAgent.slice(0, 500),
+          requestId: lastRequestId,
+        },
+      }),
+    });
+    void Promise.resolve(reportResult).catch(() => {
+      // Best-effort only -- a failed error report must never replace the
+      // original application error with a second telemetry error.
+    });
+  } catch {
+    // A synchronous failure from a custom/mock fetch implementation is also
+    // intentionally ignored for the same reason.
+  }
 }
 
 // Wires window-level error listeners and wraps window.fetch so every

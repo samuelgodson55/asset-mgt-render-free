@@ -109,6 +109,8 @@ class RequestContextMiddleware:
             if message.get('type') == 'http.response.start':
                 headers = list(message.get('headers', []))
                 headers = [(k, v) for k, v in headers if k.lower() != b'x-request-id']
+                # HTTP header names are case-insensitive; this is the
+                # X-Request-ID response header used to correlate each probe/event.
                 headers.append((b'x-request-id', rid.encode('latin-1')))
                 message['headers'] = headers
             await send(message)

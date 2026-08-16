@@ -1,3 +1,5 @@
+// Modal for creating a new asset pool. UI state lives here; the actual API
+// request is delegated to the shared assets API so backend rules stay central.
 import { useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { X, Loader2 } from "lucide-react";
