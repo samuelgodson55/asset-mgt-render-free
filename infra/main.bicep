@@ -1292,7 +1292,28 @@ resource errorBeaconApp 'Microsoft.App/containerApps@2024-03-01' = if (errorBeac
           ]
         }
       ]
-      volumes: [ { name: 'errorbeacon-data', storageType: 'AzureFile', storageName: 'errorbeacon-data' } ]
+      volumes: [
+        {
+          name: 'errorbeacon-data'
+          storageType: 'AzureFile'
+          storageName: 'errorbeacon-data'
+          // 'nobrl' = don't send POSIX byte-range lock requests to the SMB
+          // server. Azure Files' SMB implementation doesn't reliably honor
+          // the byte-range locks SQLite depends on for its own write
+          // locking, so even with journal_mode=DELETE, the write-lock
+          // SQLite takes internally before CREATE TABLE/INSERT/UPDATE fails
+          // with "database is locked" -- this isn't a concurrency problem
+          // (minReplicas/maxReplicas are both 1, one Uvicorn worker), it's
+          // the SMB client silently failing to grant the lock at all. This
+          // is Microsoft's own documented mountOptions recommendation for
+          // apps like this that rely on POSIX locks:
+          // https://learn.microsoft.com/troubleshoot/azure/azure-kubernetes/storage/mountoptions-settings-azure-files
+          // A single-writer app like this doesn't need real cross-host byte
+          // -range locking anyway -- init_db()'s own fcntl.flock() plus the
+          // single-process/single-replica topology already serialize access.
+          mountOptions: 'nobrl'
+        }
+      ]
       scale: {
         minReplicas: 1
         maxReplicas: 1
