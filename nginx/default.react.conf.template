@@ -94,12 +94,22 @@ server {
     # ---- baseline security headers for static content --------------------
     # The backend's own SecurityHeadersMiddleware (see
     # backend/middleware/security_headers.py) already stamps these on every
-    # API response. We add the same baseline here so the HTML/JS/CSS nginx
-    # serves directly gets identical protection, regardless of which layer
-    # answered the request.
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header X-Frame-Options "DENY" always;
-    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    # API response, and it wraps EVERY backend route -- /api/*, /docs,
+    # /redoc, /openapi.json, /healthz, /readyz, all of it. This USED to be
+    # a server-level `add_header` here too, on the theory that nginx's own
+    # add_header is only inherited into a location that declares none of
+    # its own -- which is true, but /api/ (and /api/backup/, /healthz,
+    # /readyz below) declare none of their own, so they silently inherited
+    # these right alongside the identical ones the backend was already
+    # sending, stamping every proxied API response with each header
+    # TWICE. Harmless (browsers just use the first occurrence), but sloppy
+    # and confusing to debug against. Declaring these explicitly only in
+    # the locations that serve THIS container's own static content
+    # directly (root `location /` and the hashed-asset location below --
+    # `location = /index.html` already does this too) -- and nowhere in a
+    # `location` that proxy_passes to `backend` -- gives every response
+    # exactly one copy of each header, from whichever layer actually
+    # produced the response.
 
     # ---- Content-Security-Policy ------------------------------------------
     # Tuned against the React "Ledger" SPA's ACTUAL resource usage
@@ -234,6 +244,45 @@ server {
         client_max_body_size 200m;
     }
 
+    # ---- public health/readiness checks --------------------------------
+    # BUG FIX: with no location matching "/healthz"/"/readyz" specifically,
+    # both used to fall through to the SPA catch-all (`location /` below),
+    # which happily serves index.html with a 200 for literally any
+    # unrecognized path -- that's the entire point of a SPA fallback. So
+    # every external monitor hitting https://.../healthz was really just
+    # asking "does nginx serve index.html", which it always will even if
+    # `backend` is completely down, out of healthy replicas, or mid-crash-
+    # loop -- a real outage would report 200 OK all the way until someone
+    # noticed the app itself was broken. Proxying these straight through to
+    # backend's actual /healthz (liveness -- see backend/main.py's
+    # health_check()) and /readyz (readiness, DB/migration-aware -- see
+    # readiness_check()) makes external monitors see what's really true.
+    location = /healthz {
+        set $backend_upstream ${BACKEND_HOST}:${BACKEND_PORT};
+        proxy_pass http://$backend_upstream$request_uri;
+        proxy_http_version 1.1;
+        proxy_set_header Host $backend_upstream;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_connect_timeout 5s;
+        proxy_send_timeout 5s;
+        proxy_read_timeout 5s;
+    }
+
+    location = /readyz {
+        set $backend_upstream ${BACKEND_HOST}:${BACKEND_PORT};
+        proxy_pass http://$backend_upstream$request_uri;
+        proxy_http_version 1.1;
+        proxy_set_header Host $backend_upstream;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_connect_timeout 5s;
+        proxy_send_timeout 5s;
+        proxy_read_timeout 5s;
+    }
+
     location /api/ {
         set $backend_upstream ${BACKEND_HOST}:${BACKEND_PORT};
 
@@ -350,11 +399,14 @@ server {
         #
         # `add_header` does NOT merge with headers set in an enclosing
         # block once a location declares its own (same nginx gotcha called
-        # out on the static-asset location below) -- so every baseline
-        # header has to be re-declared here too, not just the CSP.
-        add_header X-Content-Type-Options "nosniff" always;
-        add_header X-Frame-Options "DENY" always;
-        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        # out on the static-asset location below) -- but this location
+        # proxies to `backend`, and backend's own SecurityHeadersMiddleware
+        # already stamps X-Content-Type-Options/X-Frame-Options/
+        # Referrer-Policy on this response before nginx ever sees it -- so
+        # only the CSP (which backend, a pure JSON API, has no reason to
+        # ever set) needs declaring here. Re-adding the baseline three here
+        # too would just duplicate them a second time on top of backend's
+        # copy.
         add_header Content-Security-Policy "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'; style-src 'self' https://cdn.jsdelivr.net https://fonts.googleapis.com 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: https://cdn.jsdelivr.net https://fastapi.tiangolo.com; connect-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'" always;
 
         set $backend_upstream ${BACKEND_HOST}:${BACKEND_PORT};
@@ -625,6 +677,9 @@ server {
     # "/assets" today.
     location / {
         try_files $uri /index.html;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
     }
 
     # Long-lived, effectively-forever caching for Vite's build output under

@@ -105,6 +105,38 @@ class RateLimitMiddleware:
         )
 
     def _client_ip(self, scope: Scope) -> str:
+        """
+        `backend` has ingress.external: false (main.bicep) -- the ONLY way
+        to reach it is through the `frontend` nginx container app, which
+        sets X-Real-IP / X-Forwarded-For on every proxied /api/ request
+        (see nginx/default.conf.template). Trusting those headers is safe
+        here specifically because backend can't be hit directly from the
+        internet to spoof them.
+
+        Without this, scope["client"] is the IP of whichever `frontend`
+        REPLICA proxied the request -- not the real caller's IP. With
+        frontendMaxReplicas > 1 in prod, successive requests from the same
+        real client can land on different frontend replicas and therefore
+        different scope["client"] values, splitting one attacker/user
+        across several Redis keys and silently defeating the fixed-window
+        counter (it never reaches max_requests on any single key). This
+        bit us in production validation: session-redis-test.py sent 6
+        rapid login attempts and never got a 429.
+        """
+        headers = dict(scope.get("headers") or [])
+        real_ip = headers.get(b"x-real-ip")
+        if real_ip:
+            return real_ip.decode("latin-1").strip()
+
+        forwarded_for = headers.get(b"x-forwarded-for")
+        if forwarded_for:
+            # nginx appends via $proxy_add_x_forwarded_for, so the FIRST
+            # entry is the original client -- everything after it is hops
+            # nginx itself added.
+            return forwarded_for.decode("latin-1").split(",")[0].strip()
+
+        # Fallback for local/docker-compose dev, where nginx isn't
+        # necessarily in front of the backend the same way.
         client = scope.get("client")
         return client[0] if client else "unknown"
 

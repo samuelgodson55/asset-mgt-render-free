@@ -7,6 +7,7 @@ reconciliation check-in, the advanced checkout flow, and CSV batch import.
 
 from typing import Optional, Literal
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query, Response
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from database import get_db
@@ -88,7 +89,14 @@ def export_assets_inventory(
 ):
     """Downloads the Asset Inventory table itself as a CSV or PDF, optionally narrowed to a single category."""
     fmt = _validate_export_format(format)
-    content, media_type, filename = asset_service.export_assets_inventory(db, user, category, fmt)
+    if fmt == "csv":
+        # Streamed row-by-row (see asset_service.export_assets_inventory_csv's
+        # docstring) rather than built as one in-memory blob first -- the
+        # PDF path below still has to materialize every row for reportlab's
+        # layout engine regardless, so it keeps the simpler Response return.
+        generator, filename = asset_service.export_assets_inventory_csv(db, user, category)
+        return StreamingResponse(generator, media_type="text/csv", headers={"Content-Disposition": f"attachment; filename={filename}"})
+    content, media_type, filename = asset_service.export_assets_inventory_pdf(db, user, category)
     return Response(content=content, media_type=media_type, headers={"Content-Disposition": f"attachment; filename={filename}"})
 
 
