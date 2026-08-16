@@ -819,6 +819,15 @@ services:
     mem_limit: ${ERRORBEACON_MEM_LIMIT:-256m}
     mem_reservation: ${ERRORBEACON_MEM_RESERVATION:-64m}
     environment:
+      # Without this, the container falls back to its code default
+      # ('development'), so the /v1/test manual-alert endpoint (which
+      # stamps its synthetic event with this service's OWN ENVIRONMENT
+      # var, not the backend's) always reports "development" here even
+      # on a production VM deploy -- real errors reported by
+      # backend-blue/backend-green were unaffected since they already get
+      # ENVIRONMENT (see their own `ENVIRONMENT: ${ENVIRONMENT:-production}`
+      # lines above); only this service's copy was missing it.
+      ENVIRONMENT: ${ENVIRONMENT:-production}
       ERRORBEACON_API_KEY: ${ERRORBEACON_API_KEY:?Set ERRORBEACON_API_KEY in .env}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?Set TELEGRAM_BOT_TOKEN in .env}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:?Set TELEGRAM_CHAT_ID in .env}

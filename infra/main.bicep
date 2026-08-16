@@ -1252,6 +1252,15 @@ resource errorBeaconApp 'Microsoft.App/containerApps@2024-03-01' = if (errorBeac
           resources: { cpu: json('0.25'), memory: '0.5Gi' }
           volumeMounts: [ { volumeName: 'errorbeacon-data', mountPath: '/data' } ]
           env: [
+            // Without this, the container falls back to its code default
+            // ('development'), so the /v1/test manual-alert endpoint (which
+            // stamps its synthetic event with this service's OWN
+            // ENVIRONMENT var, not the backend's) always reports
+            // "development" here even on a prod ACA deploy -- real errors
+            // reported by `backend` were unaffected since backend gets
+            // ENVIRONMENT correctly via `sharedEnv` above; only this
+            // service's copy was missing it.
+            { name: 'ENVIRONMENT', value: runtimeEnvironment }
             { name: 'ERRORBEACON_API_KEY', secretRef: 'errorbeacon-api-key' }
             { name: 'TELEGRAM_BOT_TOKEN', secretRef: 'telegram-bot-token' }
             { name: 'TELEGRAM_CHAT_ID', secretRef: 'telegram-chat-id' }

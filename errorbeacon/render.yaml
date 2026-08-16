@@ -17,6 +17,14 @@ services:
     plan: free
     healthCheckPath: /healthz
     envVars:
+      # Without this, the container falls back to its code default
+      # ('development'), so the /v1/test manual-alert endpoint (which
+      # stamps its synthetic event with this service's own ENVIRONMENT
+      # var) always reports "development" regardless of how this
+      # standalone monitor is actually being used. Set to "production" on
+      # Render if this deployment is monitoring a production system.
+      - key: ENVIRONMENT
+        value: production
       - key: ERRORBEACON_API_KEY
         sync: false
       - key: TELEGRAM_BOT_TOKEN
