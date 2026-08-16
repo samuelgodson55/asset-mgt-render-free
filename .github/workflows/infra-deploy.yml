@@ -474,7 +474,7 @@ jobs:
           MISSING=()
           [ -z "${{ secrets.ERRORBEACON_API_KEY }}" ] && MISSING+=("ERRORBEACON_API_KEY")
           [ -z "${{ secrets.ERRORBEACON_TELEGRAM_BOT_TOKEN }}" ] && MISSING+=("ERRORBEACON_TELEGRAM_BOT_TOKEN")
-          [ -z "${{ vars.ERRORBEACON_TELEGRAM_CHAT_ID }}" ] && MISSING+=("ERRORBEACON_TELEGRAM_CHAT_ID")
+          [ -z "${{ secrets.ERRORBEACON_TELEGRAM_CHAT_ID }}" ] && MISSING+=("ERRORBEACON_TELEGRAM_CHAT_ID")
           if [ "${#MISSING[@]}" -gt 0 ]; then echo "::error::Missing ErrorBeacon configuration: ${MISSING[*]}"; exit 1; fi
 
       - name: Bicep What-If plan and GitHub Summary
@@ -501,7 +501,7 @@ jobs:
               errorBeaconAppName="${{ vars.ERRORBEACON_APP || 'asset-inventory-quotes' }}" \
               errorBeaconApiKey="${{ secrets.ERRORBEACON_API_KEY }}" \
               errorBeaconTelegramBotToken="${{ secrets.ERRORBEACON_TELEGRAM_BOT_TOKEN }}" \
-              errorBeaconTelegramChatId="${{ vars.ERRORBEACON_TELEGRAM_CHAT_ID }}" \
+              errorBeaconTelegramChatId="${{ secrets.ERRORBEACON_TELEGRAM_CHAT_ID }}" \
               errorBeaconTelegramThreadId="${{ vars.ERRORBEACON_TELEGRAM_THREAD_ID }}" \
               errorBeaconGeminiApiKey="${{ secrets.ERRORBEACON_GEMINI_API_KEY }}" \
               errorBeaconGeminiModel="${{ vars.ERRORBEACON_GEMINI_MODEL || 'gemini-2.5-flash-lite' }}" \
@@ -654,7 +654,7 @@ jobs:
               errorBeaconAppName="${{ vars.ERRORBEACON_APP || 'asset-inventory-quotes' }}" \
               errorBeaconApiKey="${{ secrets.ERRORBEACON_API_KEY }}" \
               errorBeaconTelegramBotToken="${{ secrets.ERRORBEACON_TELEGRAM_BOT_TOKEN }}" \
-              errorBeaconTelegramChatId="${{ vars.ERRORBEACON_TELEGRAM_CHAT_ID }}" \
+              errorBeaconTelegramChatId="${{ secrets.ERRORBEACON_TELEGRAM_CHAT_ID }}" \
               errorBeaconTelegramThreadId="${{ vars.ERRORBEACON_TELEGRAM_THREAD_ID }}" \
               errorBeaconGeminiApiKey="${{ secrets.ERRORBEACON_GEMINI_API_KEY }}" \
               errorBeaconGeminiModel="${{ vars.ERRORBEACON_GEMINI_MODEL || 'gemini-2.5-flash-lite' }}" \
@@ -782,7 +782,7 @@ jobs:
               errorBeaconAppName="${{ vars.ERRORBEACON_APP || 'asset-inventory-quotes' }}" \
               errorBeaconApiKey="${{ secrets.ERRORBEACON_API_KEY }}" \
               errorBeaconTelegramBotToken="${{ secrets.ERRORBEACON_TELEGRAM_BOT_TOKEN }}" \
-              errorBeaconTelegramChatId="${{ vars.ERRORBEACON_TELEGRAM_CHAT_ID }}" \
+              errorBeaconTelegramChatId="${{ secrets.ERRORBEACON_TELEGRAM_CHAT_ID }}" \
               errorBeaconTelegramThreadId="${{ vars.ERRORBEACON_TELEGRAM_THREAD_ID }}" \
               errorBeaconGeminiApiKey="${{ secrets.ERRORBEACON_GEMINI_API_KEY }}" \
               errorBeaconGeminiModel="${{ vars.ERRORBEACON_GEMINI_MODEL || 'gemini-2.5-flash-lite' }}" \

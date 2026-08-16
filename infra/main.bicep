@@ -98,6 +98,7 @@ param errorBeaconApiKey string = ''
 
 @secure()
 param errorBeaconTelegramBotToken string = ''
+@secure()
 param errorBeaconTelegramChatId string = ''
 param errorBeaconTelegramThreadId string = ''
 @secure()
@@ -1231,6 +1232,7 @@ resource errorBeaconApp 'Microsoft.App/containerApps@2024-03-01' = if (errorBeac
       ] : [], [
         { name: 'errorbeacon-api-key', value: errorBeaconApiKey }
         { name: 'telegram-bot-token', value: errorBeaconTelegramBotToken }
+        { name: 'telegram-chat-id', value: errorBeaconTelegramChatId }
         { name: 'gemini-api-key', value: empty(errorBeaconGeminiApiKey) ? 'unset' : errorBeaconGeminiApiKey }
         { name: 'groq-api-key', value: empty(errorBeaconGroqApiKey) ? 'unset' : errorBeaconGroqApiKey }
         { name: 'openrouter-api-key', value: empty(errorBeaconOpenRouterApiKey) ? 'unset' : errorBeaconOpenRouterApiKey }
@@ -1252,7 +1254,7 @@ resource errorBeaconApp 'Microsoft.App/containerApps@2024-03-01' = if (errorBeac
           env: [
             { name: 'ERRORBEACON_API_KEY', secretRef: 'errorbeacon-api-key' }
             { name: 'TELEGRAM_BOT_TOKEN', secretRef: 'telegram-bot-token' }
-            { name: 'TELEGRAM_CHAT_ID', value: errorBeaconTelegramChatId }
+            { name: 'TELEGRAM_CHAT_ID', secretRef: 'telegram-chat-id' }
             { name: 'TELEGRAM_THREAD_ID', value: errorBeaconTelegramThreadId }
             { name: 'AI_ENABLED', value: 'true' }
             { name: 'GROQ_API_KEY', secretRef: 'groq-api-key' }

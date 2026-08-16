@@ -1565,7 +1565,7 @@ ERRORBEACON_TELEGRAM_BOT_TOKEN      secret
 ERRORBEACON_GROQ_API_KEY            secret (optional)
 ERRORBEACON_GEMINI_API_KEY          secret (optional)
 ERRORBEACON_OPENROUTER_API_KEY      secret (optional)
-ERRORBEACON_TELEGRAM_CHAT_ID        variable
+ERRORBEACON_TELEGRAM_CHAT_ID        secret
 ERRORBEACON_TELEGRAM_THREAD_ID      variable (optional)
 ERRORBEACON_GROQ_MODEL               variable (optional)
 ERRORBEACON_GEMINI_MODEL             variable (optional)

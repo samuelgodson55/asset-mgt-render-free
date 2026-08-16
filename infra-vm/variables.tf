@@ -181,6 +181,7 @@ variable "errorbeacon_telegram_bot_token" {
 variable "errorbeacon_telegram_chat_id" {
   description = "Telegram destination chat ID for ErrorBeacon alerts."
   type        = string
+  sensitive   = true
 }
 
 variable "errorbeacon_telegram_thread_id" {

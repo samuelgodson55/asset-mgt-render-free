@@ -145,7 +145,7 @@ jobs:
       TF_VAR_jwt_secret_key: ${{ secrets.JWT_SECRET_KEY }}
       TF_VAR_errorbeacon_api_key: ${{ secrets.ERRORBEACON_API_KEY }}
       TF_VAR_errorbeacon_telegram_bot_token: ${{ secrets.ERRORBEACON_TELEGRAM_BOT_TOKEN }}
-      TF_VAR_errorbeacon_telegram_chat_id: ${{ vars.ERRORBEACON_TELEGRAM_CHAT_ID }}
+      TF_VAR_errorbeacon_telegram_chat_id: ${{ secrets.ERRORBEACON_TELEGRAM_CHAT_ID }}
       TF_VAR_errorbeacon_telegram_thread_id: ${{ vars.ERRORBEACON_TELEGRAM_THREAD_ID }}
       TF_VAR_errorbeacon_gemini_api_key: ${{ secrets.ERRORBEACON_GEMINI_API_KEY }}
       TF_VAR_errorbeacon_image: ${{ secrets.DOCKERHUB_USERNAME }}/errorbeacon-lite
