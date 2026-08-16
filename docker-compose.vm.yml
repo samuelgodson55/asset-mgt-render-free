@@ -628,6 +628,7 @@ services:
       # --concurrency=2 (2 forked processes) is one of the four inputs.
       DB_EXPECTED_PROCESSES: "7"
       REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_CONNECTION_MAX_RETRIES: ${CELERY_BROKER_CONNECTION_MAX_RETRIES:-none}
       EXPORT_RESULT_DIR: /app/export_results
       # `worker` is what actually generates CSV/PDF exports
       # (backend/services/export_service.py), which reads both of these
@@ -735,6 +736,7 @@ services:
       # is sized to fit alongside the other six.
       DB_EXPECTED_PROCESSES: "7"
       REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_CONNECTION_MAX_RETRIES: ${CELERY_BROKER_CONNECTION_MAX_RETRIES:-none}
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_FORMAT: json

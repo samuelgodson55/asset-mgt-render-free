@@ -83,7 +83,7 @@ param dockerHubBackendImage string
 @description('Docker Hub repository for the frontend image (static frontend + reverse proxy to `backend`), e.g. "yourusername/snipeit-lite-frontend", built from frontend/Dockerfile UNCHANGED from local Docker Compose. Public repo by default.')
 param dockerHubFrontendImage string
 
-@description('Docker Hub repository for the isolated ErrorBeacon monitoring image, e.g. "yourusername/errorbeacon-lite". The monitor is deployed as its own Container App and is not part of backend/frontend blue-green traffic. Defaults to the project's public ErrorBeacon image.')
+@description('Docker Hub repository for the isolated ErrorBeacon monitoring image, e.g. "yourusername/errorbeacon-lite". The monitor is deployed as its own Container App and is not part of backend/frontend blue-green traffic. Defaults to the project\'s public ErrorBeacon image.')
 param dockerHubErrorBeaconImage string = 'samuelgodson55/errorbeacon-lite'
 
 @description('Enable the isolated ErrorBeacon Container App. Production workflows enable this by default. Set false only when intentionally disabling monitoring.')

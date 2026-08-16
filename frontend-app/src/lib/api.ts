@@ -950,7 +950,7 @@ export const assetsApi = {
   // page -- reachable by every role, including someone just browsing demo
   // data with no backend session -- keeps working with client-paginated
   // mock data, same spirit as api.getAssets() above.
-  list: (limit: number, offset: number, search: string, category?: string, status?: "available" | "low" | "out"): Promise<DirectoryPage<AssetType>> =>
+  list: (limit: number, offset: number, search = "", category?: string, status?: "available" | "low" | "out"): Promise<DirectoryPage<AssetType>> =>
     tryLoad(async () => {
       const data = await rawFetch<{ items: RawAssetType[]; total: number; limit: number; offset: number }>(`/assets${qs({ limit, offset, search, category, status })}`);
       return { items: (data.items ?? []).map(mapAsset), total: data.total, limit: data.limit, offset: data.offset };
@@ -1030,7 +1030,7 @@ export const quotationsApi = {
   // limit/offset/search -> {items,total,limit,offset} contract as
   // assetsApi.list/usersApi.list/etc (DirectoryPage<T>). Used by the
   // Quotations page's own browsable "Asset Catalog" table.
-  catalogPage: (limit: number, offset: number, search: string): Promise<DirectoryPage<CatalogAsset>> =>
+  catalogPage: (limit: number, offset: number, search = ""): Promise<DirectoryPage<CatalogAsset>> =>
     tryLoad(async () => {
       const data = await rawFetch<{ items: CatalogAsset[]; total: number; limit: number; offset: number; show_stock: boolean }>(`/assets/catalog${qs({ limit, offset, search })}`);
       return { items: data.items ?? [], total: data.total, limit: data.limit, offset: data.offset };

@@ -52,27 +52,33 @@ export function reportClientError(error, context = {}) {
   lastReportAt = now;
 
   const err = error instanceof Error ? error : new Error(String(error));
-  fetch('/api/telemetry/client-error', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'include',
-    keepalive: true,
-    body: JSON.stringify({
-      message: String(err.message || err).slice(0, 5000),
-      stack: String(err.stack || '').slice(0, 12000),
-      path: window.location.pathname,
-      request_id: lastRequestId,
-      context: {
-        ...context,
-        url: sanitizeUrl(window.location.href),
-        userAgent: navigator.userAgent.slice(0, 500),
-        requestId: lastRequestId,
-      },
-    }),
-  }).catch(() => {
-    // Best-effort only -- a failed error report should never itself surface
-    // as an error to the user.
-  });
+  // Best-effort only. Keep the beacon itself from becoming the error when
+  // fetch is unavailable or a test/runtime shim returns a non-Promise.
+  try {
+    Promise.resolve(fetch('/api/telemetry/client-error', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      keepalive: true,
+      body: JSON.stringify({
+        message: String(err.message || err).slice(0, 5000),
+        stack: String(err.stack || '').slice(0, 12000),
+        path: window.location.pathname,
+        request_id: lastRequestId,
+        context: {
+          ...context,
+          url: sanitizeUrl(window.location.href),
+          userAgent: navigator.userAgent.slice(0, 500),
+          requestId: lastRequestId,
+        },
+      }),
+    })).catch(() => {
+      // Best-effort only -- a failed error report should never itself surface
+      // as an error to the user.
+    });
+  } catch {
+    // Synchronous fetch failures are also intentionally ignored.
+  }
 }
 
 // Wires window-level error listeners and wraps window.fetch so every
@@ -82,13 +88,20 @@ export function installGlobalErrorBeacon() {
   if (patched || typeof window === 'undefined') return;
   patched = true;
 
-  const nativeFetch = window.fetch.bind(window);
-  window.fetch = async (...args) => {
-    const response = await nativeFetch(...args);
-    const requestId = response.headers.get('x-request-id');
-    if (requestId) setLastRequestId(requestId);
-    return response;
-  };
+  const nativeFetch = typeof window.fetch === 'function'
+    ? window.fetch.bind(window)
+    : typeof globalThis.fetch === 'function'
+      ? globalThis.fetch.bind(globalThis)
+      : null;
+
+  if (nativeFetch) {
+    window.fetch = async (...args) => {
+      const response = await nativeFetch(...args);
+      const requestId = response?.headers?.get?.('x-request-id');
+      if (requestId) setLastRequestId(requestId);
+      return response;
+    };
+  }
 
   window.addEventListener('error', (e) => {
     reportClientError(e.error || new Error(e.message), { source: 'window.error' });
