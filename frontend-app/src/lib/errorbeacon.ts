@@ -50,35 +50,47 @@ export function reportClientError(error: unknown, context: Record<string, unknow
   lastReportAt = now;
 
   const err = error instanceof Error ? error : new Error(String(error));
-  // Error reporting is deliberately best-effort. Tests and unusual browser
-  // environments can provide a fetch implementation that returns undefined
-  // instead of a Promise, so normalise the result before calling .catch().
+  // Error reporting is deliberately best-effort and must NOT reuse the
+  // application's fetch wrapper. Reusing fetch here creates a subtle failure
+  // loop: an API request can fail, telemetry tries to use the same mocked or
+  // wrapped fetch, and telemetry can then throw while reporting the original
+  // error. That second error would hide the real network/server error.
+  const body = JSON.stringify({
+    message: String(err.message || err).slice(0, 5000),
+    stack: String(err.stack || "").slice(0, 12000),
+    path: window.location.pathname,
+    request_id: lastRequestId,
+    context: {
+      ...context,
+      url: sanitizeUrl(window.location.href),
+      userAgent: navigator.userAgent.slice(0, 500),
+      requestId: lastRequestId,
+    },
+  });
+
   try {
-    const reportResult = fetch("/api/telemetry/client-error", {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      keepalive: true,
-      body: JSON.stringify({
-        message: String(err.message || err).slice(0, 5000),
-        stack: String(err.stack || "").slice(0, 12000),
-        path: window.location.pathname,
-        request_id: lastRequestId,
-        context: {
-          ...context,
-          url: sanitizeUrl(window.location.href),
-          userAgent: navigator.userAgent.slice(0, 500),
-          requestId: lastRequestId,
-        },
-      }),
-    });
-    void Promise.resolve(reportResult).catch(() => {
-      // Best-effort only -- a failed error report must never replace the
-      // original application error with a second telemetry error.
-    });
+    // sendBeacon is ideal for telemetry because it is asynchronous and does
+    // not consume the application's normal fetch path. It also works during
+    // page unload, when a normal fetch may be cancelled.
+    if (typeof navigator !== "undefined" && typeof navigator.sendBeacon === "function") {
+      const accepted = navigator.sendBeacon(
+        "/api/telemetry/client-error",
+        new Blob([body], { type: "application/json" }),
+      );
+      if (accepted) return;
+    }
+
+    // Older browsers may not support sendBeacon. XMLHttpRequest is the
+    // fallback so telemetry still does not interfere with fetch-based API
+    // calls or their tests. The request is intentionally fire-and-forget.
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/telemetry/client-error", true);
+    xhr.withCredentials = true;
+    xhr.setRequestHeader("Content-Type", "application/json");
+    xhr.send(body);
   } catch {
-    // A synchronous failure from a custom/mock fetch implementation is also
-    // intentionally ignored for the same reason.
+    // A telemetry failure must NEVER replace or alter the original
+    // application error. There is deliberately nothing else to throw here.
   }
 }
 
@@ -92,8 +104,16 @@ export function installGlobalErrorBeacon(): void {
   const nativeFetch = window.fetch.bind(window);
   window.fetch = async (...args: Parameters<typeof fetch>) => {
     const response = await nativeFetch(...args);
-    const requestId = response.headers.get("x-request-id");
-    if (requestId) setLastRequestId(requestId);
+
+    // A test double or unusual fetch implementation can legally return
+    // undefined even though the real browser fetch API always returns a
+    // Response. Never let the correlation wrapper turn that into a new
+    // "reading headers" error.
+    if (response?.headers) {
+      const requestId = response.headers.get("x-request-id");
+      if (requestId) setLastRequestId(requestId);
+    }
+
     return response;
   };
 

@@ -1968,6 +1968,13 @@ def _restore_backup_impl(filepath: str, take_safety_backup: bool = True) -> dict
         if reset_result.returncode != 0:
             raise RuntimeError(f"Failed to reset schema before restore: {reset_result.stderr.decode(errors='replace')[:2000]}")
 
+        # The reset command deliberately terminates every other PostgreSQL
+        # connection, including idle connections held by SQLAlchemy's pool.
+        # Dispose the pool now so the next readiness/schema query cannot reuse
+        # a connection that PostgreSQL already killed. SQLAlchemy will create
+        # fresh connections on demand for the restored database.
+        database_module.engine.dispose()
+
         restore_cmd = [
             "psql",
             "--host", conn["host"],

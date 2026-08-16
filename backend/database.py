@@ -371,8 +371,17 @@ def _create_readiness_engine_from_url(source_url):
 # matters in tests, where conftest.py swaps `database.engine` for a temporary
 # SQLite engine; readiness must follow that test database rather than the
 # original production-style engine created during module import.
-readiness_engine = None
-_readiness_engine_source = None
+def _create_readiness_engine():
+    """Create the readiness engine from the application's current engine URL."""
+    return _create_readiness_engine_from_url(engine.url)
+
+
+# Keep a dedicated readiness engine separate from the request pool. The
+# variable is initialized once, then `_get_readiness_engine()` replaces it if
+# tests or application startup swap the main engine for another database.
+readiness_engine = _create_readiness_engine()
+_readiness_engine_source = engine
+
 
 def _get_readiness_engine():
     """Return a readiness-only engine matching the current application engine."""

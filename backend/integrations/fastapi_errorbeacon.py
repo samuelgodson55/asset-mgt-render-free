@@ -268,7 +268,7 @@ def report_client_event(
         "component": "frontend",
         "category": (
             "chaos_test"
-            if isinstance(context, dict) and context.get("test")
+            if isinstance(context, dict) and context.get('test')
             else "client_error"
         ),
         "context": clean(context or {}),
