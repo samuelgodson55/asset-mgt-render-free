@@ -89,6 +89,9 @@ param dockerHubErrorBeaconImage string = 'samuelgodson55/errorbeacon-lite'
 @description('Enable the isolated ErrorBeacon Container App. Production workflows enable this by default. Set false only when intentionally disabling monitoring.')
 param errorBeaconEnabled bool = true
 
+@description('Identity string backend/worker/beat report themselves as via the ERRORBEACON_APP env var -- shows up as the "app" field on every event ErrorBeacon receives. Matches docker-compose.yml/docker-compose.vm.yml\'s own ERRORBEACON_APP default so all three deployment paths report under the same identity unless intentionally overridden.')
+param errorBeaconAppName string = 'asset-inventory-quotes'
+
 @description('ErrorBeacon shared API key. Generate with: python -c "import secrets; print(secrets.token_urlsafe(32))"')
 @secure()
 param errorBeaconApiKey string = ''
@@ -107,7 +110,11 @@ param errorBeaconGroqModel string = 'llama-3.1-8b-instant'
 @secure()
 param errorBeaconOpenRouterApiKey string = ''
 param errorBeaconOpenRouterModel string = 'openrouter/free'
-param errorBeaconOpenRouterSiteUrl string = 'https://errorbeacon.local'
+// NOTE: no separate errorBeaconOpenRouterSiteUrl param -- redundant with
+// `customDomain` (below), which is already the public origin of this exact
+// deployment. `publicOrigin` (computed from customDomain, defined further
+// down) is what the errorbeacon Container App's OPENROUTER_SITE_URL env var
+// uses directly instead.
 
 @description('Backward-compatible common image tag. Used only when initialBackendImageTag/initialFrontendImageTag are omitted.')
 param initialImageTag string = 'latest'
@@ -990,7 +997,7 @@ var sharedEnv = [
   { name: 'EXPORT_RESULT_DIR', value: '/app/export_results' }
   { name: 'ERRORBEACON_URL', value: 'http://errorbeacon:8000' }
   // Keep the same observability identity and timeout used by both Compose paths.
-  { name: 'ERRORBEACON_APP', value: 'asset-inventory-quotes' }
+  { name: 'ERRORBEACON_APP', value: errorBeaconAppName }
   { name: 'APP_RELEASE', value: empty(initialBackendImageTag) ? initialImageTag : initialBackendImageTag }
   { name: 'ERRORBEACON_TIMEOUT', value: '0.75' }
   // Embedded Celery worker/beat uses this to avoid broker connection retry loops.
@@ -1255,7 +1262,11 @@ resource errorBeaconApp 'Microsoft.App/containerApps@2024-03-01' = if (errorBeac
             { name: 'GEMINI_FALLBACK_MODEL', value: errorBeaconGeminiFallbackModel }
             { name: 'OPENROUTER_API_KEY', secretRef: 'openrouter-api-key' }
             { name: 'OPENROUTER_MODEL', value: errorBeaconOpenRouterModel }
-            { name: 'OPENROUTER_SITE_URL', value: errorBeaconOpenRouterSiteUrl }
+            // Reuses `publicOrigin` (customDomain if set, else the frontend's
+            // default *.azurecontainerapps.io FQDN) instead of a separate
+            // errorBeaconOpenRouterSiteUrl param -- see that param's removal
+            // comment above.
+            { name: 'OPENROUTER_SITE_URL', value: publicOrigin }
             { name: 'DATA_DIR', value: '/data' }
             { name: 'DEDUP_SECONDS', value: '60' }
             { name: 'SPIKE_THRESHOLD', value: '10' }

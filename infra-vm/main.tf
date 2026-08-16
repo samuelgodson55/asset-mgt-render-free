@@ -280,6 +280,7 @@ locals {
     errorbeacon_telegram_thread_id        = var.errorbeacon_telegram_thread_id
     errorbeacon_gemini_api_key            = var.errorbeacon_gemini_api_key
     errorbeacon_image                     = var.errorbeacon_image
+    errorbeacon_app                       = var.errorbeacon_app
     root_admin_bootstrap_password         = var.root_admin_bootstrap_password
     deploy_status_user                    = var.deploy_status_user
     deploy_status_password_hash           = local.effective_deploy_status_password_hash

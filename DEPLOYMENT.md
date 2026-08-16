@@ -1571,8 +1571,12 @@ ERRORBEACON_GROQ_MODEL               variable (optional)
 ERRORBEACON_GEMINI_MODEL             variable (optional)
 ERRORBEACON_GEMINI_FALLBACK_MODEL    variable (optional)
 ERRORBEACON_OPENROUTER_MODEL         variable (optional)
-ERRORBEACON_OPENROUTER_SITE_URL      variable (optional)
+ERRORBEACON_APP                      variable (optional)
 ```
+
+There is deliberately no `ERRORBEACON_OPENROUTER_SITE_URL` variable -- it would just duplicate `CUSTOM_DOMAIN`, which is already this environment's public origin. The errorbeacon Container App's `OPENROUTER_SITE_URL` is set from Bicep's own `publicOrigin` (the same value `CORS_ORIGINS` uses: `customDomain` if set, else the frontend's default `*.azurecontainerapps.io` FQDN) instead.
+
+`ERRORBEACON_APP` defaults to `asset-inventory-quotes` (matching `docker-compose.yml`/`docker-compose.vm.yml`'s own default) -- it's the identity string backend/worker/beat report themselves as, shown as the `app` field on every event ErrorBeacon receives. Only worth setting if you're running more than one ErrorBeacon-integrated app against the same monitor and want to tell their events apart.
 
 The backend receives `ERRORBEACON_URL=http://errorbeacon:8000` and the shared API key automatically through the Bicep deployment.
 

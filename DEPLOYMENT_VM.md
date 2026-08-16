@@ -690,6 +690,17 @@ Optional (leave unset if you don't use them yet):
 `BACKUP_GDRIVE_FOLDER_ID` — see [Google Drive backup uploads](#google-drive-backup-uploads)
 below for where these five come from.
 
+Also optional, for ErrorBeacon: `ERRORBEACON_GROQ_API_KEY`,
+`ERRORBEACON_GROQ_MODEL` (**Variable**), `ERRORBEACON_GEMINI_MODEL`
+(**Variable**), `ERRORBEACON_GEMINI_FALLBACK_MODEL` (**Variable**),
+`ERRORBEACON_OPENROUTER_API_KEY`, `ERRORBEACON_OPENROUTER_MODEL`
+(**Variable**), `ERRORBEACON_APP` (**Variable**, defaults to
+`asset-inventory-quotes` -- the identity string backend/worker/beat report
+themselves as to ErrorBeacon). There is no `ERRORBEACON_OPENROUTER_SITE_URL`
+variable -- it would just duplicate `CUSTOM_DOMAIN` (above), which
+`sync-secrets-vm.yml`/`deploy-azure-vm.yml` already use directly to set the
+VM's `OPENROUTER_SITE_URL`.
+
 Also optional — `EMAIL_PROVIDER` (**Variable**, default `smtp`) \|
 `brevo` \| `resend` — an alternative to the `SMTP_*` secrets above if
 your network blocks outbound SMTP ports (both send over plain HTTPS).

@@ -664,13 +664,35 @@ jobs:
             if grep -q '^TELEGRAM_CHAT_ID=' .env; then sed -i "s|^TELEGRAM_CHAT_ID=.*|TELEGRAM_CHAT_ID=${{ vars.ERRORBEACON_TELEGRAM_CHAT_ID }}|" .env; else echo "TELEGRAM_CHAT_ID=${{ vars.ERRORBEACON_TELEGRAM_CHAT_ID }}" >> .env; fi
             if grep -q '^TELEGRAM_THREAD_ID=' .env; then sed -i "s|^TELEGRAM_THREAD_ID=.*|TELEGRAM_THREAD_ID=${{ vars.ERRORBEACON_TELEGRAM_THREAD_ID }}|" .env; else echo "TELEGRAM_THREAD_ID=${{ vars.ERRORBEACON_TELEGRAM_THREAD_ID }}" >> .env; fi
             if grep -q '^GEMINI_API_KEY=' .env; then sed -i "s|^GEMINI_API_KEY=.*|GEMINI_API_KEY=${{ secrets.ERRORBEACON_GEMINI_API_KEY }}|" .env; else echo "GEMINI_API_KEY=${{ secrets.ERRORBEACON_GEMINI_API_KEY }}" >> .env; fi
-            if grep -q '^GEMINI_MODEL=' .env; then sed -i "s|^GEMINI_MODEL=.*|GEMINI_MODEL=$ERRORBEACON_GEMINI_MODEL|" .env; else echo "GEMINI_MODEL=$ERRORBEACON_GEMINI_MODEL" >> .env; fi
-            if grep -q '^GEMINI_FALLBACK_MODEL=' .env; then sed -i "s|^GEMINI_FALLBACK_MODEL=.*|GEMINI_FALLBACK_MODEL=$ERRORBEACON_GEMINI_FALLBACK_MODEL|" .env; else echo "GEMINI_FALLBACK_MODEL=$ERRORBEACON_GEMINI_FALLBACK_MODEL" >> .env; fi
-            if grep -q '^GROQ_API_KEY=' .env; then sed -i "s|^GROQ_API_KEY=.*|GROQ_API_KEY=$ERRORBEACON_GROQ_API_KEY|" .env; else echo "GROQ_API_KEY=$ERRORBEACON_GROQ_API_KEY" >> .env; fi
-            if grep -q '^GROQ_MODEL=' .env; then sed -i "s|^GROQ_MODEL=.*|GROQ_MODEL=$ERRORBEACON_GROQ_MODEL|" .env; else echo "GROQ_MODEL=$ERRORBEACON_GROQ_MODEL" >> .env; fi
-            if grep -q '^OPENROUTER_API_KEY=' .env; then sed -i "s|^OPENROUTER_API_KEY=.*|OPENROUTER_API_KEY=$ERRORBEACON_OPENROUTER_API_KEY|" .env; else echo "OPENROUTER_API_KEY=$ERRORBEACON_OPENROUTER_API_KEY" >> .env; fi
-            if grep -q '^OPENROUTER_MODEL=' .env; then sed -i "s|^OPENROUTER_MODEL=.*|OPENROUTER_MODEL=$ERRORBEACON_OPENROUTER_MODEL|" .env; else echo "OPENROUTER_MODEL=$ERRORBEACON_OPENROUTER_MODEL" >> .env; fi
-            if grep -q '^OPENROUTER_SITE_URL=' .env; then sed -i "s|^OPENROUTER_SITE_URL=.*|OPENROUTER_SITE_URL=$ERRORBEACON_OPENROUTER_SITE_URL|" .env; else echo "OPENROUTER_SITE_URL=$ERRORBEACON_OPENROUTER_SITE_URL" >> .env; fi
+            # BUG FIX: these seven lines used to reference $ERRORBEACON_GEMINI_MODEL,
+            # $ERRORBEACON_GEMINI_FALLBACK_MODEL, $ERRORBEACON_GROQ_API_KEY,
+            # $ERRORBEACON_GROQ_MODEL, $ERRORBEACON_OPENROUTER_API_KEY,
+            # $ERRORBEACON_OPENROUTER_MODEL, and $ERRORBEACON_OPENROUTER_SITE_URL as
+            # plain bash variables -- but this heredoc uses an UNQUOTED delimiter
+            # (<<EOF, see this step's own comment above), so those get expanded by
+            # THIS JOB'S RUNNER SHELL, not the remote VM, before ever reaching `sed`.
+            # None of those seven names were ever declared in this job's `env:`
+            # block (unlike ERRORBEACON_API_KEY etc. two lines up, which correctly
+            # use inline `${{ secrets.X }}`/`${{ vars.X }}` expressions instead) --
+            # so every one of them silently expanded to an EMPTY string on every
+            # run, blanking these values back out in /opt/snipeit/.env on every VM
+            # deploy regardless of what sync-secrets-vm.yml had previously set.
+            # Fixed by switching to the same inline `${{ ... }}` expression style
+            # already used for the other ErrorBeacon lines in this step.
+            if grep -q '^GEMINI_MODEL=' .env; then sed -i "s|^GEMINI_MODEL=.*|GEMINI_MODEL=${{ vars.ERRORBEACON_GEMINI_MODEL || 'gemini-2.5-flash-lite' }}|" .env; else echo "GEMINI_MODEL=${{ vars.ERRORBEACON_GEMINI_MODEL || 'gemini-2.5-flash-lite' }}" >> .env; fi
+            if grep -q '^GEMINI_FALLBACK_MODEL=' .env; then sed -i "s|^GEMINI_FALLBACK_MODEL=.*|GEMINI_FALLBACK_MODEL=${{ vars.ERRORBEACON_GEMINI_FALLBACK_MODEL || 'gemini-2.5-flash' }}|" .env; else echo "GEMINI_FALLBACK_MODEL=${{ vars.ERRORBEACON_GEMINI_FALLBACK_MODEL || 'gemini-2.5-flash' }}" >> .env; fi
+            if grep -q '^GROQ_API_KEY=' .env; then sed -i "s|^GROQ_API_KEY=.*|GROQ_API_KEY=${{ secrets.ERRORBEACON_GROQ_API_KEY }}|" .env; else echo "GROQ_API_KEY=${{ secrets.ERRORBEACON_GROQ_API_KEY }}" >> .env; fi
+            if grep -q '^GROQ_MODEL=' .env; then sed -i "s|^GROQ_MODEL=.*|GROQ_MODEL=${{ vars.ERRORBEACON_GROQ_MODEL || 'llama-3.1-8b-instant' }}|" .env; else echo "GROQ_MODEL=${{ vars.ERRORBEACON_GROQ_MODEL || 'llama-3.1-8b-instant' }}" >> .env; fi
+            if grep -q '^OPENROUTER_API_KEY=' .env; then sed -i "s|^OPENROUTER_API_KEY=.*|OPENROUTER_API_KEY=${{ secrets.ERRORBEACON_OPENROUTER_API_KEY }}|" .env; else echo "OPENROUTER_API_KEY=${{ secrets.ERRORBEACON_OPENROUTER_API_KEY }}" >> .env; fi
+            if grep -q '^OPENROUTER_MODEL=' .env; then sed -i "s|^OPENROUTER_MODEL=.*|OPENROUTER_MODEL=${{ vars.ERRORBEACON_OPENROUTER_MODEL || 'openrouter/free' }}|" .env; else echo "OPENROUTER_MODEL=${{ vars.ERRORBEACON_OPENROUTER_MODEL || 'openrouter/free' }}" >> .env; fi
+            # No separate ERRORBEACON_OPENROUTER_SITE_URL variable -- redundant
+            # with CUSTOM_DOMAIN, which is already this VM's live public domain
+            # (see infra-deploy-vm.yml's TF_VAR_custom_domain and this same
+            # file's "Look up the live domain" step just below, which reads the
+            # identical value back out of this VM's own DOMAIN= for the smoke
+            # test/poller further down).
+            if grep -q '^OPENROUTER_SITE_URL=' .env; then sed -i "s|^OPENROUTER_SITE_URL=.*|OPENROUTER_SITE_URL=https://${{ vars.CUSTOM_DOMAIN }}|" .env; else echo "OPENROUTER_SITE_URL=https://${{ vars.CUSTOM_DOMAIN }}" >> .env; fi
+            if grep -q '^ERRORBEACON_APP=' .env; then sed -i "s|^ERRORBEACON_APP=.*|ERRORBEACON_APP=${{ vars.ERRORBEACON_APP || 'asset-inventory-quotes' }}|" .env; else echo "ERRORBEACON_APP=${{ vars.ERRORBEACON_APP || 'asset-inventory-quotes' }}" >> .env; fi
             echo "Resolved backend image: $BACKEND_IMAGE:$IMAGE_TAG"
             echo "Resolved frontend image: $FRONTEND_IMAGE:$IMAGE_TAG"
             docker compose -f docker-compose.vm.yml config --images

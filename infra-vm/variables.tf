@@ -202,6 +202,12 @@ variable "errorbeacon_image" {
   default     = "samuelgodson55/errorbeacon-lite"
 }
 
+variable "errorbeacon_app" {
+  description = "Identity string backend/worker/beat report themselves as via the ERRORBEACON_APP env var -- shows up as the \"app\" field on every event ErrorBeacon receives. Matches docker-compose.yml/docker-compose.vm.yml's own ERRORBEACON_APP default so all three deployment paths report under the same identity unless intentionally overridden."
+  type        = string
+  default     = "asset-inventory-quotes"
+}
+
 variable "jwt_secret_key" {
   description = "JWT signing secret. Generate with: openssl rand -hex 32"
   type        = string

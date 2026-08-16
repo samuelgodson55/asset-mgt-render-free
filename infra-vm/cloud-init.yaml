@@ -143,6 +143,7 @@ write_files:
       TELEGRAM_CHAT_ID=${errorbeacon_telegram_chat_id}
       TELEGRAM_THREAD_ID=${errorbeacon_telegram_thread_id}
       GEMINI_API_KEY=${errorbeacon_gemini_api_key}
+      ERRORBEACON_APP=${errorbeacon_app}
       JWT_ALGORITHM=HS256
       JWT_EXPIRY_HOURS=12
 

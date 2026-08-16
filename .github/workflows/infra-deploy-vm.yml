@@ -149,6 +149,7 @@ jobs:
       TF_VAR_errorbeacon_telegram_thread_id: ${{ vars.ERRORBEACON_TELEGRAM_THREAD_ID }}
       TF_VAR_errorbeacon_gemini_api_key: ${{ secrets.ERRORBEACON_GEMINI_API_KEY }}
       TF_VAR_errorbeacon_image: ${{ secrets.DOCKERHUB_USERNAME }}/errorbeacon-lite
+      TF_VAR_errorbeacon_app: ${{ vars.ERRORBEACON_APP || 'asset-inventory-quotes' }}
       TF_VAR_root_admin_bootstrap_password: ${{ secrets.ROOT_ADMIN_BOOTSTRAP_PASSWORD }}
       # /_deploy/ dashboard Basic Auth -- see infra-vm/variables.tf's
       # deploy_status_user/deploy_status_password_hash comments. Leave

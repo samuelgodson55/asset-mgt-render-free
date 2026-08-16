@@ -498,6 +498,7 @@ jobs:
               dockerHubFrontendImage="${{ steps.current.outputs.frontend_repo }}" \
               dockerHubErrorBeaconImage="${{ secrets.DOCKERHUB_USERNAME }}/errorbeacon-lite" \
               errorBeaconEnabled=true \
+              errorBeaconAppName="${{ vars.ERRORBEACON_APP || 'asset-inventory-quotes' }}" \
               errorBeaconApiKey="${{ secrets.ERRORBEACON_API_KEY }}" \
               errorBeaconTelegramBotToken="${{ secrets.ERRORBEACON_TELEGRAM_BOT_TOKEN }}" \
               errorBeaconTelegramChatId="${{ vars.ERRORBEACON_TELEGRAM_CHAT_ID }}" \
@@ -509,7 +510,6 @@ jobs:
               errorBeaconGroqModel="${{ vars.ERRORBEACON_GROQ_MODEL || 'llama-3.1-8b-instant' }}" \
               errorBeaconOpenRouterApiKey="${{ secrets.ERRORBEACON_OPENROUTER_API_KEY }}" \
               errorBeaconOpenRouterModel="${{ vars.ERRORBEACON_OPENROUTER_MODEL || 'openrouter/free' }}" \
-              errorBeaconOpenRouterSiteUrl="${{ vars.ERRORBEACON_OPENROUTER_SITE_URL || 'https://errorbeacon.local' }}" \
               initialImageTag="latest" \
               initialBackendImageTag="${{ steps.current.outputs.backend_tag }}" \
               initialFrontendImageTag="${{ steps.current.outputs.frontend_tag }}" \
@@ -651,6 +651,7 @@ jobs:
               dockerHubFrontendImage="${{ steps.current.outputs.frontend_repo }}" \
               dockerHubErrorBeaconImage="${{ secrets.DOCKERHUB_USERNAME }}/errorbeacon-lite" \
               errorBeaconEnabled=true \
+              errorBeaconAppName="${{ vars.ERRORBEACON_APP || 'asset-inventory-quotes' }}" \
               errorBeaconApiKey="${{ secrets.ERRORBEACON_API_KEY }}" \
               errorBeaconTelegramBotToken="${{ secrets.ERRORBEACON_TELEGRAM_BOT_TOKEN }}" \
               errorBeaconTelegramChatId="${{ vars.ERRORBEACON_TELEGRAM_CHAT_ID }}" \
@@ -662,7 +663,6 @@ jobs:
               errorBeaconGroqModel="${{ vars.ERRORBEACON_GROQ_MODEL || 'llama-3.1-8b-instant' }}" \
               errorBeaconOpenRouterApiKey="${{ secrets.ERRORBEACON_OPENROUTER_API_KEY }}" \
               errorBeaconOpenRouterModel="${{ vars.ERRORBEACON_OPENROUTER_MODEL || 'openrouter/free' }}" \
-              errorBeaconOpenRouterSiteUrl="${{ vars.ERRORBEACON_OPENROUTER_SITE_URL || 'https://errorbeacon.local' }}" \
               initialImageTag="latest" \
               initialBackendImageTag="${{ steps.current.outputs.backend_tag }}" \
               initialFrontendImageTag="${{ steps.current.outputs.frontend_tag }}" \
@@ -779,6 +779,7 @@ jobs:
               dockerHubFrontendImage="${{ steps.current.outputs.frontend_repo }}" \
               dockerHubErrorBeaconImage="${{ secrets.DOCKERHUB_USERNAME }}/errorbeacon-lite" \
               errorBeaconEnabled=true \
+              errorBeaconAppName="${{ vars.ERRORBEACON_APP || 'asset-inventory-quotes' }}" \
               errorBeaconApiKey="${{ secrets.ERRORBEACON_API_KEY }}" \
               errorBeaconTelegramBotToken="${{ secrets.ERRORBEACON_TELEGRAM_BOT_TOKEN }}" \
               errorBeaconTelegramChatId="${{ vars.ERRORBEACON_TELEGRAM_CHAT_ID }}" \
@@ -790,7 +791,6 @@ jobs:
               errorBeaconGroqModel="${{ vars.ERRORBEACON_GROQ_MODEL || 'llama-3.1-8b-instant' }}" \
               errorBeaconOpenRouterApiKey="${{ secrets.ERRORBEACON_OPENROUTER_API_KEY }}" \
               errorBeaconOpenRouterModel="${{ vars.ERRORBEACON_OPENROUTER_MODEL || 'openrouter/free' }}" \
-              errorBeaconOpenRouterSiteUrl="${{ vars.ERRORBEACON_OPENROUTER_SITE_URL || 'https://errorbeacon.local' }}" \
               initialImageTag="latest" \
               initialBackendImageTag="${{ steps.current.outputs.backend_tag }}" \
               initialFrontendImageTag="${{ steps.current.outputs.frontend_tag }}" \
