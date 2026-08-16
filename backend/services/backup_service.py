@@ -2289,6 +2289,17 @@ def _restore_backup_impl(filepath: str, take_safety_backup: bool = True) -> dict
         # alongside pool_pre_ping (see database.py's engine setup).
         database_module.engine.dispose()
 
+        # The readiness engine is deliberately separate from the request pool,
+        # but it can also hold a connection lifecycle tied to the pre-restore
+        # schema. Dispose it explicitly after a destructive restore so the
+        # final readiness check is guaranteed to open a brand-new connection
+        # against the restored database.
+        readiness_engine = getattr(database_module, "readiness_engine", None)
+        if readiness_engine is not None:
+            readiness_engine.dispose()
+        if hasattr(database_module, "_readiness_engine_source"):
+            database_module._readiness_engine_source = None
+
         schema_status_after = database_module.get_schema_status()
         logger.warning(
             "backup_service: post-restore schema status -- ready=%s (%s)",

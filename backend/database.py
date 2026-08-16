@@ -438,7 +438,11 @@ def get_schema_status() -> dict:
     expected_heads = set(_expected_migration_heads())
 
     try:
-        with _get_readiness_engine().connect() as conn:
+        # Refresh the dedicated readiness engine first when tests/startup swap
+        # the application's main engine, then use that dedicated engine
+        # explicitly. This keeps /readyz independent from the request pool.
+        _get_readiness_engine()
+        with readiness_engine.connect() as conn:
             if not inspect(conn).has_table("alembic_version"):
                 # BUG FIX (silent readiness failures): every "not ready"
                 # branch below used to return straight to the caller with

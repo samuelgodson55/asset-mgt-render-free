@@ -52,32 +52,44 @@ export function reportClientError(error, context = {}) {
   lastReportAt = now;
 
   const err = error instanceof Error ? error : new Error(String(error));
-  // Best-effort only. Keep the beacon itself from becoming the error when
-  // fetch is unavailable or a test/runtime shim returns a non-Promise.
+  const payload = JSON.stringify({
+    message: String(err.message || err).slice(0, 5000),
+    stack: String(err.stack || '').slice(0, 12000),
+    path: window.location.pathname,
+    request_id: lastRequestId,
+    context: {
+      ...context,
+      url: sanitizeUrl(window.location.href),
+      userAgent: navigator.userAgent.slice(0, 500),
+      requestId: lastRequestId,
+    },
+  });
+
+  // IMPORTANT: telemetry must never use the application's global fetch().
+  // API tests intentionally mock fetch() and expect exactly one business
+  // request. More importantly, a failed telemetry request must never replace
+  // the original application/network error we are trying to report.
   try {
-    Promise.resolve(fetch('/api/telemetry/client-error', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      keepalive: true,
-      body: JSON.stringify({
-        message: String(err.message || err).slice(0, 5000),
-        stack: String(err.stack || '').slice(0, 12000),
-        path: window.location.pathname,
-        request_id: lastRequestId,
-        context: {
-          ...context,
-          url: sanitizeUrl(window.location.href),
-          userAgent: navigator.userAgent.slice(0, 500),
-          requestId: lastRequestId,
-        },
-      }),
-    })).catch(() => {
-      // Best-effort only -- a failed error report should never itself surface
-      // as an error to the user.
-    });
+    if (typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
+      const accepted = navigator.sendBeacon(
+        '/api/telemetry/client-error',
+        new Blob([payload], { type: 'application/json' }),
+      );
+      if (accepted) return;
+    }
+
+    // sendBeacon is unavailable or declined the payload. XHR is deliberately
+    // used as an isolated fallback instead of fetch(), so telemetry remains
+    // outside the application's request/retry/error path.
+    if (typeof XMLHttpRequest === 'function') {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/telemetry/client-error', true);
+      xhr.setRequestHeader('Content-Type', 'application/json');
+      xhr.withCredentials = true;
+      xhr.send(payload);
+    }
   } catch {
-    // Synchronous fetch failures are also intentionally ignored.
+    // Telemetry is strictly best-effort. Never throw from this function.
   }
 }
 
