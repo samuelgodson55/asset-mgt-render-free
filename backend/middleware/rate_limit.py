@@ -122,18 +122,47 @@ class RateLimitMiddleware:
         counter (it never reaches max_requests on any single key). This
         bit us in production validation: session-redis-test.py sent 6
         rapid login attempts and never got a 429.
+
+        BUG FIX -- round 2: the first fix here checked X-Real-IP BEFORE
+        X-Forwarded-For, which turned out to be exactly backwards.
+        `frontend` (external: true) isn't the first hop for real traffic
+        either -- Azure Container Apps' own platform ingress (Envoy) sits
+        in front of it too, the same way it sits in front of `backend`.
+        nginx's `X-Real-IP $remote_addr` (see nginx/default.conf.template)
+        reflects whatever IP ACA's OWN edge proxy connected from, which
+        can vary request-to-request depending on which ACA ingress node
+        happened to handle it -- the identical class of bug as the
+        scope["client"] issue above, just one hop further out. Confirmed
+        in production logs: after the first fix deployed, Redis's INCR
+        was succeeding on every single login attempt (no "Redis
+        unavailable" fail-open warning anywhere in the logs), yet
+        session-redis-test.py's 6 rapid attempts still never got a 429 --
+        only explainable by each attempt hashing to a DIFFERENT Redis key,
+        i.e. a different perceived client_ip per request, i.e. X-Real-IP
+        (which we were checking first) was not stable.
+        X-Forwarded-For IS stable: ACA's ingress prepends the true
+        external client IP onto it before nginx ever sees it, and nginx's
+        `$proxy_add_x_forwarded_for` only ever appends to that (never
+        replaces it) -- so the LEFTMOST entry is the one value that stays
+        constant across every hop and every request from the same real
+        client, regardless of which ACA/nginx internal node handled it.
+        Checking it first (X-Real-IP now only a fallback) is what actually
+        fixes this.
         """
         headers = dict(scope.get("headers") or [])
-        real_ip = headers.get(b"x-real-ip")
-        if real_ip:
-            return real_ip.decode("latin-1").strip()
 
         forwarded_for = headers.get(b"x-forwarded-for")
         if forwarded_for:
             # nginx appends via $proxy_add_x_forwarded_for, so the FIRST
-            # entry is the original client -- everything after it is hops
-            # nginx itself added.
-            return forwarded_for.decode("latin-1").split(",")[0].strip()
+            # (leftmost) entry is the original client -- everything after
+            # it is a hop (ACA's ingress, nginx itself, ...) added later.
+            first = forwarded_for.decode("latin-1").split(",")[0].strip()
+            if first:
+                return first
+
+        real_ip = headers.get(b"x-real-ip")
+        if real_ip:
+            return real_ip.decode("latin-1").strip()
 
         # Fallback for local/docker-compose dev, where nginx isn't
         # necessarily in front of the backend the same way.
