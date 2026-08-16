@@ -355,23 +355,14 @@ def _create_readiness_engine_from_url(source_url):
     even though PostgreSQL itself is healthy. NullPool plus short PostgreSQL
     connect/statement timeouts makes the probe deterministic: healthy DB =>
     fast 200; unreachable/slow DB => fast 503.
-
-    IMPORTANT: `make_url()` is given `source_url` directly, NOT
-    `str(source_url)`. SQLAlchemy's `URL.__str__()` renders via
-    `render_as_string(hide_password=True)`, which replaces a real password
-    with the literal string "***" -- fine for logging, fatal for actually
-    connecting. Round-tripping through `str()` here silently swapped in
-    that masked password, so this readiness engine (and, transitively,
-    `backup_service`'s post-restore schema-status check, which reuses this
-    helper) connected to Postgres with the password "***" and failed with a
-    genuine `password authentication failed` error even when
-    settings.DATABASE_URL was completely correct. `make_url()` happily
-    accepts a `URL` object as well as a string and preserves the real
-    password either way, so passing `source_url` through unchanged fixes
-    this without any behavior change for callers that already pass a
-    plain string.
     """
-    url = make_url(source_url)
+    # IMPORTANT: never round-trip a SQLAlchemy URL through `str()` here.
+    # `str(URL)` intentionally hides the password as `***` for safe logging.
+    # Feeding that masked string back into `make_url()` changes the actual
+    # credentials used by the readiness connection and causes misleading
+    # `password authentication failed` errors after a restore. Keep an
+    # existing SQLAlchemy URL object intact; only parse plain strings.
+    url = source_url if hasattr(source_url, "get_backend_name") else make_url(str(source_url))
     kwargs = {"poolclass": NullPool}
     if url.get_backend_name().startswith("postgresql"):
         kwargs["connect_args"] = {
@@ -396,13 +387,25 @@ def _create_readiness_engine():
 # tests or application startup swap the main engine for another database.
 readiness_engine = _create_readiness_engine()
 _readiness_engine_source = engine
+_readiness_engine_source_url = engine.url
 
 
 def _get_readiness_engine():
     """Return a readiness-only engine matching the current application engine."""
-    global readiness_engine, _readiness_engine_source
+    global readiness_engine, _readiness_engine_source, _readiness_engine_source_url
 
-    if readiness_engine is not None and _readiness_engine_source is engine:
+    # Compare both the engine object and its URL. Tests and restore workflows
+    # can replace/dispose the main engine without replacing this module's
+    # readiness engine object. Comparing the URL object itself keeps the
+    # credentials/host identity intact because `str(URL)` masks passwords.
+    # identity check. `str(engine.url)` deliberately masks passwords and
+    # could make two different database credentials look identical.
+    current_source_url = engine.url
+    if (
+        readiness_engine is not None
+        and _readiness_engine_source is engine
+        and _readiness_engine_source_url == current_source_url
+    ):
         return readiness_engine
 
     if readiness_engine is not None:
@@ -410,6 +413,7 @@ def _get_readiness_engine():
 
     readiness_engine = _create_readiness_engine_from_url(engine.url)
     _readiness_engine_source = engine
+    _readiness_engine_source_url = current_source_url
     return readiness_engine
 
 

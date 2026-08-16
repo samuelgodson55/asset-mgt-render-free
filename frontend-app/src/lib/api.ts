@@ -80,17 +80,9 @@ function retryDelayMs(attempt: number): number {
 async function rawFetch<T = unknown>(path: string, init?: RequestInit): Promise<T> {
   const method = String(init?.method ?? "GET").toUpperCase();
   const retrySafe = SAFE_RETRY_METHODS.has(method);
+  let lastNetworkError: unknown = null;
 
-  // Retries only ever apply to a response we actually got back (a transient
-  // 502/503/504 -- see TRANSIENT_HTTP_STATUSES below). A network-level
-  // failure (fetch() itself throwing -- DNS failure, connection refused,
-  // offline, CORS, etc.) is surfaced immediately and never retried here:
-  // retrying it silently would mean a single real outage turns into several
-  // more fetch() calls before the caller ever finds out, and -- for a
-  // signed-in, non-demo session -- tryLoad()'s contract above depends on
-  // that failure propagating so it is never mistaken for a moment to fall
-  // back to demo data.
-  for (let attempt = 0; attempt < API_RETRY_ATTEMPTS; attempt += 1) {
+  for (let attempt = 0; attempt < (retrySafe ? API_RETRY_ATTEMPTS : 1); attempt += 1) {
     let res: Response;
     try {
       res = await fetch(`${API_BASE}${path}`, {
@@ -99,8 +91,28 @@ async function rawFetch<T = unknown>(path: string, init?: RequestInit): Promise<
         ...init,
       });
     } catch (err) {
+      // A transport/network failure is already ambiguous from the browser's
+      // point of view: the request may have left the machine even if no
+      // response came back. Do not automatically replay it, even for GETs.
+      // HTTP 502/503/504 responses are the only failures this client retries,
+      // because those are explicit server/proxy responses that can be safely
+      // classified by the policy below. This also preserves the ORIGINAL
+      // network error for callers instead of allowing a later retry/test stub
+      // failure to replace it.
+      lastNetworkError = err;
       reportClientError(err, { source: "api.network", endpoint: path, attempts: attempt + 1 });
       throw err;
+    }
+
+    // A real browser `fetch()` always resolves with a Response. Treat an
+    // undefined/null value defensively anyway because test doubles, custom
+    // fetch adapters, or future wrappers can violate that contract. Most
+    // importantly, never turn the original network error into a secondary
+    // `Cannot read properties of undefined (reading 'headers')` error.
+    if (!res) {
+      throw lastNetworkError instanceof Error
+        ? lastNetworkError
+        : new Error("Request failed: fetch returned no response");
     }
 
     const requestId = res.headers.get("x-request-id");
@@ -132,7 +144,7 @@ async function rawFetch<T = unknown>(path: string, init?: RequestInit): Promise<
     return (await res.json()) as T;
   }
 
-  throw new Error("Request failed after retries");
+  throw lastNetworkError instanceof Error ? lastNetworkError : new Error("Request failed after retries");
 }
 
 /**

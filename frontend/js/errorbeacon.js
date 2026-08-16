@@ -93,27 +93,14 @@ export function reportClientError(error, context = {}) {
   }
 }
 
-// Wires window-level error listeners and wraps window.fetch so every
-// response's X-Request-ID header updates lastRequestId. Safe to call more
-// than once; only the first call takes effect.
+// Wires only window-level error listeners. API request correlation is handled
+// by the API module itself, immediately after each successful fetch. We
+// deliberately do NOT monkey-patch window.fetch here: changing the global
+// fetch function makes request failures harder to reason about and can cause
+// test doubles or other application code to receive an unexpected wrapper.
 export function installGlobalErrorBeacon() {
   if (patched || typeof window === 'undefined') return;
   patched = true;
-
-  const nativeFetch = typeof window.fetch === 'function'
-    ? window.fetch.bind(window)
-    : typeof globalThis.fetch === 'function'
-      ? globalThis.fetch.bind(globalThis)
-      : null;
-
-  if (nativeFetch) {
-    window.fetch = async (...args) => {
-      const response = await nativeFetch(...args);
-      const requestId = response?.headers?.get?.('x-request-id');
-      if (requestId) setLastRequestId(requestId);
-      return response;
-    };
-  }
 
   window.addEventListener('error', (e) => {
     reportClientError(e.error || new Error(e.message), { source: 'window.error' });

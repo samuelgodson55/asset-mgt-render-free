@@ -2310,6 +2310,8 @@ def _restore_backup_impl(filepath: str, take_safety_backup: bool = True) -> dict
             readiness_engine.dispose()
         if hasattr(database_module, "_readiness_engine_source"):
             database_module._readiness_engine_source = None
+        if hasattr(database_module, "_readiness_engine_source_url"):
+            database_module._readiness_engine_source_url = None
 
         schema_status_after = database_module.get_schema_status()
         logger.warning(
