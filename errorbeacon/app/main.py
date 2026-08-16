@@ -204,24 +204,38 @@ def init_db():
             with _db_lock:
                 last_error = None
                 c = None
-                for attempt in range(5):
-                    try:
-                        c = sqlite3.connect(DB_PATH, timeout=15)
-                        journal = os.getenv('SQLITE_JOURNAL_MODE', 'WAL').upper()
-                        journal = journal if journal in {'WAL','DELETE','TRUNCATE','PERSIST'} else 'WAL'
-                        c.execute(f'PRAGMA journal_mode={journal}')
-                        c.execute('PRAGMA busy_timeout=15000')
-                        last_error = None
+                configured_journal = os.getenv('SQLITE_JOURNAL_MODE', 'WAL').upper()
+                configured_journal = configured_journal if configured_journal in {'WAL','DELETE','TRUNCATE','PERSIST'} else 'WAL'
+                # WAL mode needs a shared-memory (-shm) mmap that network filesystems
+                # (Azure Files/SMB, NFS, etc.) don't support reliably -- on those mounts
+                # every PRAGMA journal_mode=WAL attempt fails with "database is locked",
+                # even for a single writer, and retrying the same mode never helps. Retry
+                # the configured mode first (transient locks do happen on local disks
+                # too), then fall back to DELETE -- a plain rollback journal that needs
+                # no shared memory -- instead of failing startup forever.
+                journal_attempts = [configured_journal]
+                if configured_journal != 'DELETE':
+                    journal_attempts.append('DELETE')
+                for journal in journal_attempts:
+                    for attempt in range(5):
+                        try:
+                            c = sqlite3.connect(DB_PATH, timeout=15)
+                            c.execute(f'PRAGMA journal_mode={journal}')
+                            c.execute('PRAGMA busy_timeout=15000')
+                            last_error = None
+                            break
+                        except sqlite3.OperationalError as exc:
+                            last_error = exc
+                            if c is not None:
+                                try:
+                                    c.close()
+                                except Exception:
+                                    pass
+                                c = None
+                            time.sleep(0.25 * (attempt + 1))
+                    if last_error is None:
                         break
-                    except sqlite3.OperationalError as exc:
-                        last_error = exc
-                        if c is not None:
-                            try:
-                                c.close()
-                            except Exception:
-                                pass
-                            c = None
-                        time.sleep(0.25 * (attempt + 1))
+                    log.warning('ErrorBeacon SQLite journal_mode=%s unavailable (%s); trying fallback', journal, last_error)
                 if last_error is not None or c is None:
                     raise last_error or sqlite3.OperationalError('Unable to initialize ErrorBeacon SQLite database')
                 try:

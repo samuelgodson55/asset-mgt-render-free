@@ -1270,6 +1270,15 @@ resource errorBeaconApp 'Microsoft.App/containerApps@2024-03-01' = if (errorBeac
             // comment above.
             { name: 'OPENROUTER_SITE_URL', value: publicOrigin }
             { name: 'DATA_DIR', value: '/data' }
+            // '/data' here is the errorbeacon-data Azure Files (SMB) share (see
+            // errorBeaconStorage above), not local disk. SQLite's default WAL journal
+            // mode needs a shared-memory mmap that Azure Files doesn't support, so
+            // PRAGMA journal_mode=WAL fails with "database is locked" on every startup
+            // even with a single replica/worker. DELETE (plain rollback journal) needs
+            // no shared memory and works correctly over the file share. Local deploy
+            // paths (docker-compose.yml, render.yaml, infra-vm) use local disk and are
+            // unaffected -- they keep the app's WAL default.
+            { name: 'SQLITE_JOURNAL_MODE', value: 'DELETE' }
             { name: 'DEDUP_SECONDS', value: '60' }
             { name: 'SPIKE_THRESHOLD', value: '10' }
             { name: 'SPIKE_WINDOW_SECONDS', value: '300' }
