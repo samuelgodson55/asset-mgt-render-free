@@ -1475,6 +1475,8 @@ see `.gitignore`) and are read by `backend/config.py` into a single typed
 | `DISPLAY_TIMEZONE` | `Africa/Lagos` | IANA timezone every CSV/PDF export (audit ledger, properties-assigned reports) renders its timestamps in, and the zone an export date-range filter's "from"/"to" boundaries are interpreted in. Data is always stored/queried as UTC either way — this only controls the DISPLAY layer, so exported hours match what the Audit Trail already shows on screen (which converts UTC → browser-local automatically). The backend refuses to start if this isn't a real IANA zone name. |
 | `CORS_ORIGINS` | localhost variants | Comma-separated list of origins allowed to call the API. |
 | `AUTO_INIT_DB` | `true` | If true, runs `create_all()` on startup (creates missing tables). Set `false` in production and use Alembic instead. |
+
+**Local Docker note (v11):** the Compose stack intentionally overrides `AUTO_INIT_DB=false` and runs a one-shot `migrate` service (`alembic upgrade head`) before the backend, worker, and Beat start. This keeps the local schema versioned. You do **not** need `alembic stamp head`; for a disposable local database, use `docker compose down -v` and rebuild.
 | `AUTO_SEED_DEMO_DATA` | `true` | If true, seeds demo accounts/data on an empty DB at startup. Set `false` in production. Independently of this flag, the login page's "Demo accounts" credentials hint box (`frontend/index.html`) is physically removed from the shipped HTML whenever the frontend image is built with `BUILD_ENV=production` — see `build-frontend/build.js`'s `BUILD:PROD-STRIP` markers and the "Frontend build modes" section below. |
 | `LOG_LEVEL` | `INFO` | `DEBUG` \| `INFO` \| `WARNING` \| `ERROR` \| `CRITICAL`. |
 | `LOG_FORMAT` | `json` | `json` (production/log aggregators) or `text` (readable local dev). |
@@ -2957,6 +2959,19 @@ navbar/modal/tab structure. To add a new tab:
   changes state.** Copy the `db.add(models.AuditLog(...))` pattern from a
   neighboring function in the same service file.
 
+## Resilience, zero-downtime and performance validation
+
+The P1/P2 hardening suite is documented in [`P1_P2_RESILIENCE.md`](P1_P2_RESILIENCE.md).
+
+Quick local checks:
+
+```bash
+./scripts/chaos-test.sh
+python scripts/load-test.py --url http://localhost:8080/healthz --requests 500 --concurrency 25
+```
+
+The chaos test verifies Redis, Celery worker, ErrorBeacon and PostgreSQL failure/recovery behavior. The load runner reports throughput and p50/p95/p99 latency. Safe browser GETs also retry brief 502/503/504/network failures, while mutations are deliberately never retried automatically.
+
 ## Testing Your Changes
 
 ### Automated test suite (`backend/tests/`)
@@ -3621,3 +3636,13 @@ Small, well-scoped follow-ups if you want to keep extending this project:
 The **Deploy ACA Infrastructure (Bicep)** workflow now surfaces infrastructure previews in the GitHub Actions **Summary** tab. `plan` runs Azure Resource Manager What-If without changing Azure and reports Create/Modify/Delete/Deploy/No-change counts plus resource IDs. `apply` runs the same What-If immediately before the deployment and records the preview before applying it. `destroy` reads the Deployment Stack's managed-resource list and publishes the resources that will be deleted; the parent resource group is retained.
 
 The Bicep preview uses `az deployment group what-if`, while actual lifecycle management continues to use the Azure Deployment Stack. Azure's What-If supports resource-group scoped previews, and Deployment Stacks support `deleteResources` for deleting resources that are no longer managed.
+
+## ErrorBeacon real-time monitoring
+
+The application now has an isolated ErrorBeacon service for fast exception detection and Telegram notification. It does not replace Azure Monitor/Application Insights; it shortens the path from an unexpected application error to a human-readable alert.
+
+See:
+
+- [`ERRORBEACON_COVERAGE.md`](ERRORBEACON_COVERAGE.md) for the system-wide error-handling scan and capture points.
+- [`errorbeacon/README.md`](errorbeacon/README.md) for the monitor itself.
+- [`errorbeacon/DEPLOYMENT.md`](errorbeacon/DEPLOYMENT.md) for local Docker, Render Free, ACA, VM and other deployment paths.

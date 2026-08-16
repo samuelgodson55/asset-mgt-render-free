@@ -1,3 +1,14 @@
+## ErrorBeacon AI analysis hardening\n\n- Enforced deterministic ROOT CAUSE, IMPACT, NEXT STEPS, and CONFIDENCE sections.\n- Rejects incomplete AI output instead of sending malformed analysis to Telegram.\n- Adds factuality and evidence-only instructions to the Gemini prompt.\n- Added tests for section parsing, required sections, and confidence normalization.\n\n## v8 — Correlation + Chaos Test Hardening
+
+- Forward the Asset application's `X-Request-ID` to ErrorBeacon ingestion.
+- Add ErrorBeacon request-context middleware and structured request IDs to its own Uvicorn access logs.
+- Return `request_id` from ErrorBeacon event ingestion responses.
+- Make `/v1/test` use the middleware correlation ID.
+- Fix the local chaos suite to test backend `/readyz` directly instead of the frontend proxy.
+- Add Redis fail-open login validation, ErrorBeacon outage latency validation, PostgreSQL readiness/recovery validation, and end-to-end frontend → backend → ErrorBeacon correlation validation.
+- Add correlation unit tests and ErrorBeacon request-ID middleware tests.
+- ErrorBeacon version bumped to 3.1.0.
+
 # Changelog
 
 ## Table of Contents

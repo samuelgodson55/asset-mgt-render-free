@@ -10,6 +10,8 @@ instead of an empty one.
 
 import datetime
 import logging
+from functools import lru_cache
+from integrations.fastapi_errorbeacon import report_background_exception
 import os
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
@@ -68,7 +70,8 @@ def _probe_postgres_connection_budget(url) -> "tuple[int, int] | None":
             return int(max_conn), int(reserved)
         finally:
             probe_engine.dispose()
-    except Exception:
+    except Exception as exc:
+        report_background_exception(exc, component="database", operation="probe_connection_budget", severity="warning")
         logger.warning(
             "database: couldn't probe the Postgres server's connection budget "
             "(unreachable, not Postgres, or lacking permission to read "
@@ -327,6 +330,47 @@ def get_db():
             )
 
 
+@lru_cache(maxsize=1)
+def _expected_migration_heads() -> tuple[str, ...]:
+    """Return the immutable migration heads baked into this application image.
+
+    The code/migrations shipped in a running container do not change, so there
+    is no reason to parse the Alembic script directory on every readiness probe.
+    Caching this removes avoidable filesystem/import work from a hot probe path.
+    """
+    from alembic.config import Config as AlembicConfig
+    from alembic.script import ScriptDirectory
+
+    backend_dir = os.path.dirname(os.path.abspath(__file__))
+    alembic_cfg = AlembicConfig(os.path.join(backend_dir, "alembic.ini"))
+    alembic_cfg.set_main_option("script_location", os.path.join(backend_dir, "alembic"))
+    return tuple(sorted(ScriptDirectory.from_config(alembic_cfg).get_heads()))
+
+
+def _create_readiness_engine():
+    """Create a short-lived, unpooled engine dedicated to readiness checks.
+
+    Readiness must never wait behind the application's normal SQLAlchemy pool.
+    Under load, a full request pool could otherwise make /readyz appear hung
+    even though PostgreSQL itself is healthy. NullPool plus short PostgreSQL
+    connect/statement timeouts makes the probe deterministic: healthy DB =>
+    fast 200; unreachable/slow DB => fast 503.
+    """
+    url = make_url(DATABASE_URL)
+    kwargs = {"poolclass": NullPool}
+    if url.get_backend_name().startswith("postgresql"):
+        kwargs["connect_args"] = {
+            "connect_timeout": 3,
+            "options": "-c statement_timeout=3000",
+        }
+    return create_engine(url, **kwargs)
+
+
+# Never share the application's pooled engine with /readyz. This engine holds
+# no persistent connections and is used only for the tiny readiness query.
+readiness_engine = _create_readiness_engine()
+
+
 def get_schema_status() -> dict:
     """
     Compares the database's ACTUAL current migration revision (whatever
@@ -361,19 +405,13 @@ def get_schema_status() -> dict:
     equal this code's expected head(s).
     """
     from sqlalchemy import inspect, text
-    from alembic.config import Config as AlembicConfig
-    from alembic.script import ScriptDirectory
 
-    # Resolve the migration(s) THIS CODE expects to be current -- reads
-    # straight from backend/alembic/versions/ as shipped in this image,
-    # completely independent of whatever the database actually contains.
-    backend_dir = os.path.dirname(os.path.abspath(__file__))
-    alembic_cfg = AlembicConfig(os.path.join(backend_dir, "alembic.ini"))
-    alembic_cfg.set_main_option("script_location", os.path.join(backend_dir, "alembic"))
-    expected_heads = set(ScriptDirectory.from_config(alembic_cfg).get_heads())
+    # Resolve the migration(s) THIS CODE expects to be current once per
+    # process. The database side is still checked on every probe.
+    expected_heads = set(_expected_migration_heads())
 
     try:
-        with engine.connect() as conn:
+        with readiness_engine.connect() as conn:
             if not inspect(conn).has_table("alembic_version"):
                 # BUG FIX (silent readiness failures): every "not ready"
                 # branch below used to return straight to the caller with
@@ -428,6 +466,7 @@ def get_schema_status() -> dict:
                 return status
             current_heads = {row[0] for row in conn.execute(text("SELECT version_num FROM alembic_version"))}
     except Exception as exc:
+        report_background_exception(exc, component="database", operation="readiness_check", severity="error")
         # Same "fail legibly, not with a raw traceback" reasoning as
         # main.py's on_startup() -- an unreachable database at readiness-
         # check time should read as "not ready yet", not crash the probe.

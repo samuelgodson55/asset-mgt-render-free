@@ -66,6 +66,7 @@ from database import init_db, seed_db, get_schema_status, engine as db_engine
 from config import settings
 from logging_config import configure_logging
 from telemetry import setup_tracing, shutdown_tracing, instrument_fastapi_app, instrument_sqlalchemy_engine
+from integrations.fastapi_errorbeacon import report_background_exception
 from middleware.error_handling import UnhandledExceptionMiddleware
 from middleware.request_context import RequestContextMiddleware
 from middleware.rate_limit import RateLimitMiddleware
@@ -83,6 +84,7 @@ from api.backup_api import router as backup_router
 from api.quotations_api import router as quotations_router
 from api.notifications_api import router as notifications_router
 from api.reports_api import router as reports_router
+from api.telemetry_api import router as telemetry_router
 
 # ---------------------------------------------------------------------------
 # STRUCTURED LOGGING -- configure this FIRST, before anything else in the
@@ -164,7 +166,8 @@ def on_startup() -> None:
             init_db()
         else:
             logger.info("AUTO_INIT_DB is disabled -- skipping create_all(). Run 'alembic upgrade head' instead.")
-    except Exception:
+    except Exception as exc:
+        report_background_exception(exc, component="startup", operation="database_init", severity="critical")
         logger.error(
             "Could not reach the database at startup. Common causes: (1) "
             "DATABASE_URL is wrong/unset -- check host, port, credentials, "
@@ -450,6 +453,7 @@ app.include_router(backup_router, prefix="/api")
 app.include_router(quotations_router, prefix="/api")
 app.include_router(notifications_router, prefix="/api")
 app.include_router(reports_router, prefix="/api")
+app.include_router(telemetry_router, prefix="/api")
 
 # ---------------------------------------------------------------------------
 # STATIC FRONTEND (free-tier single-service deployment only)

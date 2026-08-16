@@ -1548,3 +1548,80 @@ caution applies to `REDIS_PASSWORD`.
 The **Deploy ACA Infrastructure (Bicep)** workflow now surfaces infrastructure previews in the GitHub Actions **Summary** tab. `plan` runs Azure Resource Manager What-If without changing Azure and reports Create/Modify/Delete/Deploy/No-change counts plus resource IDs. `apply` runs the same What-If immediately before the deployment and records the preview before applying it. `destroy` reads the Deployment Stack's managed-resource list and publishes the resources that will be deleted; the parent resource group is retained.
 
 The Bicep preview uses `az deployment group what-if`, while actual lifecycle management continues to use the Azure Deployment Stack. Azure's What-If supports resource-group scoped previews, and Deployment Stacks support `deleteResources` for deleting resources that are no longer managed.
+
+## ErrorBeacon monitoring
+
+The production application now includes ErrorBeacon as a separate service. See [`ERRORBEACON_COVERAGE.md`](ERRORBEACON_COVERAGE.md) for the system-wide error-handling map and [`errorbeacon/DEPLOYMENT.md`](errorbeacon/DEPLOYMENT.md) for monitor deployment.
+
+### ACA
+
+The ACA infrastructure workflow provisions an internal `errorbeacon` Container App with `minReplicas=1`. It is deliberately outside the backend/frontend blue-green traffic lifecycle. The infrastructure workflow builds/pushes the ErrorBeacon image before applying Bicep, so the first infrastructure deployment does not depend on a manually pre-pushed monitor image.
+
+Configure these GitHub Environment values/secrets once:
+
+```text
+ERRORBEACON_API_KEY                 secret
+ERRORBEACON_TELEGRAM_BOT_TOKEN      secret
+ERRORBEACON_GROQ_API_KEY            secret (optional)
+ERRORBEACON_GEMINI_API_KEY          secret (optional)
+ERRORBEACON_OPENROUTER_API_KEY      secret (optional)
+ERRORBEACON_TELEGRAM_CHAT_ID        variable
+ERRORBEACON_TELEGRAM_THREAD_ID      variable (optional)
+ERRORBEACON_GROQ_MODEL               variable (optional)
+ERRORBEACON_GEMINI_MODEL             variable (optional)
+ERRORBEACON_GEMINI_FALLBACK_MODEL    variable (optional)
+ERRORBEACON_OPENROUTER_MODEL         variable (optional)
+ERRORBEACON_OPENROUTER_SITE_URL      variable (optional)
+```
+
+The backend receives `ERRORBEACON_URL=http://errorbeacon:8000` and the shared API key automatically through the Bicep deployment.
+
+### VM
+
+The VM Compose file includes an independent `errorbeacon` container with persistent storage under:
+
+```text
+/mnt/docker-data/volumes/errorbeacon_data
+```
+
+The VM deployment workflow builds/pushes `errorbeacon-lite`, writes its image tag and monitoring secrets to `/opt/snipeit/.env`, and starts it independently of the blue/green backend slots.
+
+### Local Docker
+
+The standard local Compose file includes `errorbeacon`. Generate the API key, place the Telegram credentials in `.env`, then run:
+
+```bash
+docker compose up -d --build
+```
+
+The backend uses the private Compose address:
+
+```text
+http://errorbeacon:8000
+```
+
+### Render Free
+
+Use the standalone `errorbeacon/` service with the included Render Blueprint. For a practical free warm-up, point a free external HTTP monitor such as UptimeRobot at `/healthz` every 5 minutes. This reduces cold-start exposure but is not an uptime guarantee. Render Free's filesystem is ephemeral, so use an external durable database if incident history must survive restarts.
+
+## ErrorBeacon production monitoring
+
+The integrated ErrorBeacon service is isolated from backend/frontend blue-green traffic. It uses a bounded alert queue, fixed workers, persistent incident/spike state, comprehensive secret redaction, browser request-ID correlation, and Telegram View/Resolve/Silence controls.
+
+For ACA, `/data` is backed by the dedicated `errorbeacon-data` Azure Files share. For the VM, `/data` maps to `/mnt/docker-data/volumes/errorbeacon_data`. Render Free remains best-effort because its filesystem is ephemeral.
+
+## Local Docker direct backend diagnostics
+
+The local `docker-compose.yml` publishes FastAPI directly on `localhost:8001` by
+default (override with `BACKEND_DIRECT_PORT`). The public application remains
+ on `localhost:8080` through nginx. This is intentional: readiness and chaos
+ tests must hit the real FastAPI `/readyz`, not an nginx SPA fallback that could
+ return HTTP 200 while the backend is unhealthy.
+
+```bash
+curl http://localhost:8001/healthz
+curl http://localhost:8001/readyz
+```
+
+This direct port is a local Docker diagnostic surface only. ACA, VM and Render
+deployments do not expose the backend directly to the public internet.

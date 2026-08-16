@@ -96,7 +96,13 @@ class RateLimitMiddleware:
         # point handling raw bytes everywhere below. A single shared
         # connection pool (redis-py manages this internally) is reused for
         # the lifetime of the process rather than reconnecting per request.
-        self._redis = redis.from_url(settings.REDIS_URL, decode_responses=True)
+        self._redis = redis.from_url(
+            settings.REDIS_URL,
+            decode_responses=True,
+            socket_connect_timeout=1,
+            socket_timeout=1,
+            health_check_interval=30,
+        )
 
     def _client_ip(self, scope: Scope) -> str:
         client = scope.get("client")
@@ -126,7 +132,9 @@ class RateLimitMiddleware:
                 retry_after = self.window_seconds - int(time.time() % self.window_seconds)
                 return True, max(1, retry_after)
             return False, 0
-        except redis.RedisError:
+        except redis.RedisError as exc:
+            from integrations.fastapi_errorbeacon import report_exception
+            report_exception(exc, None, None, component="rate_limit", operation="redis_check", severity="warning", category="dependency_degraded", context={"failure_mode": "fail_open", "dependency": "redis", "rate_limit_enforced": False})
             # Fail open -- see module docstring's "FAIL-OPEN ON REDIS
             # ERRORS" section for why this is the right tradeoff here.
             logger.warning("rate_limit: Redis unavailable, allowing request through unlimited.", exc_info=True)

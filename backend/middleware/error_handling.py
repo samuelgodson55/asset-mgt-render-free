@@ -80,6 +80,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from logging_config import request_id_var
+from integrations.fastapi_errorbeacon import report_exception
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +110,7 @@ class UnhandledExceptionMiddleware:
 
         try:
             await self.app(scope, receive, send_wrapper)
-        except Exception:
+        except Exception as exc:
             request = Request(scope, receive=receive)
             logger.error(
                 "Unhandled exception while handling %s %s",
@@ -118,6 +119,7 @@ class UnhandledExceptionMiddleware:
                 exc_info=True,
                 extra={"http_method": request.method, "http_path": request.url.path},
             )
+            report_exception(exc, scope, status_code=500, context={"request_id": request_id_var.get()})
 
             if response_started:
                 # A response had already started streaming (e.g. this

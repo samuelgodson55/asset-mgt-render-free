@@ -233,6 +233,11 @@ services:
       - /mnt/docker-data/volumes/export_data:/app/export_results
     environment:
       ENVIRONMENT: ${ENVIRONMENT:-production}
+      ERRORBEACON_URL: ${ERRORBEACON_URL:-http://errorbeacon:8000}
+      ERRORBEACON_API_KEY: ${ERRORBEACON_API_KEY:-}
+      ERRORBEACON_APP: ${ERRORBEACON_APP:-asset-inventory-quotes}
+      APP_RELEASE: ${APP_RELEASE:-${IMAGE_TAG:-local}}
+      ERRORBEACON_TIMEOUT: ${ERRORBEACON_TIMEOUT:-0.75}
       UVICORN_WORKERS: ${UVICORN_WORKERS:-2}
       # Pre-encoded, ready-to-use DATABASE_URL from .env -- written by
       # infra-vm/cloud-init.yaml / sync-secrets-vm.yml using Terraform's
@@ -422,6 +427,11 @@ services:
       - /mnt/docker-data/volumes/export_data:/app/export_results
     environment:
       ENVIRONMENT: ${ENVIRONMENT:-production}
+      ERRORBEACON_URL: ${ERRORBEACON_URL:-http://errorbeacon:8000}
+      ERRORBEACON_API_KEY: ${ERRORBEACON_API_KEY:-}
+      ERRORBEACON_APP: ${ERRORBEACON_APP:-asset-inventory-quotes}
+      APP_RELEASE: ${APP_RELEASE:-${IMAGE_TAG:-local}}
+      ERRORBEACON_TIMEOUT: ${ERRORBEACON_TIMEOUT:-0.75}
       UVICORN_WORKERS: ${UVICORN_WORKERS:-2}
       # Pre-encoded, ready-to-use DATABASE_URL from .env -- written by
       # infra-vm/cloud-init.yaml / sync-secrets-vm.yml using Terraform's
@@ -604,6 +614,11 @@ services:
       - /mnt/docker-data/volumes/export_data:/app/export_results
     environment:
       ENVIRONMENT: ${ENVIRONMENT:-production}
+      ERRORBEACON_URL: ${ERRORBEACON_URL:-http://errorbeacon:8000}
+      ERRORBEACON_API_KEY: ${ERRORBEACON_API_KEY:-}
+      ERRORBEACON_APP: ${ERRORBEACON_APP:-asset-inventory-quotes}
+      APP_RELEASE: ${APP_RELEASE:-${IMAGE_TAG:-local}}
+      ERRORBEACON_TIMEOUT: ${ERRORBEACON_TIMEOUT:-0.75}
       # Pre-encoded DATABASE_URL from .env -- see the backend service's
       # DATABASE_URL comment above for why this is no longer rebuilt from
       # raw POSTGRES_USER/POSTGRES_PASSWORD here.
@@ -705,6 +720,11 @@ services:
     command: ["celery", "-A", "celery_app", "beat", "--loglevel=info"]
     environment:
       ENVIRONMENT: ${ENVIRONMENT:-production}
+      ERRORBEACON_URL: ${ERRORBEACON_URL:-http://errorbeacon:8000}
+      ERRORBEACON_API_KEY: ${ERRORBEACON_API_KEY:-}
+      ERRORBEACON_APP: ${ERRORBEACON_APP:-asset-inventory-quotes}
+      APP_RELEASE: ${APP_RELEASE:-${IMAGE_TAG:-local}}
+      ERRORBEACON_TIMEOUT: ${ERRORBEACON_TIMEOUT:-0.75}
       # Pre-encoded DATABASE_URL from .env -- see the backend service's
       # DATABASE_URL comment above for why this is no longer rebuilt from
       # raw POSTGRES_USER/POSTGRES_PASSWORD here.
@@ -787,6 +807,43 @@ services:
   # BLUE-GREEN DEPLOYMENTS" header comment). `caddy` below is what actually
   # decides how much traffic each one gets.
   # ---------------------------------------------------------------------
+
+  # ErrorBeacon is deliberately outside the backend blue/green slots.
+  # A backend rollout can replace blue/green without replacing the monitor.
+  errorbeacon:
+    image: ${ERRORBEACON_IMAGE:-samuelgodson55/errorbeacon-lite}:${ERRORBEACON_IMAGE_TAG:-latest}
+    container_name: snipeit_lite_errorbeacon
+    restart: unless-stopped
+    mem_limit: ${ERRORBEACON_MEM_LIMIT:-256m}
+    mem_reservation: ${ERRORBEACON_MEM_RESERVATION:-64m}
+    environment:
+      ERRORBEACON_API_KEY: ${ERRORBEACON_API_KEY:?Set ERRORBEACON_API_KEY in .env}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?Set TELEGRAM_BOT_TOKEN in .env}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:?Set TELEGRAM_CHAT_ID in .env}
+      TELEGRAM_THREAD_ID: ${TELEGRAM_THREAD_ID:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      DATA_DIR: /data
+      DEDUP_SECONDS: ${DEDUP_SECONDS:-60}
+      SPIKE_THRESHOLD: ${SPIKE_THRESHOLD:-10}
+      SPIKE_WINDOW_SECONDS: ${SPIKE_WINDOW_SECONDS:-300}
+      ALERT_QUEUE_SIZE: ${ALERT_QUEUE_SIZE:-1000}
+      ALERT_WORKERS: ${ALERT_WORKERS:-3}
+      TELEGRAM_POLLING: ${TELEGRAM_POLLING:-true}
+    volumes:
+      - /mnt/docker-data/volumes/errorbeacon_data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   frontend-blue:
     image: ${DOCKERHUB_FRONTEND_IMAGE}:${IMAGE_TAG:-latest}
     container_name: snipeit_lite_frontend_blue

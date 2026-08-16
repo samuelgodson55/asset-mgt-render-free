@@ -1,0 +1,57 @@
+# ErrorBeacon Lite on Render Free
+#
+# This Blueprint creates only the ErrorBeacon Web Service.
+# For a genuinely always-warm free deployment, use a dedicated Render
+# workspace for ErrorBeacon and configure UptimeRobot Free to request
+# /healthz every 5 minutes. Render Free spins down after 15 minutes without
+# inbound traffic; UptimeRobot Free checks every 5 minutes.
+#
+# IMPORTANT: Render can still restart Free services at any time, so this is
+# a practical free workaround, not an SLA. SQLite is ephemeral on Render Free.
+services:
+  - type: web
+    name: errorbeacon-lite
+    runtime: docker
+    dockerfilePath: Dockerfile
+    dockerContext: .
+    plan: free
+    healthCheckPath: /healthz
+    envVars:
+      - key: ERRORBEACON_API_KEY
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: TELEGRAM_THREAD_ID
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: llama-3.1-8b-instant
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash-lite
+      - key: GEMINI_FALLBACK_MODEL
+        value: gemini-2.5-flash
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: OPENROUTER_MODEL
+        value: openrouter/free
+      - key: MAX_ALERTS_PER_MINUTE
+        value: "30"
+      - key: DEDUP_SECONDS
+        value: "60"
+      - key: DATA_DIR
+        value: "/data"
+      - key: TELEGRAM_POLLING
+        value: "true"
+      - key: ALERT_QUEUE_SIZE
+        value: "1000"
+      - key: ALERT_WORKERS
+        value: "3"
+      - key: SPIKE_THRESHOLD
+        value: "10"
+      - key: SPIKE_WINDOW_SECONDS
+        value: "300"

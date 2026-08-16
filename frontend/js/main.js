@@ -22,6 +22,7 @@
 // string, and add `'my-thing': (el) => ...` to the relevant registry.
 // =============================================================================
 
+import { installGlobalErrorBeacon, reportClientError } from './errorbeacon.js';
 import { checkAccess, startIdleWatchdog, login, confirmMfaSetup, verifyMfa, redirectByUserRole, logout, getSession, requestPasswordReset, confirmPasswordReset } from './auth.js';
 import { qrcode } from './vendor/qrcode.js';
 import { closeModal, switchTab, toggleRoute, toggleAdhocExisting, toggleCapacityEdit, toggleNameEdit, toggleCategoryEdit, togglePriceEdit, changePage, setSearch, setPerPage, openRowDetailsFromElement, initSwipeNav, initModalBackdropDismiss, switchDashboardTab, initDashSwipeNav, initSearchClearButtons, downloadTextFile } from './ui.js';
@@ -1105,3 +1106,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setInterval(refreshNotifications, 60000);
   }
 });
+
+
+// Capture browser/runtime failures that never reach a component catch block.
+installGlobalErrorBeacon();

@@ -113,6 +113,7 @@ jobs:
       build_matrix: |
         [
           {"service":"backend","dockerfile":"backend/Dockerfile","context":"backend","image_name":"snipeit-lite-backend"},
+          {"service":"errorbeacon","dockerfile":"errorbeacon/Dockerfile","context":"errorbeacon","image_name":"errorbeacon-lite"},
           {"service":"frontend-react","dockerfile":"frontend/Dockerfile","context":".","target":"frontend-react-only","image_name":"snipeit-lite-frontend-react"},
           {"service":"frontend-legacy","dockerfile":"frontend/Dockerfile","context":".","target":"frontend-legacy-only","image_name":"snipeit-lite-frontend-legacy"}
         ]

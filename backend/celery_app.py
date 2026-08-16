@@ -30,7 +30,7 @@ import datetime
 
 from celery import Celery
 from celery.schedules import crontab
-from celery.signals import beat_init, worker_process_init
+from celery.signals import beat_init, worker_process_init, task_failure
 
 from config import settings
 from logging_config import configure_logging
@@ -42,6 +42,27 @@ from logging_config import configure_logging
 # producer): `configure_logging()` clears/replaces handlers rather than
 # stacking them, so it never causes duplicate log lines either way.
 configure_logging(settings)
+
+
+
+@task_failure.connect
+def _errorbeacon_task_failure(task_id=None, exception=None, args=None, kwargs=None, traceback=None, sender=None, **_kwargs):
+    """Report every unhandled Celery task failure without touching task code."""
+    if exception is None:
+        return
+    try:
+        from integrations.fastapi_errorbeacon import report_exception
+        report_exception(
+            exception,
+            None,
+            500,
+            context={"task_id": task_id, "task": getattr(sender, "name", None), "args": repr(args)[:1000], "kwargs": repr(kwargs)[:1000]},
+            component="celery",
+            operation=getattr(sender, "name", None),
+            category="background_task",
+        )
+    except Exception:
+        pass
 
 celery_app = Celery(
     "snipeit_lite",
@@ -71,7 +92,10 @@ celery_app.conf.update(
     },
     broker_connection_retry_on_startup=True,
     broker_connection_retry=True,
-    broker_connection_max_retries=5,
+    broker_connection_max_retries=(
+        None if __import__('os').environ.get('CELERY_BROKER_CONNECTION_MAX_RETRIES', '5').strip().lower() in {'none', 'infinite', 'inf'}
+        else int(__import__('os').environ.get('CELERY_BROKER_CONNECTION_MAX_RETRIES', '5'))
+    ),
     # Store each task's return value (or exception) for
     # EXPORT_RESULT_TTL_SECONDS after it finishes, then let Redis expire it
     # automatically -- we don't want finished export files (which can

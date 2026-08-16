@@ -166,6 +166,42 @@ variable "postgres_db" {
   default     = "asset_db"
 }
 
+variable "errorbeacon_api_key" {
+  description = "Shared API key used by the application to authenticate to ErrorBeacon. Generate with: python -c \"import secrets; print(secrets.token_urlsafe(32))\""
+  type        = string
+  sensitive   = true
+}
+
+variable "errorbeacon_telegram_bot_token" {
+  description = "Telegram Bot API token used by ErrorBeacon."
+  type        = string
+  sensitive   = true
+}
+
+variable "errorbeacon_telegram_chat_id" {
+  description = "Telegram destination chat ID for ErrorBeacon alerts."
+  type        = string
+}
+
+variable "errorbeacon_telegram_thread_id" {
+  description = "Optional Telegram forum topic/thread ID."
+  type        = string
+  default     = ""
+}
+
+variable "errorbeacon_gemini_api_key" {
+  description = "Optional Gemini API key for second-stage AI incident analysis."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "errorbeacon_image" {
+  description = "Docker image repository for ErrorBeacon."
+  type        = string
+  default     = "samuelgodson55/errorbeacon-lite"
+}
+
 variable "jwt_secret_key" {
   description = "JWT signing secret. Generate with: openssl rand -hex 32"
   type        = string

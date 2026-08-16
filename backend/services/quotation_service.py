@@ -1407,10 +1407,18 @@ def bulk_checkout_quotation(
     never an automatic fallback.
     """
     outsource_decisions = {d.quotation_item_id: d for d in (outsource_shortfall_items or [])}
+    # Lock the quotation itself before checking its status. Two managers can
+    # otherwise click Fulfill at nearly the same instant: both transactions
+    # read `approved`, both create checkout rows, and both eventually commit.
+    # Asset row locks below prevent stock overselling, but they do not prevent
+    # duplicate fulfillment of the SAME quotation when the first transaction
+    # has not committed yet. PostgreSQL serializes this row lock so the second
+    # transaction re-reads the now-fulfilled state and is rejected.
     quotation = (
         db.query(models.Quotation)
         .options(joinedload(models.Quotation.items), joinedload(models.Quotation.outsourced_items))
         .filter(models.Quotation.id == quotation_id)
+        .with_for_update()
         .first()
     )
     if not quotation:
@@ -1605,7 +1613,9 @@ def bulk_checkout_quotation(
     except HTTPException:
         db.rollback()
         raise
-    except Exception:
+    except Exception as exc:
+        from integrations.fastapi_errorbeacon import report_exception
+        report_exception(exc, None, 500, component="quotation_service", operation="bulk_checkout")
         db.rollback()
         raise HTTPException(status_code=500, detail="Bulk checkout failed due to an unexpected server error. No changes were made.")
 

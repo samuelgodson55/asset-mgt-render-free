@@ -82,6 +82,8 @@ def create_backup_now(user: dict = Depends(require_true_super_admin)):
         # silently torn/inconsistent backup file instead.
         raise HTTPException(status_code=409, detail=str(exc))
     except Exception as exc:
+        from integrations.fastapi_errorbeacon import report_exception
+        report_exception(exc, None, 500, component="backup_api")
         logger.exception("backup: manual backup failed")
         raise HTTPException(status_code=500, detail=f"Backup failed: {exc}")
     return entry
@@ -120,6 +122,8 @@ def restore_status(user: dict = Depends(require_true_super_admin)):
     try:
         return backup_service.get_restore_status()
     except Exception as exc:
+        from integrations.fastapi_errorbeacon import report_exception
+        report_exception(exc, None, 500, component="backup_api")
         logger.exception("backup: failed to load restore status")
         raise HTTPException(status_code=500, detail=f"Failed to load restore status: {exc}")
 
@@ -147,6 +151,8 @@ def restore_from_local(filename: str, user: dict = Depends(require_true_super_ad
         # retry, which is exactly what this status code + message says.
         raise HTTPException(status_code=409, detail=str(exc))
     except Exception as exc:
+        from integrations.fastapi_errorbeacon import report_exception
+        report_exception(exc, None, 500, component="backup_api")
         logger.exception("backup: restore from local backup failed")
         raise HTTPException(status_code=500, detail=f"Restore failed: {exc}")
     return result
@@ -179,6 +185,8 @@ async def restore_from_upload(
     except RestoreInProgressError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     except Exception as exc:
+        from integrations.fastapi_errorbeacon import report_exception
+        report_exception(exc, None, 500, component="backup_api")
         logger.exception("backup: restore from uploaded file failed")
         raise HTTPException(status_code=500, detail=f"Restore failed: {exc}")
     return result

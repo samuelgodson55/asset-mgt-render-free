@@ -101,7 +101,9 @@ def _notify(to, subject: str, body: str) -> None:
     """
     try:
         send_email_task.delay(to=to, subject=subject, body=body)
-    except Exception:
+    except Exception as exc:
+        from integrations.fastapi_errorbeacon import report_exception
+        report_exception(exc, None, 500, component="extension_service", operation="enqueue_notification", severity="warning")
         logger.warning("Failed to enqueue notification email %r", subject, exc_info=True)
 
 

@@ -136,6 +136,13 @@ write_files:
       DATABASE_URL=postgresql://${postgres_user_urlencoded}:${postgres_password_urlencoded}@db:5432/${postgres_db}
 
       JWT_SECRET_KEY=${jwt_secret_key}
+      ERRORBEACON_API_KEY=${errorbeacon_api_key}
+      ERRORBEACON_IMAGE=${errorbeacon_image}
+      ERRORBEACON_IMAGE_TAG=${initial_image_tag}
+      TELEGRAM_BOT_TOKEN=${errorbeacon_telegram_bot_token}
+      TELEGRAM_CHAT_ID=${errorbeacon_telegram_chat_id}
+      TELEGRAM_THREAD_ID=${errorbeacon_telegram_thread_id}
+      GEMINI_API_KEY=${errorbeacon_gemini_api_key}
       JWT_ALGORITHM=HS256
       JWT_EXPIRY_HOURS=12
 

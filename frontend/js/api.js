@@ -22,6 +22,7 @@
 // =============================================================================
 
 import { getSession, logout } from './auth.js';
+import { reportClientError, setLastRequestId } from './errorbeacon.js';
 
 export const API_URL = '/api';
 
@@ -37,7 +38,16 @@ export async function apiRequest(path, options = {}) {
     headers['Content-Type'] = 'application/json';
   }
 
-  const response = await fetch(`${API_URL}${path}`, { ...options, headers, credentials: 'include' });
+  let response;
+  try {
+    response = await fetch(`${API_URL}${path}`, { ...options, headers, credentials: 'include' });
+  } catch (err) {
+    reportClientError(err, { source: 'api.network', endpoint: path });
+    throw err;
+  }
+
+  const requestId = response.headers.get('x-request-id');
+  if (requestId) setLastRequestId(requestId);
 
   if (response.status === 401) {
     // Session expired or invalid -- force a clean re-login.
@@ -48,12 +58,13 @@ export async function apiRequest(path, options = {}) {
   // Some endpoints (CSV export) return a raw file, not JSON.
   const contentType = response.headers.get('content-type') || '';
   if (!contentType.includes('application/json')) {
-    if (!response.ok) throw new Error(buildErrorMessage(response, {}));
+    if (!response.ok) { if (response.status >= 500) reportClientError(new Error(`HTTP ${response.status} ${path}`), { source: 'api.http', endpoint: path, status: response.status }); throw new Error(buildErrorMessage(response, {})); }
     return response;
   }
 
   const data = await response.json();
   if (!response.ok) {
+    if (response.status >= 500) reportClientError(new Error(buildErrorMessage(response, data)), { source: 'api.http', endpoint: path, status: response.status });
     throw new Error(buildErrorMessage(response, data));
   }
   return data;

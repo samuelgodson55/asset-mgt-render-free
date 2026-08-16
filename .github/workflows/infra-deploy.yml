@@ -109,6 +109,17 @@ jobs:
 
       # Azure authentication only. The bootstrap script merely stores the
       # existing OIDC coordinates in GitHub; this workflow owns ACA infrastructure.
+      - name: Build + push ErrorBeacon image before infrastructure apply
+        if: ${{ github.event.inputs.action != 'destroy' }}
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+          docker build -f errorbeacon/Dockerfile -t "$DOCKERHUB_USERNAME/errorbeacon-lite:latest" errorbeacon
+          docker push "$DOCKERHUB_USERNAME/errorbeacon-lite:latest"
+
       - name: Register Azure resource providers required by ACA infrastructure
         run: |
           set -euo pipefail
@@ -457,6 +468,15 @@ jobs:
             fi
           done
 
+      - name: Validate ErrorBeacon secrets
+        if: ${{ github.event.inputs.action != 'destroy' }}
+        run: |
+          MISSING=()
+          [ -z "${{ secrets.ERRORBEACON_API_KEY }}" ] && MISSING+=("ERRORBEACON_API_KEY")
+          [ -z "${{ secrets.ERRORBEACON_TELEGRAM_BOT_TOKEN }}" ] && MISSING+=("ERRORBEACON_TELEGRAM_BOT_TOKEN")
+          [ -z "${{ vars.ERRORBEACON_TELEGRAM_CHAT_ID }}" ] && MISSING+=("ERRORBEACON_TELEGRAM_CHAT_ID")
+          if [ "${#MISSING[@]}" -gt 0 ]; then echo "::error::Missing ErrorBeacon configuration: ${MISSING[*]}"; exit 1; fi
+
       - name: Bicep What-If plan and GitHub Summary
         if: ${{ github.event.inputs.action == 'plan' }}
         run: |
@@ -476,6 +496,20 @@ jobs:
               environmentName="$ENV_NAME" \
               dockerHubBackendImage="${{ steps.current.outputs.backend_repo }}" \
               dockerHubFrontendImage="${{ steps.current.outputs.frontend_repo }}" \
+              dockerHubErrorBeaconImage="${{ secrets.DOCKERHUB_USERNAME }}/errorbeacon-lite" \
+              errorBeaconEnabled=true \
+              errorBeaconApiKey="${{ secrets.ERRORBEACON_API_KEY }}" \
+              errorBeaconTelegramBotToken="${{ secrets.ERRORBEACON_TELEGRAM_BOT_TOKEN }}" \
+              errorBeaconTelegramChatId="${{ vars.ERRORBEACON_TELEGRAM_CHAT_ID }}" \
+              errorBeaconTelegramThreadId="${{ vars.ERRORBEACON_TELEGRAM_THREAD_ID }}" \
+              errorBeaconGeminiApiKey="${{ secrets.ERRORBEACON_GEMINI_API_KEY }}" \
+              errorBeaconGeminiModel="${{ vars.ERRORBEACON_GEMINI_MODEL || 'gemini-2.5-flash-lite' }}" \
+              errorBeaconGeminiFallbackModel="${{ vars.ERRORBEACON_GEMINI_FALLBACK_MODEL || 'gemini-2.5-flash' }}" \
+              errorBeaconGroqApiKey="${{ secrets.ERRORBEACON_GROQ_API_KEY }}" \
+              errorBeaconGroqModel="${{ vars.ERRORBEACON_GROQ_MODEL || 'llama-3.1-8b-instant' }}" \
+              errorBeaconOpenRouterApiKey="${{ secrets.ERRORBEACON_OPENROUTER_API_KEY }}" \
+              errorBeaconOpenRouterModel="${{ vars.ERRORBEACON_OPENROUTER_MODEL || 'openrouter/free' }}" \
+              errorBeaconOpenRouterSiteUrl="${{ vars.ERRORBEACON_OPENROUTER_SITE_URL || 'https://errorbeacon.local' }}" \
               initialImageTag="latest" \
               initialBackendImageTag="${{ steps.current.outputs.backend_tag }}" \
               initialFrontendImageTag="${{ steps.current.outputs.frontend_tag }}" \
@@ -615,6 +649,20 @@ jobs:
               environmentName="$ENV_NAME" \
               dockerHubBackendImage="${{ steps.current.outputs.backend_repo }}" \
               dockerHubFrontendImage="${{ steps.current.outputs.frontend_repo }}" \
+              dockerHubErrorBeaconImage="${{ secrets.DOCKERHUB_USERNAME }}/errorbeacon-lite" \
+              errorBeaconEnabled=true \
+              errorBeaconApiKey="${{ secrets.ERRORBEACON_API_KEY }}" \
+              errorBeaconTelegramBotToken="${{ secrets.ERRORBEACON_TELEGRAM_BOT_TOKEN }}" \
+              errorBeaconTelegramChatId="${{ vars.ERRORBEACON_TELEGRAM_CHAT_ID }}" \
+              errorBeaconTelegramThreadId="${{ vars.ERRORBEACON_TELEGRAM_THREAD_ID }}" \
+              errorBeaconGeminiApiKey="${{ secrets.ERRORBEACON_GEMINI_API_KEY }}" \
+              errorBeaconGeminiModel="${{ vars.ERRORBEACON_GEMINI_MODEL || 'gemini-2.5-flash-lite' }}" \
+              errorBeaconGeminiFallbackModel="${{ vars.ERRORBEACON_GEMINI_FALLBACK_MODEL || 'gemini-2.5-flash' }}" \
+              errorBeaconGroqApiKey="${{ secrets.ERRORBEACON_GROQ_API_KEY }}" \
+              errorBeaconGroqModel="${{ vars.ERRORBEACON_GROQ_MODEL || 'llama-3.1-8b-instant' }}" \
+              errorBeaconOpenRouterApiKey="${{ secrets.ERRORBEACON_OPENROUTER_API_KEY }}" \
+              errorBeaconOpenRouterModel="${{ vars.ERRORBEACON_OPENROUTER_MODEL || 'openrouter/free' }}" \
+              errorBeaconOpenRouterSiteUrl="${{ vars.ERRORBEACON_OPENROUTER_SITE_URL || 'https://errorbeacon.local' }}" \
               initialImageTag="latest" \
               initialBackendImageTag="${{ steps.current.outputs.backend_tag }}" \
               initialFrontendImageTag="${{ steps.current.outputs.frontend_tag }}" \
@@ -729,6 +777,20 @@ jobs:
               environmentName="$ENV_NAME" \
               dockerHubBackendImage="${{ steps.current.outputs.backend_repo }}" \
               dockerHubFrontendImage="${{ steps.current.outputs.frontend_repo }}" \
+              dockerHubErrorBeaconImage="${{ secrets.DOCKERHUB_USERNAME }}/errorbeacon-lite" \
+              errorBeaconEnabled=true \
+              errorBeaconApiKey="${{ secrets.ERRORBEACON_API_KEY }}" \
+              errorBeaconTelegramBotToken="${{ secrets.ERRORBEACON_TELEGRAM_BOT_TOKEN }}" \
+              errorBeaconTelegramChatId="${{ vars.ERRORBEACON_TELEGRAM_CHAT_ID }}" \
+              errorBeaconTelegramThreadId="${{ vars.ERRORBEACON_TELEGRAM_THREAD_ID }}" \
+              errorBeaconGeminiApiKey="${{ secrets.ERRORBEACON_GEMINI_API_KEY }}" \
+              errorBeaconGeminiModel="${{ vars.ERRORBEACON_GEMINI_MODEL || 'gemini-2.5-flash-lite' }}" \
+              errorBeaconGeminiFallbackModel="${{ vars.ERRORBEACON_GEMINI_FALLBACK_MODEL || 'gemini-2.5-flash' }}" \
+              errorBeaconGroqApiKey="${{ secrets.ERRORBEACON_GROQ_API_KEY }}" \
+              errorBeaconGroqModel="${{ vars.ERRORBEACON_GROQ_MODEL || 'llama-3.1-8b-instant' }}" \
+              errorBeaconOpenRouterApiKey="${{ secrets.ERRORBEACON_OPENROUTER_API_KEY }}" \
+              errorBeaconOpenRouterModel="${{ vars.ERRORBEACON_OPENROUTER_MODEL || 'openrouter/free' }}" \
+              errorBeaconOpenRouterSiteUrl="${{ vars.ERRORBEACON_OPENROUTER_SITE_URL || 'https://errorbeacon.local' }}" \
               initialImageTag="latest" \
               initialBackendImageTag="${{ steps.current.outputs.backend_tag }}" \
               initialFrontendImageTag="${{ steps.current.outputs.frontend_tag }}" \

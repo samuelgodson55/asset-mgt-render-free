@@ -180,7 +180,9 @@ def send_email(to: Iterable[str] | str, subject: str, body: str) -> bool:
             _send_via_smtp(recipients, subject, body)
         logger.info("send_email: sent %r to %s via %s", subject, recipients, provider)
         return True
-    except Exception:
+    except Exception as exc:
+        from integrations.fastapi_errorbeacon import report_exception
+        report_exception(exc, None, 500, component="notification_service", operation="send_email", severity="warning")
         # Broad `except Exception` is intentional here -- smtplib and the
         # HTTP-API providers below can each raise a long tail of different
         # exception types (connection refused, auth failure, timeout,

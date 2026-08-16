@@ -1,3 +1,4 @@
+import { reportClientError, setLastRequestId } from "./errorbeacon";
 import { mockAssets, mockCheckouts, mockExtensions, mockNotifications, mockStats, mockBackups, mockBackupStatus, mockDigestRecipients, mockAuditLogs, mockCatalog, mockQuotationCart, mockReportsDashboard } from "./mock";
 import type { AssetType, Checkout, ExtensionRequest, NotificationItem, DashboardStats, BackupEntry, BackupStatus, RestoreResult, ImportResult, MyItem, ProfileDetail, UserRow, OutsiderRow, CustodyItem, AuditLogEntry, PublicConfig, CatalogAsset, QuotationCartOrDetail, QuotationListRow, FulfillmentQueueRow, QuotationOutsourcedItemCreate, QuotationOutsourceShortfallItem, AssetDetails, DeletedAssetRow, DeletedUserRow, RosterUser, BulkExtendResult, MyExtensionDecision, QuotationNotification, ReportsDashboard } from "./types";
 
@@ -62,28 +63,73 @@ function extractErrorMessage(body: unknown, fallback: string): string {
   }
 }
 
+const TRANSIENT_HTTP_STATUSES = new Set([502, 503, 504]);
+const SAFE_RETRY_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+const API_RETRY_ATTEMPTS = 3;
+const API_RETRY_BASE_DELAY_MS = 150;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function retryDelayMs(attempt: number): number {
+  const jitter = Math.floor(Math.random() * 75);
+  return API_RETRY_BASE_DELAY_MS * 2 ** attempt + jitter;
+}
+
 async function rawFetch<T = unknown>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    credentials: "include",
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
-    ...init,
-  });
-  if (!res.ok) {
-    const fallback = res.statusText || `Request failed (${res.status})`;
-    let message = fallback;
+  const method = String(init?.method ?? "GET").toUpperCase();
+  const retrySafe = SAFE_RETRY_METHODS.has(method);
+  let lastNetworkError: unknown = null;
+
+  for (let attempt = 0; attempt < (retrySafe ? API_RETRY_ATTEMPTS : 1); attempt += 1) {
+    let res: Response;
     try {
-      const body = await res.json();
-      message = extractErrorMessage(body, fallback);
-    } catch {
-      // body wasn't JSON -- keep the status text
+      res = await fetch(`${API_BASE}${path}`, {
+        credentials: "include",
+        headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+        ...init,
+      });
+    } catch (err) {
+      lastNetworkError = err;
+      if (retrySafe && attempt + 1 < API_RETRY_ATTEMPTS) {
+        await sleep(retryDelayMs(attempt));
+        continue;
+      }
+      reportClientError(err, { source: "api.network", endpoint: path, attempts: attempt + 1 });
+      throw err;
     }
-    if (res.status === 401 && !path.startsWith("/auth/login") && !path.startsWith("/auth/mfa") && typeof window !== "undefined") {
-      window.dispatchEvent(new Event("asset-app:auth-expired"));
+
+    const requestId = res.headers.get("x-request-id");
+    if (requestId) setLastRequestId(requestId);
+
+    // Safe reads may survive a brief proxy/container restart. Never retry
+    // mutations: a POST/PUT/PATCH/DELETE may already have changed state.
+    if (retrySafe && TRANSIENT_HTTP_STATUSES.has(res.status) && attempt + 1 < API_RETRY_ATTEMPTS) {
+      await sleep(retryDelayMs(attempt));
+      continue;
     }
-    throw new ApiError(res.status, message);
+
+    if (!res.ok) {
+      const fallback = res.statusText || `Request failed (${res.status})`;
+      let message = fallback;
+      try {
+        const body = await res.json();
+        message = extractErrorMessage(body, fallback);
+      } catch {
+        // body wasn't JSON -- keep the status text
+      }
+      if (res.status >= 500) reportClientError(new Error(message), { source: "api.http", endpoint: path, status: res.status });
+      if (res.status === 401 && !path.startsWith("/auth/login") && !path.startsWith("/auth/mfa") && typeof window !== "undefined") {
+        window.dispatchEvent(new Event("asset-app:auth-expired"));
+      }
+      throw new ApiError(res.status, message);
+    }
+    if (res.status === 204) return null as T;
+    return (await res.json()) as T;
   }
-  if (res.status === 204) return null as T;
-  return (await res.json()) as T;
+
+  throw lastNetworkError instanceof Error ? lastNetworkError : new Error("Request failed after retries");
 }
 
 /**
@@ -100,6 +146,8 @@ async function rawFetchMultipart<T = unknown>(path: string, formData: FormData, 
     body: formData,
     ...init,
   });
+  const requestId = res.headers.get("x-request-id");
+  if (requestId) setLastRequestId(requestId);
   if (!res.ok) {
     const fallback = res.statusText || `Request failed (${res.status})`;
     let message = fallback;

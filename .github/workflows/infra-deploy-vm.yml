@@ -143,6 +143,12 @@ jobs:
       TF_VAR_custom_domain: ${{ vars.CUSTOM_DOMAIN }} # repo/environment Variable, not a secret -- REQUIRED now, must be a hostname in the cloudflare_zone_id zone above
       TF_VAR_postgres_password: ${{ secrets.POSTGRES_PASSWORD }}
       TF_VAR_jwt_secret_key: ${{ secrets.JWT_SECRET_KEY }}
+      TF_VAR_errorbeacon_api_key: ${{ secrets.ERRORBEACON_API_KEY }}
+      TF_VAR_errorbeacon_telegram_bot_token: ${{ secrets.ERRORBEACON_TELEGRAM_BOT_TOKEN }}
+      TF_VAR_errorbeacon_telegram_chat_id: ${{ vars.ERRORBEACON_TELEGRAM_CHAT_ID }}
+      TF_VAR_errorbeacon_telegram_thread_id: ${{ vars.ERRORBEACON_TELEGRAM_THREAD_ID }}
+      TF_VAR_errorbeacon_gemini_api_key: ${{ secrets.ERRORBEACON_GEMINI_API_KEY }}
+      TF_VAR_errorbeacon_image: ${{ secrets.DOCKERHUB_USERNAME }}/errorbeacon-lite
       TF_VAR_root_admin_bootstrap_password: ${{ secrets.ROOT_ADMIN_BOOTSTRAP_PASSWORD }}
       # /_deploy/ dashboard Basic Auth -- see infra-vm/variables.tf's
       # deploy_status_user/deploy_status_password_hash comments. Leave

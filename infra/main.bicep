@@ -83,6 +83,32 @@ param dockerHubBackendImage string
 @description('Docker Hub repository for the frontend image (static frontend + reverse proxy to `backend`), e.g. "yourusername/snipeit-lite-frontend", built from frontend/Dockerfile UNCHANGED from local Docker Compose. Public repo by default.')
 param dockerHubFrontendImage string
 
+@description('Docker Hub repository for the isolated ErrorBeacon monitoring image, e.g. "yourusername/errorbeacon-lite". The monitor is deployed as its own Container App and is not part of backend/frontend blue-green traffic. Defaults to the project's public ErrorBeacon image.')
+param dockerHubErrorBeaconImage string = 'samuelgodson55/errorbeacon-lite'
+
+@description('Enable the isolated ErrorBeacon Container App. Production workflows enable this by default. Set false only when intentionally disabling monitoring.')
+param errorBeaconEnabled bool = true
+
+@description('ErrorBeacon shared API key. Generate with: python -c "import secrets; print(secrets.token_urlsafe(32))"')
+@secure()
+param errorBeaconApiKey string = ''
+
+@secure()
+param errorBeaconTelegramBotToken string = ''
+param errorBeaconTelegramChatId string = ''
+param errorBeaconTelegramThreadId string = ''
+@secure()
+param errorBeaconGeminiApiKey string = ''
+param errorBeaconGeminiModel string = 'gemini-2.5-flash-lite'
+param errorBeaconGeminiFallbackModel string = 'gemini-2.5-flash'
+@secure()
+param errorBeaconGroqApiKey string = ''
+param errorBeaconGroqModel string = 'llama-3.1-8b-instant'
+@secure()
+param errorBeaconOpenRouterApiKey string = ''
+param errorBeaconOpenRouterModel string = 'openrouter/free'
+param errorBeaconOpenRouterSiteUrl string = 'https://errorbeacon.local'
+
 @description('Backward-compatible common image tag. Used only when initialBackendImageTag/initialFrontendImageTag are omitted.')
 param initialImageTag string = 'latest'
 
@@ -313,6 +339,7 @@ var storageAccountName = take(replace('${appBaseName}${environmentName}st${take(
 var usePrivateDockerHubRepo = !empty(dockerHubUsername)
 var backendImage = '${dockerHubBackendImage}:${empty(initialBackendImageTag) ? initialImageTag : initialBackendImageTag}'
 var frontendImage = '${dockerHubFrontendImage}:${empty(initialFrontendImageTag) ? initialImageTag : initialFrontendImageTag}'
+var errorBeaconImage = '${dockerHubErrorBeaconImage}:${initialImageTag}'
 
 // One Log Analytics workspace for every container app's console/system
 // logs. Application Insights is opt-in (see `otelAzureMonitorEnabled` above).
@@ -536,6 +563,12 @@ resource exportShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023
   properties: { shareQuota: 10 }
 }
 
+resource errorBeaconShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023-05-01' = {
+  parent: fileServices
+  name: 'errorbeacon-data'
+  properties: { shareQuota: 5 }
+}
+
 // Live blue-green rollout status (status.json/checks.log/.htpasswd) --
 // the ACA equivalent of the VM path's /mnt/docker-data/volumes/deploy_status
 // directory. Written to by .github/workflows/deploy-azure-aca.yml (via `az
@@ -731,6 +764,12 @@ resource backupStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' =
       accessMode: 'ReadWrite'
     }
   }
+}
+
+resource errorBeaconStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' = {
+  parent: env
+  name: 'errorbeacon-data'
+  properties: { azureFile: { accountName: storage.name, accountKey: storage.listKeys().keys[0].value, shareName: errorBeaconShare.name, accessMode: 'ReadWrite' } }
 }
 
 resource exportStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' = {
@@ -949,6 +988,7 @@ var runtimeEnvironment = environmentName == 'prod' ? 'production' : 'development
 var sharedEnv = [
   { name: 'ENVIRONMENT', value: runtimeEnvironment }
   { name: 'EXPORT_RESULT_DIR', value: '/app/export_results' }
+  { name: 'ERRORBEACON_URL', value: 'http://errorbeacon:8000' }
   { name: 'JWT_ALGORITHM', value: 'HS256' }
   { name: 'JWT_EXPIRY_HOURS', value: '12' }
   { name: 'SITE_NAME', value: siteName }
@@ -1005,6 +1045,7 @@ var sharedEnv = [
 
 var sharedSecrets = concat([
   { name: 'jwt-secret-key', value: jwtSecretKey }
+  { name: 'errorbeacon-api-key', value: empty(errorBeaconApiKey) ? 'unset' : errorBeaconApiKey }
   { name: 'root-admin-bootstrap-password', value: rootAdminBootstrapPassword }
   { name: 'database-url', value: databaseUrl }
   { name: 'redis-url', value: redisUrl }
@@ -1111,6 +1152,7 @@ resource backendApp 'Microsoft.App/containerApps@2024-03-01' = {
             // itself correct automatically if this param is ever
             // changed, with no matching code/config edit required.
             { name: 'BACKEND_MAX_REPLICAS', value: string(backendMaxReplicas) }
+            { name: 'ERRORBEACON_API_KEY', secretRef: 'errorbeacon-api-key' }
           ])
           volumeMounts: [
             { volumeName: 'backup-data', mountPath: '/app/backups' }
@@ -1154,6 +1196,81 @@ resource backendApp 'Microsoft.App/containerApps@2024-03-01' = {
     backupStorage
     exportStorage
   ]
+}
+
+// ---------------------------------------------------------------------------
+// `errorbeacon` -- isolated exception monitor. It has its own revision
+// lifecycle and is deliberately NOT part of backend/frontend blue-green
+// traffic. Keeping minReplicas=1 means a backend rollout, scale event, or
+// revision replacement does not remove the monitoring endpoint.
+// ---------------------------------------------------------------------------
+resource errorBeaconApp 'Microsoft.App/containerApps@2024-03-01' = if (errorBeaconEnabled) {
+  name: 'errorbeacon'
+  location: location
+  dependsOn: [errorBeaconStorage]
+  properties: {
+    managedEnvironmentId: env.id
+    configuration: {
+      activeRevisionsMode: 'Single'
+      registries: registries
+      secrets: concat(usePrivateDockerHubRepo ? [
+        { name: 'dockerhub-token', value: dockerHubToken }
+      ] : [], [
+        { name: 'errorbeacon-api-key', value: errorBeaconApiKey }
+        { name: 'telegram-bot-token', value: errorBeaconTelegramBotToken }
+        { name: 'gemini-api-key', value: empty(errorBeaconGeminiApiKey) ? 'unset' : errorBeaconGeminiApiKey }
+        { name: 'groq-api-key', value: empty(errorBeaconGroqApiKey) ? 'unset' : errorBeaconGroqApiKey }
+        { name: 'openrouter-api-key', value: empty(errorBeaconOpenRouterApiKey) ? 'unset' : errorBeaconOpenRouterApiKey }
+      ])
+      ingress: {
+        external: false
+        targetPort: 8000
+        transport: 'auto'
+        allowInsecure: true
+      }
+    }
+    template: {
+      containers: [
+        {
+          name: 'errorbeacon'
+          image: errorBeaconImage
+          resources: { cpu: json('0.25'), memory: '0.5Gi' }
+          volumeMounts: [ { volumeName: 'errorbeacon-data', mountPath: '/data' } ]
+          env: [
+            { name: 'ERRORBEACON_API_KEY', secretRef: 'errorbeacon-api-key' }
+            { name: 'TELEGRAM_BOT_TOKEN', secretRef: 'telegram-bot-token' }
+            { name: 'TELEGRAM_CHAT_ID', value: errorBeaconTelegramChatId }
+            { name: 'TELEGRAM_THREAD_ID', value: errorBeaconTelegramThreadId }
+            { name: 'AI_ENABLED', value: 'true' }
+            { name: 'GROQ_API_KEY', secretRef: 'groq-api-key' }
+            { name: 'GROQ_MODEL', value: errorBeaconGroqModel }
+            { name: 'GEMINI_API_KEY', secretRef: 'gemini-api-key' }
+            { name: 'GEMINI_MODEL', value: errorBeaconGeminiModel }
+            { name: 'GEMINI_FALLBACK_MODEL', value: errorBeaconGeminiFallbackModel }
+            { name: 'OPENROUTER_API_KEY', secretRef: 'openrouter-api-key' }
+            { name: 'OPENROUTER_MODEL', value: errorBeaconOpenRouterModel }
+            { name: 'OPENROUTER_SITE_URL', value: errorBeaconOpenRouterSiteUrl }
+            { name: 'DATA_DIR', value: '/data' }
+            { name: 'DEDUP_SECONDS', value: '60' }
+            { name: 'SPIKE_THRESHOLD', value: '10' }
+            { name: 'SPIKE_WINDOW_SECONDS', value: '300' }
+            { name: 'ALERT_QUEUE_SIZE', value: '1000' }
+            { name: 'ALERT_WORKERS', value: '3' }
+            { name: 'TELEGRAM_POLLING', value: 'true' }
+            { name: 'SQLITE_JOURNAL_MODE', value: 'DELETE' }
+          ]
+          probes: [
+            { type: 'Liveness', httpGet: { path: '/healthz', port: 8000 }, initialDelaySeconds: 10, periodSeconds: 30 }
+          ]
+        }
+      ]
+      volumes: [ { name: 'errorbeacon-data', storageType: 'AzureFile', storageName: 'errorbeacon-data' } ]
+      scale: {
+        minReplicas: 1
+        maxReplicas: 1
+      }
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------

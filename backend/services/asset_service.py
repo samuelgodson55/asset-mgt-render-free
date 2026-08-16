@@ -783,7 +783,7 @@ def flag_asset_exception(db: Session, asset_id: int, exc: ExceptionCreate, user:
     """
     asset = db.query(models.AssetType).filter(
         models.AssetType.id == asset_id, ~models.AssetType.is_deleted
-    ).first()
+    ).with_for_update().first()
     if not asset:
         raise HTTPException(status_code=404, detail="Asset type not found")
 
@@ -830,7 +830,7 @@ def recall_asset_exception(db: Session, asset_id: int, exception_id: int, user: 
     """
     asset = db.query(models.AssetType).filter(
         models.AssetType.id == asset_id, ~models.AssetType.is_deleted
-    ).first()
+    ).with_for_update().first()
     if not asset:
         raise HTTPException(status_code=404, detail="Asset type not found")
 
@@ -869,7 +869,7 @@ def checkin_asset(db: Session, asset_id: int, quantity: int, user: dict) -> dict
     """
     asset = db.query(models.AssetType).filter(
         models.AssetType.id == asset_id, ~models.AssetType.is_deleted
-    ).first()
+    ).with_for_update().first()
     if not asset:
         raise HTTPException(status_code=404, detail="Asset type not found")
 
@@ -1001,7 +1001,9 @@ def checkout_advanced(db: Session, asset_id: int, req: AdvancedCheckoutRequest, 
         # around, then re-raise the original, informative error unchanged.
         db.rollback()
         raise
-    except Exception:
+    except Exception as exc:
+        from integrations.fastapi_errorbeacon import report_exception
+        report_exception(exc, None, 500, component="asset_service", operation="checkout")
         # Unexpected failure (DB error, etc). Roll back to release the row
         # lock and discard any partial writes, then surface a clean 500
         # instead of leaking a stack trace or leaving the transaction open.
@@ -1293,6 +1295,8 @@ def import_assets_from_csv(db: Session, file: UploadFile, user: dict) -> dict:
     except HTTPException:
         raise
     except Exception as e:
+        from integrations.fastapi_errorbeacon import report_exception
+        report_exception(e, None, 500, component="asset_service", operation="csv_import")
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 

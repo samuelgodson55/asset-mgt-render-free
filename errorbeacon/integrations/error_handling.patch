@@ -1,0 +1,20 @@
+*** Begin Patch
+*** Update File: backend/middleware/error_handling.py
+@@
+ from logging_config import request_id_var
++from integrations.fastapi_errorbeacon import report_exception
+@@
+-        except Exception:
++        except Exception as exc:
+@@
+             logger.error(
+@@
+                 extra={"http_method": request.method, "http_path": request.url.path},
+             )
++            report_exception(
++                exc,
++                scope,
++                status_code=500,
++                context={"request_id": request_id_var.get()},
++            )
+*** End Patch

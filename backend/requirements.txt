@@ -21,6 +21,9 @@ redis==8.0.1
 # no longer silently change (or drop) the version this app actually
 # relies on.
 requests==2.32.3
+# Keep requests encoding-detection dependencies on versions it supports.
+charset-normalizer==3.3.2
+chardet<6
 # Redis-backed Celery Beat scheduler with a built-in distributed lock:
 # whichever replica currently holds the lock is the only one that actually
 # fires scheduled tasks (celery_app.py's beat_schedule); if it dies, the

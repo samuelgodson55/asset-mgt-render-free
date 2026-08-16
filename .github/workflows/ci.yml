@@ -126,7 +126,7 @@ jobs:
           # This workflow file itself is in every filter below: a change
           # to ci.yml's own logic should always re-run everything it
           # touches, not silently skip based on the OLD filter rules.
-          if echo "$CHANGED" | grep -qE '^(backend/|docker-compose\.yml|\.github/workflows/ci\.yml)'; then
+          if echo "$CHANGED" | grep -qE '^(backend/|scripts/|docker-compose\.yml|\.github/workflows/ci\.yml)'; then
             echo "backend=true" >> "$GITHUB_OUTPUT"
           else
             echo "backend=false" >> "$GITHUB_OUTPUT"
@@ -327,6 +327,9 @@ jobs:
           TEST_REDIS_HOST: localhost
           TEST_REDIS_PORT: 6379
         run: pytest backend/tests -v
+
+      - name: Migration zero-downtime safety gate
+        run: python scripts/check-migration-safety.py
 
       - name: pip-audit (dependency vulnerability scan)
         run: pip-audit -r backend/requirements.txt --desc || true

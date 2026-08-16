@@ -105,6 +105,31 @@ services:
       timeout: 5s
       retries: 5
 
+  # ---------------------------------------------------------------------
+  # migrate (local development schema gate)
+  # ---------------------------------------------------------------------
+  # Local Docker deliberately uses Alembic as the source of truth. This
+  # one-shot service runs before backend/worker/beat so a fresh local DB is
+  # fully versioned instead of relying on create_all() and then needing
+  # `alembic stamp head`. It is only a local Compose concern; ACA/VM use
+  # their deployment migration gates.
+  migrate:
+    build: ./backend
+    image: snipeit-lite-backend:local
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: development
+      DATABASE_URL: ${DATABASE_URL:-postgresql://admin:supersecret@db:5432/asset_db}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in your .env file -- see .env.example}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      JWT_EXPIRY_HOURS: ${JWT_EXPIRY_HOURS:-12}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      AUTO_INIT_DB: "false"
+    command: ["alembic", "upgrade", "head"]
+
   backend:
     build: ./backend
     # `backend`, `worker`, and `beat` all build from the same Dockerfile
@@ -120,6 +145,12 @@ services:
     # service; Compose auto-generates unique names per replica instead
     # (snipeit-lite-backend-1, -2, ...).
     restart: unless-stopped
+    # Local-only direct backend port for diagnostics/chaos tests. Production
+    # deployments do not use docker-compose.yml, and the public application
+    # still goes through nginx on :8080. Keeping this port separate from the
+    # frontend proxy makes readiness/incident tests unambiguous.
+    ports:
+      - "${BACKEND_DIRECT_PORT:-8001}:8000"
     volumes:
       # Local backup files (see backend/services/backup_service.py) --
       # named volume so they survive `docker compose restart`/`down`
@@ -144,6 +175,13 @@ services:
       # in backend/config.py (requirement #5). Defaults to "development" so
       # local `docker compose up` keeps working with the placeholder secret.
       ENVIRONMENT: ${ENVIRONMENT:-development}
+      # Local Compose schema is managed by the one-shot migrate service.
+      AUTO_INIT_DB: "false"
+      ERRORBEACON_URL: ${ERRORBEACON_URL:-http://errorbeacon:8000}
+      ERRORBEACON_API_KEY: ${ERRORBEACON_API_KEY:-}
+      ERRORBEACON_APP: ${ERRORBEACON_APP:-asset-inventory-quotes}
+      APP_RELEASE: ${APP_RELEASE:-${IMAGE_TAG:-local}}
+      ERRORBEACON_TIMEOUT: ${ERRORBEACON_TIMEOUT:-0.75}
       # How many uvicorn worker processes backend/start.sh launches when
       # ENVIRONMENT=production (ignored otherwise -- development/local
       # always run a single worker with --reload instead). Set this to
@@ -332,6 +370,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     # ZERO-DOWNTIME: no explicit `healthcheck:` block needed here -- this
     # service's image (backend/Dockerfile) now bakes in its own
     # HEALTHCHECK instruction (GET /healthz -- see that Dockerfile's own
@@ -398,12 +438,19 @@ services:
       - export_data:/app/export_results
     environment:
       ENVIRONMENT: ${ENVIRONMENT:-development}
+      ERRORBEACON_URL: ${ERRORBEACON_URL:-http://errorbeacon:8000}
+      ERRORBEACON_API_KEY: ${ERRORBEACON_API_KEY:-}
+      ERRORBEACON_APP: ${ERRORBEACON_APP:-asset-inventory-quotes}
+      APP_RELEASE: ${APP_RELEASE:-${IMAGE_TAG:-local}}
+      ERRORBEACON_TIMEOUT: ${ERRORBEACON_TIMEOUT:-0.75}
       DATABASE_URL: ${DATABASE_URL:-postgresql://admin:supersecret@db:5432/asset_db}
       # See `backend`'s matching DB_EXPECTED_PROCESSES comment above for
       # the full "why 4" breakdown -- this worker's own --concurrency=2
       # (2 forked processes) is one of the three inputs.
       DB_EXPECTED_PROCESSES: "4"
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      # Dedicated local worker/beat processes wait in-process for Redis instead of crash-looping.
+      CELERY_BROKER_CONNECTION_MAX_RETRIES: ${CELERY_BROKER_CONNECTION_MAX_RETRIES:-none}
       EXPORT_RESULT_DIR: ${EXPORT_RESULT_DIR:-/app/export_results}
       # `worker` is what actually generates CSV/PDF exports
       # (backend/services/export_service.py), which reads both of these
@@ -488,6 +535,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     # This service shares `backend`'s image, which includes an inherited
     # HEALTHCHECK for `GET /healthz` over HTTP -- but this container runs
     # `celery worker`, not uvicorn, so nothing listens on port 8000.
@@ -520,6 +569,11 @@ services:
     command: ["celery", "-A", "celery_app", "beat", "--loglevel=info"]
     environment:
       ENVIRONMENT: ${ENVIRONMENT:-development}
+      ERRORBEACON_URL: ${ERRORBEACON_URL:-http://errorbeacon:8000}
+      ERRORBEACON_API_KEY: ${ERRORBEACON_API_KEY:-}
+      ERRORBEACON_APP: ${ERRORBEACON_APP:-asset-inventory-quotes}
+      APP_RELEASE: ${APP_RELEASE:-${IMAGE_TAG:-local}}
+      ERRORBEACON_TIMEOUT: ${ERRORBEACON_TIMEOUT:-0.75}
       DATABASE_URL: ${DATABASE_URL:-postgresql://admin:supersecret@db:5432/asset_db}
       # See `backend`'s matching DB_EXPECTED_PROCESSES comment above for
       # the full "why 4" breakdown -- beat itself is only 1 of the 4 (no
@@ -527,6 +581,8 @@ services:
       # sized to fit alongside the other three.
       DB_EXPECTED_PROCESSES: "4"
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      # Dedicated local worker/beat processes wait in-process for Redis instead of crash-looping.
+      CELERY_BROKER_CONNECTION_MAX_RETRIES: ${CELERY_BROKER_CONNECTION_MAX_RETRIES:-none}
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in your .env file -- see .env.example}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_FORMAT: ${LOG_FORMAT:-json}
@@ -586,6 +642,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     # This container inherits `backend`'s HTTP-based HEALTHCHECK, but
     # `celery beat` serves no HTTP endpoint and (unlike `worker`) has no
     # "inspect ping" equivalent -- Beat doesn't consume tasks, so it never
@@ -664,6 +722,43 @@ services:
   # browser talks exclusively to nginx, which forwards /api/* to `backend`
   # over the private Compose network (see BACKEND_HOST/BACKEND_PORT below).
   # `backend` itself is not reachable from outside Docker.
+
+  errorbeacon:
+    build: ./errorbeacon
+    image: errorbeacon-lite:local
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATA_DIR: /data
+      ERRORBEACON_API_KEY: ${ERRORBEACON_API_KEY:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      TELEGRAM_THREAD_ID: ${TELEGRAM_THREAD_ID:-}
+      AI_ENABLED: ${AI_ENABLED:-true}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-llama-3.1-8b-instant}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash-lite}
+      GEMINI_FALLBACK_MODEL: ${GEMINI_FALLBACK_MODEL:-gemini-2.5-flash}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-openrouter/free}
+      OPENROUTER_SITE_URL: ${OPENROUTER_SITE_URL:-https://errorbeacon.local}
+      DEDUP_SECONDS: ${DEDUP_SECONDS:-60}
+      SPIKE_THRESHOLD: ${SPIKE_THRESHOLD:-10}
+      SPIKE_WINDOW_SECONDS: ${SPIKE_WINDOW_SECONDS:-300}
+      ALERT_QUEUE_SIZE: ${ALERT_QUEUE_SIZE:-1000}
+      ALERT_WORKERS: ${ALERT_WORKERS:-3}
+      TELEGRAM_POLLING: ${TELEGRAM_POLLING:-true}
+    volumes:
+      - errorbeacon_data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
   frontend:
     build:
       context: .
@@ -746,3 +841,4 @@ volumes:
   redisdata:
   backup_data:
   export_data:
+  errorbeacon_data:

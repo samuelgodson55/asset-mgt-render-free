@@ -374,6 +374,7 @@ jobs:
       build_matrix: |
         [
           {"service":"backend","dockerfile":"backend/Dockerfile","context":"backend","image_name":"snipeit-lite-backend${{ needs.resolve-target.outputs.image_suffix }}"},
+          {"service":"errorbeacon","dockerfile":"errorbeacon/Dockerfile","context":"errorbeacon","image_name":"errorbeacon-lite"},
           {"service":"frontend-${{ needs.resolve-target.outputs.frontend_type }}","dockerfile":"frontend/Dockerfile","context":".","target":"frontend-${{ needs.resolve-target.outputs.frontend_type }}-only","image_name":"snipeit-lite-frontend-${{ needs.resolve-target.outputs.frontend_type }}${{ needs.resolve-target.outputs.image_suffix }}"}
         ]
       # Trivy blocking follows the deploy TARGET (staging vs production --
@@ -574,6 +575,7 @@ jobs:
     env:
       BACKEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-backend${{ needs.resolve-target.outputs.image_suffix }}
       FRONTEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/snipeit-lite-frontend-${{ needs.resolve-target.outputs.frontend_type }}${{ needs.resolve-target.outputs.image_suffix }}
+      ERRORBEACON_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/errorbeacon-lite
     steps:
       # Needed now (wasn't before) -- this job runs aca-blue-green.sh out of
       # .github/scripts/, unlike every other step here, which only ever
@@ -585,6 +587,15 @@ jobs:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Update isolated ErrorBeacon monitor (never traffic-switched)
+        run: |
+          if az containerapp show --name errorbeacon --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1; then
+            az containerapp update --name errorbeacon --resource-group "$RESOURCE_GROUP" --image "$ERRORBEACON_IMAGE:${{ env.IMAGE_TAG }}" --min-replicas 1 --max-replicas 1 >/dev/null
+            az containerapp show --name errorbeacon --resource-group "$RESOURCE_GROUP" --query "properties.provisioningState" -o tsv
+          else
+            echo "ErrorBeacon Container App does not exist yet. Deploy ACA infrastructure first; the infrastructure workflow provisions it separately."
+          fi
 
       # BUG FIX / INCIDENT RESPONSE: a rollout that fails its health gate is
       # supposed to self-clean via aca-blue-green.sh's own deactivate call,

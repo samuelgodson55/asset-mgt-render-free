@@ -58,9 +58,14 @@ def return_checkout(db: Session, checkout_id: int, req: ReturnRequest, user: dic
     Only Super Admins and Managers can process returns -- staff/customers get
     a read-only view of their own custody on their self-service dashboards.
     """
+    # Serialize concurrent returns against this exact checkout. Without a
+    # row lock, two requests can both read the same outstanding quantity and
+    # each approve a return that should have been rejected. PostgreSQL blocks
+    # the second transaction until the first commits, after which it sees the
+    # updated quantity/status and applies the correct validation.
     checkout = db.query(models.AssetCheckout).filter(
         models.AssetCheckout.id == checkout_id, models.AssetCheckout.status == "active"
-    ).first()
+    ).with_for_update().first()
     if not checkout:
         raise HTTPException(status_code=404, detail="Active checkout record not found.")
 
@@ -72,6 +77,16 @@ def return_checkout(db: Session, checkout_id: int, req: ReturnRequest, user: dic
         )
 
     asset = checkout.asset
+    # Returns and new checkouts both recalculate the cached available stock.
+    # Lock the asset row too so those two transaction types cannot calculate
+    # from the same stale outbound snapshot and overwrite each other's
+    # available_quantity value.
+    if asset is not None:
+        asset = db.query(models.AssetType).filter(
+            models.AssetType.id == asset.id, ~models.AssetType.is_deleted
+        ).with_for_update().first()
+        if asset is None:
+            raise HTTPException(status_code=404, detail="Asset type no longer exists.")
     checkout.quantity_returned += req.quantity
 
     # Fully settled once every outstanding unit has come back.
