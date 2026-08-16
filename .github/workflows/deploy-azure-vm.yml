@@ -677,8 +677,9 @@ jobs:
             # so every one of them silently expanded to an EMPTY string on every
             # run, blanking these values back out in /opt/snipeit/.env on every VM
             # deploy regardless of what sync-secrets-vm.yml had previously set.
-            # Fixed by switching to the same inline `${{ ... }}` expression style
-            # already used for the other ErrorBeacon lines in this step.
+            # Fixed by switching to the same inline GitHub Actions expression
+            # style already used for the other ErrorBeacon lines in this step
+            # (see ERRORBEACON_API_KEY etc. above).
             if grep -q '^GEMINI_MODEL=' .env; then sed -i "s|^GEMINI_MODEL=.*|GEMINI_MODEL=${{ vars.ERRORBEACON_GEMINI_MODEL || 'gemini-2.5-flash-lite' }}|" .env; else echo "GEMINI_MODEL=${{ vars.ERRORBEACON_GEMINI_MODEL || 'gemini-2.5-flash-lite' }}" >> .env; fi
             if grep -q '^GEMINI_FALLBACK_MODEL=' .env; then sed -i "s|^GEMINI_FALLBACK_MODEL=.*|GEMINI_FALLBACK_MODEL=${{ vars.ERRORBEACON_GEMINI_FALLBACK_MODEL || 'gemini-2.5-flash' }}|" .env; else echo "GEMINI_FALLBACK_MODEL=${{ vars.ERRORBEACON_GEMINI_FALLBACK_MODEL || 'gemini-2.5-flash' }}" >> .env; fi
             if grep -q '^GROQ_API_KEY=' .env; then sed -i "s|^GROQ_API_KEY=.*|GROQ_API_KEY=${{ secrets.ERRORBEACON_GROQ_API_KEY }}|" .env; else echo "GROQ_API_KEY=${{ secrets.ERRORBEACON_GROQ_API_KEY }}" >> .env; fi
