@@ -355,8 +355,23 @@ def _create_readiness_engine_from_url(source_url):
     even though PostgreSQL itself is healthy. NullPool plus short PostgreSQL
     connect/statement timeouts makes the probe deterministic: healthy DB =>
     fast 200; unreachable/slow DB => fast 503.
+
+    IMPORTANT: `make_url()` is given `source_url` directly, NOT
+    `str(source_url)`. SQLAlchemy's `URL.__str__()` renders via
+    `render_as_string(hide_password=True)`, which replaces a real password
+    with the literal string "***" -- fine for logging, fatal for actually
+    connecting. Round-tripping through `str()` here silently swapped in
+    that masked password, so this readiness engine (and, transitively,
+    `backup_service`'s post-restore schema-status check, which reuses this
+    helper) connected to Postgres with the password "***" and failed with a
+    genuine `password authentication failed` error even when
+    settings.DATABASE_URL was completely correct. `make_url()` happily
+    accepts a `URL` object as well as a string and preserves the real
+    password either way, so passing `source_url` through unchanged fixes
+    this without any behavior change for callers that already pass a
+    plain string.
     """
-    url = make_url(str(source_url))
+    url = make_url(source_url)
     kwargs = {"poolclass": NullPool}
     if url.get_backend_name().startswith("postgresql"):
         kwargs["connect_args"] = {

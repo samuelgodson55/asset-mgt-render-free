@@ -80,9 +80,17 @@ function retryDelayMs(attempt: number): number {
 async function rawFetch<T = unknown>(path: string, init?: RequestInit): Promise<T> {
   const method = String(init?.method ?? "GET").toUpperCase();
   const retrySafe = SAFE_RETRY_METHODS.has(method);
-  let lastNetworkError: unknown = null;
 
-  for (let attempt = 0; attempt < (retrySafe ? API_RETRY_ATTEMPTS : 1); attempt += 1) {
+  // Retries only ever apply to a response we actually got back (a transient
+  // 502/503/504 -- see TRANSIENT_HTTP_STATUSES below). A network-level
+  // failure (fetch() itself throwing -- DNS failure, connection refused,
+  // offline, CORS, etc.) is surfaced immediately and never retried here:
+  // retrying it silently would mean a single real outage turns into several
+  // more fetch() calls before the caller ever finds out, and -- for a
+  // signed-in, non-demo session -- tryLoad()'s contract above depends on
+  // that failure propagating so it is never mistaken for a moment to fall
+  // back to demo data.
+  for (let attempt = 0; attempt < API_RETRY_ATTEMPTS; attempt += 1) {
     let res: Response;
     try {
       res = await fetch(`${API_BASE}${path}`, {
@@ -91,11 +99,6 @@ async function rawFetch<T = unknown>(path: string, init?: RequestInit): Promise<
         ...init,
       });
     } catch (err) {
-      lastNetworkError = err;
-      if (retrySafe && attempt + 1 < API_RETRY_ATTEMPTS) {
-        await sleep(retryDelayMs(attempt));
-        continue;
-      }
       reportClientError(err, { source: "api.network", endpoint: path, attempts: attempt + 1 });
       throw err;
     }
@@ -129,7 +132,7 @@ async function rawFetch<T = unknown>(path: string, init?: RequestInit): Promise<
     return (await res.json()) as T;
   }
 
-  throw lastNetworkError instanceof Error ? lastNetworkError : new Error("Request failed after retries");
+  throw new Error("Request failed after retries");
 }
 
 /**
