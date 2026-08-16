@@ -101,21 +101,13 @@ export function installGlobalErrorBeacon(): void {
   if (typeof window === "undefined" || patched) return;
   patched = true;
 
-  const nativeFetch = window.fetch.bind(window);
-  window.fetch = async (...args: Parameters<typeof fetch>) => {
-    const response = await nativeFetch(...args);
-
-    // A test double or unusual fetch implementation can legally return
-    // undefined even though the real browser fetch API always returns a
-    // Response. Never let the correlation wrapper turn that into a new
-    // "reading headers" error.
-    if (response?.headers) {
-      const requestId = response.headers.get("x-request-id");
-      if (requestId) setLastRequestId(requestId);
-    }
-
-    return response;
-  };
+  // Do NOT monkey-patch window.fetch here. The API layer owns its request
+  // handling and already records X-Request-ID on every response it receives.
+  // A global fetch wrapper creates hidden coupling with tests and with other
+  // code that deliberately replaces fetch, and it can turn a failed business
+  // request into a secondary "response.headers" error. Keeping ErrorBeacon
+  // limited to window-level error listeners makes telemetry completely
+  // independent from the application's HTTP implementation.
 
   window.addEventListener("error", (e) => {
     reportClientError(e.error || new Error(e.message), { source: "window.error" });

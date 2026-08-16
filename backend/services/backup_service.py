@@ -2185,6 +2185,8 @@ def _restore_backup_impl(filepath: str, take_safety_backup: bool = True) -> dict
                     existing_tables = set(sa_inspect(_conn).get_table_names()) - {"alembic_version"}
 
                 if schema_status_before["current_heads"] or not existing_tables:
+                    # A tracked schema can be upgraded normally. An actually
+                    # empty schema also needs the complete migration chain.
                     command.upgrade(alembic_cfg, "head")
                 else:
                     with database_module.engine.connect() as _conn:
@@ -2192,13 +2194,22 @@ def _restore_backup_impl(filepath: str, take_safety_backup: bool = True) -> dict
                     logger.warning(
                         "backup_service: restored schema has %d table(s) but no "
                         "'alembic_version' row -- inspected its actual shape and it "
-                        "corresponds to migration '%s'. Stamping that revision, then "
-                        "running 'alembic upgrade head' to apply any migrations still "
-                        "missing on top of it (a no-op if it's genuinely already current).",
+                        "corresponds to migration '%s'. Stamping that revision before "
+                        "upgrading to the current head.",
                         len(existing_tables), detected_revision,
                     )
+                    # A create_all()/legacy dump has tables but no Alembic
+                    # marker. Stamp the revision that the restored columns/tables
+                    # actually represent; never blindly stamp "head".
                     command.stamp(alembic_cfg, detected_revision)
-                    command.upgrade(alembic_cfg, "head")
+
+                # Always execute an idempotent final upgrade, even when the
+                # restored dump already reported the current head. This makes
+                # restore reconciliation self-healing: if the dump's
+                # alembic_version marker was stale, incomplete, or otherwise
+                # disagreed with the physical schema, Alembic gets one final
+                # opportunity to reconcile it before readiness is evaluated.
+                command.upgrade(alembic_cfg, "head")
             except Exception as exc:
                 logger.exception("backup_service: post-restore schema reconciliation failed")
                 raise RuntimeError(
