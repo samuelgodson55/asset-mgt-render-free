@@ -1468,8 +1468,8 @@ def ai_recovery_loop():
             with _db_lock:
                 c=db()
                 rows=c.execute("SELECT * FROM incidents WHERE ai_status='pending' AND (ai_next_retry_at IS NULL OR ai_next_retry_at<=?) AND ai_analysis IS NULL ORDER BY created_at ASC LIMIT ?",(now,max(1,AI_Q//4))).fetchall()
-            tg_rows=c.execute("SELECT * FROM incidents WHERE ai_status='telegram_pending' AND ai_analysis IS NOT NULL AND (ai_next_retry_at IS NULL OR ai_next_retry_at<=?) ORDER BY created_at ASC LIMIT ?",(now,max(1,AI_Q//4))).fetchall()
-            c.close()
+                tg_rows=c.execute("SELECT * FROM incidents WHERE ai_status='telegram_pending' AND ai_analysis IS NOT NULL AND (ai_next_retry_at IS NULL OR ai_next_retry_at<=?) ORDER BY created_at ASC LIMIT ?",(now,max(1,AI_Q//4))).fetchall()
+                c.close()
             for x in rows:
                 e=_event_from_row(x)
                 enqueue_ai(e,x['id'],x['occurrence_count'],bool(x['spike_detected']),bool(x['deployment_regression']))
@@ -1658,14 +1658,14 @@ def _telegram_stats(window='24h'):
     w=window.strip().lower() or '24h'
     if not re.fullmatch(r'\d+(m|h|d|w)',w):
         raise ValueError('window must look like 30m, 24h, 7d, or 1w')
-    stats=get_stats(w)
-    delivery=stats['delivery']
+    s=stats(w)
+    delivery=s['delivery']
     return '\n'.join([
         f'📊 <b>ErrorBeacon stats ({html.escape(w)})</b>',
-        f'Incidents: {stats["incidents"]}',
-        f'Unresolved: {stats["unresolved"]}',
-        f'Spikes: {stats["spike_count"]}',
-        f'Regressions: {stats["deployment_regression_count"]}',
+        f'Incidents: {s["incidents"]}',
+        f'Unresolved: {s["unresolved"]}',
+        f'Spikes: {s["spike_count"]}',
+        f'Regressions: {s["deployment_regression_count"]}',
         f'Telegram success: {delivery["telegram"]["success_rate_percent"] if delivery["telegram"]["success_rate_percent"] is not None else "n/a"}%',
         f'Email fallback success: {delivery["email_fallback"]["success_rate_percent"] if delivery["email_fallback"]["success_rate_percent"] is not None else "n/a"}%',
         f'AI completion: {delivery["ai"]["completion_rate_percent"] if delivery["ai"]["completion_rate_percent"] is not None else "n/a"}%'
@@ -1676,7 +1676,7 @@ def handle_telegram_command(text):
     try:
         if cmd=='/help' or cmd=='/start': return _telegram_help()
         if cmd=='/health':
-            h=healthz(); return '\n'.join(['💚 <b>ErrorBeacon health</b>',f'Status: {h["status"]}',f'Telegram configured: {h["telegram_configured"]}',f'Email fallback configured: {h["email_fallback_configured"]}',f'Email provider: {h["email_provider"]}',f'Email missing: {", ".join(h["email"]["missing"]) or "none"}',f'DB: {h["db_size_mb"]:.1f} MB',f'AI queue: {h["ai_queue_depth"]}',f'AI pending: {h["ai_pending"]}'])
+            h=health_payload(); return '\n'.join(['💚 <b>ErrorBeacon health</b>',f'Status: {h["status"]}',f'Telegram configured: {h["telegram_configured"]}',f'Email fallback configured: {h["email_fallback_configured"]}',f'Email provider: {h["email_provider"]}',f'Email missing: {", ".join(h["email"]["missing"]) or "none"}',f'DB: {h["db_size_mb"]:.1f} MB',f'AI queue: {h["ai_queue_depth"]}',f'AI pending: {h["ai_pending"]}'])
         if cmd=='/incidents': return _incidents_summary()
         if cmd=='/incident':
             if len(p)!=2: return 'Usage: /incident <incident_id>'
