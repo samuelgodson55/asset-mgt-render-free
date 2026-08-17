@@ -17,9 +17,9 @@
 ErrorBeacon:
 
 ```env
-ERRORBEACON_API_KEY=...
-ERRORBEACON_INGEST_API_KEY=...   # optional; defaults to legacy key
-ERRORBEACON_ADMIN_API_KEY=...   # optional; defaults to legacy key
+ERRORBEACON_INGEST_API_KEY=...   # required for monitored application ingest
+ERRORBEACON_ADMIN_API_KEY=...   # required for management endpoints
+ERRORBEACON_TRUST_PROXY_HEADERS=false   # safe default; enable only behind a trusted proxy
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_CHAT_ID=-100xxxxxxxxxx
 TELEGRAM_THREAD_ID=
@@ -40,13 +40,21 @@ ERRORBEACON_EMAIL_FALLBACK_ENABLED=true
 ERRORBEACON_EMAIL_FALLBACK_AFTER_ATTEMPTS=3
 ERRORBEACON_EMAIL_FALLBACK_AFTER_SECONDS=300
 ERRORBEACON_RETENTION_DAYS=90
+ERRORBEACON_AUTO_STALE_DAYS=30
+ERRORBEACON_DB_WARN_MB=4096
+ERRORBEACON_CLEAN_MAX_DEPTH=10
+ERRORBEACON_CLEAN_MAX_ITEMS=100
+ERRORBEACON_DIGEST_ENABLED=true
+ERRORBEACON_DIGEST_INTERVAL_HOURS=24
+ERRORBEACON_STARTUP_SELF_TEST=false
+ADMIN_NOTIFICATION_EMAILS=admin@example.com
 ```
 
 Monitored application:
 
 ```env
 ERRORBEACON_URL=http://errorbeacon:8000
-ERRORBEACON_API_KEY=the-same-key
+ERRORBEACON_INGEST_API_KEY=the-same-key
 ERRORBEACON_APP=asset-inventory-quotes
 APP_RELEASE=your-image-tag-or-commit-sha
 ```
@@ -75,6 +83,8 @@ Test:
 
 ```bash
 curl -X POST http://127.0.0.1:8787/v1/test -H "X-API-Key: YOUR_KEY"
+curl -X POST http://127.0.0.1:8787/v1/test-telegram -H "X-API-Key: YOUR_KEY"
+curl -X POST http://127.0.0.1:8787/v1/test-email -H "X-API-Key: YOUR_KEY"
 ```
 
 When both applications run in one Compose project, use `http://errorbeacon:8000` from the backend. Do not use `localhost` from one container to reach another.
@@ -102,7 +112,7 @@ Health check: /healthz
 Plan: Free
 ```
 
-Set the secret environment variables in Render. Do not commit `.env`.
+Set the secret environment variables in Render. Do not commit `.env`. Keep `ERRORBEACON_TRUST_PROXY_HEADERS=false` on Render Free because ErrorBeacon is itself publicly reachable and clients can spoof proxy headers.
 
 To reduce cold starts, use a free external uptime monitor to request `/healthz` every five minutes. This is only a practical workaround; Render can still restart the service and the monitor's filesystem is not durable.
 
@@ -130,6 +140,7 @@ ACA Environment
 ErrorBeacon has:
 
 - internal ingress only
+- `ERRORBEACON_TRUST_PROXY_HEADERS=true` because ACA ingress is a controlled proxy boundary
 - one warm replica
 - independent revision lifecycle
 - Azure Files mounted at `/data`

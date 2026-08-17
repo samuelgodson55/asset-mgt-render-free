@@ -4,7 +4,8 @@ from datetime import datetime, timedelta, timezone
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-os.environ['ERRORBEACON_API_KEY']='test-key'
+os.environ['ERRORBEACON_INGEST_API_KEY']='test-ingest-key'
+os.environ['ERRORBEACON_ADMIN_API_KEY']='test-admin-key'
 os.environ['DATA_DIR']='/tmp/errorbeacon-test'
 from app import main
 from app.main import ErrorEvent, fingerprint, redact, clean, telegram_message, RequestContextMiddleware, request_id_var
@@ -22,6 +23,24 @@ def test_fingerprint_normalizes_volatile_ids():
     a = ErrorEvent(message='duplicate quotation 123456 for request abcdef123456789', error_type='IntegrityError', path='/api/quotations')
     b = ErrorEvent(message='duplicate quotation 987654 for request 999999999999999', error_type='IntegrityError', path='/api/quotations')
     assert fingerprint(a) == fingerprint(b)
+
+def test_fingerprint_normalizes_ids_in_path():
+    # Regression guard: the same recurring bug on different asset IDs must
+    # collapse to ONE incident, not one per ID.
+    a = ErrorEvent(message='boom', error_type='ValueError', path='/api/assets/142')
+    b = ErrorEvent(message='boom', error_type='ValueError', path='/api/assets/143')
+    assert fingerprint(a) == fingerprint(b)
+
+def test_fingerprint_keeps_different_routes_distinct():
+    asset = ErrorEvent(message='boom', error_type='ValueError', path='/api/assets/142')
+    user = ErrorEvent(message='boom', error_type='ValueError', path='/api/users/142')
+    assert fingerprint(asset) != fingerprint(user)
+
+def test_fingerprint_keeps_different_errors_distinct():
+    value_error = ErrorEvent(message='boom', error_type='ValueError', path='/api/assets/142')
+    runtime_error = ErrorEvent(message='boom', error_type='RuntimeError', path='/api/assets/143')
+    assert fingerprint(value_error) != fingerprint(runtime_error)
+
 
 def test_redaction_covers_credentials_and_db_urls():
     value = 'Authorization: Bearer abc.def.ghi password=supersecret postgresql://admin:pw@db:5432/app'
@@ -143,9 +162,13 @@ def test_chaos_test_is_info_classification():
     e = main.ErrorEvent(message="controlled", severity="error", category="chaos_test", status_code=None)
     assert main.classify(e) == "info"
 
-def test_healthz_exposes_ai_queue():
+def test_healthz_is_public_summary_only():
     payload = main.healthz()
-    assert "ai_queue_depth" in payload
+    assert set(payload) == {'status','service','version','db_status'}
+
+def test_detailed_health_is_available_separately():
+    payload = main.detailed_health()
+    assert 'ai_queue_depth' in payload
 
 
 def test_incident_schema_has_durable_ai_state(tmp_path, monkeypatch):
@@ -391,7 +414,7 @@ def test_http_incident_lifecycle_endpoints(tmp_path, monkeypatch):
     main.init_db()
     incident, *_ = main.persist(main.ErrorEvent(message='endpoint boom', error_type='RuntimeError'))
     with TestClient(main.app) as client:
-        headers = {'X-API-Key': 'test-key'}
+        headers = {'X-API-Key': 'test-admin-key'}
         response = client.get('/v1/incidents', headers=headers)
         assert response.status_code == 200
         assert any(row['id'] == incident for row in response.json())
@@ -409,7 +432,7 @@ def test_http_test_endpoint_has_own_rate_limit(tmp_path, monkeypatch):
     main._test_rate.clear()
     main.init_db()
     with TestClient(main.app) as client:
-        headers = {'X-API-Key': 'test-key'}
+        headers = {'X-API-Key': 'test-admin-key'}
         assert client.post('/v1/test', headers=headers).status_code == 200
         assert client.post('/v1/test', headers=headers).status_code == 429
     main._test_rate.clear()
@@ -475,3 +498,141 @@ def test_deployment_regression_detected_after_release_changes(tmp_path, monkeypa
         ).fetchone()
         c.close()
     assert row['deployment_regression'] == 1
+
+
+def test_clean_enforces_depth_limit(monkeypatch):
+    monkeypatch.setattr(main, 'CLEAN_MAX_DEPTH', 2)
+    nested = {'a': {'b': {'c': 'secret'}}}
+    out = main.clean(nested)
+    assert out['a']['b'] == '[TRUNCATED_DEPTH]'
+
+
+def test_email_diagnostics_identifies_missing_fallback_configuration(monkeypatch):
+    monkeypatch.setattr(main, 'EMAIL_FALLBACK_ENABLED', True)
+    monkeypatch.setattr(main, 'NOTIFICATIONS_ENABLED', True)
+    monkeypatch.setattr(main, 'ADMIN_NOTIFICATION_EMAILS', '')
+    monkeypatch.setattr(main, 'EMAIL_PROVIDER', 'smtp')
+    monkeypatch.setattr(main, 'SMTP_HOST', '')
+    monkeypatch.setattr(main, 'SMTP_FROM_EMAIL', '')
+    d = main._email_diagnostics()
+    assert d['configured'] is False
+    assert 'ADMIN_NOTIFICATION_EMAILS' in d['missing']
+    assert 'SMTP_HOST' in d['missing']
+    assert 'SMTP_FROM_EMAIL' in d['missing']
+
+
+def test_http_incident_detail_and_stats(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    monkeypatch.setattr(main, 'DATA_DIR', tmp_path)
+    monkeypatch.setattr(main, 'DB_PATH', tmp_path / 'errorbeacon.db')
+    main.init_db()
+    e = main.ErrorEvent(app='stats-app', environment='production', severity='error', message='detailed boom', traceback='Traceback\nboom', user_id='user-1', host='host-1', context={'safe':'ok'})
+    incident, *_ = main.persist(e)
+    with TestClient(main.app) as client:
+        headers = {'X-API-Key': 'test-admin-key'}
+        detail = client.get(f'/v1/incidents/{incident}', headers=headers)
+        assert detail.status_code == 200
+        payload = detail.json()
+        assert payload['traceback'].startswith('Traceback')
+        assert payload['context']['safe'] == 'ok'
+        filtered = client.get('/v1/incidents?app=stats-app&severity=error&resolved=false', headers=headers)
+        assert filtered.status_code == 200
+        assert any(x['id'] == incident for x in filtered.json())
+        stats = client.get('/v1/stats?window=24h', headers=headers)
+        assert stats.status_code == 200
+        data = stats.json()
+        assert data['incidents'] >= 1
+        assert any(x['app'] == 'stats-app' for x in data['by_app'])
+        assert data['top_fingerprints']
+
+
+def test_telegram_help_lists_operational_and_test_commands():
+    help_text = main.handle_telegram_command('/help')
+    for command in ['/health', '/incidents', '/incident &lt;id&gt;', '/stats [window]', '/resolve &lt;id&gt;', '/reopen &lt;id&gt;', '/silence &lt;id&gt; &lt;duration&gt;', '/unsilence &lt;id&gt;', '/test', '/testtelegram', '/testemail', '/help']:
+        assert command in help_text
+
+
+def test_unknown_telegram_command_points_to_help():
+    assert 'Use /help' in main.handle_telegram_command('/not-a-command')
+
+
+def test_admin_auth_does_not_trust_spoofed_proxy_ip_by_default(monkeypatch):
+    from fastapi import HTTPException
+    main._admin_failures.clear()
+    monkeypatch.setattr(main, 'TRUST_PROXY_HEADERS', False)
+    monkeypatch.setattr(main, 'ADMIN_AUTH_FAILURES_PER_MINUTE', 2)
+
+    class Req:
+        def __init__(self, forwarded):
+            self.headers = {'x-real-ip': forwarded}
+            self.client = type('Client', (), {'host': '203.0.113.10'})()
+
+    for spoofed in ('198.51.100.1', '198.51.100.2'):
+        try:
+            main.admin_auth(Req(spoofed), 'wrong')
+        except HTTPException as exc:
+            assert exc.status_code == 401
+    assert set(main._admin_failures) == {'203.0.113.10'}
+    main._admin_failures.clear()
+
+def test_admin_auth_prefers_leftmost_forwarded_ip_when_proxy_is_trusted(monkeypatch):
+    from fastapi import HTTPException
+    main._admin_failures.clear()
+    monkeypatch.setattr(main, 'TRUST_PROXY_HEADERS', True)
+    class Req:
+        headers = {'x-forwarded-for': '198.51.100.8, 10.0.0.4', 'x-real-ip': '192.0.2.8'}
+        client = type('Client', (), {'host': '203.0.113.10'})()
+    try:
+        main.admin_auth(Req(), 'wrong')
+    except HTTPException as exc:
+        assert exc.status_code == 401
+    assert set(main._admin_failures) == {'198.51.100.8'}
+    main._admin_failures.clear()
+
+
+def test_admin_auth_uses_proxy_ip_when_explicitly_trusted(monkeypatch):
+    from fastapi import HTTPException
+    main._admin_failures.clear()
+    monkeypatch.setattr(main, 'TRUST_PROXY_HEADERS', True)
+    monkeypatch.setattr(main, 'ADMIN_AUTH_FAILURES_PER_MINUTE', 1)
+
+    class Req:
+        headers = {'x-real-ip': '198.51.100.7'}
+        client = type('Client', (), {'host': '203.0.113.10'})()
+
+    try:
+        main.admin_auth(Req(), 'wrong')
+    except HTTPException as exc:
+        assert exc.status_code == 401
+    assert set(main._admin_failures) == {'198.51.100.7'}
+    main._admin_failures.clear()
+
+
+def test_admin_auth_rate_limits_failed_attempts(monkeypatch):
+    from fastapi import HTTPException
+    main._admin_failures.clear()
+    monkeypatch.setattr(main, 'ADMIN_AUTH_FAILURES_PER_MINUTE', 2)
+    class Req:
+        headers = {}
+        client = type('Client', (), {'host':'203.0.113.10'})()
+    for _ in range(2):
+        try: main.admin_auth(Req(), 'wrong')
+        except HTTPException as exc: assert exc.status_code == 401
+    try: main.admin_auth(Req(), 'wrong')
+    except HTTPException as exc: assert exc.status_code == 429
+    else: assert False
+    main._admin_failures.clear()
+
+def test_request_size_limit_rejects_large_content_length():
+    import asyncio
+    sent=[]
+    async def app(scope, receive, send):
+        raise AssertionError('downstream should not run')
+    middleware=main.RequestSizeLimitMiddleware(app, 10)
+    async def send(message): sent.append(message)
+    scope={'type':'http','method':'POST','path':'/v1/events','headers':[(b'content-length',b'11')]}
+    asyncio.run(middleware(scope, lambda: None, send))
+    assert sent[0]['status'] == 413
+
+def test_errorbeacon_docs_disabled_in_production_default():
+    assert main.ENABLE_DOCS is False

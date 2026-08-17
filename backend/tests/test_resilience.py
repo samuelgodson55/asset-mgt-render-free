@@ -26,15 +26,15 @@ def test_login_rate_limit_fails_open_when_redis_is_down(monkeypatch):
     login endpoint into an outage of its own.
     """
     middleware = RateLimitMiddleware(lambda *_args, **_kwargs: None, {"/auth/login"})
-    middleware._redis = _BrokenRedis()
-    blocked, retry_after = middleware._is_limited("198.51.100.10")
+    middleware._limiter._redis = _BrokenRedis()
+    blocked, retry_after = middleware._limiter.check("198.51.100.10")
     assert blocked is False
     assert retry_after == 0
 
 
 def test_rate_limiter_uses_bounded_redis_timeouts():
     middleware = RateLimitMiddleware(lambda *_args, **_kwargs: None, {"/auth/login"})
-    kwargs = middleware._redis.connection_pool.connection_kwargs
+    kwargs = middleware._limiter._redis.connection_pool.connection_kwargs
     assert kwargs["socket_connect_timeout"] == 1
     assert kwargs["socket_timeout"] == 1
     assert kwargs["health_check_interval"] == 30
@@ -52,7 +52,11 @@ def test_rate_limit_non_limited_requests_pass_through():
 
 
 def test_rate_limit_redis_failure_reports_degradation_without_http_503():
-    source = (Path(__file__).resolve().parents[1] / "middleware" / "rate_limit.py").read_text()
-    assert 'report_exception(exc, None, None' in source
+    # The fail-open report_exception() call now lives in the shared
+    # RedisFixedWindowLimiter (utils/rate_limiter.py), used by both the
+    # login rate limiter and api/telemetry_api.py's client-error limiter --
+    # see that module's docstring.
+    source = (Path(__file__).resolve().parents[1] / "utils" / "rate_limiter.py").read_text()
+    assert 'report_exception(' in source
     assert 'category="dependency_degraded"' in source
     assert '"failure_mode": "fail_open"' in source

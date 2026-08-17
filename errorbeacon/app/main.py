@@ -22,12 +22,11 @@ import requests
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
-APP_VERSION = '4.0.0'
+APP_VERSION = '4.1.3'
 DATA_DIR = Path(os.getenv('DATA_DIR', '/data'))
 DB_PATH = DATA_DIR / 'errorbeacon.db'
-LEGACY_API_KEY = os.getenv('ERRORBEACON_API_KEY', '')
-INGEST_API_KEY = os.getenv('ERRORBEACON_INGEST_API_KEY', '') or LEGACY_API_KEY
-ADMIN_API_KEY = os.getenv('ERRORBEACON_ADMIN_API_KEY', '') or LEGACY_API_KEY
+INGEST_API_KEY = os.getenv('ERRORBEACON_INGEST_API_KEY', '')
+ADMIN_API_KEY = os.getenv('ERRORBEACON_ADMIN_API_KEY', '')
 TG_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')
 TG_CHAT = os.getenv('TELEGRAM_CHAT_ID', '')
 TG_THREAD = os.getenv('TELEGRAM_THREAD_ID', '')
@@ -41,6 +40,10 @@ GEMINI_FALLBACK_MODEL = os.getenv('GEMINI_FALLBACK_MODEL', 'gemini-2.5-flash')
 OPENROUTER_KEY = os.getenv('OPENROUTER_API_KEY', '')
 OPENROUTER_MODEL = os.getenv('OPENROUTER_MODEL', 'openrouter/free')
 MAX_ALERTS = int(os.getenv('MAX_ALERTS_PER_MINUTE', '30'))
+MAX_REQUEST_BODY_BYTES = max(16 * 1024, int(os.getenv('ERRORBEACON_MAX_REQUEST_BODY_BYTES', '131072')))
+ADMIN_AUTH_FAILURES_PER_MINUTE = max(1, int(os.getenv('ERRORBEACON_ADMIN_AUTH_FAILURES_PER_MINUTE', '10')))
+TRUST_PROXY_HEADERS = os.getenv('ERRORBEACON_TRUST_PROXY_HEADERS', 'false').lower() in {'1', 'true', 'yes', 'on'}
+ENABLE_DOCS = os.getenv('ERRORBEACON_ENABLE_DOCS', 'false' if os.getenv('ENVIRONMENT', 'production').lower() in {'prod','production'} else 'true').lower() in {'1','true','yes','on'}
 DEDUP = int(os.getenv('DEDUP_SECONDS', '60'))
 SPIKE_WINDOW = int(os.getenv('SPIKE_WINDOW_SECONDS', '300'))
 SPIKE_THRESHOLD = int(os.getenv('SPIKE_THRESHOLD', '10'))
@@ -60,6 +63,9 @@ AI_MAX_INCIDENT_RETRIES = max(1, int(os.getenv('AI_MAX_INCIDENT_RETRIES', '3')))
 TEST_ALERTS_PER_MINUTE = max(1, int(os.getenv('TEST_ALERTS_PER_MINUTE', '3')))
 RETENTION_DAYS = max(1, int(os.getenv('ERRORBEACON_RETENTION_DAYS', '90')))
 RETENTION_INTERVAL_SECONDS = max(300, int(os.getenv('ERRORBEACON_RETENTION_INTERVAL_SECONDS', '3600')))
+AUTO_STALE_DAYS = max(1, int(os.getenv('ERRORBEACON_AUTO_STALE_DAYS', '30')))
+DIGEST_ENABLED = os.getenv('ERRORBEACON_DIGEST_ENABLED', 'true').lower() in {'1', 'true', 'yes', 'on'}
+DIGEST_INTERVAL_HOURS = max(1, int(os.getenv('ERRORBEACON_DIGEST_INTERVAL_HOURS', '24')))
 DB_WARN_MB = max(1, float(os.getenv('ERRORBEACON_DB_WARN_MB', '4096')))
 EMAIL_FALLBACK_ENABLED = os.getenv('ERRORBEACON_EMAIL_FALLBACK_ENABLED', 'true').lower() in {'1','true','yes','on'}
 EMAIL_FALLBACK_AFTER_ATTEMPTS = max(1, int(os.getenv('ERRORBEACON_EMAIL_FALLBACK_AFTER_ATTEMPTS', '3')))
@@ -78,8 +84,10 @@ BREVO_API_KEY = os.getenv('BREVO_API_KEY', '')
 RESEND_API_KEY = os.getenv('RESEND_API_KEY', '')
 ADMIN_NOTIFICATION_EMAILS = os.getenv('ADMIN_NOTIFICATION_EMAILS', '')
 EMAIL_TIMEOUT_SECONDS = max(3, int(os.getenv('ERRORBEACON_EMAIL_TIMEOUT_SECONDS', '10')))
+STARTUP_SELF_TEST = os.getenv('ERRORBEACON_STARTUP_SELF_TEST', 'false').lower() in {'1', 'true', 'yes', 'on'}
 from contextvars import ContextVar
 from starlette.types import ASGIApp, Receive, Scope, Send
+from shared.errorbeacon_sanitization import clean as _shared_clean, redact, sanitize_url
 
 request_id_var: ContextVar[str | None] = ContextVar('errorbeacon_request_id', default=None)
 
@@ -114,6 +122,58 @@ for _name in ('uvicorn', 'uvicorn.error', 'uvicorn.access'):
     _logger.propagate = True
 log=logging.getLogger('errorbeacon')
 
+class RequestSizeLimitMiddleware:
+    def __init__(self, app: ASGIApp, max_bytes: int):
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get('type') != 'http':
+            await self.app(scope, receive, send)
+            return
+        headers = dict(scope.get('headers', []))
+        content_length = headers.get(b'content-length')
+        if content_length:
+            try:
+                if int(content_length) > self.max_bytes:
+                    body = (f'Request body too large; maximum is {self.max_bytes} bytes').encode()
+                    await send({'type':'http.response.start','status':413,'headers':[(b'content-type',b'text/plain'),(b'content-length',str(len(body)).encode())]})
+                    await send({'type':'http.response.body','body':body})
+                    return
+            except ValueError:
+                pass
+
+        total = 0
+        finished = False
+        async def limited_receive():
+            nonlocal total, finished
+            message = await receive()
+            if message.get('type') == 'http.request':
+                chunk = message.get('body', b'') or b''
+                total += len(chunk)
+                if total > self.max_bytes:
+                    finished = True
+                    raise ValueError('request body too large')
+                if not message.get('more_body', False):
+                    finished = True
+            return message
+        try:
+            await self.app(scope, limited_receive, send)
+        except ValueError as exc:
+            if str(exc) == 'request body too large' and not finished:
+                body = (f'Request body too large; maximum is {self.max_bytes} bytes').encode()
+                await send({'type':'http.response.start','status':413,'headers':[(b'content-type',b'text/plain'),(b'content-length',str(len(body)).encode())]})
+                await send({'type':'http.response.body','body':body})
+            elif str(exc) == 'request body too large':
+                body = (f'Request body too large; maximum is {self.max_bytes} bytes').encode()
+                try:
+                    await send({'type':'http.response.start','status':413,'headers':[(b'content-type',b'text/plain'),(b'content-length',str(len(body)).encode())]})
+                    await send({'type':'http.response.body','body':body})
+                except RuntimeError:
+                    pass
+            else:
+                raise
+
 class RequestContextMiddleware:
     def __init__(self, app: ASGIApp):
         self.app = app
@@ -145,6 +205,8 @@ class RequestContextMiddleware:
             request_id_var.reset(token)
 _db_lock=threading.Lock()
 _rate_lock=threading.Lock()
+_admin_fail_lock=threading.Lock()
+_admin_failures={}
 _ai_state_lock=threading.Lock()
 _rate=[]
 _test_rate=[]
@@ -156,12 +218,6 @@ _workers=[]
 _ai_workers=[]
 _ai_enqueued=set()
 _recovery_thread=None
-_SECRET_KEY=re.compile(r'(?i)(password|passwd|secret|token|api[_-]?key|authorization|cookie|session|reset[_-]?token|access[_-]?token|refresh[_-]?token|private[_-]?key)')
-_ASSIGN=re.compile(r'(?i)(authorization|cookie|x-api-key|api[_-]?key|access[_-]?token|refresh[_-]?token|reset[_-]?token|password|passwd|secret|session(?:[_-]?id)?)\s*[:=]\s*([^\s,;&]+)')
-_BEARER=re.compile(r'(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+')
-_JWT=re.compile(r'\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b')
-_DBURL=re.compile(r'(?i)(postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis)://[^\s]+')
-_SENSITIVE_Q=re.compile(r'(?i)([?&](?:token|access_token|refresh_token|reset_token|code|secret|key|password|passwd|api_key|apikey|session|session_id))=[^&#]*')
 _VOLATILE=re.compile(r'\b(?:[0-9a-f]{8,}|\d{3,})\b',re.I)
 
 class ErrorEvent(BaseModel):
@@ -187,38 +243,20 @@ class ErrorEvent(BaseModel):
 def iso():
     return datetime.now(timezone.utc).isoformat()
 
-def sanitize_url(v):
-    """Redact sensitive query-string values (tokens, secrets, etc.) from a URL/path."""
-    try:
-        redacted = _SENSITIVE_Q.sub(lambda m: f'{m.group(1)}=[REDACTED]', str(v or ''))
-        return redacted[:2000]
-    except Exception:
-        return str(v or '')[:2000]
+CLEAN_MAX_DEPTH = max(1, int(os.getenv('ERRORBEACON_CLEAN_MAX_DEPTH', '10')))
+CLEAN_MAX_ITEMS = max(1, int(os.getenv('ERRORBEACON_CLEAN_MAX_ITEMS', '100')))
 
-def redact(v, limit=30000):
-    """Strip common secret shapes (JWTs, bearer tokens, DB URLs, key=value pairs) from text."""
-    if v is None:
-        return ''
-    s = str(v)
-    s = _JWT.sub('[REDACTED_JWT]', s)
-    s = _BEARER.sub('Bearer [REDACTED]', s)
-    s = _DBURL.sub('[REDACTED_DB_URL]', s)
-    s = _ASSIGN.sub(lambda m: f'{m.group(1)}=[REDACTED]', s)
-    return s[:limit]
-
-def clean(v, key=''):
-    """Recursively redact a context dict/list before it is persisted, sent to AI, or sent to Telegram."""
-    if _SECRET_KEY.search(key):
-        return '[REDACTED]'
-    if isinstance(v, dict):
-        return {str(k): clean(x, str(k)) for k, x in list(v.items())[:100]}
-    if isinstance(v, (list, tuple)):
-        return [clean(x, key) for x in list(v)[:100]]
-    if isinstance(v, str):
-        return redact(sanitize_url(v), 4000)
-    if isinstance(v, (int, float, bool)) or v is None:
-        return v
-    return redact(v, 4000)
+def clean(v, key='', depth=0):
+    """Recursively redact context with both breadth and depth limits."""
+    return _shared_clean(
+        v,
+        key,
+        depth,
+        max_depth=CLEAN_MAX_DEPTH,
+        max_items=CLEAN_MAX_ITEMS,
+        string_limit=4000,
+        scalar_limit=4000,
+    )
 
 def init_db():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -305,7 +343,16 @@ def init_db():
                             fallback_next_retry_at TEXT,
                             fallback_last_error TEXT,
                             fallback_sent_at TEXT,
-                            ai_failure_email_sent_at TEXT
+                            ai_failure_email_sent_at TEXT,
+                            resolved_at TEXT,
+                            resolved_reason TEXT
+                        )
+                    ''')
+                    c.execute('''
+                        CREATE TABLE IF NOT EXISTS service_state(
+                            key TEXT PRIMARY KEY,
+                            value TEXT NOT NULL,
+                            updated_at TEXT NOT NULL
                         )
                     ''')
                     c.execute('''
@@ -344,6 +391,8 @@ def init_db():
                         'fallback_last_error': 'ALTER TABLE incidents ADD COLUMN fallback_last_error TEXT',
                         'fallback_sent_at': 'ALTER TABLE incidents ADD COLUMN fallback_sent_at TEXT',
                         'ai_failure_email_sent_at': 'ALTER TABLE incidents ADD COLUMN ai_failure_email_sent_at TEXT',
+                        'resolved_at': 'ALTER TABLE incidents ADD COLUMN resolved_at TEXT',
+                        'resolved_reason': 'ALTER TABLE incidents ADD COLUMN resolved_reason TEXT',
                     }
                     cols = {r[1] for r in c.execute('PRAGMA table_info(incidents)')}
                     for column_name, alter_sql in migrations.items():
@@ -368,6 +417,21 @@ def db():
     c.execute('PRAGMA busy_timeout=15000')
     return c
 
+def _client_ip_from_request(request: Request) -> str:
+    # Proxy headers are attacker-controlled unless this service is known to
+    # sit behind a trusted ingress/reverse proxy that overwrites them. Render
+    # Free exposes ErrorBeacon publicly, so the safe default is to use the
+    # immediate peer address. Controlled ACA deployments may opt in explicitly
+    # with ERRORBEACON_TRUST_PROXY_HEADERS=true.
+    if TRUST_PROXY_HEADERS:
+        xff = request.headers.get('x-forwarded-for')
+        if xff:
+            return xff.split(',', 1)[0].strip()[:128] or 'unknown'
+        forwarded = request.headers.get('x-real-ip')
+        if forwarded:
+            return forwarded.strip()[:128] or 'unknown'
+    return request.client.host if request.client else 'unknown'
+
 def _check_api_key(x_api_key: str | None, configured: str, label: str) -> bool:
     if not configured:
         raise HTTPException(503, f'ErrorBeacon is not configured with {label}')
@@ -378,11 +442,29 @@ def _check_api_key(x_api_key: str | None, configured: str, label: str) -> bool:
 def ingest_auth(x_api_key: str | None = Header(default=None)):
     return _check_api_key(x_api_key, INGEST_API_KEY, 'ERRORBEACON_INGEST_API_KEY')
 
-def admin_auth(x_api_key: str | None = Header(default=None)):
-    return _check_api_key(x_api_key, ADMIN_API_KEY, 'ERRORBEACON_ADMIN_API_KEY')
+def admin_auth(request: Request, x_api_key: str | None = Header(default=None)):
+    ip = _client_ip_from_request(request)
+    now = time.time()
+    with _admin_fail_lock:
+        bucket = _admin_failures.setdefault(ip, [])
+        bucket[:] = [t for t in bucket if t > now - 60]
+        if len(bucket) >= ADMIN_AUTH_FAILURES_PER_MINUTE:
+            raise HTTPException(429, 'Too many invalid admin authentication attempts; try again later')
+    try:
+        return _check_api_key(x_api_key, ADMIN_API_KEY, 'ERRORBEACON_ADMIN_API_KEY')
+    except HTTPException as exc:
+        if exc.status_code == 401:
+            with _admin_fail_lock:
+                bucket = _admin_failures.setdefault(ip, [])
+                bucket.append(now)
+                if len(_admin_failures) > 5000:
+                    oldest = sorted(_admin_failures.items(), key=lambda item: max(item[1]) if item[1] else 0)[:500]
+                    for key, _ in oldest:
+                        _admin_failures.pop(key, None)
+        raise
 
-def auth(x_api_key: str | None = Header(default=None)):
-    return admin_auth(x_api_key)
+def auth(request: Request, x_api_key: str | None = Header(default=None)):
+    return admin_auth(request, x_api_key)
 def limited():
     now=time.time()
     with _rate_lock:
@@ -405,6 +487,13 @@ def normalize(s):
     s=re.sub(r'\b(?:req|request|trace|user|quote|quotation|asset)[_-]?[0-9a-f-]{6,}\b','<id>',s,flags=re.I)
     return _VOLATILE.sub('<n>',s).lower().strip()
 def fingerprint(e):
+    # BUG FIX: `path` used to be hashed raw (e.g. '/api/assets/42'), while
+    # `message` was already run through normalize() to strip volatile IDs.
+    # The same bug on '/assets/42' vs '/assets/43' produced two DIFFERENT
+    # fingerprints -- two separate incidents (and two separate Telegram
+    # alerts) for what's really one recurring bug on a parameterized route.
+    # Reuse the existing normalize()/_VOLATILE machinery here too instead
+    # of a second ID-stripping implementation.
     value = '|'.join(
         [
             e.app,
@@ -413,7 +502,7 @@ def fingerprint(e):
             e.error_type or '',
             normalize(e.message),
             e.method or '',
-            e.path or '',
+            normalize(e.path or ''),
             str(e.status_code or ''),
         ]
     )
@@ -811,7 +900,9 @@ def email_recipients() -> list[str]:
 def email_configured() -> bool:
     if not EMAIL_FALLBACK_ENABLED or not NOTIFICATIONS_ENABLED or not email_recipients():
         return False
-    if EMAIL_PROVIDER == 'smtp': return bool(SMTP_HOST and SMTP_FROM_EMAIL)
+    if EMAIL_PROVIDER == 'smtp':
+        auth_ok = bool(SMTP_USERNAME and SMTP_PASSWORD) or (not SMTP_USERNAME and not SMTP_PASSWORD)
+        return bool(SMTP_HOST and SMTP_FROM_EMAIL and auth_ok)
     if EMAIL_PROVIDER == 'brevo': return bool(BREVO_API_KEY and SMTP_FROM_EMAIL)
     if EMAIL_PROVIDER == 'resend': return bool(RESEND_API_KEY and SMTP_FROM_EMAIL)
     return False
@@ -907,23 +998,109 @@ def email_fallback_loop():
         except Exception: log.exception('Secondary email fallback loop failed')
         _stop.wait(15)
 
+def _state_get(key, default=None):
+    with _db_lock:
+        c=db(); row=c.execute('SELECT value FROM service_state WHERE key=?',(key,)).fetchone(); c.close()
+    return row['value'] if row else default
+
+def _state_set(key, value):
+    with _db_lock:
+        c=db(); c.execute('INSERT INTO service_state(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at',(key,str(value),iso())); c.commit(); c.close()
+
+def auto_stale_resolve():
+    cutoff=(datetime.now(timezone.utc)-timedelta(days=AUTO_STALE_DAYS)).isoformat()
+    with _db_lock:
+        c=db()
+        rows=c.execute("SELECT id FROM incidents WHERE resolved=0 AND last_seen_at<=? LIMIT 500",(cutoff,)).fetchall()
+        if rows:
+            now=iso()
+            c.executemany('UPDATE incidents SET resolved=1,resolved_at=?,resolved_reason=? WHERE id=?',[(now,f'auto-stale: no new occurrence for {AUTO_STALE_DAYS} days',r['id']) for r in rows])
+            c.commit()
+        c.close()
+    if rows: log.info('Auto-stale resolution closed %d incident(s)',len(rows))
+    return len(rows)
+
 def purge_resolved_incidents():
     cutoff=(datetime.now(timezone.utc)-timedelta(days=RETENTION_DAYS)).isoformat()
     with _db_lock:
         c=db()
-        old_event_count=c.execute('SELECT COUNT(*) FROM incident_events WHERE occurred_at<?',(cutoff,)).fetchone()[0]
-        c.execute('DELETE FROM incident_events WHERE occurred_at<?',(cutoff,))
-        ids=[r['id'] for r in c.execute('SELECT id FROM incidents WHERE resolved=1 AND last_seen_at<?',(cutoff,)).fetchall()]
+        ids=[r['id'] for r in c.execute('SELECT id FROM incidents WHERE resolved=1 AND COALESCE(resolved_at,last_seen_at)<=?',(cutoff,)).fetchall()]
+        old_event_count=c.execute('SELECT COUNT(*) FROM incident_events WHERE occurred_at<=?',(cutoff,)).fetchone()[0]
         if ids:
-            ph=','.join('?' for _ in ids); c.execute(f'DELETE FROM incident_events WHERE incident_id IN ({ph})',ids); c.execute(f'DELETE FROM incidents WHERE id IN ({ph})',ids)
+            c.executemany('DELETE FROM incident_events WHERE incident_id=?',[(i,) for i in ids]); c.executemany('DELETE FROM incidents WHERE id=?',[(i,) for i in ids])
+        c.execute('DELETE FROM incident_events WHERE occurred_at<=?',(cutoff,))
         c.commit(); c.close()
     if ids or old_event_count: log.info('Retention purge removed %d resolved incident(s) and %d old event(s)',len(ids),old_event_count)
     return len(ids) + old_event_count
 
+def _db_warning_message(mb):
+    return (f'⚠️ <b>ErrorBeacon DB warning</b>\n\nDatabase size is <b>{mb:.1f} MB</b>, which has crossed the configured warning threshold of <b>{DB_WARN_MB:.1f} MB</b>.\n\nRetention: {RETENTION_DAYS} days\nAuto-stale: {AUTO_STALE_DAYS} days')
+
+def check_db_warning():
+    size=DB_PATH.stat().st_size if DB_PATH.exists() else 0
+    mb=size/(1024*1024)
+    if mb >= DB_WARN_MB:
+        if _state_get('db_warn_active','0') != '1':
+            _state_set('db_warn_active','1')
+            text=_db_warning_message(mb)
+            tg_result=tg_delivery('sendMessage',text)
+            if not tg_result.sent and email_configured():
+                send_email(email_recipients(),'ErrorBeacon DB warning',re.sub('<[^>]+>','',text))
+            log.warning('ErrorBeacon DB size crossed warning threshold: %.1f MB >= %.1f MB',mb,DB_WARN_MB)
+            return True
+    elif _state_get('db_warn_active','0') == '1':
+        _state_set('db_warn_active','0')
+        log.info('ErrorBeacon DB size returned below warning threshold: %.1f MB',mb)
+    return False
+
+def _digest_text():
+    cutoff=(datetime.now(timezone.utc)-timedelta(hours=DIGEST_INTERVAL_HOURS)).isoformat()
+    with _db_lock:
+        c=db()
+        total=c.execute('SELECT COUNT(*) FROM incidents WHERE last_seen_at>=?',(cutoff,)).fetchone()[0]
+        unresolved=c.execute('SELECT COUNT(*) FROM incidents WHERE resolved=0').fetchone()[0]
+        top=c.execute('SELECT fingerprint,app,severity,message,SUM(occurrence_count) occurrences FROM incidents WHERE last_seen_at>=? GROUP BY fingerprint,app,severity,message ORDER BY occurrences DESC LIMIT 5',(cutoff,)).fetchall()
+        tg_sent=c.execute("SELECT COUNT(*) FROM incidents WHERE last_seen_at>=? AND telegram_status='sent'",(cutoff,)).fetchone()[0]
+        email_sent=c.execute("SELECT COUNT(*) FROM incidents WHERE last_seen_at>=? AND fallback_status='sent'",(cutoff,)).fetchone()[0]
+        ai_done=c.execute("SELECT COUNT(*) FROM incidents WHERE last_seen_at>=? AND ai_status='complete'",(cutoff,)).fetchone()[0]
+        c.close()
+    lines=[f'📊 <b>ErrorBeacon {"daily" if DIGEST_INTERVAL_HOURS<=24 else "periodic"} digest</b>','',f'Window: last {DIGEST_INTERVAL_HOURS}h',f'Incidents: {total}',f'Unresolved: {unresolved}',f'Telegram delivered: {tg_sent} / {total} incidents',f'Email fallback delivered: {email_sent}',f'AI completed: {ai_done}','']
+    if top:
+        lines.append('<b>Top recurring fingerprints</b>')
+        for r in top:
+            lines.append(f'• {r["occurrences"]}x · {html.escape(str(r["severity"]).upper())} · {html.escape(str(r["app"]))} · {html.escape(redact(r["message"],220))}')
+    else:
+        lines.append('No incidents in this window.')
+    return '\n'.join(lines)
+
+def send_digest():
+    if not DIGEST_ENABLED: return False
+    now=datetime.now(timezone.utc)
+    last=_state_get('digest_last_sent_at')
+    if not last:
+        _state_set('digest_last_sent_at',now.isoformat())
+        return False
+    try:
+        if (now-datetime.fromisoformat(last)).total_seconds() < DIGEST_INTERVAL_HOURS*3600: return False
+    except ValueError:
+        _state_set('digest_last_sent_at',now.isoformat())
+        return False
+    text=_digest_text()
+    result=tg_delivery('sendMessage',text)
+    sent=result.sent
+    if not sent and email_configured():
+        sent=send_email(email_recipients(),'ErrorBeacon digest',re.sub('<[^>]+>','',text))
+    if sent: _state_set('digest_last_sent_at',now.isoformat())
+    return sent
+
 def retention_and_health_loop():
     while not _stop.is_set():
-        try: purge_resolved_incidents()
-        except Exception: log.exception('Retention cleanup failed')
+        try:
+            auto_stale_resolve()
+            purge_resolved_incidents()
+            check_db_warning()
+            send_digest()
+        except Exception: log.exception('Retention/health maintenance failed')
         _stop.wait(RETENTION_INTERVAL_SECONDS)
 
 def tg_delivery(method, text=None, markup=None, http_timeout=5, **kwargs):
@@ -1445,16 +1622,81 @@ def _incidents_summary(limit=10):
         status='RESOLVED' if r['resolved'] else 'OPEN'; lines.append(f'<code>{r["id"]}</code> · <b>{html.escape(r["severity"].upper())}</b> · {status} · {html.escape(r["app"])} · {r["occurrence_count"]}x'); lines.append(f'{html.escape(redact(r["message"],300))} · TG:{r["telegram_status"]} · Email:{r["fallback_status"]} · AI:{r["ai_status"]}')
     return '\n'.join(lines)[:4000]
 
+def _telegram_help():
+    return '\n'.join([
+        '🛠️ <b>ErrorBeacon commands</b>',
+        '',
+        '<b>Monitoring</b>',
+        '/health — service health, queues, DB and email diagnostics',
+        '/incidents — recent incidents with status and delivery state',
+        '/incident &lt;id&gt; — full detail for one incident',
+        '/stats [window] — aggregate stats; e.g. /stats 24h or /stats 7d',
+        '',
+        '<b>Triage</b>',
+        '/resolve &lt;id&gt; — resolve an incident',
+        '/reopen &lt;id&gt; — reopen an incident',
+        '/silence &lt;id&gt; &lt;duration&gt; — e.g. 30m, 1h, 24h',
+        '/unsilence &lt;id&gt; — remove an incident silence',
+        '',
+        '<b>Delivery tests</b>',
+        '/test — create a controlled test incident and exercise the alert pipeline',
+        '/testtelegram — send a direct Telegram delivery test',
+        '/testemail — send a direct email delivery test',
+        '',
+        '/help — show this command list',
+        '',
+        '🔒 All commands are restricted to the configured Telegram chat.'
+    ])
+
+def _telegram_test_incident():
+    rid=str(uuid.uuid4())
+    e=ErrorEvent(app='errorbeacon-test',environment=os.getenv('ENVIRONMENT','production'),severity='warning',error_type='TestException',message='This is a controlled ErrorBeacon Telegram test incident.',request_id=rid,method='TELEGRAM',path=f'/telegram-test/{rid}',status_code=500,category=None)
+    i,o,q,s=process(e)
+    return f'🧪 <b>Test incident created</b>\nIncident: <code>{html.escape(str(i))}</code>\nOccurrence: {o}\nQueued: {q}\nSilenced: {s}\n\nThe normal Telegram/AI/email pipeline has been exercised.'
+
+def _telegram_stats(window='24h'):
+    w=window.strip().lower() or '24h'
+    if not re.fullmatch(r'\d+(m|h|d|w)',w):
+        raise ValueError('window must look like 30m, 24h, 7d, or 1w')
+    stats=get_stats(w)
+    delivery=stats['delivery']
+    return '\n'.join([
+        f'📊 <b>ErrorBeacon stats ({html.escape(w)})</b>',
+        f'Incidents: {stats["incidents"]}',
+        f'Unresolved: {stats["unresolved"]}',
+        f'Spikes: {stats["spike_count"]}',
+        f'Regressions: {stats["deployment_regression_count"]}',
+        f'Telegram success: {delivery["telegram"]["success_rate_percent"] if delivery["telegram"]["success_rate_percent"] is not None else "n/a"}%',
+        f'Email fallback success: {delivery["email_fallback"]["success_rate_percent"] if delivery["email_fallback"]["success_rate_percent"] is not None else "n/a"}%',
+        f'AI completion: {delivery["ai"]["completion_rate_percent"] if delivery["ai"]["completion_rate_percent"] is not None else "n/a"}%'
+    ])
+
 def handle_telegram_command(text):
     p=text.strip().split(); cmd=(p[0].split('@',1)[0].lower() if p else '')
     try:
+        if cmd=='/help' or cmd=='/start': return _telegram_help()
         if cmd=='/health':
-            h=healthz(); return '\n'.join(['💚 <b>ErrorBeacon health</b>',f'Status: {h["status"]}',f'Telegram configured: {h["telegram_configured"]}',f'Email fallback configured: {h["email_fallback_configured"]}',f'DB: {h["db_size_mb"]:.1f} MB',f'AI queue: {h["ai_queue_depth"]}',f'AI pending: {h["ai_pending"]}'])
+            h=healthz(); return '\n'.join(['💚 <b>ErrorBeacon health</b>',f'Status: {h["status"]}',f'Telegram configured: {h["telegram_configured"]}',f'Email fallback configured: {h["email_fallback_configured"]}',f'Email provider: {h["email_provider"]}',f'Email missing: {", ".join(h["email"]["missing"]) or "none"}',f'DB: {h["db_size_mb"]:.1f} MB',f'AI queue: {h["ai_queue_depth"]}',f'AI pending: {h["ai_pending"]}'])
         if cmd=='/incidents': return _incidents_summary()
+        if cmd=='/incident':
+            if len(p)!=2: return 'Usage: /incident <incident_id>'
+            return incident_view(p[1])
+        if cmd=='/stats': return _telegram_stats(p[1] if len(p)>1 else '24h')
+        if cmd=='/test': return _telegram_test_incident()
+        if cmd=='/testtelegram':
+            result=tg_delivery('sendMessage','🧪 <b>ErrorBeacon Telegram delivery test</b>\n\nTelegram delivery is working.')
+            return '✅ Telegram test succeeded.' if result.sent else f'❌ Telegram test failed: {html.escape(result.error or "unknown error")}'
+        if cmd=='/testemail':
+            diagnostics=_email_diagnostics()
+            if not diagnostics['configured']:
+                return '❌ Email test unavailable. Missing: '+', '.join(diagnostics['missing'])
+            ok=send_email(email_recipients(),'ErrorBeacon email test','This is an administrative ErrorBeacon email delivery test. No incident was generated.')
+            return '✅ Email test succeeded.' if ok else '❌ Email test failed. Check the ErrorBeacon logs and SMTP configuration.'
         if cmd in {'/resolve','/reopen','/unsilence'}:
             if len(p)!=2: return f'Usage: {cmd} <incident_id>'
-            sql={'/resolve':'UPDATE incidents SET resolved=1 WHERE id=?','/reopen':'UPDATE incidents SET resolved=0 WHERE id=?','/unsilence':'UPDATE incidents SET silenced_until=NULL WHERE id=?'}[cmd]
-            return {'/resolve':'Incident resolved.','/reopen':'Incident reopened.','/unsilence':'Incident unsilenced.'}[cmd] if _incident_update(p[1],sql,(p[1],)) else 'Incident not found.'
+            sql={'/resolve':'UPDATE incidents SET resolved=1,resolved_at=?,resolved_reason=? WHERE id=?','/reopen':'UPDATE incidents SET resolved=0,resolved_at=NULL,resolved_reason=NULL WHERE id=?','/unsilence':'UPDATE incidents SET silenced_until=NULL WHERE id=?'}[cmd]
+            params=(iso(),'manual',p[1]) if cmd=='/resolve' else (p[1],)
+            return {'/resolve':'Incident resolved.','/reopen':'Incident reopened.','/unsilence':'Incident unsilenced.'}[cmd] if _incident_update(p[1],sql,params) else 'Incident not found.'
         if cmd=='/silence':
             if len(p)!=3: return 'Usage: /silence <incident_id> <duration> (e.g. 1h, 4h, 24h)'
             sec=_silence_seconds(p[2]); until=(datetime.now(timezone.utc)+timedelta(seconds=sec)).isoformat(); return f'Incident silenced for {_format_duration(sec)}.' if _incident_update(p[1],'UPDATE incidents SET silenced_until=? WHERE id=?',(until,p[1])) else 'Incident not found.'
@@ -1462,7 +1704,7 @@ def handle_telegram_command(text):
     except Exception:
         log.exception('Telegram command failed: %s',cmd)
         return '❌ Something went wrong running that command. Check the server logs.'
-    return 'Commands: /incidents, /resolve <id>, /reopen <id>, /silence <id> <duration>, /unsilence <id>, /health'
+    return 'Unknown command. Use /help to see all available commands.'
 
 def _refresh_callback_message(q):
     message=q.get('message') or {}
@@ -1486,9 +1728,9 @@ def callback(u):
     if data.startswith('view:'):
         i=data.split(':',1)[1]; tg('answerCallbackQuery',callback_query_id=qid,text='Loading incident...'); tg('sendMessage',incident_view(i),keyboard(i)); return
     if data.startswith('resolve:'):
-        i=data.split(':',1)[1]; ok=_incident_update(i,'UPDATE incidents SET resolved=1 WHERE id=?',(i,)); tg('answerCallbackQuery',callback_query_id=qid,text='Incident resolved.' if ok else 'Incident not found.'); _refresh_callback_message(q); return
+        i=data.split(':',1)[1]; ok=_incident_update(i,'UPDATE incidents SET resolved=1,resolved_at=?,resolved_reason=? WHERE id=?',(iso(),'manual',i)); tg('answerCallbackQuery',callback_query_id=qid,text='Incident resolved.' if ok else 'Incident not found.'); _refresh_callback_message(q); return
     if data.startswith('reopen:'):
-        i=data.split(':',1)[1]; ok=_incident_update(i,'UPDATE incidents SET resolved=0 WHERE id=?',(i,)); tg('answerCallbackQuery',callback_query_id=qid,text='Incident reopened.' if ok else 'Incident not found.'); _refresh_callback_message(q); return
+        i=data.split(':',1)[1]; ok=_incident_update(i,'UPDATE incidents SET resolved=0,resolved_at=NULL,resolved_reason=NULL WHERE id=?',(i,)); tg('answerCallbackQuery',callback_query_id=qid,text='Incident reopened.' if ok else 'Incident not found.'); _refresh_callback_message(q); return
     if data.startswith('unsilence:'):
         i=data.split(':',1)[1]; ok=_incident_update(i,'UPDATE incidents SET silenced_until=NULL WHERE id=?',(i,)); tg('answerCallbackQuery',callback_query_id=qid,text='Incident unsilenced.' if ok else 'Incident not found.'); _refresh_callback_message(q); return
     if data.startswith('silence:'):
@@ -1512,6 +1754,29 @@ def telegram_loop():
                     if text.startswith('/'): tg('sendMessage',handle_telegram_command(text))
             except Exception: log.exception('Telegram update failed')
 
+def startup_delivery_checks():
+    if TG_TOKEN:
+        result=tg_delivery('getMe')
+        if result.sent:
+            log.info('Telegram startup validation succeeded')
+        else:
+            log.warning('Telegram startup validation failed: %s',result.error or 'unknown')
+    elif TG_CHAT:
+        log.warning('TELEGRAM_CHAT_ID is set but TELEGRAM_BOT_TOKEN is missing')
+    diagnostics=_email_diagnostics()
+    if diagnostics['configured']:
+        log.info('Email fallback configuration is complete via %s',EMAIL_PROVIDER)
+        if STARTUP_SELF_TEST:
+            ok=send_email(email_recipients(),'ErrorBeacon startup test','ErrorBeacon startup self-test: email delivery is working.')
+            if ok: log.info('Email startup self-test succeeded')
+            else: log.warning('Email startup self-test failed')
+    else:
+        log.warning('Email fallback is not fully configured; missing=%s',diagnostics['missing'])
+    if STARTUP_SELF_TEST and TG_TOKEN and TG_CHAT:
+        result=tg_delivery('sendMessage','🧪 <b>ErrorBeacon startup test</b>\n\nTelegram delivery is working.')
+        if result.sent: log.info('Telegram startup self-test succeeded')
+        else: log.warning('Telegram startup self-test failed: %s',result.error or 'unknown')
+
 @asynccontextmanager
 async def lifespan(_):
     init_db()
@@ -1532,6 +1797,11 @@ async def lifespan(_):
     threading.Thread(target=retention_and_health_loop,name='errorbeacon-maintenance',daemon=True).start()
     _recovery_thread=threading.Thread(target=ai_recovery_loop,name='errorbeacon-ai-recovery',daemon=True)
     _recovery_thread.start()
+    if os.getenv('ENVIRONMENT', 'production').lower() in {'prod','production'}:
+        missing_keys = [name for name, value in (('ERRORBEACON_INGEST_API_KEY', INGEST_API_KEY), ('ERRORBEACON_ADMIN_API_KEY', ADMIN_API_KEY)) if not value]
+        if missing_keys:
+            log.error('Production ErrorBeacon is missing required scoped API keys: %s', ', '.join(missing_keys))
+    startup_delivery_checks()
     if TG_POLL and TG_TOKEN and TG_CHAT:
         threading.Thread(target=telegram_loop,name='errorbeacon-telegram',daemon=True).start()
     yield
@@ -1540,27 +1810,52 @@ async def lifespan(_):
         t.join(timeout=2)
     if _recovery_thread:
         _recovery_thread.join(timeout=2)
-app=FastAPI(title='ErrorBeacon Lite',version=APP_VERSION,lifespan=lifespan)
+app=FastAPI(title='ErrorBeacon Lite',version=APP_VERSION,lifespan=lifespan,docs_url='/docs' if ENABLE_DOCS else None,redoc_url='/redoc' if ENABLE_DOCS else None,openapi_url='/openapi.json' if ENABLE_DOCS else None)
+app.add_middleware(RequestSizeLimitMiddleware, max_bytes=MAX_REQUEST_BODY_BYTES)
 app.add_middleware(RequestContextMiddleware)
-@app.get('/healthz')
-def healthz():
+def _email_diagnostics():
+    recipients=email_recipients()
+    missing=[]
+    if not EMAIL_FALLBACK_ENABLED: missing.append('ERRORBEACON_EMAIL_FALLBACK_ENABLED')
+    if not NOTIFICATIONS_ENABLED: missing.append('NOTIFICATIONS_ENABLED')
+    if not recipients: missing.append('ADMIN_NOTIFICATION_EMAILS')
+    if EMAIL_PROVIDER=='smtp':
+        if not SMTP_HOST: missing.append('SMTP_HOST')
+        if not SMTP_FROM_EMAIL: missing.append('SMTP_FROM_EMAIL')
+        if bool(SMTP_USERNAME) != bool(SMTP_PASSWORD): missing.append('SMTP_USERNAME/SMTP_PASSWORD')
+    elif EMAIL_PROVIDER=='brevo':
+        if not BREVO_API_KEY: missing.append('BREVO_API_KEY')
+        if not SMTP_FROM_EMAIL: missing.append('SMTP_FROM_EMAIL')
+    elif EMAIL_PROVIDER=='resend':
+        if not RESEND_API_KEY: missing.append('RESEND_API_KEY')
+        if not SMTP_FROM_EMAIL: missing.append('SMTP_FROM_EMAIL')
+    else: missing.append(f'unsupported EMAIL_PROVIDER={EMAIL_PROVIDER}')
+    return {'enabled':EMAIL_FALLBACK_ENABLED,'notifications_enabled':NOTIFICATIONS_ENABLED,'provider':EMAIL_PROVIDER,'configured':not missing,'recipients_count':len(recipients),'smtp_host_configured':bool(SMTP_HOST),'smtp_username_configured':bool(SMTP_USERNAME),'smtp_password_configured':bool(SMTP_PASSWORD),'from_configured':bool(SMTP_FROM_EMAIL),'missing':missing}
+
+def health_payload():
     if not DB_PATH.exists(): init_db()
     with _db_lock:
-        c=db(); pending=c.execute("SELECT COUNT(*) FROM incidents WHERE ai_status='pending' AND ai_analysis IS NULL").fetchone()[0]; incidents_count=c.execute('SELECT COUNT(*) FROM incidents').fetchone()[0]; events_count=c.execute('SELECT COUNT(*) FROM incident_events').fetchone()[0]; c.close()
+        c=db(); pending=c.execute("SELECT COUNT(*) FROM incidents WHERE ai_status='pending' AND ai_analysis IS NULL").fetchone()[0]; incidents_count=c.execute('SELECT COUNT(*) FROM incidents').fetchone()[0]; events_count=c.execute('SELECT COUNT(*) FROM incident_events').fetchone()[0]; unresolved=c.execute('SELECT COUNT(*) FROM incidents WHERE resolved=0').fetchone()[0]; c.close()
     size=DB_PATH.stat().st_size if DB_PATH.exists() else 0; mb=size/(1024*1024); status='warning' if mb>=DB_WARN_MB else 'ok'
-    return {'status':status,'service':'errorbeacon','version':APP_VERSION,'queue_depth':_jobs.qsize(),'ai_queue_depth':_ai_jobs.qsize(),'ai_pending':pending,'ai_enabled':bool(AI_ENABLED and _providers()),'ai_providers':[p[0] for p in _providers()],'telegram_configured':bool(TG_TOKEN and TG_CHAT),'email_fallback_configured':email_configured(),'email_provider':EMAIL_PROVIDER,'incidents_count':incidents_count,'incident_events_count':events_count,'db_size_bytes':size,'db_size_mb':mb,'db_status':status,'retention_days':RETENTION_DAYS}
+    email=_email_diagnostics()
+    return {'status':status,'service':'errorbeacon','version':APP_VERSION,'queue_depth':_jobs.qsize(),'ai_queue_depth':_ai_jobs.qsize(),'ai_pending':pending,'ai_enabled':bool(AI_ENABLED and _providers()),'ai_providers':[p[0] for p in _providers()],'telegram_configured':bool(TG_TOKEN and TG_CHAT),'email_fallback_configured':email['configured'],'email_provider':EMAIL_PROVIDER,'email':email,'incidents_count':incidents_count,'unresolved_incidents':unresolved,'incident_events_count':events_count,'db_size_bytes':size,'db_size_mb':mb,'db_status':status,'retention_days':RETENTION_DAYS,'auto_stale_days':AUTO_STALE_DAYS,'digest_enabled':DIGEST_ENABLED,'digest_interval_hours':DIGEST_INTERVAL_HOURS}
+
+@app.get('/healthz')
+def healthz():
+    h=health_payload()
+    return {'status':h['status'],'service':h['service'],'version':h['version'],'db_status':h['db_status']}
+@app.get('/v1/health',dependencies=[Depends(admin_auth)])
+def detailed_health():
+    return health_payload()
 @app.get('/')
 def root():
-    return {
-        'service': 'ErrorBeacon Lite',
-        'version': APP_VERSION,
-        'docs': '/docs',
-        'health': '/healthz',
-    }
+    result={'service':'ErrorBeacon Lite','version':APP_VERSION,'health':'/healthz'}
+    if ENABLE_DOCS:
+        result['docs']='/docs'
+    return result
 @app.post('/v1/events',dependencies=[Depends(ingest_auth)])
 def ingest(event:ErrorEvent):
-    if not limited():
-        raise HTTPException(429,'Alert rate limit exceeded')
+    if not limited(): raise HTTPException(429,'Alert rate limit exceeded')
     try:
         i,o,q,s=process(event)
         return {'accepted':True,'queued':q,'incident_id':i,'occurrence':o,'request_id':request_id_var.get(),'silenced':s}
@@ -1571,37 +1866,82 @@ def ingest(event:ErrorEvent):
 def test_alert(request:Request):
     if not limited_test(): raise HTTPException(429,'Test alert rate limit exceeded')
     rid=request_id_var.get() or request.headers.get('x-request-id') or str(uuid.uuid4())
-    # Keep controlled tests independently addressable so a previous test incident cannot
-    # suppress the next manual Telegram test through normal fingerprint deduplication.
-    e=ErrorEvent(
-        app='errorbeacon-test',
-        environment=os.getenv('ENVIRONMENT','development'),
-        severity='warning',
-        error_type='TestException',
-        message='This is a controlled ErrorBeacon test alert.',
-        request_id=rid,
-        method=request.method,
-        path=f'/errorbeacon-test/{rid}',
-        status_code=500,
-        category=None
-    )
+    e=ErrorEvent(app='errorbeacon-test',environment=os.getenv('ENVIRONMENT','development'),severity='warning',error_type='TestException',message='This is a controlled ErrorBeacon test alert.',request_id=rid,method=request.method,path=f'/errorbeacon-test/{rid}',status_code=500,category=None)
     i,o,q,s=process(e)
     return {'ok':True,'incident_id':i,'queued':q,'request_id':rid,'silenced':s}
 @app.get('/v1/incidents',dependencies=[Depends(admin_auth)])
-def incidents(limit:int=50):
-    limit=max(1,min(limit,200))
+def incidents(limit:int=50, app_name:str|None=None, app:str|None=None, environment:str|None=None, severity:str|None=None, resolved:bool|None=None, start_date:str|None=None, end_date:str|None=None):
+    limit=max(1,min(limit,200)); app_filter=app if app is not None else app_name
+    clauses=[]; params=[]
+    if app_filter: clauses.append('app=?'); params.append(app_filter)
+    if environment: clauses.append('environment=?'); params.append(environment)
+    if severity: clauses.append('severity=?'); params.append(severity)
+    if resolved is not None: clauses.append('resolved=?'); params.append(1 if resolved else 0)
+    if start_date: clauses.append('last_seen_at>=?'); params.append(start_date)
+    if end_date: clauses.append('last_seen_at<=?'); params.append(end_date)
+    where=(' WHERE '+' AND '.join(clauses)) if clauses else ''
     with _db_lock:
-        c=db(); rows=c.execute('SELECT id,created_at,app,environment,severity,error_type,message,request_id,path,status_code,release,component,operation,occurrence_count,last_seen_at,resolved,telegram_sent,telegram_status,telegram_attempts,telegram_last_error,fallback_status,fallback_attempts,fallback_last_error,fallback_sent_at,ai_status,ai_analysis,ai_attempts,ai_last_error,ai_failure_email_sent_at,spike_detected,deployment_regression,silenced_until FROM incidents ORDER BY last_seen_at DESC LIMIT ?',(limit,)).fetchall(); c.close()
+        c=db(); rows=c.execute(f'SELECT id,created_at,app,environment,severity,error_type,message,request_id,path,status_code,release,component,operation,occurrence_count,last_seen_at,resolved,resolved_at,resolved_reason,telegram_sent,telegram_status,telegram_attempts,telegram_last_error,fallback_status,fallback_attempts,fallback_last_error,fallback_sent_at,ai_status,ai_analysis,ai_attempts,ai_last_error,ai_failure_email_sent_at,spike_detected,deployment_regression,silenced_until FROM incidents{where} ORDER BY last_seen_at DESC LIMIT ?',params+[limit]).fetchall(); c.close()
     return [dict(r) for r in rows]
+
+@app.get('/v1/incidents/{incident_id}',dependencies=[Depends(admin_auth)])
+def incident_detail(incident_id:str):
+    with _db_lock:
+        c=db(); x=c.execute('SELECT * FROM incidents WHERE id=?',(incident_id,)).fetchone(); events=c.execute('SELECT id,occurred_at,app,environment,release,request_id FROM incident_events WHERE incident_id=? ORDER BY occurred_at DESC LIMIT 500',(incident_id,)).fetchall(); c.close()
+    if not x: raise HTTPException(404,'Incident not found')
+    result=dict(x);
+    try: result['context']=json.loads(result.pop('context_json') or '{}')
+    except Exception: result['context']=result.pop('context_json') or {}
+    result['events']=[dict(r) for r in events]
+    return result
+
+@app.get('/v1/stats',dependencies=[Depends(admin_auth)])
+def stats(window:str='24h'):
+    m=re.fullmatch(r'(?i)(\d+)(m|h|d|w)',window.strip())
+    if not m: raise HTTPException(400,'window must look like 30m, 24h, 7d, or 1w')
+    seconds=int(m.group(1))*{'m':60,'h':3600,'d':86400,'w':604800}[m.group(2).lower()]; seconds=max(60,min(seconds,365*86400)); cutoff=(datetime.now(timezone.utc)-timedelta(seconds=seconds)).isoformat()
+    with _db_lock:
+        c=db()
+        total=c.execute('SELECT COUNT(*) FROM incidents WHERE last_seen_at>=?',(cutoff,)).fetchone()[0]
+        unresolved=c.execute('SELECT COUNT(*) FROM incidents WHERE resolved=0 AND last_seen_at>=?',(cutoff,)).fetchone()[0]
+        by_severity=[dict(r) for r in c.execute('SELECT severity,COUNT(*) count,SUM(occurrence_count) occurrences FROM incidents WHERE last_seen_at>=? GROUP BY severity ORDER BY count DESC',(cutoff,))]
+        by_app=[dict(r) for r in c.execute('SELECT app,COUNT(*) count,SUM(occurrence_count) occurrences FROM incidents WHERE last_seen_at>=? GROUP BY app ORDER BY count DESC LIMIT 25',(cutoff,))]
+        by_environment=[dict(r) for r in c.execute('SELECT environment,COUNT(*) count,SUM(occurrence_count) occurrences FROM incidents WHERE last_seen_at>=? GROUP BY environment ORDER BY count DESC',(cutoff,))]
+        top_fingerprints=[dict(r) for r in c.execute('SELECT fingerprint,app,severity,message,SUM(occurrence_count) occurrences,MAX(spike_detected) spike_detected,MAX(deployment_regression) deployment_regression FROM incidents WHERE last_seen_at>=? GROUP BY fingerprint,app,severity,message ORDER BY occurrences DESC LIMIT 20',(cutoff,))]
+        spikes=c.execute('SELECT COUNT(*) FROM incidents WHERE last_seen_at>=? AND spike_detected=1',(cutoff,)).fetchone()[0]
+        regressions=c.execute('SELECT COUNT(*) FROM incidents WHERE last_seen_at>=? AND deployment_regression=1',(cutoff,)).fetchone()[0]
+        tg_sent=c.execute("SELECT COUNT(*) FROM incidents WHERE last_seen_at>=? AND telegram_status='sent'",(cutoff,)).fetchone()[0]
+        tg_attempts=c.execute('SELECT COALESCE(SUM(telegram_attempts),0) FROM incidents WHERE last_seen_at>=?',(cutoff,)).fetchone()[0]
+        tg_total=c.execute('SELECT COUNT(*) FROM incidents WHERE last_seen_at>=?',(cutoff,)).fetchone()[0]
+        email_sent=c.execute("SELECT COUNT(*) FROM incidents WHERE last_seen_at>=? AND fallback_status='sent'",(cutoff,)).fetchone()[0]
+        email_attempts=c.execute('SELECT COALESCE(SUM(fallback_attempts),0) FROM incidents WHERE last_seen_at>=?',(cutoff,)).fetchone()[0]
+        ai_complete=c.execute("SELECT COUNT(*) FROM incidents WHERE last_seen_at>=? AND ai_status='complete'",(cutoff,)).fetchone()[0]
+        ai_attempts=c.execute('SELECT COALESCE(SUM(ai_attempts),0) FROM incidents WHERE last_seen_at>=?',(cutoff,)).fetchone()[0]
+        c.close()
+    rate=lambda a,b: round((a/b)*100,2) if b else None
+    return {'window':window,'since':cutoff,'incidents':total,'unresolved':unresolved,'by_severity':by_severity,'by_app':by_app,'by_environment':by_environment,'top_fingerprints':top_fingerprints,'spike_count':spikes,'deployment_regression_count':regressions,'delivery':{'telegram':{'sent_incidents':tg_sent,'incidents_in_window':tg_total,'retry_failures':tg_attempts,'success_rate_percent':rate(tg_sent,tg_total)},'email_fallback':{'sent_incidents':email_sent,'attempts':email_attempts,'success_rate_percent':rate(email_sent,email_attempts)},'ai':{'completed':ai_complete,'attempts':ai_attempts,'completion_rate_percent':rate(ai_complete,ai_complete+ai_attempts)}}}
+
+@app.post('/v1/test-telegram',dependencies=[Depends(admin_auth)])
+def test_telegram():
+    result=tg_delivery('sendMessage','🧪 <b>ErrorBeacon Telegram test</b>\n\nThis is an administrative delivery test.')
+    if not result.sent: raise HTTPException(502, result.error or 'Telegram delivery failed')
+    return {'ok':True,'channel':'telegram'}
+
+@app.post('/v1/test-email',dependencies=[Depends(admin_auth)])
+def test_email():
+    if not email_configured(): raise HTTPException(503,detail={'message':'Email fallback is not configured','email':_email_diagnostics()})
+    ok=send_email(email_recipients(),'ErrorBeacon email test','This is an administrative ErrorBeacon email delivery test. No incident was generated.')
+    if not ok: raise HTTPException(502,'Email delivery failed')
+    return {'ok':True,'channel':'email','recipients_count':len(email_recipients()),'provider':EMAIL_PROVIDER}
 
 @app.post('/v1/incidents/{incident_id}/resolve',dependencies=[Depends(admin_auth)])
 def resolve(incident_id:str):
-    if not _incident_update(incident_id,'UPDATE incidents SET resolved=1 WHERE id=?',(incident_id,)): raise HTTPException(404,'Incident not found')
+    if not _incident_update(incident_id,'UPDATE incidents SET resolved=1,resolved_at=?,resolved_reason=? WHERE id=?',(iso(),'manual',incident_id)): raise HTTPException(404,'Incident not found')
     return {'resolved':True,'incident_id':incident_id}
 
 @app.post('/v1/incidents/{incident_id}/reopen',dependencies=[Depends(admin_auth)])
 def reopen(incident_id:str):
-    if not _incident_update(incident_id,'UPDATE incidents SET resolved=0 WHERE id=?',(incident_id,)): raise HTTPException(404,'Incident not found')
+    if not _incident_update(incident_id,'UPDATE incidents SET resolved=0,resolved_at=NULL,resolved_reason=NULL WHERE id=?',(incident_id,)): raise HTTPException(404,'Incident not found')
     return {'reopened':True,'incident_id':incident_id}
 
 @app.post('/v1/incidents/{incident_id}/silence',dependencies=[Depends(admin_auth)])

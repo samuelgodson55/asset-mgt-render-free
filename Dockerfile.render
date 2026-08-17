@@ -157,6 +157,7 @@ COPY --from=backend-builder /opt/venv /opt/venv
 
 # Backend application code.
 COPY backend/ /app/
+COPY shared/ /app/shared/
 
 # BOTH processed frontends, side by side -- see this file's own
 # "CHOOSING A FRONTEND" section above for why both ship unconditionally.

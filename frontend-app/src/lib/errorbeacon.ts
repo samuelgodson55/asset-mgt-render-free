@@ -3,7 +3,7 @@
 // backend's /api/telemetry/client-error endpoint, which in turn feeds
 // ErrorBeacon (see errorbeacon/errorbeacon-telegram-setup.md). This module
 // never talks to ErrorBeacon directly -- the backend is the only thing
-// holding the ERRORBEACON_API_KEY.
+// holding the ERRORBEACON_INGEST_API_KEY.
 
 const SENSITIVE_QUERY_PARAM = /^(token|access_token|refresh_token|reset_token|code|secret|key|password|passwd|api_key|apikey|session|session_id)$/i;
 const REPORT_THROTTLE_MS = 1000;

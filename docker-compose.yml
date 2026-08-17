@@ -114,7 +114,9 @@ services:
   # `alembic stamp head`. It is only a local Compose concern; ACA/VM use
   # their deployment migration gates.
   migrate:
-    build: ./backend
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
     image: snipeit-lite-backend:local
     restart: "no"
     depends_on:
@@ -131,9 +133,13 @@ services:
     command: ["alembic", "upgrade", "head"]
 
   backend:
-    build: ./backend
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
     # `backend`, `worker`, and `beat` all build from the same Dockerfile
-    # (`build: ./backend`) but need the SAME explicit `image:` tag -- without
+    # (`build:
+      context: .
+      dockerfile: backend/Dockerfile`) but need the SAME explicit `image:` tag -- without
     # it, Compose tags each service's build output separately, and
     # rebuilding just `backend` leaves `worker`/`beat` running a stale image.
     image: snipeit-lite-backend:local
@@ -178,9 +184,8 @@ services:
       # Local Compose schema is managed by the one-shot migrate service.
       AUTO_INIT_DB: "false"
       ERRORBEACON_URL: ${ERRORBEACON_URL:-http://errorbeacon:8000}
-      ERRORBEACON_API_KEY: ${ERRORBEACON_API_KEY:-}
-      ERRORBEACON_INGEST_API_KEY: ${ERRORBEACON_INGEST_API_KEY:-${ERRORBEACON_API_KEY:-}}
-      ERRORBEACON_ADMIN_API_KEY: ${ERRORBEACON_ADMIN_API_KEY:-${ERRORBEACON_API_KEY:-}}
+      ERRORBEACON_INGEST_API_KEY: ${ERRORBEACON_INGEST_API_KEY:-}
+      ERRORBEACON_ADMIN_API_KEY: ${ERRORBEACON_ADMIN_API_KEY:-}
       ERRORBEACON_APP: ${ERRORBEACON_APP:-asset-inventory-quotes}
       APP_RELEASE: ${APP_RELEASE:-${IMAGE_TAG:-local}}
       ERRORBEACON_TIMEOUT: ${ERRORBEACON_TIMEOUT:-0.75}
@@ -416,7 +421,9 @@ services:
   # at all: nothing outside this Compose network ever talks to a worker
   # directly, only via the job queue.
   worker:
-    build: ./backend
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
     # Same explicit tag as `backend` above -- see that service's own
     # comment for the full "why": this is what actually prevents `worker`
     # from ever running a stale image relative to `backend` again.
@@ -440,9 +447,8 @@ services:
     environment:
       ENVIRONMENT: ${ENVIRONMENT:-development}
       ERRORBEACON_URL: ${ERRORBEACON_URL:-http://errorbeacon:8000}
-      ERRORBEACON_API_KEY: ${ERRORBEACON_API_KEY:-}
-      ERRORBEACON_INGEST_API_KEY: ${ERRORBEACON_INGEST_API_KEY:-${ERRORBEACON_API_KEY:-}}
-      ERRORBEACON_ADMIN_API_KEY: ${ERRORBEACON_ADMIN_API_KEY:-${ERRORBEACON_API_KEY:-}}
+      ERRORBEACON_INGEST_API_KEY: ${ERRORBEACON_INGEST_API_KEY:-}
+      ERRORBEACON_ADMIN_API_KEY: ${ERRORBEACON_ADMIN_API_KEY:-}
       ERRORBEACON_APP: ${ERRORBEACON_APP:-asset-inventory-quotes}
       APP_RELEASE: ${APP_RELEASE:-${IMAGE_TAG:-local}}
       ERRORBEACON_TIMEOUT: ${ERRORBEACON_TIMEOUT:-0.75}
@@ -564,7 +570,9 @@ services:
   # WOULD duplicate if `worker` were scaled) is what makes `worker` itself
   # safe to scale to N replicas above.
   beat:
-    build: ./backend
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
     # Same explicit tag as `backend`/`worker` above -- see `backend`'s own
     # comment for the full "why".
     image: snipeit-lite-backend:local
@@ -573,9 +581,8 @@ services:
     environment:
       ENVIRONMENT: ${ENVIRONMENT:-development}
       ERRORBEACON_URL: ${ERRORBEACON_URL:-http://errorbeacon:8000}
-      ERRORBEACON_API_KEY: ${ERRORBEACON_API_KEY:-}
-      ERRORBEACON_INGEST_API_KEY: ${ERRORBEACON_INGEST_API_KEY:-${ERRORBEACON_API_KEY:-}}
-      ERRORBEACON_ADMIN_API_KEY: ${ERRORBEACON_ADMIN_API_KEY:-${ERRORBEACON_API_KEY:-}}
+      ERRORBEACON_INGEST_API_KEY: ${ERRORBEACON_INGEST_API_KEY:-}
+      ERRORBEACON_ADMIN_API_KEY: ${ERRORBEACON_ADMIN_API_KEY:-}
       ERRORBEACON_APP: ${ERRORBEACON_APP:-asset-inventory-quotes}
       APP_RELEASE: ${APP_RELEASE:-${IMAGE_TAG:-local}}
       ERRORBEACON_TIMEOUT: ${ERRORBEACON_TIMEOUT:-0.75}
@@ -729,21 +736,29 @@ services:
   # `backend` itself is not reachable from outside Docker.
 
   errorbeacon:
-    build: ./errorbeacon
+    build:
+      context: .
+      dockerfile: errorbeacon/Dockerfile
     image: errorbeacon-lite:local
     restart: unless-stopped
     env_file:
       - .env
     environment:
       DATA_DIR: /data
-      ERRORBEACON_API_KEY: ${ERRORBEACON_API_KEY:-}
-      ERRORBEACON_INGEST_API_KEY: ${ERRORBEACON_INGEST_API_KEY:-${ERRORBEACON_API_KEY:-}}
-      ERRORBEACON_ADMIN_API_KEY: ${ERRORBEACON_ADMIN_API_KEY:-${ERRORBEACON_API_KEY:-}}
+      ERRORBEACON_INGEST_API_KEY: ${ERRORBEACON_INGEST_API_KEY:-}
+      ERRORBEACON_ADMIN_API_KEY: ${ERRORBEACON_ADMIN_API_KEY:-}
+      ERRORBEACON_TRUST_PROXY_HEADERS: ${ERRORBEACON_TRUST_PROXY_HEADERS:-false}
       ERRORBEACON_EMAIL_FALLBACK_ENABLED: ${ERRORBEACON_EMAIL_FALLBACK_ENABLED:-true}
       ERRORBEACON_EMAIL_FALLBACK_AFTER_ATTEMPTS: ${ERRORBEACON_EMAIL_FALLBACK_AFTER_ATTEMPTS:-3}
       ERRORBEACON_EMAIL_FALLBACK_AFTER_SECONDS: ${ERRORBEACON_EMAIL_FALLBACK_AFTER_SECONDS:-300}
       ERRORBEACON_RETENTION_DAYS: ${ERRORBEACON_RETENTION_DAYS:-90}
       ERRORBEACON_DB_WARN_MB: ${ERRORBEACON_DB_WARN_MB:-4096}
+      ERRORBEACON_AUTO_STALE_DAYS: ${ERRORBEACON_AUTO_STALE_DAYS:-30}
+      ERRORBEACON_CLEAN_MAX_DEPTH: ${ERRORBEACON_CLEAN_MAX_DEPTH:-10}
+      ERRORBEACON_CLEAN_MAX_ITEMS: ${ERRORBEACON_CLEAN_MAX_ITEMS:-100}
+      ERRORBEACON_DIGEST_ENABLED: ${ERRORBEACON_DIGEST_ENABLED:-true}
+      ERRORBEACON_DIGEST_INTERVAL_HOURS: ${ERRORBEACON_DIGEST_INTERVAL_HOURS:-24}
+      ERRORBEACON_STARTUP_SELF_TEST: ${ERRORBEACON_STARTUP_SELF_TEST:-false}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
       TELEGRAM_THREAD_ID: ${TELEGRAM_THREAD_ID:-}

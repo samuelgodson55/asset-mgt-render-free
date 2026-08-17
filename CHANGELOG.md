@@ -1,3 +1,12 @@
+## 4.1.3 - ErrorBeacon security hardening
+
+- Minimized public ErrorBeacon `/healthz`; detailed diagnostics moved behind admin authentication at `/v1/health`.
+- Disabled ErrorBeacon Swagger/ReDoc/OpenAPI by default in production.
+- Added per-IP rate limiting for failed ErrorBeacon admin API-key attempts.
+- Added ErrorBeacon request-body size limits.
+- Hardened the browser telemetry endpoint with trusted client-IP rate limiting, bounded context depth/items/size, and nginx 128 KiB request cap.
+- Confirmed browser telemetry never receives ErrorBeacon API credentials.
+
 ## ErrorBeacon AI analysis hardening\n\n- Enforced deterministic ROOT CAUSE, IMPACT, NEXT STEPS, and CONFIDENCE sections.\n- Rejects incomplete AI output instead of sending malformed analysis to Telegram.\n- Adds factuality and evidence-only instructions to the Gemini prompt.\n- Added tests for section parsing, required sections, and confidence normalization.\n\n## v8 — Correlation + Chaos Test Hardening
 
 - Forward the Asset application's `X-Request-ID` to ErrorBeacon ingestion.

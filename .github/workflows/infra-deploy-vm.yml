@@ -143,7 +143,6 @@ jobs:
       TF_VAR_custom_domain: ${{ vars.CUSTOM_DOMAIN }} # repo/environment Variable, not a secret -- REQUIRED now, must be a hostname in the cloudflare_zone_id zone above
       TF_VAR_postgres_password: ${{ secrets.POSTGRES_PASSWORD }}
       TF_VAR_jwt_secret_key: ${{ secrets.JWT_SECRET_KEY }}
-      TF_VAR_errorbeacon_api_key: ${{ secrets.ERRORBEACON_API_KEY }}
       TF_VAR_errorbeacon_ingest_api_key: ${{ secrets.ERRORBEACON_INGEST_API_KEY }}
       TF_VAR_errorbeacon_admin_api_key: ${{ secrets.ERRORBEACON_ADMIN_API_KEY }}
       TF_VAR_errorbeacon_telegram_bot_token: ${{ secrets.ERRORBEACON_TELEGRAM_BOT_TOKEN }}

@@ -62,12 +62,12 @@ replicas, since every replica shares the same Postgres database.
 """
 
 import logging
-import time
 
-import redis
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from config import settings
+from utils.client_ip import asgi_header_getter, resolve_client_ip
+from utils.rate_limiter import RedisFixedWindowLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +79,12 @@ class RateLimitMiddleware:
     Pure ASGI middleware that rate-limits POST requests to a configurable
     set of paths (in this project: just `/auth/login`). Every other path
     passes through completely untouched.
+
+    IP resolution and the fixed-window Redis counter itself both live in
+    `utils/` now, shared with api/telemetry_api.py's client-error rate
+    limiter -- see those modules' docstrings for why they used to be two
+    separate (and, in the IP-resolution case, two DIFFERENTLY BUGGY)
+    implementations.
     """
 
     def __init__(
@@ -90,116 +96,12 @@ class RateLimitMiddleware:
     ) -> None:
         self.app = app
         self.limited_paths = limited_paths
-        self.max_requests = max_requests
-        self.window_seconds = window_seconds
-        # decode_responses=True: we only ever read back plain integers, no
-        # point handling raw bytes everywhere below. A single shared
-        # connection pool (redis-py manages this internally) is reused for
-        # the lifetime of the process rather than reconnecting per request.
-        self._redis = redis.from_url(
+        self._limiter = RedisFixedWindowLimiter(
             settings.REDIS_URL,
-            decode_responses=True,
-            socket_connect_timeout=1,
-            socket_timeout=1,
-            health_check_interval=30,
+            key_prefix=_KEY_PREFIX,
+            max_requests=max_requests,
+            window_seconds=window_seconds,
         )
-
-    def _client_ip(self, scope: Scope) -> str:
-        """
-        `backend` has ingress.external: false (main.bicep) -- the ONLY way
-        to reach it is through the `frontend` nginx container app, which
-        sets X-Real-IP / X-Forwarded-For on every proxied /api/ request
-        (see nginx/default.conf.template). Trusting those headers is safe
-        here specifically because backend can't be hit directly from the
-        internet to spoof them.
-
-        Without this, scope["client"] is the IP of whichever `frontend`
-        REPLICA proxied the request -- not the real caller's IP. With
-        frontendMaxReplicas > 1 in prod, successive requests from the same
-        real client can land on different frontend replicas and therefore
-        different scope["client"] values, splitting one attacker/user
-        across several Redis keys and silently defeating the fixed-window
-        counter (it never reaches max_requests on any single key). This
-        bit us in production validation: session-redis-test.py sent 6
-        rapid login attempts and never got a 429.
-
-        BUG FIX -- round 2: the first fix here checked X-Real-IP BEFORE
-        X-Forwarded-For, which turned out to be exactly backwards.
-        `frontend` (external: true) isn't the first hop for real traffic
-        either -- Azure Container Apps' own platform ingress (Envoy) sits
-        in front of it too, the same way it sits in front of `backend`.
-        nginx's `X-Real-IP $remote_addr` (see nginx/default.conf.template)
-        reflects whatever IP ACA's OWN edge proxy connected from, which
-        can vary request-to-request depending on which ACA ingress node
-        happened to handle it -- the identical class of bug as the
-        scope["client"] issue above, just one hop further out. Confirmed
-        in production logs: after the first fix deployed, Redis's INCR
-        was succeeding on every single login attempt (no "Redis
-        unavailable" fail-open warning anywhere in the logs), yet
-        session-redis-test.py's 6 rapid attempts still never got a 429 --
-        only explainable by each attempt hashing to a DIFFERENT Redis key,
-        i.e. a different perceived client_ip per request, i.e. X-Real-IP
-        (which we were checking first) was not stable.
-        X-Forwarded-For IS stable: ACA's ingress prepends the true
-        external client IP onto it before nginx ever sees it, and nginx's
-        `$proxy_add_x_forwarded_for` only ever appends to that (never
-        replaces it) -- so the LEFTMOST entry is the one value that stays
-        constant across every hop and every request from the same real
-        client, regardless of which ACA/nginx internal node handled it.
-        Checking it first (X-Real-IP now only a fallback) is what actually
-        fixes this.
-        """
-        headers = dict(scope.get("headers") or [])
-
-        forwarded_for = headers.get(b"x-forwarded-for")
-        if forwarded_for:
-            # nginx appends via $proxy_add_x_forwarded_for, so the FIRST
-            # (leftmost) entry is the original client -- everything after
-            # it is a hop (ACA's ingress, nginx itself, ...) added later.
-            first = forwarded_for.decode("latin-1").split(",")[0].strip()
-            if first:
-                return first
-
-        real_ip = headers.get(b"x-real-ip")
-        if real_ip:
-            return real_ip.decode("latin-1").strip()
-
-        # Fallback for local/docker-compose dev, where nginx isn't
-        # necessarily in front of the backend the same way.
-        client = scope.get("client")
-        return client[0] if client else "unknown"
-
-    def _is_limited(self, client_ip: str) -> tuple[bool, int]:
-        """
-        Returns (should_block, retry_after_seconds). Fixed-window counter:
-        the window is identified by `int(time.time() // window_seconds)`,
-        so every client sharing that same window bucket increments the
-        same Redis key. `INCR` on a brand-new key both creates it (at 1)
-        and returns the new value atomically -- no separate GET needed.
-        """
-        window_id = int(time.time() // self.window_seconds)
-        key = f"{_KEY_PREFIX}:{client_ip}:{window_id}"
-        try:
-            count = self._redis.incr(key)
-            if count == 1:
-                # First hit in this window -- set the key to expire once
-                # the window ends, so Redis cleans it up on its own rather
-                # than these keys accumulating forever.
-                self._redis.expire(key, self.window_seconds)
-
-            if count > self.max_requests:
-                # Time remaining until this window rolls over -- the
-                # soonest a retry could possibly succeed.
-                retry_after = self.window_seconds - int(time.time() % self.window_seconds)
-                return True, max(1, retry_after)
-            return False, 0
-        except redis.RedisError as exc:
-            from integrations.fastapi_errorbeacon import report_exception
-            report_exception(exc, None, None, component="rate_limit", operation="redis_check", severity="warning", category="dependency_degraded", context={"failure_mode": "fail_open", "dependency": "redis", "rate_limit_enforced": False})
-            # Fail open -- see module docstring's "FAIL-OPEN ON REDIS
-            # ERRORS" section for why this is the right tradeoff here.
-            logger.warning("rate_limit: Redis unavailable, allowing request through unlimited.", exc_info=True)
-            return False, 0
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if (
@@ -210,8 +112,12 @@ class RateLimitMiddleware:
             await self.app(scope, receive, send)
             return
 
-        client_ip = self._client_ip(scope)
-        blocked, retry_after = self._is_limited(client_ip)
+        client = scope.get("client")
+        client_ip = resolve_client_ip(
+            asgi_header_getter(scope),
+            client[0] if client else None,
+        )
+        blocked, retry_after = self._limiter.check(client_ip)
 
         if blocked:
             logger.warning(

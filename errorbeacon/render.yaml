@@ -12,7 +12,7 @@ services:
   - type: web
     name: errorbeacon-lite
     runtime: docker
-    dockerfilePath: Dockerfile
+    dockerfilePath: errorbeacon/Dockerfile
     dockerContext: .
     plan: free
     healthCheckPath: /healthz
@@ -25,15 +25,17 @@ services:
       # Render if this deployment is monitoring a production system.
       - key: ENVIRONMENT
         value: production
-      # Legacy single key: still read as a fallback by both ingest_auth and
-      # admin_auth if the scoped keys below are left unset, for deployments
-      # that haven't migrated yet. New setups should leave this blank and
-      # use the two scoped keys instead so a compromised backend's ingest
-      # key can't also resolve/silence incidents.
-      - key: ERRORBEACON_API_KEY
-        sync: false
       - key: ERRORBEACON_INGEST_API_KEY
         sync: false
+      - key: ERRORBEACON_ENABLE_DOCS
+        value: "false"
+      - key: ERRORBEACON_MAX_REQUEST_BODY_BYTES
+        value: "131072"
+      - key: ERRORBEACON_ADMIN_AUTH_FAILURES_PER_MINUTE
+        value: "10"
+      # ErrorBeacon is directly public on Render Free; never trust spoofable proxy headers.
+      - key: ERRORBEACON_TRUST_PROXY_HEADERS
+        value: "false"
       - key: ERRORBEACON_ADMIN_API_KEY
         sync: false
       - key: TELEGRAM_BOT_TOKEN
@@ -94,10 +96,13 @@ services:
         sync: false
       - key: RESEND_API_KEY
         sync: false
-      - key: ADMIN_NOTIFICATION_EMAILS
-        sync: false
       - key: ERRORBEACON_EMAIL_FALLBACK_ENABLED
         value: "true"
+      # Admin recipients are intentionally separate from the application's
+      # normal notification routing. Set this to the address(es) that should
+      # receive ErrorBeacon fallback/test emails.
+      - key: ADMIN_NOTIFICATION_EMAILS
+        sync: false
       - key: ERRORBEACON_EMAIL_FALLBACK_AFTER_ATTEMPTS
         value: "3"
       - key: ERRORBEACON_EMAIL_FALLBACK_AFTER_SECONDS
@@ -106,3 +111,13 @@ services:
         value: "90"
       - key: ERRORBEACON_DB_WARN_MB
         value: "4096"
+      - key: ERRORBEACON_AUTO_STALE_DAYS
+        value: "30"
+      - key: ERRORBEACON_DIGEST_ENABLED
+        value: "true"
+      - key: ERRORBEACON_DIGEST_INTERVAL_HOURS
+        value: "24"
+      - key: ERRORBEACON_EMAIL_FALLBACK_RETRIES
+        value: "3"
+      - key: ERRORBEACON_STARTUP_SELF_TEST
+        value: "false"

@@ -373,8 +373,8 @@ jobs:
       # pull-time name.
       build_matrix: |
         [
-          {"service":"backend","dockerfile":"backend/Dockerfile","context":"backend","image_name":"snipeit-lite-backend${{ needs.resolve-target.outputs.image_suffix }}"},
-          {"service":"errorbeacon","dockerfile":"errorbeacon/Dockerfile","context":"errorbeacon","image_name":"errorbeacon-lite"},
+          {"service":"backend","dockerfile":"backend/Dockerfile","context":".","image_name":"snipeit-lite-backend${{ needs.resolve-target.outputs.image_suffix }}"},
+          {"service":"errorbeacon","dockerfile":"errorbeacon/Dockerfile","context":".","image_name":"errorbeacon-lite"},
           {"service":"frontend-${{ needs.resolve-target.outputs.frontend_type }}","dockerfile":"frontend/Dockerfile","context":".","target":"frontend-${{ needs.resolve-target.outputs.frontend_type }}-only","image_name":"snipeit-lite-frontend-${{ needs.resolve-target.outputs.frontend_type }}${{ needs.resolve-target.outputs.image_suffix }}"}
         ]
       # Trivy blocking follows the deploy TARGET (staging vs production --

@@ -117,7 +117,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
-          docker build -f errorbeacon/Dockerfile -t "$DOCKERHUB_USERNAME/errorbeacon-lite:latest" errorbeacon
+          docker build -f errorbeacon/Dockerfile -t "$DOCKERHUB_USERNAME/errorbeacon-lite:latest" .
           docker push "$DOCKERHUB_USERNAME/errorbeacon-lite:latest"
 
       - name: Register Azure resource providers required by ACA infrastructure
@@ -472,9 +472,10 @@ jobs:
         if: ${{ github.event.inputs.action != 'destroy' }}
         run: |
           MISSING=()
-          [ -z "${{ secrets.ERRORBEACON_API_KEY }}" ] && MISSING+=("ERRORBEACON_API_KEY")
           [ -z "${{ secrets.ERRORBEACON_TELEGRAM_BOT_TOKEN }}" ] && MISSING+=("ERRORBEACON_TELEGRAM_BOT_TOKEN")
           [ -z "${{ secrets.ERRORBEACON_TELEGRAM_CHAT_ID }}" ] && MISSING+=("ERRORBEACON_TELEGRAM_CHAT_ID")
+          [ -z "${{ secrets.ERRORBEACON_INGEST_API_KEY }}" ] && MISSING+=("ERRORBEACON_INGEST_API_KEY")
+          [ -z "${{ secrets.ERRORBEACON_ADMIN_API_KEY }}" ] && MISSING+=("ERRORBEACON_ADMIN_API_KEY")
           if [ "${#MISSING[@]}" -gt 0 ]; then echo "::error::Missing ErrorBeacon configuration: ${MISSING[*]}"; exit 1; fi
 
       - name: Bicep What-If plan and GitHub Summary
@@ -499,9 +500,8 @@ jobs:
               dockerHubErrorBeaconImage="${{ secrets.DOCKERHUB_USERNAME }}/errorbeacon-lite" \
               errorBeaconEnabled=true \
               errorBeaconAppName="${{ vars.ERRORBEACON_APP || 'asset-inventory-quotes' }}" \
-              errorBeaconApiKey="${{ secrets.ERRORBEACON_API_KEY }}" \
-              errorBeaconIngestApiKey="${{ secrets.ERRORBEACON_INGEST_API_KEY || secrets.ERRORBEACON_API_KEY }}" \
-              errorBeaconAdminApiKey="${{ secrets.ERRORBEACON_ADMIN_API_KEY || secrets.ERRORBEACON_API_KEY }}" \
+              errorBeaconIngestApiKey="${{ secrets.ERRORBEACON_INGEST_API_KEY }}" \
+              errorBeaconAdminApiKey="${{ secrets.ERRORBEACON_ADMIN_API_KEY }}" \
               errorBeaconTelegramBotToken="${{ secrets.ERRORBEACON_TELEGRAM_BOT_TOKEN }}" \
               errorBeaconTelegramChatId="${{ secrets.ERRORBEACON_TELEGRAM_CHAT_ID }}" \
               errorBeaconTelegramThreadId="${{ vars.ERRORBEACON_TELEGRAM_THREAD_ID }}" \
@@ -654,9 +654,8 @@ jobs:
               dockerHubErrorBeaconImage="${{ secrets.DOCKERHUB_USERNAME }}/errorbeacon-lite" \
               errorBeaconEnabled=true \
               errorBeaconAppName="${{ vars.ERRORBEACON_APP || 'asset-inventory-quotes' }}" \
-              errorBeaconApiKey="${{ secrets.ERRORBEACON_API_KEY }}" \
-              errorBeaconIngestApiKey="${{ secrets.ERRORBEACON_INGEST_API_KEY || secrets.ERRORBEACON_API_KEY }}" \
-              errorBeaconAdminApiKey="${{ secrets.ERRORBEACON_ADMIN_API_KEY || secrets.ERRORBEACON_API_KEY }}" \
+              errorBeaconIngestApiKey="${{ secrets.ERRORBEACON_INGEST_API_KEY }}" \
+              errorBeaconAdminApiKey="${{ secrets.ERRORBEACON_ADMIN_API_KEY }}" \
               errorBeaconTelegramBotToken="${{ secrets.ERRORBEACON_TELEGRAM_BOT_TOKEN }}" \
               errorBeaconTelegramChatId="${{ secrets.ERRORBEACON_TELEGRAM_CHAT_ID }}" \
               errorBeaconTelegramThreadId="${{ vars.ERRORBEACON_TELEGRAM_THREAD_ID }}" \
@@ -784,9 +783,8 @@ jobs:
               dockerHubErrorBeaconImage="${{ secrets.DOCKERHUB_USERNAME }}/errorbeacon-lite" \
               errorBeaconEnabled=true \
               errorBeaconAppName="${{ vars.ERRORBEACON_APP || 'asset-inventory-quotes' }}" \
-              errorBeaconApiKey="${{ secrets.ERRORBEACON_API_KEY }}" \
-              errorBeaconIngestApiKey="${{ secrets.ERRORBEACON_INGEST_API_KEY || secrets.ERRORBEACON_API_KEY }}" \
-              errorBeaconAdminApiKey="${{ secrets.ERRORBEACON_ADMIN_API_KEY || secrets.ERRORBEACON_API_KEY }}" \
+              errorBeaconIngestApiKey="${{ secrets.ERRORBEACON_INGEST_API_KEY }}" \
+              errorBeaconAdminApiKey="${{ secrets.ERRORBEACON_ADMIN_API_KEY }}" \
               errorBeaconTelegramBotToken="${{ secrets.ERRORBEACON_TELEGRAM_BOT_TOKEN }}" \
               errorBeaconTelegramChatId="${{ secrets.ERRORBEACON_TELEGRAM_CHAT_ID }}" \
               errorBeaconTelegramThreadId="${{ vars.ERRORBEACON_TELEGRAM_THREAD_ID }}" \

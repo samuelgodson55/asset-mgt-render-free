@@ -382,8 +382,8 @@ jobs:
       # `deploy` job's own FRONTEND_IMAGE for the matching pull-time name.
       build_matrix: |
         [
-          {"service":"backend","dockerfile":"backend/Dockerfile","context":"backend","image_name":"snipeit-lite-backend${{ needs.resolve-target.outputs.image_suffix }}"},
-          {"service":"errorbeacon","dockerfile":"errorbeacon/Dockerfile","context":"errorbeacon","image_name":"errorbeacon-lite"},
+          {"service":"backend","dockerfile":"backend/Dockerfile","context":".","image_name":"snipeit-lite-backend${{ needs.resolve-target.outputs.image_suffix }}"},
+          {"service":"errorbeacon","dockerfile":"errorbeacon/Dockerfile","context":".","image_name":"errorbeacon-lite"},
           {"service":"frontend-${{ needs.resolve-target.outputs.frontend_type }}","dockerfile":"frontend/Dockerfile","context":".","target":"frontend-${{ needs.resolve-target.outputs.frontend_type }}-only","image_name":"snipeit-lite-frontend-${{ needs.resolve-target.outputs.frontend_type }}${{ needs.resolve-target.outputs.image_suffix }}"}
         ]
       trivy_blocking: true
@@ -504,7 +504,6 @@ jobs:
           [ -z "$VM_SSH_PRIVATE_KEY" ] && MISSING+=("VM_SSH_PRIVATE_KEY")
           [ -z "$CF_ACCESS_CLIENT_ID" ] && MISSING+=("CF_ACCESS_CLIENT_ID")
           [ -z "$CF_ACCESS_CLIENT_SECRET" ] && MISSING+=("CF_ACCESS_CLIENT_SECRET")
-          [ -z "${{ secrets.ERRORBEACON_API_KEY }}" ] && MISSING+=("ERRORBEACON_API_KEY")
           [ -z "${{ secrets.ERRORBEACON_INGEST_API_KEY }}" ] && MISSING+=("ERRORBEACON_INGEST_API_KEY")
           [ -z "${{ secrets.ERRORBEACON_ADMIN_API_KEY }}" ] && MISSING+=("ERRORBEACON_ADMIN_API_KEY")
           [ -z "${{ secrets.ERRORBEACON_TELEGRAM_BOT_TOKEN }}" ] && MISSING+=("ERRORBEACON_TELEGRAM_BOT_TOKEN")
@@ -661,7 +660,6 @@ jobs:
             fi
             if grep -q '^ERRORBEACON_IMAGE=' .env; then sed -i "s|^ERRORBEACON_IMAGE=.*|ERRORBEACON_IMAGE=$ERRORBEACON_IMAGE|" .env; else echo "ERRORBEACON_IMAGE=$ERRORBEACON_IMAGE" >> .env; fi
             if grep -q '^ERRORBEACON_IMAGE_TAG=' .env; then sed -i "s/^ERRORBEACON_IMAGE_TAG=.*/ERRORBEACON_IMAGE_TAG=$IMAGE_TAG/" .env; else echo "ERRORBEACON_IMAGE_TAG=$IMAGE_TAG" >> .env; fi
-            if grep -q '^ERRORBEACON_API_KEY=' .env; then sed -i "s|^ERRORBEACON_API_KEY=.*|ERRORBEACON_API_KEY=${{ secrets.ERRORBEACON_API_KEY }}|" .env; else echo "ERRORBEACON_API_KEY=${{ secrets.ERRORBEACON_API_KEY }}" >> .env; fi
             if grep -q '^ERRORBEACON_INGEST_API_KEY=' .env; then sed -i "s|^ERRORBEACON_INGEST_API_KEY=.*|ERRORBEACON_INGEST_API_KEY=${{ secrets.ERRORBEACON_INGEST_API_KEY }}|" .env; else echo "ERRORBEACON_INGEST_API_KEY=${{ secrets.ERRORBEACON_INGEST_API_KEY }}" >> .env; fi
             if grep -q '^ERRORBEACON_ADMIN_API_KEY=' .env; then sed -i "s|^ERRORBEACON_ADMIN_API_KEY=.*|ERRORBEACON_ADMIN_API_KEY=${{ secrets.ERRORBEACON_ADMIN_API_KEY }}|" .env; else echo "ERRORBEACON_ADMIN_API_KEY=${{ secrets.ERRORBEACON_ADMIN_API_KEY }}" >> .env; fi
             if grep -q '^TELEGRAM_BOT_TOKEN=' .env; then sed -i "s|^TELEGRAM_BOT_TOKEN=.*|TELEGRAM_BOT_TOKEN=${{ secrets.ERRORBEACON_TELEGRAM_BOT_TOKEN }}|" .env; else echo "TELEGRAM_BOT_TOKEN=${{ secrets.ERRORBEACON_TELEGRAM_BOT_TOKEN }}" >> .env; fi
@@ -676,14 +674,12 @@ jobs:
             # (<<EOF, see this step's own comment above), so those get expanded by
             # THIS JOB'S RUNNER SHELL, not the remote VM, before ever reaching `sed`.
             # None of those seven names were ever declared in this job's `env:`
-            # block (unlike ERRORBEACON_API_KEY etc. two lines up, which correctly
             # use inline `${{ secrets.X }}`/`${{ vars.X }}` expressions instead) --
             # so every one of them silently expanded to an EMPTY string on every
             # run, blanking these values back out in /opt/snipeit/.env on every VM
             # deploy regardless of what sync-secrets-vm.yml had previously set.
             # Fixed by switching to the same inline GitHub Actions expression
             # style already used for the other ErrorBeacon lines in this step
-            # (see ERRORBEACON_API_KEY etc. above).
             if grep -q '^GEMINI_MODEL=' .env; then sed -i "s|^GEMINI_MODEL=.*|GEMINI_MODEL=${{ vars.ERRORBEACON_GEMINI_MODEL || 'gemini-2.5-flash-lite' }}|" .env; else echo "GEMINI_MODEL=${{ vars.ERRORBEACON_GEMINI_MODEL || 'gemini-2.5-flash-lite' }}" >> .env; fi
             if grep -q '^GEMINI_FALLBACK_MODEL=' .env; then sed -i "s|^GEMINI_FALLBACK_MODEL=.*|GEMINI_FALLBACK_MODEL=${{ vars.ERRORBEACON_GEMINI_FALLBACK_MODEL || 'gemini-2.5-flash' }}|" .env; else echo "GEMINI_FALLBACK_MODEL=${{ vars.ERRORBEACON_GEMINI_FALLBACK_MODEL || 'gemini-2.5-flash' }}" >> .env; fi
             if grep -q '^GROQ_API_KEY=' .env; then sed -i "s|^GROQ_API_KEY=.*|GROQ_API_KEY=${{ secrets.ERRORBEACON_GROQ_API_KEY }}|" .env; else echo "GROQ_API_KEY=${{ secrets.ERRORBEACON_GROQ_API_KEY }}" >> .env; fi

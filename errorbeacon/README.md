@@ -83,7 +83,7 @@ python -c "import secrets; print(secrets.token_urlsafe(32))"
 Use the generated value in **both** ErrorBeacon and the monitored application:
 
 ```env
-ERRORBEACON_API_KEY=YOUR_GENERATED_KEY
+ERRORBEACON_INGEST_API_KEY=YOUR_GENERATED_KEY
 ```
 
 The application sends it as:
@@ -167,7 +167,7 @@ Docker Compose:
 
 ```env
 ERRORBEACON_URL=http://errorbeacon:8000
-ERRORBEACON_API_KEY=YOUR_GENERATED_KEY
+ERRORBEACON_INGEST_API_KEY=YOUR_GENERATED_KEY
 ```
 
 ACA uses the internal service name:
@@ -178,7 +178,7 @@ http://errorbeacon:8000
 
 VM Compose uses the same private Docker DNS name.
 
-The browser never receives `ERRORBEACON_API_KEY`. Browser errors are forwarded through the backend telemetry endpoint.
+The browser never receives `ERRORBEACON_INGEST_API_KEY`. Browser errors are forwarded through the backend telemetry endpoint.
 
 The frontend reporter stores the latest `X-Request-ID` returned by any same-origin API response and attaches it to later browser exceptions. URLs are sanitized before reporting, including password-reset tokens and other sensitive query parameters.
 
@@ -199,12 +199,33 @@ POST /v1/test
 X-API-Key: YOUR_KEY
 ```
 
-### List incidents
+### List and filter incidents
 
 ```text
-GET /v1/incidents?limit=50
+GET /v1/incidents?limit=50&app=asset-inventory-quotes&environment=production&severity=error&resolved=false&start_date=2026-08-01T00:00:00+00:00&end_date=2026-08-17T23:59:59+00:00
 X-API-Key: YOUR_KEY
 ```
+
+Filters are optional. Use `/v1/incidents/{id}` when you need the full incident record, including traceback, context, AI analysis, user/host fields and occurrence event history.
+
+### Incident analytics
+
+```text
+GET /v1/stats?window=24h
+X-API-Key: YOUR_KEY
+```
+
+`/v1/stats` returns counts by severity, app and environment, top recurring fingerprints, spike/regression counts and Telegram/email/AI delivery metrics. Window values support minutes, hours, days and weeks, for example `30m`, `24h`, `7d` or `1w`.
+
+### Delivery tests
+
+```text
+POST /v1/test-telegram
+POST /v1/test-email
+X-API-Key: YOUR_KEY
+```
+
+These are admin-key protected and perform a real delivery test without creating an incident.
 
 ### Resolve
 
@@ -222,17 +243,21 @@ X-API-Key: YOUR_KEY
 
 ## Telegram controls
 
-The bot accepts `/incidents`, `/resolve <id>`, `/reopen <id>`, `/silence <id> <duration>`, `/unsilence <id>`, and `/health`. Silence accepts `1h`, `4h`, `24h`, or other minute/hour/day values up to 24 hours. Telegram polling listens for both callback buttons and messages, and only the configured `TELEGRAM_CHAT_ID` can issue commands.
+The bot accepts `/help`, `/health`, `/incidents`, `/incident <id>`, `/stats [window]`, `/resolve <id>`, `/reopen <id>`, `/silence <id> <duration>`, `/unsilence <id>`, `/test`, `/testtelegram`, and `/testemail`. Silence accepts minute/hour/day values up to 24 hours. `/test` creates a controlled incident and exercises the normal alert/AI pipeline; `/testtelegram` tests Telegram delivery directly; `/testemail` tests the configured email fallback transport without creating an incident. Telegram polling listens for both callback buttons and messages, and only the configured `TELEGRAM_CHAT_ID` can issue commands. `/start` is an alias for `/help`.
 
 When Telegram remains explicitly failed or ambiguous long enough, ErrorBeacon escalates through the application's existing email notification transport. It reuses `NOTIFICATIONS_ENABLED`, `EMAIL_PROVIDER`, the existing SMTP/Brevo/Resend credentials, `SMTP_FROM_EMAIL`, and `ADMIN_NOTIFICATION_EMAILS`; there is no separate ErrorBeacon email provider configuration. AI permanent failures also get an email notification when Telegram cannot deliver that state.
 
+For production email fallback, set `ADMIN_NOTIFICATION_EMAILS` and `ERRORBEACON_EMAIL_FALLBACK_ENABLED=true`. `/healthz` and Telegram `/health` now show which email configuration items are missing without exposing secrets. `ERRORBEACON_STARTUP_SELF_TEST=true` optionally performs actual Telegram and email sends at startup; otherwise startup validates Telegram with `getMe` and logs email configuration problems without sending messages.
+
 ## Data retention and capacity
 
-Resolved incidents and their event rows older than `ERRORBEACON_RETENTION_DAYS` (default 90) are purged by the maintenance loop. Unresolved incidents are never automatically purged. `/healthz` reports SQLite file size, incident/event counts, retention days, and a database warning state.
+Resolved incidents and their event rows older than `ERRORBEACON_RETENTION_DAYS` (default 90) are purged by the maintenance loop. Incidents with no new occurrence for `ERRORBEACON_AUTO_STALE_DAYS` (default 30) are automatically marked resolved with an `auto-stale` reason, allowing retention to bound storage without requiring manual triage. `/healthz` reports SQLite file size, incident/event counts, retention days, auto-stale settings and database warning state. Crossing `ERRORBEACON_DB_WARN_MB` triggers an active Telegram warning with email fallback, rather than only changing the health response.
+
+When `ERRORBEACON_DIGEST_ENABLED=true`, the maintenance loop sends a periodic operational digest using `ERRORBEACON_DIGEST_INTERVAL_HOURS` (default 24). It includes recurring fingerprints, unresolved count and delivery/AI health.
 
 ## API key scopes
 
-`ERRORBEACON_INGEST_API_KEY` is used by the monitored application for `/v1/events`. `ERRORBEACON_ADMIN_API_KEY` is used for tests, reads, and lifecycle controls. Both fall back to the legacy `ERRORBEACON_API_KEY` when the scoped values are not configured, so existing deployments remain compatible while allowing later rotation/scope separation.
+`ERRORBEACON_INGEST_API_KEY` is used by the monitored application for `/v1/events`. `ERRORBEACON_ADMIN_API_KEY` is used for tests, reads, and lifecycle controls. Both are required in production and are intentionally independent; there is no legacy shared-key fallback.
 
 
 
@@ -250,6 +275,8 @@ Before persistence, Telegram delivery or Gemini analysis, ErrorBeacon recursivel
 - sensitive context dictionary keys
 
 Frontend URLs are sanitized so `reset_token`, `access_token`, `code`, `password`, `api_key`, `session_id` and similar values cannot be forwarded in clear text.
+
+Admin authentication failure throttling uses the immediate peer IP by default. Do **not** trust `X-Real-IP` or `X-Forwarded-For` merely because they are present: public deployments such as Render Free must keep `ERRORBEACON_TRUST_PROXY_HEADERS=false`. Set it to `true` only when ErrorBeacon is behind a controlled ingress/reverse proxy that is known to overwrite those headers (the integrated ACA deployment does this explicitly).
 
 ## Deployment
 
@@ -306,10 +333,14 @@ AI analysis runs on a dedicated serialized queue with retry/backoff. Telegram de
 
 ### Incident lifecycle API
 
-All management endpoints use `ERRORBEACON_ADMIN_API_KEY` (or the legacy key fallback):
+All management endpoints use `ERRORBEACON_ADMIN_API_KEY`:
 
 ```text
 GET  /v1/incidents
+GET  /v1/incidents/{id}
+GET  /v1/stats?window=24h
+POST /v1/test-telegram
+POST /v1/test-email
 POST /v1/incidents/{id}/resolve
 POST /v1/incidents/{id}/reopen
 POST /v1/incidents/{id}/silence?seconds=3600

@@ -33,7 +33,7 @@ ENV PATH="/opt/venv/bin:$PATH" \
 
 # Copy requirements and install dependencies first so Docker can cache this
 # layer and skip re-installing packages every time only the app code changes.
-COPY requirements.txt /app/
+COPY backend/requirements.txt /app/
 #
 # BUG FIX -- this RUN used to `apt-get install build-essential libpq-dev`
 # before `pip install`, on the assumption that some dependency needed a C
@@ -123,7 +123,8 @@ RUN apt-get update && \
 COPY --from=builder /opt/venv /opt/venv
 
 # The application code.
-COPY . /app/
+COPY backend/ /app/
+COPY shared/ /app/shared/
 
 # Precompile every .py file to .pyc now, at build time, instead of paying
 # that cost on the container's first request/import at startup. This is

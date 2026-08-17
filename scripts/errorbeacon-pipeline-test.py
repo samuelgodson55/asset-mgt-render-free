@@ -7,7 +7,7 @@ RUN THIS INSIDE THE BACKEND CONTAINER, not from your laptop:
 
 ErrorBeacon's ingress is internal-only (see security checklist item #16 --
 "ErrorBeacon public URL -> inaccessible" is a REQUIREMENT, not a bug), so
-$ERRORBEACON_URL / $ERRORBEACON_API_KEY only resolve from inside the ACA
+$ERRORBEACON_URL / $ERRORBEACON_INGEST_API_KEY only resolve from inside the ACA
 environment. The backend container already has both set (it's how it talks
 to ErrorBeacon on every unhandled exception -- see
 backend/integrations/fastapi_errorbeacon.py), so this reuses them instead
@@ -83,12 +83,12 @@ def call(method: str, url: str, api_key: str, timeout: float = 10.0) -> tuple[in
 
 def main() -> int:
     base_url = os.environ.get("ERRORBEACON_URL", "").rstrip("/")
-    api_key = os.environ.get("ERRORBEACON_API_KEY", "")
+    api_key = os.environ.get("ERRORBEACON_INGEST_API_KEY", "")
 
     if not record_env_check("ERRORBEACON_URL set", bool(base_url), base_url):
         print_summary()
         return 1
-    if not record_env_check("ERRORBEACON_API_KEY set", bool(api_key), "(non-empty)" if api_key else "(empty)"):
+    if not record_env_check("ERRORBEACON_INGEST_API_KEY set", bool(api_key), "(non-empty)" if api_key else "(empty)"):
         print_summary()
         return 1
     if base_url in ("http://errorbeacon:8000",) :

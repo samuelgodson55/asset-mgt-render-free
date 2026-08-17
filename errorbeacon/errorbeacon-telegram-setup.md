@@ -189,7 +189,7 @@ python -c "import secrets; print(secrets.token_urlsafe(32))"
 Configure the exact same value as:
 
 ```env
-ERRORBEACON_API_KEY=<generated value>
+ERRORBEACON_INGEST_API_KEY=<generated value>
 ```
 
 The backend sends it as:
@@ -387,7 +387,7 @@ cp .env.example .env
 Add or update:
 
 ```env
-ERRORBEACON_API_KEY=<generated key>
+ERRORBEACON_INGEST_API_KEY=<generated key>
 
 TELEGRAM_BOT_TOKEN=<BotFather token>
 TELEGRAM_CHAT_ID=<chat id>
@@ -451,7 +451,7 @@ cp .env.example .env
 Configure:
 
 ```env
-ERRORBEACON_API_KEY=<generated key>
+ERRORBEACON_INGEST_API_KEY=<generated key>
 
 TELEGRAM_BOT_TOKEN=<BotFather token>
 TELEGRAM_CHAT_ID=<chat id>
@@ -490,6 +490,20 @@ curl http://127.0.0.1:8787/healthz
 ```
 
 ---
+
+## Telegram command testing
+
+Once the bot is running, send `/help` to see the complete command list. The three useful deployment tests are:
+
+```text
+/test
+/testtelegram
+/testemail
+```
+
+`/test` creates a controlled ErrorBeacon incident and sends it through the normal incident pipeline, including Telegram and queued AI enrichment. `/testtelegram` sends a direct Telegram delivery test without creating an incident. `/testemail` sends a direct email test using the existing application email transport and `ADMIN_NOTIFICATION_EMAILS`; it does not create an incident.
+
+Use `/health` immediately before and after the tests to confirm queue depth, Telegram configuration, email configuration, database size and AI state.
 
 ## 10. Test Telegram end to end
 
@@ -585,13 +599,13 @@ import os, urllib.request
 req = urllib.request.Request(
     'http://localhost:8000/v1/test',
     method='POST',
-    headers={'x-api-key': os.environ['ERRORBEACON_API_KEY']},
+    headers={'x-api-key': os.environ['ERRORBEACON_ADMIN_API_KEY']},
 )
 print(urllib.request.urlopen(req).read())
 "
 
 # 3. If 2 doesn't work
-python3 -c "import os, urllib.request; req = urllib.request.Request('http://localhost:8000/v1/test', method='POST', headers={'x-api-key': os.environ['ERRORBEACON_API_KEY']}); print(urllib.request.urlopen(req).read())"
+python3 -c "import os, urllib.request; req = urllib.request.Request('http://localhost:8000/v1/test', method='POST', headers={'x-api-key': os.environ['ERRORBEACON_ADMIN_API_KEY']}); print(urllib.request.urlopen(req).read())"
 ```
 
 Then check Telegram — the message should arrive within a couple of seconds
@@ -707,7 +721,7 @@ Configure these GitHub secrets/variables when you want AI in ACA:
 ### Secrets
 
 ```text
-ERRORBEACON_API_KEY
+ERRORBEACON_INGEST_API_KEY
 ERRORBEACON_TELEGRAM_BOT_TOKEN
 ERRORBEACON_TELEGRAM_CHAT_ID
 ERRORBEACON_GROQ_API_KEY          optional
@@ -946,12 +960,12 @@ misrepresented as ordinary HTTP outages.
 
 ### `/v1/test` returns 401/403
 
-The `X-API-Key` does not match `ERRORBEACON_API_KEY`.
+The `X-API-Key` does not match `ERRORBEACON_ADMIN_API_KEY` for management endpoints, or `ERRORBEACON_INGEST_API_KEY` for `/v1/events`.
 
 Check both sides:
 
 ```env
-ERRORBEACON_API_KEY=<same exact value>
+ERRORBEACON_ADMIN_API_KEY=<admin key used for management endpoints>
 ```
 
 ### `/v1/test` succeeds but Telegram does not receive anything
@@ -1082,7 +1096,7 @@ Check the backend configuration. For Full-stack Docker Compose and the VM:
 
 ```env
 ERRORBEACON_URL=http://errorbeacon:8000
-ERRORBEACON_API_KEY=<same key as ErrorBeacon>
+ERRORBEACON_INGEST_API_KEY=<ingest key configured on the monitored application>
 ```
 
 Then verify the backend can resolve the Docker service name:
@@ -1127,7 +1141,8 @@ Compose-style `errorbeacon:8000` form.
 ### Minimum Telegram-only setup
 
 ```env
-ERRORBEACON_API_KEY=<random key>
+ERRORBEACON_INGEST_API_KEY=<random ingest key>
+ERRORBEACON_ADMIN_API_KEY=<different random admin key>
 TELEGRAM_BOT_TOKEN=<telegram token>
 TELEGRAM_CHAT_ID=<chat id>
 AI_ENABLED=false
@@ -1225,7 +1240,7 @@ ERRORBEACON_INGEST_API_KEY=<key used by the monitored application>
 ERRORBEACON_ADMIN_API_KEY=<key used for operator/API management>
 ```
 
-Both remain backward compatible with `ERRORBEACON_API_KEY`; if either scoped value is empty, ErrorBeacon falls back to the legacy key. The monitored FastAPI integration prefers `ERRORBEACON_INGEST_API_KEY` when it is available.
+The scoped keys are intentionally independent. `ERRORBEACON_INGEST_API_KEY` is for event ingestion and `ERRORBEACON_ADMIN_API_KEY` is for management endpoints. There is no legacy shared-key fallback.
 
 ### Retention and database capacity
 

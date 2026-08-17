@@ -10,7 +10,6 @@ from __future__ import annotations
 import logging
 import os
 import queue
-import re
 import socket
 import threading
 import traceback
@@ -19,6 +18,7 @@ from typing import Any
 
 import requests
 from starlette.types import Scope
+from shared.errorbeacon_sanitization import clean as _shared_clean
 
 try:
     from logging_config import request_id_var
@@ -29,7 +29,7 @@ except Exception:  # pragma: no cover - logging_config is optional
 log = logging.getLogger("errorbeacon.client")
 
 URL = os.getenv("ERRORBEACON_URL", "http://errorbeacon:8000")
-KEY = os.getenv("ERRORBEACON_INGEST_API_KEY", "") or os.getenv("ERRORBEACON_API_KEY", "")
+KEY = os.getenv("ERRORBEACON_INGEST_API_KEY", "")
 APP = os.getenv("ERRORBEACON_APP", "asset-inventory-quotes")
 ENV = os.getenv("ENVIRONMENT", "production")
 RELEASE = os.getenv("APP_RELEASE", "")
@@ -45,48 +45,16 @@ component_var: ContextVar[str | None] = ContextVar(
     default=None,
 )
 
-SECRET = re.compile(
-    r"(?i)(password|passwd|secret|token|api[_-]?key|authorization|cookie|"
-    r"session|reset[_-]?token|access[_-]?token|refresh[_-]?token|private[_-]?key)"
-)
-JWT = re.compile(
-    r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\."
-    r"[A-Za-z0-9_-]{10,}\b"
-)
-BEARER = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
-DBURL = re.compile(
-    r"(?i)(postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis)://[^\s]+"
-)
-ASSIGN = re.compile(
-    r"(?i)(authorization|cookie|x-api-key|api[_-]?key|access[_-]?token|"
-    r"refresh[_-]?token|reset[_-]?token|password|passwd|secret|"
-    r"session(?:[_-]?id)?)\s*[:=]\s*([^\s,;&]+)"
-)
-
-
 def clean(value: Any, key: str = "") -> Any:
-    """Recursively remove credentials and other sensitive values."""
-
-    if SECRET.search(key):
-        return "[REDACTED]"
-
-    if isinstance(value, dict):
-        return {str(k): clean(v, str(k)) for k, v in value.items()}
-
-    if isinstance(value, (list, tuple)):
-        return [clean(item, key) for item in list(value)[:100]]
-
-    if isinstance(value, str):
-        sanitized = JWT.sub("[REDACTED_JWT]", value)
-        sanitized = BEARER.sub("Bearer [REDACTED]", sanitized)
-        sanitized = DBURL.sub("[REDACTED_DB_URL]", sanitized)
-        sanitized = ASSIGN.sub(
-            lambda match: f"{match.group(1)}=[REDACTED]",
-            sanitized,
-        )
-        return sanitized[:12000]
-
-    return value
+    """Recursively redact credentials while preserving client payload limits."""
+    return _shared_clean(
+        value,
+        key,
+        max_depth=1000,
+        max_items=100,
+        string_limit=12000,
+        scalar_limit=12000,
+    )
 
 
 def set_component(value: str | None) -> None:

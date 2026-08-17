@@ -57,7 +57,7 @@ on:
           caller's `with:` block cannot itself reference the secrets
           context. Example (release.yml's shape -- backend once, both
           frontend flavors):
-            [{"service":"backend","dockerfile":"backend/Dockerfile","context":"backend","image_name":"snipeit-lite-backend"},
+            [{"service":"backend","dockerfile":"backend/Dockerfile","context":".","image_name":"snipeit-lite-backend"},
              {"service":"frontend-react","dockerfile":"frontend/Dockerfile","context":".","target":"frontend-react-only","image_name":"snipeit-lite-frontend-react"},
              {"service":"frontend-legacy","dockerfile":"frontend/Dockerfile","context":".","target":"frontend-legacy-only","image_name":"snipeit-lite-frontend-legacy"}]
         required: true

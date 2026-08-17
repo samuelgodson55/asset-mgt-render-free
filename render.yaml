@@ -181,6 +181,15 @@ services:
         value: true
       - key: LOG_LEVEL
         value: INFO
+      # ErrorBeacon is deployed as a separate Render Web Service using
+      # errorbeacon/render.yaml. These variables let the main application
+      # send ingest events to that monitor without exposing its admin key.
+      - key: ERRORBEACON_URL
+        sync: false
+      - key: ERRORBEACON_INGEST_API_KEY
+        sync: false
+      - key: ERRORBEACON_APP
+        value: asset-inventory-quotes
       - key: LOG_FORMAT
         value: json
       - key: LOGIN_RATE_LIMIT_MAX

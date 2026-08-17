@@ -136,7 +136,6 @@ write_files:
       DATABASE_URL=postgresql://${postgres_user_urlencoded}:${postgres_password_urlencoded}@db:5432/${postgres_db}
 
       JWT_SECRET_KEY=${jwt_secret_key}
-      ERRORBEACON_API_KEY=${errorbeacon_api_key}
       ERRORBEACON_INGEST_API_KEY=${errorbeacon_ingest_api_key}
       ERRORBEACON_ADMIN_API_KEY=${errorbeacon_admin_api_key}
       ERRORBEACON_IMAGE=${errorbeacon_image}

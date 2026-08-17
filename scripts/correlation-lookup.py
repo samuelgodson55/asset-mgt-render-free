@@ -64,9 +64,9 @@ def main() -> int:
     args = ap.parse_args()
 
     base_url = os.environ.get("ERRORBEACON_URL", "").rstrip("/")
-    api_key = os.environ.get("ERRORBEACON_API_KEY", "")
+    api_key = os.environ.get("ERRORBEACON_ADMIN_API_KEY", "")
     if not base_url or not api_key:
-        record("ERRORBEACON_URL / ERRORBEACON_API_KEY set", FAIL, f"URL={'set' if base_url else 'MISSING'} KEY={'set' if api_key else 'MISSING'}")
+        record("ERRORBEACON_URL / ERRORBEACON_ADMIN_API_KEY set", FAIL, f"URL={'set' if base_url else 'MISSING'} KEY={'set' if api_key else 'MISSING'}")
         print_summary()
         return 1
 
@@ -80,7 +80,7 @@ def main() -> int:
                 break
         time.sleep(2)
 
-    if not expect("incident found with matching request_id", match is not None, f"found incident {match.get('id') if match else None}", f"no incident with request_id={args.request_id!r} found within {args.wait_seconds}s -- check that correlation-id-test.py ran successfully and ERRORBEACON_API_KEY on the backend matches this container's"):
+    if not expect("incident found with matching request_id", match is not None, f"found incident {match.get('id') if match else None}", f"no incident with request_id={args.request_id!r} found within {args.wait_seconds}s -- check that correlation-id-test.py ran successfully and ERRORBEACON_ADMIN_API_KEY on the backend matches this container's"):
         print_summary()
         return 1
 

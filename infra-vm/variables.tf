@@ -180,11 +180,6 @@ variable "errorbeacon_admin_api_key" {
   default     = ""
 }
 
-variable "errorbeacon_api_key" {
-  description = "Shared API key used by the application to authenticate to ErrorBeacon. Generate with: python -c \"import secrets; print(secrets.token_urlsafe(32))\""
-  type        = string
-  sensitive   = true
-}
 
 variable "errorbeacon_telegram_bot_token" {
   description = "Telegram Bot API token used by ErrorBeacon."

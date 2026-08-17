@@ -1560,7 +1560,7 @@ The ACA infrastructure workflow provisions an internal `errorbeacon` Container A
 Configure these GitHub Environment values/secrets once:
 
 ```text
-ERRORBEACON_API_KEY                 secret
+ERRORBEACON_INGEST_API_KEY                 secret
 ERRORBEACON_TELEGRAM_BOT_TOKEN      secret
 ERRORBEACON_GROQ_API_KEY            secret (optional)
 ERRORBEACON_GEMINI_API_KEY          secret (optional)

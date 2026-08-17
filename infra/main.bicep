@@ -94,9 +94,6 @@ param errorBeaconEnabled bool = true
 @description('Identity string backend/worker/beat report themselves as via the ERRORBEACON_APP env var -- shows up as the "app" field on every event ErrorBeacon receives. Matches docker-compose.yml/docker-compose.vm.yml\'s own ERRORBEACON_APP default so all three deployment paths report under the same identity unless intentionally overridden.')
 param errorBeaconAppName string = 'asset-inventory-quotes'
 
-@description('ErrorBeacon shared API key. Generate with: python -c "import secrets; print(secrets.token_urlsafe(32))"')
-@secure()
-param errorBeaconApiKey string = ''
 @secure()
 param errorBeaconIngestApiKey string = ''
 @secure()
@@ -1076,9 +1073,8 @@ var sharedEnv = [
 
 var sharedSecrets = concat([
   { name: 'jwt-secret-key', value: jwtSecretKey }
-  { name: 'errorbeacon-api-key', value: empty(errorBeaconApiKey) ? 'unset' : errorBeaconApiKey }
-  { name: 'errorbeacon-ingest-api-key', value: empty(errorBeaconIngestApiKey) ? (empty(errorBeaconApiKey) ? 'unset' : errorBeaconApiKey) : errorBeaconIngestApiKey }
-  { name: 'errorbeacon-admin-api-key', value: empty(errorBeaconAdminApiKey) ? (empty(errorBeaconApiKey) ? 'unset' : errorBeaconApiKey) : errorBeaconAdminApiKey }
+  { name: 'errorbeacon-ingest-api-key', value: empty(errorBeaconIngestApiKey) ? 'unset' : errorBeaconIngestApiKey }
+  { name: 'errorbeacon-admin-api-key', value: empty(errorBeaconAdminApiKey) ? 'unset' : errorBeaconAdminApiKey }
   { name: 'root-admin-bootstrap-password', value: rootAdminBootstrapPassword }
   { name: 'database-url', value: databaseUrl }
   { name: 'redis-url', value: redisUrl }
@@ -1187,7 +1183,6 @@ resource backendApp 'Microsoft.App/containerApps@2024-03-01' = {
             // itself correct automatically if this param is ever
             // changed, with no matching code/config edit required.
             { name: 'BACKEND_MAX_REPLICAS', value: string(backendMaxReplicas) }
-            { name: 'ERRORBEACON_API_KEY', secretRef: 'errorbeacon-api-key' }
             { name: 'ERRORBEACON_INGEST_API_KEY', secretRef: 'errorbeacon-ingest-api-key' }
             { name: 'ERRORBEACON_ADMIN_API_KEY', secretRef: 'errorbeacon-admin-api-key' }
           ])
@@ -1253,9 +1248,8 @@ resource errorBeaconApp 'Microsoft.App/containerApps@2024-03-01' = if (errorBeac
       secrets: concat(usePrivateDockerHubRepo ? [
         { name: 'dockerhub-token', value: dockerHubToken }
       ] : [], [
-        { name: 'errorbeacon-api-key', value: errorBeaconApiKey }
-        { name: 'errorbeacon-ingest-api-key', value: empty(errorBeaconIngestApiKey) ? (empty(errorBeaconApiKey) ? 'unset' : errorBeaconApiKey) : errorBeaconIngestApiKey }
-        { name: 'errorbeacon-admin-api-key', value: empty(errorBeaconAdminApiKey) ? (empty(errorBeaconApiKey) ? 'unset' : errorBeaconApiKey) : errorBeaconAdminApiKey }
+        { name: 'errorbeacon-ingest-api-key', value: empty(errorBeaconIngestApiKey) ? 'unset' : errorBeaconIngestApiKey }
+        { name: 'errorbeacon-admin-api-key', value: empty(errorBeaconAdminApiKey) ? 'unset' : errorBeaconAdminApiKey }
         { name: 'telegram-bot-token', value: errorBeaconTelegramBotToken }
         { name: 'telegram-chat-id', value: errorBeaconTelegramChatId }
         { name: 'gemini-api-key', value: empty(errorBeaconGeminiApiKey) ? 'unset' : errorBeaconGeminiApiKey }
@@ -1289,9 +1283,10 @@ resource errorBeaconApp 'Microsoft.App/containerApps@2024-03-01' = if (errorBeac
             // ENVIRONMENT correctly via `sharedEnv` above; only this
             // service's copy was missing it.
             { name: 'ENVIRONMENT', value: runtimeEnvironment }
-            { name: 'ERRORBEACON_API_KEY', secretRef: 'errorbeacon-api-key' }
             { name: 'ERRORBEACON_INGEST_API_KEY', secretRef: 'errorbeacon-ingest-api-key' }
             { name: 'ERRORBEACON_ADMIN_API_KEY', secretRef: 'errorbeacon-admin-api-key' }
+            // ACA ingress is a controlled proxy boundary; allow ErrorBeacon to use the forwarded client IP.
+            { name: 'ERRORBEACON_TRUST_PROXY_HEADERS', value: 'true' }
             { name: 'TELEGRAM_BOT_TOKEN', secretRef: 'telegram-bot-token' }
             { name: 'TELEGRAM_CHAT_ID', secretRef: 'telegram-chat-id' }
             { name: 'TELEGRAM_THREAD_ID', value: errorBeaconTelegramThreadId }
@@ -1325,6 +1320,12 @@ resource errorBeaconApp 'Microsoft.App/containerApps@2024-03-01' = if (errorBeac
             { name: 'ERRORBEACON_EMAIL_FALLBACK_AFTER_SECONDS', value: '300' }
             { name: 'ERRORBEACON_RETENTION_DAYS', value: '90' }
             { name: 'ERRORBEACON_DB_WARN_MB', value: '4096' }
+            { name: 'ERRORBEACON_AUTO_STALE_DAYS', value: '30' }
+            { name: 'ERRORBEACON_CLEAN_MAX_DEPTH', value: '10' }
+            { name: 'ERRORBEACON_CLEAN_MAX_ITEMS', value: '100' }
+            { name: 'ERRORBEACON_DIGEST_ENABLED', value: 'true' }
+            { name: 'ERRORBEACON_DIGEST_INTERVAL_HOURS', value: '24' }
+            { name: 'ERRORBEACON_STARTUP_SELF_TEST', value: 'false' }
             { name: 'DATA_DIR', value: '/data' }
             // '/data' here is the errorbeacon-data Azure Files (SMB) share (see
             // errorBeaconStorage above), not local disk. SQLite's default WAL journal
