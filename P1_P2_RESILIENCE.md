@@ -141,6 +141,22 @@ cold-connection or Docker/host networking behaviour.
 Use the same command against the **staging ACA revision before 100% traffic**
 and against the inactive VM blue/green slot before cutover.
 
+# To test the load_test for regression
+specific test is useful whenever scripts/load-test.py is changed.
+
+```
+python -m unittest scripts.test_load_test -v
+```
+
+you should get ```
+test_http_error_status_is_returned_for_caller_to_classify ... ok
+test_keep_alive_drains_large_response_before_reuse ... ok
+
+Ran 2 tests
+
+OK
+```
+
 ### Recommended initial gates
 
 These are starting gates, not universal SLAs:

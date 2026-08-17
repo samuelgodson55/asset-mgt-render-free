@@ -2556,7 +2556,7 @@ the actual logic lives. Use this section as a map when you need to find
   body)`, the ONE place `smtplib` is touched anywhere in this codebase.
   Fail-soft by design (never raises — logs a warning and returns `False`
   instead) and a no-op that just logs at `DEBUG` when
-  `NOTIFICATIONS_ENABLED=true`.
+  `NOTIFICATIONS_ENABLED=false`.
 - **`services/user_service.py`** — `_derive_username` turns an email's
   local-part into a unique username, steering clear of the reserved Super
   Admin username too; `RESERVED_ROLES` blocks `role: "super_admin"` from
@@ -3277,7 +3277,7 @@ A checklist before you deploy this anywhere real:
       beats implicit for a deployment's actual config), but nothing
       breaks if you forget.
 - [ ] Set `CORS_ORIGINS` to your real frontend domain(s) only.
-- [ ] Decide on email: leave `NOTIFICATIONS_ENABLED=true` if you don't
+- [ ] Decide on email: leave `NOTIFICATIONS_ENABLED=false` if you don't
       want extension-request/overdue/due-soon-checkout emails yet, or set
       it to `true` and fill in real `SMTP_HOST`/`SMTP_FROM_EMAIL`/etc. —
       see [Due-Date Extensions & Notifications](#due-date-extensions--notifications).
