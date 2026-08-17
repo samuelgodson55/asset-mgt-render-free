@@ -1015,6 +1015,17 @@ var sharedEnv = [
   { name: 'ERRORBEACON_APP', value: errorBeaconAppName }
   { name: 'APP_RELEASE', value: empty(initialBackendImageTag) ? initialImageTag : initialBackendImageTag }
   { name: 'ERRORBEACON_TIMEOUT', value: '0.75' }
+  // Keep the ErrorBeacon-related runtime keys accepted consistently across
+  // Compose, VM Compose, and ACA. These are consumed by the standalone
+  // ErrorBeacon image when applicable; harmless defaults here keep the shared
+  // backend image contract identical across deployment paths.
+  { name: 'ERRORBEACON_ENABLE_DOCS', value: 'false' }
+  { name: 'ERRORBEACON_MAX_REQUEST_BODY_BYTES', value: '131072' }
+  { name: 'ERRORBEACON_ADMIN_AUTH_FAILURES_PER_MINUTE', value: '10' }
+  // The ACA ErrorBeacon service itself enables this separately below because
+  // ACA ingress is its controlled proxy boundary. The backend must not trust
+  // forwarded headers merely because it shares the same image contract.
+  { name: 'ERRORBEACON_TRUST_PROXY_HEADERS', value: 'false' }
   // Embedded Celery worker/beat uses this to avoid broker connection retry loops.
   { name: 'CELERY_BROKER_CONNECTION_MAX_RETRIES', value: 'none' }
   { name: 'JWT_ALGORITHM', value: 'HS256' }

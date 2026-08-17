@@ -500,7 +500,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Build backend image
-        run: docker build -t snipeit-backend:ci ./backend
+        run: docker build -f backend/Dockerfile -t snipeit-backend:ci .
 
       # REGRESSION GUARD for the "readyz: not ready ... could not open
       # certificate file '/root/.postgresql/postgresql.crt': Permission
