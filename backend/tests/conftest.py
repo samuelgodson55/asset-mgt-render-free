@@ -1,11 +1,4 @@
 
-# REPO_ROOT_FOR_SHARED: expose repository-level shared helpers when pytest is
-# invoked from the backend directory as well as from repository root.
-from pathlib import Path as _Path
-import sys as _sys
-_REPO_ROOT_FOR_SHARED = _Path(__file__).resolve().parents[2]
-if str(_REPO_ROOT_FOR_SHARED) not in _sys.path:
-    _sys.path.insert(0, str(_REPO_ROOT_FOR_SHARED))
 """
 tests/conftest.py
 ------------------
@@ -58,6 +51,12 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+
+# REPO_ROOT_FOR_SHARED: expose repository-level shared helpers when pytest is
+# invoked from the backend directory as well as from repository root.
+_REPO_ROOT_FOR_SHARED = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT_FOR_SHARED) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT_FOR_SHARED))
 
 # --- Make `backend/` importable regardless of pytest's rootdir/cwd --------
 # `pytest backend/tests` (see ci.yml) collects this file without `backend/`
