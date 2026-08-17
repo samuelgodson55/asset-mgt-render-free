@@ -1433,11 +1433,29 @@ def enqueue_ai(e,i,occ,spike,regression):
         return False
     if not _ai_claim(i):
         return False
+    # Persist the claim immediately. Without this, a freshly-created incident
+    # sits with ai_status='pending' in the DB for the entire window between
+    # insert and the in-memory claim above, so ai_recovery_loop's periodic
+    # scan (a separate thread, on its own timer) can independently claim and
+    # fully process the same brand-new incident before this call ever runs,
+    # producing a second, duplicate AI analysis + Telegram send. Moving the
+    # row out of 'pending' here closes that race at the DB level, which is
+    # what the recovery loop's query actually reads.
+    with _db_lock:
+        c=db()
+        c.execute("UPDATE incidents SET ai_status='queued' WHERE id=? AND ai_status='pending'",(i,))
+        c.commit()
+        c.close()
     try:
         _ai_jobs.put_nowait((e,i,occ,spike,regression))
         return True
     except queue.Full:
         _ai_release(i)
+        with _db_lock:
+            c=db()
+            c.execute("UPDATE incidents SET ai_status='pending' WHERE id=?",(i,))
+            c.commit()
+            c.close()
         log.error('AI analysis queue full; incident %s remains pending for durable retry',i)
         return False
 
