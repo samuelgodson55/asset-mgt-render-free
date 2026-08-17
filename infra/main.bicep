@@ -1184,6 +1184,8 @@ resource backendApp 'Microsoft.App/containerApps@2024-03-01' = {
             // changed, with no matching code/config edit required.
             { name: 'BACKEND_MAX_REPLICAS', value: string(backendMaxReplicas) }
             { name: 'ERRORBEACON_API_KEY', secretRef: 'errorbeacon-api-key' }
+            { name: 'ERRORBEACON_INGEST_API_KEY', secretRef: 'errorbeacon-ingest-api-key' }
+            { name: 'ERRORBEACON_ADMIN_API_KEY', secretRef: 'errorbeacon-admin-api-key' }
           ])
           volumeMounts: [
             { volumeName: 'backup-data', mountPath: '/app/backups' }

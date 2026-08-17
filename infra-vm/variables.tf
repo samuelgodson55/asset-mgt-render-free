@@ -210,10 +210,24 @@ variable "errorbeacon_gemini_api_key" {
   sensitive   = true
   default     = ""
 }
-variable "errorbeacon_groq_api_key" { type=string sensitive=true default="" }
-variable "errorbeacon_groq_model" { type=string default="llama-3.1-8b-instant" }
-variable "errorbeacon_openrouter_api_key" { type=string sensitive=true default="" }
-variable "errorbeacon_openrouter_model" { type=string default="openrouter/free" }
+variable "errorbeacon_groq_api_key" {
+  type      = string
+  sensitive = true
+  default   = ""
+}
+variable "errorbeacon_groq_model" {
+  type    = string
+  default = "llama-3.1-8b-instant"
+}
+variable "errorbeacon_openrouter_api_key" {
+  type      = string
+  sensitive = true
+  default   = ""
+}
+variable "errorbeacon_openrouter_model" {
+  type    = string
+  default = "openrouter/free"
+}
 
 variable "errorbeacon_image" {
   description = "Docker image repository for ErrorBeacon."
