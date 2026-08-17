@@ -1077,6 +1077,8 @@ var sharedEnv = [
 var sharedSecrets = concat([
   { name: 'jwt-secret-key', value: jwtSecretKey }
   { name: 'errorbeacon-api-key', value: empty(errorBeaconApiKey) ? 'unset' : errorBeaconApiKey }
+  { name: 'errorbeacon-ingest-api-key', value: empty(errorBeaconIngestApiKey) ? (empty(errorBeaconApiKey) ? 'unset' : errorBeaconApiKey) : errorBeaconIngestApiKey }
+  { name: 'errorbeacon-admin-api-key', value: empty(errorBeaconAdminApiKey) ? (empty(errorBeaconApiKey) ? 'unset' : errorBeaconApiKey) : errorBeaconAdminApiKey }
   { name: 'root-admin-bootstrap-password', value: rootAdminBootstrapPassword }
   { name: 'database-url', value: databaseUrl }
   { name: 'redis-url', value: redisUrl }
@@ -1093,6 +1095,8 @@ var sharedSecrets = concat([
 
 var sharedSecretEnvRefs = [
   { name: 'JWT_SECRET_KEY', secretRef: 'jwt-secret-key' }
+  { name: 'ERRORBEACON_INGEST_API_KEY', secretRef: 'errorbeacon-ingest-api-key' }
+  { name: 'ERRORBEACON_ADMIN_API_KEY', secretRef: 'errorbeacon-admin-api-key' }
   // Only ever read by the `migrate` Job below, and only the very first
   // time it runs (see backend/alembic/versions/0002_bootstrap_root_admin.py)
   // -- harmless to also hand to backend/frontend/worker/beat, which simply
