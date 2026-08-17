@@ -684,7 +684,7 @@ Add these to each Environment (Secrets unless marked **Variable**):
 
 Optional (leave unset if you don't use them yet):
 `NOTIFICATIONS_ENABLED` (**Variable**), `SMTP_HOST`, `SMTP_USERNAME`,
-`SMTP_PASSWORD`, `SMTP_FROM_EMAIL`, `ADMIN_NOTIFICATION_EMAILS`,
+`SMTP_PASSWORD`, `SMTP_FROM_EMAIL`, `ADMIN_NOTIFICATION_EMAILS` (**Secret**),
 `BACKUP_GDRIVE_ENABLED` (**Variable**), `BACKUP_GDRIVE_OAUTH_CLIENT_ID`,
 `BACKUP_GDRIVE_OAUTH_CLIENT_SECRET`, `BACKUP_GDRIVE_OAUTH_REFRESH_TOKEN`,
 `BACKUP_GDRIVE_FOLDER_ID` — see [Google Drive backup uploads](#google-drive-backup-uploads)

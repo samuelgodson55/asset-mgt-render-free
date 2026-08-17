@@ -151,7 +151,7 @@ RUN python -m compileall -q /app /opt/venv
 # the full "Errno 13 Permission denied" explanation) before dropping down
 # to appuser for the actual app process.
 RUN useradd --create-home --shell /bin/bash appuser && chown -R appuser:appuser /app
-COPY docker-entrypoint.sh /docker-entrypoint.sh
+COPY backend/docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh /app/start.sh
 ENTRYPOINT ["/docker-entrypoint.sh"]
 
