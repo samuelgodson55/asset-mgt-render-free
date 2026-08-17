@@ -1,4 +1,6 @@
 import os
+import pytest
+from datetime import datetime, timedelta, timezone
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -343,3 +345,133 @@ def test_telegram_4xx_is_definitely_failed_and_retryable(monkeypatch):
     assert result.status == 'failed'
     assert result.retryable is True
     assert result.error == 'TelegramHTTP400'
+
+
+def test_test_rate_limit_is_independent_and_tighter(monkeypatch):
+    main._test_rate.clear(); monkeypatch.setattr(main, 'TEST_ALERTS_PER_MINUTE', 2)
+    assert main.limited_test() is True; assert main.limited_test() is True; assert main.limited_test() is False; main._test_rate.clear()
+
+def test_email_fallback_uses_existing_application_recipients_and_transport(tmp_path, monkeypatch):
+    monkeypatch.setattr(main,'DATA_DIR',tmp_path); monkeypatch.setattr(main,'DB_PATH',tmp_path/'errorbeacon.db'); monkeypatch.setattr(main,'EMAIL_FALLBACK_ENABLED',True); monkeypatch.setattr(main,'NOTIFICATIONS_ENABLED',True); monkeypatch.setattr(main,'ADMIN_NOTIFICATION_EMAILS','ops@example.com, oncall@example.com'); monkeypatch.setattr(main,'EMAIL_PROVIDER','smtp'); monkeypatch.setattr(main,'SMTP_HOST','smtp.example.com'); monkeypatch.setattr(main,'SMTP_FROM_EMAIL','alerts@example.com'); monkeypatch.setattr(main,'EMAIL_FALLBACK_AFTER_ATTEMPTS',3)
+    main.init_db(); e=main.ErrorEvent(message='boom',error_type='ValueError',path='/x',status_code=500); i,*_=main.persist(e)
+    with main._db_lock:
+        c=main.db(); c.execute("UPDATE incidents SET telegram_status='pending',telegram_attempts=3 WHERE id=?",(i,)); c.commit(); row=c.execute('SELECT * FROM incidents WHERE id=?',(i,)).fetchone(); c.close()
+    calls=[]; monkeypatch.setattr(main,'send_email',lambda to,subject,body:calls.append((to,subject,body)) or True)
+    assert main._send_email_fallback(row) is True; assert calls[0][0]==['ops@example.com','oncall@example.com']; assert 'boom' in calls[0][2]
+
+def test_email_fallback_requires_existing_app_notification_configuration(monkeypatch):
+    monkeypatch.setattr(main,'EMAIL_FALLBACK_ENABLED',True); monkeypatch.setattr(main,'NOTIFICATIONS_ENABLED',False); monkeypatch.setattr(main,'ADMIN_NOTIFICATION_EMAILS','ops@example.com'); assert main.email_configured() is False
+
+def test_retention_purges_only_old_resolved_incidents(tmp_path, monkeypatch):
+    monkeypatch.setattr(main,'DATA_DIR',tmp_path); monkeypatch.setattr(main,'DB_PATH',tmp_path/'errorbeacon.db'); monkeypatch.setattr(main,'RETENTION_DAYS',90); main.init_db(); old=(datetime.now(timezone.utc)-timedelta(days=120)).isoformat(); fresh=(datetime.now(timezone.utc)-timedelta(days=10)).isoformat()
+    with main._db_lock:
+        c=main.db(); c.execute("INSERT INTO incidents(id,created_at,app,environment,severity,message,fingerprint,last_seen_at,resolved) VALUES('old',?,'test','prod','error','old','fp-old',?,1)",(old,old)); c.execute("INSERT INTO incident_events(incident_id,fingerprint,occurred_at,app,environment) VALUES('old','fp-old',?,'test','prod')",(old,)); c.execute("INSERT INTO incidents(id,created_at,app,environment,severity,message,fingerprint,last_seen_at,resolved) VALUES('fresh',?,'test','prod','error','fresh','fp-fresh',?,1)",(fresh,fresh)); c.commit(); c.close()
+    assert main.purge_resolved_incidents()==2
+    with main._db_lock:
+        c=main.db(); assert c.execute("SELECT COUNT(*) FROM incident_events WHERE incident_id='old'").fetchone()[0] == 0; c.close()
+
+def test_keyboard_exposes_state_appropriate_actions(tmp_path, monkeypatch):
+    monkeypatch.setattr(main,'DATA_DIR',tmp_path); monkeypatch.setattr(main,'DB_PATH',tmp_path/'errorbeacon.db'); main.init_db(); i,*_=main.persist(main.ErrorEvent(message='boom')); texts=[b['text'] for row in main.keyboard(i)['inline_keyboard'] for b in row]; assert all(x in ' '.join(texts) for x in ('1h','4h','24h'))
+    with main._db_lock:
+        c=main.db(); c.execute('UPDATE incidents SET resolved=1 WHERE id=?',(i,)); c.commit(); c.close()
+    texts=[b['text'] for row in main.keyboard(i)['inline_keyboard'] for b in row]; assert '↩️ Reopen' in texts
+
+def test_silence_duration_parser_supports_human_units():
+    assert main._silence_seconds('1h')==3600; assert main._silence_seconds('4h')==14400; assert main._silence_seconds('24h')==86400; assert main._silence_seconds('90m')==5400; assert main._format_duration(5400)=='1h 30m'
+    with pytest.raises(ValueError): main._silence_seconds('tomorrow')
+
+def test_telegram_command_dispatches_controls(monkeypatch):
+    calls=[]; monkeypatch.setattr(main,'_incident_update',lambda *args: calls.append(args) or True); assert 'resolved' in main.handle_telegram_command('/resolve abc123'); assert 'silenced' in main.handle_telegram_command('/silence abc123 4h'); assert 'reopened' in main.handle_telegram_command('/reopen abc123'); assert 'unsilenced' in main.handle_telegram_command('/unsilence abc123')
+
+
+def test_http_incident_lifecycle_endpoints(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    monkeypatch.setattr(main, 'DATA_DIR', tmp_path)
+    monkeypatch.setattr(main, 'DB_PATH', tmp_path / 'errorbeacon.db')
+    main.init_db()
+    incident, *_ = main.persist(main.ErrorEvent(message='endpoint boom', error_type='RuntimeError'))
+    with TestClient(main.app) as client:
+        headers = {'X-API-Key': 'test-key'}
+        response = client.get('/v1/incidents', headers=headers)
+        assert response.status_code == 200
+        assert any(row['id'] == incident for row in response.json())
+        assert client.post(f'/v1/incidents/{incident}/silence?seconds=86400', headers=headers).status_code == 200
+        assert client.post(f'/v1/incidents/{incident}/unsilence', headers=headers).status_code == 200
+        assert client.post(f'/v1/incidents/{incident}/resolve', headers=headers).status_code == 200
+        assert client.post(f'/v1/incidents/{incident}/reopen', headers=headers).status_code == 200
+
+
+def test_http_test_endpoint_has_own_rate_limit(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    monkeypatch.setattr(main, 'DATA_DIR', tmp_path)
+    monkeypatch.setattr(main, 'DB_PATH', tmp_path / 'errorbeacon.db')
+    monkeypatch.setattr(main, 'TEST_ALERTS_PER_MINUTE', 1)
+    main._test_rate.clear()
+    main.init_db()
+    with TestClient(main.app) as client:
+        headers = {'X-API-Key': 'test-key'}
+        assert client.post('/v1/test', headers=headers).status_code == 200
+        assert client.post('/v1/test', headers=headers).status_code == 429
+    main._test_rate.clear()
+
+
+def test_base_ingest_rate_limiter_enforces_configured_limit(monkeypatch):
+    main._rate.clear()
+    monkeypatch.setattr(main, 'MAX_ALERTS', 2)
+    assert main.limited() is True
+    assert main.limited() is True
+    assert main.limited() is False
+    main._rate.clear()
+
+
+def test_spike_detection_crosses_threshold(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, 'DATA_DIR', tmp_path)
+    monkeypatch.setattr(main, 'DB_PATH', tmp_path / 'errorbeacon.db')
+    monkeypatch.setattr(main, 'SPIKE_THRESHOLD', 3)
+    monkeypatch.setattr(main, 'SPIKE_WINDOW', 300)
+    monkeypatch.setattr(main, 'DEDUP', 60)
+    main.init_db()
+    event = main.ErrorEvent(
+        app='spike-test', environment='test',
+        message='same failure', error_type='ValueError', path='/same',
+    )
+    first = main.persist(event)
+    second = main.persist(event)
+    third = main.persist(event)
+    assert first[3] is False
+    assert second[3] is False
+    assert third[3] is True
+    assert third[2] is True
+
+
+def test_deployment_regression_detected_after_release_changes(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, 'DATA_DIR', tmp_path)
+    monkeypatch.setattr(main, 'DB_PATH', tmp_path / 'errorbeacon.db')
+    main.init_db()
+    first = main.ErrorEvent(
+        app='regression-test', environment='production',
+        message='deployment failure', error_type='RuntimeError',
+        path='/health', release='v1.0.0',
+    )
+    first_id, *_ = main.persist(first)
+    with main._db_lock:
+        c = main.db()
+        c.execute('UPDATE incidents SET resolved=1 WHERE id=?', (first_id,))
+        c.commit()
+        c.close()
+
+    second = main.ErrorEvent(
+        app='regression-test', environment='production',
+        message='deployment failure', error_type='RuntimeError',
+        path='/health', release='v1.1.0',
+    )
+    second_id, _, _, _, regression, _ = main.persist(second)
+    assert second_id != first_id
+    assert regression is True
+    with main._db_lock:
+        c = main.db()
+        row = c.execute(
+            'SELECT deployment_regression FROM incidents WHERE id=?', (second_id,)
+        ).fetchone()
+        c.close()
+    assert row['deployment_regression'] == 1

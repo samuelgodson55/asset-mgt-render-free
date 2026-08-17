@@ -1170,3 +1170,78 @@ Gemini fallback
   ↓ failure
 OpenRouter
 ```
+
+## Operational controls and secondary email escalation (ErrorBeacon 4.0)
+
+ErrorBeacon now accepts Telegram text commands as well as inline buttons. The poller requests both `callback_query` and `message` updates, and commands are accepted only from the configured `TELEGRAM_CHAT_ID`.
+
+Supported commands:
+
+```text
+/incidents
+/health
+/resolve <incident_id>
+/reopen <incident_id>
+/silence <incident_id> 1h
+/silence <incident_id> 4h
+/silence <incident_id> 24h
+/silence <incident_id> 90m
+/unsilence <incident_id>
+```
+
+The inline keyboard is state-aware: open incidents expose Resolve and 1h/4h/24h silence actions; silenced incidents expose Unsilence; resolved incidents expose Reopen.
+
+### Secondary email is the application's existing email system
+
+ErrorBeacon does **not** introduce a second email account or a second provider configuration. Its secondary notification uses the same application email settings already used by the backend:
+
+```env
+NOTIFICATIONS_ENABLED=true
+EMAIL_PROVIDER=smtp|brevo|resend
+SMTP_HOST=...
+SMTP_PORT=587
+SMTP_USERNAME=...
+SMTP_PASSWORD=...
+SMTP_USE_TLS=true
+SMTP_USE_SSL=false
+SMTP_FROM_EMAIL=...
+BREVO_API_KEY=...
+RESEND_API_KEY=...
+ADMIN_NOTIFICATION_EMAILS=ops@example.com,oncall@example.com
+```
+
+Use the exact same values already configured for the application. In Docker/VM/ACA deployments these values are wired from the same `.env`/GitHub Environment/Bicep inputs into ErrorBeacon; no ErrorBeacon-specific SMTP/Resend/Brevo credentials are required.
+
+Email escalation is deliberately not sent for every Telegram failure. By default it becomes eligible when Telegram has had 3 attempts or the incident has remained undelivered for 5 minutes. A successful secondary email is recorded once per incident. Failed email attempts are bounded by `ERRORBEACON_EMAIL_FALLBACK_RETRIES`.
+
+If AI enrichment permanently fails while Telegram cannot deliver the failure state, ErrorBeacon sends one independent email notification using this same configured application email transport.
+
+### API key scopes
+
+New deployments may set:
+
+```env
+ERRORBEACON_INGEST_API_KEY=<key used by the monitored application>
+ERRORBEACON_ADMIN_API_KEY=<key used for operator/API management>
+```
+
+Both remain backward compatible with `ERRORBEACON_API_KEY`; if either scoped value is empty, ErrorBeacon falls back to the legacy key. The monitored FastAPI integration prefers `ERRORBEACON_INGEST_API_KEY` when it is available.
+
+### Retention and database capacity
+
+ErrorBeacon automatically removes **resolved** incidents and their `incident_events` older than `ERRORBEACON_RETENTION_DAYS` (90 days by default). Unresolved incidents are never purged automatically.
+
+`/healthz` now exposes:
+
+- SQLite database size in bytes/MB
+- incident and event counts
+- retention period
+- database warning state
+- Telegram configuration state
+- secondary email configuration state
+
+The default database warning threshold is `ERRORBEACON_DB_WARN_MB=4096`.
+
+### `/v1/test` protection
+
+`/v1/test` now has its own tighter rate limit (`TEST_ALERTS_PER_MINUTE=3` by default) and uses the admin-scoped API key. It no longer bypasses the protection applied to real ingestion.

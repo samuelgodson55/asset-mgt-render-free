@@ -65,6 +65,7 @@ jobs:
       frontend: ${{ steps.filter.outputs.frontend }}
       frontend_app: ${{ steps.filter.outputs.frontend_app }}
       infra: ${{ steps.filter.outputs.infra }}
+      errorbeacon: ${{ steps.filter.outputs.errorbeacon }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -106,6 +107,7 @@ jobs:
             echo "backend=true" >> "$GITHUB_OUTPUT"
             echo "frontend=true" >> "$GITHUB_OUTPUT"
             echo "frontend_app=true" >> "$GITHUB_OUTPUT"
+            echo "errorbeacon=true" >> "$GITHUB_OUTPUT"
             # infra/main.bicep is the ACA path only -- see this input's own
             # comment on the workflow_call trigger above. Only forced true
             # here for a caller that's actually infra-relevant (default
@@ -148,6 +150,12 @@ jobs:
             echo "frontend_app=true" >> "$GITHUB_OUTPUT"
           else
             echo "frontend_app=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if echo "$CHANGED" | grep -qE '^(errorbeacon/|\.github/workflows/ci\.yml)'; then
+            echo "errorbeacon=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "errorbeacon=false" >> "$GITHUB_OUTPUT"
           fi
 
           if echo "$CHANGED" | grep -qE '^(infra/|\.github/workflows/ci\.yml)'; then
@@ -333,6 +341,29 @@ jobs:
 
       - name: pip-audit (dependency vulnerability scan)
         run: pip-audit -r backend/requirements.txt --desc || true
+
+  errorbeacon:
+    name: ErrorBeacon tests
+    runs-on: ubuntu-latest
+    needs: changes
+    if: ${{ needs.changes.outputs.errorbeacon == 'true' }}
+    defaults:
+      run:
+        working-directory: errorbeacon
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: errorbeacon/requirements-dev.txt
+      - name: Install ErrorBeacon dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+      - name: Run ErrorBeacon tests
+        run: python -m pytest tests -v
 
   secret-scan:
     name: Gitleaks secret scan

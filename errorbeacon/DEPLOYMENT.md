@@ -18,6 +18,8 @@ ErrorBeacon:
 
 ```env
 ERRORBEACON_API_KEY=...
+ERRORBEACON_INGEST_API_KEY=...   # optional; defaults to legacy key
+ERRORBEACON_ADMIN_API_KEY=...   # optional; defaults to legacy key
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_CHAT_ID=-100xxxxxxxxxx
 TELEGRAM_THREAD_ID=
@@ -31,6 +33,13 @@ OPENROUTER_API_KEY=
 OPENROUTER_MODEL=openrouter/free
 OPENROUTER_SITE_URL=https://errorbeacon.local
 TELEGRAM_POLLING=true
+# ErrorBeacon email fallback reuses the application's existing email settings:
+# NOTIFICATIONS_ENABLED, EMAIL_PROVIDER, SMTP_*, BREVO_API_KEY, RESEND_API_KEY,
+# SMTP_FROM_EMAIL and ADMIN_NOTIFICATION_EMAILS. Do not configure another provider.
+ERRORBEACON_EMAIL_FALLBACK_ENABLED=true
+ERRORBEACON_EMAIL_FALLBACK_AFTER_ATTEMPTS=3
+ERRORBEACON_EMAIL_FALLBACK_AFTER_SECONDS=300
+ERRORBEACON_RETENTION_DAYS=90
 ```
 
 Monitored application:

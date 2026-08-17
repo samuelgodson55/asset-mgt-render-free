@@ -46,7 +46,7 @@ WHY NOTIFICATIONS_ENABLED EXISTS AS ITS OWN FLAG (separate from "is
 SMTP_HOST set")
 -----------------------------------------------------------------------
 Two different failure modes need two different messages: "notifications
-are turned off on purpose" (NOTIFICATIONS_ENABLED=false, the default --
+are turned off on purpose" when NOTIFICATIONS_ENABLED=false --
 totally normal for local dev) vs. "notifications are turned ON but
 SMTP_HOST is empty" (a real misconfiguration worth a louder log line, in
 case someone flipped the switch and forgot the rest of the settings).

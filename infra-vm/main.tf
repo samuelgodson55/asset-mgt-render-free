@@ -275,10 +275,16 @@ locals {
     postgres_db                           = var.postgres_db
     jwt_secret_key                        = var.jwt_secret_key
     errorbeacon_api_key                   = var.errorbeacon_api_key
+    errorbeacon_ingest_api_key             = var.errorbeacon_ingest_api_key
+    errorbeacon_admin_api_key              = var.errorbeacon_admin_api_key
     errorbeacon_telegram_bot_token        = var.errorbeacon_telegram_bot_token
     errorbeacon_telegram_chat_id          = var.errorbeacon_telegram_chat_id
     errorbeacon_telegram_thread_id        = var.errorbeacon_telegram_thread_id
     errorbeacon_gemini_api_key            = var.errorbeacon_gemini_api_key
+    errorbeacon_groq_api_key              = var.errorbeacon_groq_api_key
+    errorbeacon_groq_model                = var.errorbeacon_groq_model
+    errorbeacon_openrouter_api_key        = var.errorbeacon_openrouter_api_key
+    errorbeacon_openrouter_model          = var.errorbeacon_openrouter_model
     errorbeacon_image                     = var.errorbeacon_image
     errorbeacon_app                       = var.errorbeacon_app
     root_admin_bootstrap_password         = var.root_admin_bootstrap_password

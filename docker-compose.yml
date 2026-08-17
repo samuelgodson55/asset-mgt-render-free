@@ -311,10 +311,9 @@ services:
       SUPER_ADMIN_NAME: ${SUPER_ADMIN_NAME:-Super Admin}
       ROOT_ADMIN_BOOTSTRAP_PASSWORD: ${ROOT_ADMIN_BOOTSTRAP_PASSWORD:-}
       # Email notifications (extension requests + overdue-checkout digest)
-      # -- see backend/config.py's NOTIFICATIONS_ENABLED docstring. Leave
-      # disabled for local dev with no mail server; the app works fine
-      # without it, it just logs what it would have sent instead.
-      NOTIFICATIONS_ENABLED: ${NOTIFICATIONS_ENABLED:-false}
+      # -- see backend/config.py's NOTIFICATIONS_ENABLED docstring. Notifications are enabled by default; configure SMTP/API provider
+      # credentials for actual delivery.
+      NOTIFICATIONS_ENABLED: ${NOTIFICATIONS_ENABLED:-true}
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USERNAME: ${SMTP_USERNAME:-}
@@ -498,7 +497,7 @@ services:
       # needs them too. Kept identical/copy-pasted rather than factored out
       # since docker-compose.yml has no "shared env block" feature without
       # YAML anchors, which this project avoids for beginner-readability.
-      NOTIFICATIONS_ENABLED: ${NOTIFICATIONS_ENABLED:-false}
+      NOTIFICATIONS_ENABLED: ${NOTIFICATIONS_ENABLED:-true}
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USERNAME: ${SMTP_USERNAME:-}
@@ -605,7 +604,7 @@ services:
       # the database now, not in an environment variable.
       AUTO_INIT_DB: "false"
       AUTO_SEED_DEMO_DATA: "false"
-      NOTIFICATIONS_ENABLED: ${NOTIFICATIONS_ENABLED:-false}
+      NOTIFICATIONS_ENABLED: ${NOTIFICATIONS_ENABLED:-true}
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USERNAME: ${SMTP_USERNAME:-}
@@ -732,6 +731,13 @@ services:
     environment:
       DATA_DIR: /data
       ERRORBEACON_API_KEY: ${ERRORBEACON_API_KEY:-}
+      ERRORBEACON_INGEST_API_KEY: ${ERRORBEACON_INGEST_API_KEY:-${ERRORBEACON_API_KEY:-}}
+      ERRORBEACON_ADMIN_API_KEY: ${ERRORBEACON_ADMIN_API_KEY:-${ERRORBEACON_API_KEY:-}}
+      ERRORBEACON_EMAIL_FALLBACK_ENABLED: ${ERRORBEACON_EMAIL_FALLBACK_ENABLED:-true}
+      ERRORBEACON_EMAIL_FALLBACK_AFTER_ATTEMPTS: ${ERRORBEACON_EMAIL_FALLBACK_AFTER_ATTEMPTS:-3}
+      ERRORBEACON_EMAIL_FALLBACK_AFTER_SECONDS: ${ERRORBEACON_EMAIL_FALLBACK_AFTER_SECONDS:-300}
+      ERRORBEACON_RETENTION_DAYS: ${ERRORBEACON_RETENTION_DAYS:-90}
+      ERRORBEACON_DB_WARN_MB: ${ERRORBEACON_DB_WARN_MB:-4096}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
       TELEGRAM_THREAD_ID: ${TELEGRAM_THREAD_ID:-}

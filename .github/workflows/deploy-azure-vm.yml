@@ -505,6 +505,8 @@ jobs:
           [ -z "$CF_ACCESS_CLIENT_ID" ] && MISSING+=("CF_ACCESS_CLIENT_ID")
           [ -z "$CF_ACCESS_CLIENT_SECRET" ] && MISSING+=("CF_ACCESS_CLIENT_SECRET")
           [ -z "${{ secrets.ERRORBEACON_API_KEY }}" ] && MISSING+=("ERRORBEACON_API_KEY")
+          [ -z "${{ secrets.ERRORBEACON_INGEST_API_KEY }}" ] && MISSING+=("ERRORBEACON_INGEST_API_KEY")
+          [ -z "${{ secrets.ERRORBEACON_ADMIN_API_KEY }}" ] && MISSING+=("ERRORBEACON_ADMIN_API_KEY")
           [ -z "${{ secrets.ERRORBEACON_TELEGRAM_BOT_TOKEN }}" ] && MISSING+=("ERRORBEACON_TELEGRAM_BOT_TOKEN")
           [ -z "${{ secrets.ERRORBEACON_TELEGRAM_CHAT_ID }}" ] && MISSING+=("ERRORBEACON_TELEGRAM_CHAT_ID")
           if [ "${#MISSING[@]}" -gt 0 ]; then
@@ -660,6 +662,8 @@ jobs:
             if grep -q '^ERRORBEACON_IMAGE=' .env; then sed -i "s|^ERRORBEACON_IMAGE=.*|ERRORBEACON_IMAGE=$ERRORBEACON_IMAGE|" .env; else echo "ERRORBEACON_IMAGE=$ERRORBEACON_IMAGE" >> .env; fi
             if grep -q '^ERRORBEACON_IMAGE_TAG=' .env; then sed -i "s/^ERRORBEACON_IMAGE_TAG=.*/ERRORBEACON_IMAGE_TAG=$IMAGE_TAG/" .env; else echo "ERRORBEACON_IMAGE_TAG=$IMAGE_TAG" >> .env; fi
             if grep -q '^ERRORBEACON_API_KEY=' .env; then sed -i "s|^ERRORBEACON_API_KEY=.*|ERRORBEACON_API_KEY=${{ secrets.ERRORBEACON_API_KEY }}|" .env; else echo "ERRORBEACON_API_KEY=${{ secrets.ERRORBEACON_API_KEY }}" >> .env; fi
+            if grep -q '^ERRORBEACON_INGEST_API_KEY=' .env; then sed -i "s|^ERRORBEACON_INGEST_API_KEY=.*|ERRORBEACON_INGEST_API_KEY=${{ secrets.ERRORBEACON_INGEST_API_KEY }}|" .env; else echo "ERRORBEACON_INGEST_API_KEY=${{ secrets.ERRORBEACON_INGEST_API_KEY }}" >> .env; fi
+            if grep -q '^ERRORBEACON_ADMIN_API_KEY=' .env; then sed -i "s|^ERRORBEACON_ADMIN_API_KEY=.*|ERRORBEACON_ADMIN_API_KEY=${{ secrets.ERRORBEACON_ADMIN_API_KEY }}|" .env; else echo "ERRORBEACON_ADMIN_API_KEY=${{ secrets.ERRORBEACON_ADMIN_API_KEY }}" >> .env; fi
             if grep -q '^TELEGRAM_BOT_TOKEN=' .env; then sed -i "s|^TELEGRAM_BOT_TOKEN=.*|TELEGRAM_BOT_TOKEN=${{ secrets.ERRORBEACON_TELEGRAM_BOT_TOKEN }}|" .env; else echo "TELEGRAM_BOT_TOKEN=${{ secrets.ERRORBEACON_TELEGRAM_BOT_TOKEN }}" >> .env; fi
             if grep -q '^TELEGRAM_CHAT_ID=' .env; then sed -i "s|^TELEGRAM_CHAT_ID=.*|TELEGRAM_CHAT_ID=${{ secrets.ERRORBEACON_TELEGRAM_CHAT_ID }}|" .env; else echo "TELEGRAM_CHAT_ID=${{ secrets.ERRORBEACON_TELEGRAM_CHAT_ID }}" >> .env; fi
             if grep -q '^TELEGRAM_THREAD_ID=' .env; then sed -i "s|^TELEGRAM_THREAD_ID=.*|TELEGRAM_THREAD_ID=${{ vars.ERRORBEACON_TELEGRAM_THREAD_ID }}|" .env; else echo "TELEGRAM_THREAD_ID=${{ vars.ERRORBEACON_TELEGRAM_THREAD_ID }}" >> .env; fi

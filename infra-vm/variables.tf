@@ -166,6 +166,20 @@ variable "postgres_db" {
   default     = "asset_db"
 }
 
+variable "errorbeacon_ingest_api_key" {
+  description = "API key used by application producers to submit events to ErrorBeacon."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "errorbeacon_admin_api_key" {
+  description = "API key used by operators and management endpoints to read/control ErrorBeacon."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
 variable "errorbeacon_api_key" {
   description = "Shared API key used by the application to authenticate to ErrorBeacon. Generate with: python -c \"import secrets; print(secrets.token_urlsafe(32))\""
   type        = string
@@ -196,6 +210,10 @@ variable "errorbeacon_gemini_api_key" {
   sensitive   = true
   default     = ""
 }
+variable "errorbeacon_groq_api_key" { type=string sensitive=true default="" }
+variable "errorbeacon_groq_model" { type=string default="llama-3.1-8b-instant" }
+variable "errorbeacon_openrouter_api_key" { type=string sensitive=true default="" }
+variable "errorbeacon_openrouter_model" { type=string default="openrouter/free" }
 
 variable "errorbeacon_image" {
   description = "Docker image repository for ErrorBeacon."
@@ -251,7 +269,7 @@ variable "enable_api_docs" {
 variable "notifications_enabled" {
   description = "Turn on SMTP email notifications (extension requests, overdue/due-soon digests)."
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "smtp_host" {

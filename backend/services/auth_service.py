@@ -645,7 +645,7 @@ def request_password_reset(db: Session, req: ForgotPasswordRequest, frontend_bas
     # row above still exists and is still redeemable if delivery genuinely
     # failed but the operator later fixes SMTP and resends manually via
     # the logged plaintext (DEBUG level only, see send_email()) in a local
-    # dev environment with NOTIFICATIONS_ENABLED=false.
+    # development environment where NOTIFICATIONS_ENABLED is explicitly set to false.
     logger.info("Password reset requested", extra={"user_id": user.id, "email_sent": sent})
     return {"message": _FORGOT_PASSWORD_GENERIC_MESSAGE}
 

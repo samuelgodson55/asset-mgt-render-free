@@ -31,6 +31,7 @@ ErrorBeacon API
    ├── deployment regression detection
    ├── bounded alert workers
    ├── Telegram immediately
+   ├── secondary email escalation when Telegram stays unavailable
    └── AI enrichment afterwards
    └── ambiguous Telegram sends are persisted as unknown and are not replayed automatically
        ├── Groq
@@ -221,13 +222,19 @@ X-API-Key: YOUR_KEY
 
 ## Telegram controls
 
-Every alert includes:
+The bot accepts `/incidents`, `/resolve <id>`, `/reopen <id>`, `/silence <id> <duration>`, `/unsilence <id>`, and `/health`. Silence accepts `1h`, `4h`, `24h`, or other minute/hour/day values up to 24 hours. Telegram polling listens for both callback buttons and messages, and only the configured `TELEGRAM_CHAT_ID` can issue commands.
 
-- **🔎 View**: sends the incident summary
-- **✅ Resolve**: marks the incident resolved
-- **🔕 Silence 1h**: suppresses alerts for that incident for one hour
+When Telegram remains explicitly failed or ambiguous long enough, ErrorBeacon escalates through the application's existing email notification transport. It reuses `NOTIFICATIONS_ENABLED`, `EMAIL_PROVIDER`, the existing SMTP/Brevo/Resend credentials, `SMTP_FROM_EMAIL`, and `ADMIN_NOTIFICATION_EMAILS`; there is no separate ErrorBeacon email provider configuration. AI permanent failures also get an email notification when Telegram cannot deliver that state.
 
-Callback actions are accepted only from the configured Telegram chat ID.
+## Data retention and capacity
+
+Resolved incidents and their event rows older than `ERRORBEACON_RETENTION_DAYS` (default 90) are purged by the maintenance loop. Unresolved incidents are never automatically purged. `/healthz` reports SQLite file size, incident/event counts, retention days, and a database warning state.
+
+## API key scopes
+
+`ERRORBEACON_INGEST_API_KEY` is used by the monitored application for `/v1/events`. `ERRORBEACON_ADMIN_API_KEY` is used for tests, reads, and lifecycle controls. Both fall back to the legacy `ERRORBEACON_API_KEY` when the scoped values are not configured, so existing deployments remain compatible while allowing later rotation/scope separation.
+
+
 
 ## Security and redaction
 
@@ -296,3 +303,17 @@ The same rule applies to AI enrichment notifications: a successful AI analysis i
 
 ## AI analysis reliability (v3.9)
 AI analysis runs on a dedicated serialized queue with retry/backoff. Telegram delivery is not blocked by Gemini analysis, and the ErrorBeacon health endpoint exposes both alert and AI queue depth so local chaos tests can wait for analysis completion.
+
+### Incident lifecycle API
+
+All management endpoints use `ERRORBEACON_ADMIN_API_KEY` (or the legacy key fallback):
+
+```text
+GET  /v1/incidents
+POST /v1/incidents/{id}/resolve
+POST /v1/incidents/{id}/reopen
+POST /v1/incidents/{id}/silence?seconds=3600
+POST /v1/incidents/{id}/unsilence
+```
+
+Silence remains bounded to 60 seconds through 24 hours. The Telegram command parser accepts friendlier durations such as `4h` while applying the same bound.

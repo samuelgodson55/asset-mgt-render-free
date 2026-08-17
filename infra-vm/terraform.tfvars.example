@@ -58,7 +58,7 @@ root_admin_bootstrap_password = "" # leave blank to auto-generate; see backend l
 site_name                     = "Snipe-IT Lite"
 enable_api_docs               = false
 
-notifications_enabled     = false
+notifications_enabled     = true
 smtp_host                  = ""
 smtp_port                  = 587
 smtp_username              = ""

@@ -221,7 +221,7 @@ Everyone gets a piece of this, scoped by role. Four related pieces:
 `backend/tasks/notification_tasks.py`) — plain SMTP by default
 (`EMAIL_PROVIDER=smtp`), no vendor SDK ever (the two alternate providers
 below are raw HTTP calls, not an installed SDK package), off by default
-(`NOTIFICATIONS_ENABLED=false` — see [Environment Variables
+(`NOTIFICATIONS_ENABLED=true` — see [Environment Variables
 Reference](#environment-variables-reference)). If you're deploying on
 Render's free plan (which blocks outbound SMTP ports at the network
 level), set `EMAIL_PROVIDER=brevo` or `EMAIL_PROVIDER=resend` instead —
@@ -300,7 +300,7 @@ modal and the "Extension Requests" panel both feel like they hung before
 clearing. The API now commits the database change and returns
 immediately; the actual email goes out a moment later, out-of-band —
 exactly the same producer/consumer split already used for audit-ledger
-exports (see [Tech Stack](#tech-stack)). If `NOTIFICATIONS_ENABLED=false`
+exports (see [Tech Stack](#tech-stack)). If `NOTIFICATIONS_ENABLED=true`
 (the default), every notification is simply logged at `DEBUG` level
 instead of sent — nothing here requires a mail server to develop or demo
 the app locally. Set `SEND_INDIVIDUAL_HOLDER_REMINDERS=false` to keep
@@ -578,7 +578,7 @@ Click your name in the navbar on any dashboard to:
   `backend/services/notification_service.py` — works unmodified against a
   self-hosted mail server or any hosted provider's SMTP endpoint
   (SendGrid, Mailgun, AWS SES, etc.). Off by default
-  (`NOTIFICATIONS_ENABLED=false`); see [Due-Date Extensions &
+  (`NOTIFICATIONS_ENABLED=true`); see [Due-Date Extensions &
   Notifications](#due-date-extensions--notifications) and [Environment
   Variables Reference](#environment-variables-reference).
 - **Frontend:** Two mutually exclusive builds are supported. The legacy site
@@ -1494,7 +1494,7 @@ see `.gitignore`) and are read by `backend/config.py` into a single typed
 | `SUPER_ADMIN_USERNAME` | `superadmin` | Login identifier for the root admin account — see [Roles & Permissions Model](#roles--permissions-model). Also read directly (same env var name) by `alembic/versions/0002_bootstrap_root_admin.py` when it bootstraps this account in production. |
 | `SUPER_ADMIN_NAME` | `Super Admin` | Display name for that account (shown in the navbar/profile, same as any other user's `name`). Also read by the bootstrap migration. |
 | `ROOT_ADMIN_BOOTSTRAP_PASSWORD` | *(empty — auto-generated if unset)* | OPTIONAL. Read once, directly, by `alembic/versions/0002_bootstrap_root_admin.py` the first time it inserts the root admin row in production — never by the running app. Leave unset to have that migration generate a random password and print it to the migration job's own output exactly once instead. Not needed at all for local dev (`database.py`'s `seed_db()` uses a fixed demo password there). |
-| `NOTIFICATIONS_ENABLED` | `false` | Master switch for all email (see [Due-Date Extensions & Notifications](#due-date-extensions--notifications)). Leave `false` for local dev with no mail server — every send is logged at `DEBUG` instead. |
+| `NOTIFICATIONS_ENABLED` | `true` | Master switch for all email (see [Due-Date Extensions & Notifications](#due-date-extensions--notifications)). Leave `true` as the default; if no mail server is configured — every send is logged at `DEBUG` instead. |
 | `EMAIL_PROVIDER` | `smtp` | `smtp` \| `brevo` \| `resend`. Plain SMTP works everywhere except Render's free plan, which blocks outbound SMTP ports at the network level — set this to `brevo` or `resend` there instead (both send over plain HTTPS via `requests`, no vendor SDK installed). `render.yaml` defaults this to `brevo` for exactly that reason. |
 | `SMTP_HOST` | *(empty)* | Mail server hostname. Required if `NOTIFICATIONS_ENABLED=true` and `EMAIL_PROVIDER=smtp`. |
 | `SMTP_PORT` | `587` | Mail server port (587 = STARTTLS, the standard). |
@@ -2556,7 +2556,7 @@ the actual logic lives. Use this section as a map when you need to find
   body)`, the ONE place `smtplib` is touched anywhere in this codebase.
   Fail-soft by design (never raises — logs a warning and returns `False`
   instead) and a no-op that just logs at `DEBUG` when
-  `NOTIFICATIONS_ENABLED=false`.
+  `NOTIFICATIONS_ENABLED=true`.
 - **`services/user_service.py`** — `_derive_username` turns an email's
   local-part into a unique username, steering clear of the reserved Super
   Admin username too; `RESERVED_ROLES` blocks `role: "super_admin"` from
@@ -3277,7 +3277,7 @@ A checklist before you deploy this anywhere real:
       beats implicit for a deployment's actual config), but nothing
       breaks if you forget.
 - [ ] Set `CORS_ORIGINS` to your real frontend domain(s) only.
-- [ ] Decide on email: leave `NOTIFICATIONS_ENABLED=false` if you don't
+- [ ] Decide on email: leave `NOTIFICATIONS_ENABLED=true` if you don't
       want extension-request/overdue/due-soon-checkout emails yet, or set
       it to `true` and fill in real `SMTP_HOST`/`SMTP_FROM_EMAIL`/etc. —
       see [Due-Date Extensions & Notifications](#due-date-extensions--notifications).

@@ -97,6 +97,10 @@ param errorBeaconAppName string = 'asset-inventory-quotes'
 @description('ErrorBeacon shared API key. Generate with: python -c "import secrets; print(secrets.token_urlsafe(32))"')
 @secure()
 param errorBeaconApiKey string = ''
+@secure()
+param errorBeaconIngestApiKey string = ''
+@secure()
+param errorBeaconAdminApiKey string = ''
 
 @secure()
 param errorBeaconTelegramBotToken string = ''
@@ -213,8 +217,8 @@ param customDomain string = ''
 @description('Resource ID of an EXISTING `Microsoft.App/managedEnvironments/managedCertificates` (or Key Vault-backed certificate) resource that already covers `customDomain`, e.g. from `az containerapp env certificate list`. This template does not provision the certificate itself -- a managed certificate requires the domain\'s CNAME/TXT ownership validation to already be in place, which only exists once the domain is live, so it has to be created out-of-band (Portal "Add custom domain" wizard, or `az containerapp hostname bind` / `az containerapp env certificate create`) the FIRST time a given customDomain goes live, same as before this parameter existed. Once that one-time step is done, pass the resulting certificate resource ID here (infra-deploy.yml\'s "Resolve existing managed certificate" step does this lookup automatically on every run) so repeat `main.bicep` deployments stay idempotent instead of trying to rebind `customDomain` with no `certificateId`, which Azure rejects with "CertificateId property is missing for customDomain". Leave empty (the default) while `customDomain` has no certificate yet -- `frontend` simply keeps serving off its default *.azurecontainerapps.io FQDN until this is set, same as leaving `customDomain` itself empty.')
 param customDomainCertificateId string = ''
 
-@description('Notification / SMTP settings -- optional, off by default, matching .env.example.')
-param notificationsEnabled bool = false
+@description('Notification / SMTP settings -- enabled by default; configure the mail transport credentials for delivery.')
+param notificationsEnabled bool = true
 param smtpHost string = ''
 param smtpUsername string = ''
 @secure()
@@ -1244,11 +1248,16 @@ resource errorBeaconApp 'Microsoft.App/containerApps@2024-03-01' = if (errorBeac
         { name: 'dockerhub-token', value: dockerHubToken }
       ] : [], [
         { name: 'errorbeacon-api-key', value: errorBeaconApiKey }
+        { name: 'errorbeacon-ingest-api-key', value: empty(errorBeaconIngestApiKey) ? (empty(errorBeaconApiKey) ? 'unset' : errorBeaconApiKey) : errorBeaconIngestApiKey }
+        { name: 'errorbeacon-admin-api-key', value: empty(errorBeaconAdminApiKey) ? (empty(errorBeaconApiKey) ? 'unset' : errorBeaconApiKey) : errorBeaconAdminApiKey }
         { name: 'telegram-bot-token', value: errorBeaconTelegramBotToken }
         { name: 'telegram-chat-id', value: errorBeaconTelegramChatId }
         { name: 'gemini-api-key', value: empty(errorBeaconGeminiApiKey) ? 'unset' : errorBeaconGeminiApiKey }
         { name: 'groq-api-key', value: empty(errorBeaconGroqApiKey) ? 'unset' : errorBeaconGroqApiKey }
         { name: 'openrouter-api-key', value: empty(errorBeaconOpenRouterApiKey) ? 'unset' : errorBeaconOpenRouterApiKey }
+        { name: 'smtp-password', value: empty(smtpPassword) ? 'unset' : smtpPassword }
+        { name: 'brevo-api-key', value: empty(brevoApiKey) ? 'unset' : brevoApiKey }
+        { name: 'resend-api-key', value: empty(resendApiKey) ? 'unset' : resendApiKey }
       ])
       ingress: {
         external: false
@@ -1275,6 +1284,8 @@ resource errorBeaconApp 'Microsoft.App/containerApps@2024-03-01' = if (errorBeac
             // service's copy was missing it.
             { name: 'ENVIRONMENT', value: runtimeEnvironment }
             { name: 'ERRORBEACON_API_KEY', secretRef: 'errorbeacon-api-key' }
+            { name: 'ERRORBEACON_INGEST_API_KEY', secretRef: 'errorbeacon-ingest-api-key' }
+            { name: 'ERRORBEACON_ADMIN_API_KEY', secretRef: 'errorbeacon-admin-api-key' }
             { name: 'TELEGRAM_BOT_TOKEN', secretRef: 'telegram-bot-token' }
             { name: 'TELEGRAM_CHAT_ID', secretRef: 'telegram-chat-id' }
             { name: 'TELEGRAM_THREAD_ID', value: errorBeaconTelegramThreadId }
@@ -1291,6 +1302,23 @@ resource errorBeaconApp 'Microsoft.App/containerApps@2024-03-01' = if (errorBeac
             // errorBeaconOpenRouterSiteUrl param -- see that param's removal
             // comment above.
             { name: 'OPENROUTER_SITE_URL', value: publicOrigin }
+            { name: 'NOTIFICATIONS_ENABLED', value: string(notificationsEnabled) }
+            { name: 'SMTP_HOST', value: smtpHost }
+            { name: 'SMTP_PORT', value: string(smtpPort) }
+            { name: 'SMTP_USERNAME', value: smtpUsername }
+            { name: 'SMTP_USE_TLS', value: string(smtpUseTls) }
+            { name: 'SMTP_USE_SSL', value: string(smtpUseSsl) }
+            { name: 'SMTP_FROM_EMAIL', value: smtpFromEmail }
+            { name: 'EMAIL_PROVIDER', value: emailProvider }
+            { name: 'ADMIN_NOTIFICATION_EMAILS', value: adminNotificationEmails }
+            { name: 'SMTP_PASSWORD', secretRef: 'smtp-password' }
+            { name: 'BREVO_API_KEY', secretRef: 'brevo-api-key' }
+            { name: 'RESEND_API_KEY', secretRef: 'resend-api-key' }
+            { name: 'ERRORBEACON_EMAIL_FALLBACK_ENABLED', value: 'true' }
+            { name: 'ERRORBEACON_EMAIL_FALLBACK_AFTER_ATTEMPTS', value: '3' }
+            { name: 'ERRORBEACON_EMAIL_FALLBACK_AFTER_SECONDS', value: '300' }
+            { name: 'ERRORBEACON_RETENTION_DAYS', value: '90' }
+            { name: 'ERRORBEACON_DB_WARN_MB', value: '4096' }
             { name: 'DATA_DIR', value: '/data' }
             // '/data' here is the errorbeacon-data Azure Files (SMB) share (see
             // errorBeaconStorage above), not local disk. SQLite's default WAL journal
@@ -1307,7 +1335,6 @@ resource errorBeaconApp 'Microsoft.App/containerApps@2024-03-01' = if (errorBeac
             { name: 'ALERT_QUEUE_SIZE', value: '1000' }
             { name: 'ALERT_WORKERS', value: '3' }
             { name: 'TELEGRAM_POLLING', value: 'true' }
-            { name: 'SQLITE_JOURNAL_MODE', value: 'DELETE' }
           ]
           probes: [
             { type: 'Liveness', httpGet: { path: '/healthz', port: 8000 }, initialDelaySeconds: 10, periodSeconds: 30 }

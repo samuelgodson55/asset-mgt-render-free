@@ -528,7 +528,7 @@ jobs:
               customDomain="${{ vars.CUSTOM_DOMAIN }}" \
               customDomainCertificateId="${{ steps.cert.outputs.id }}" \
               alertEmailAddress="${{ secrets.ALERT_EMAIL_ADDRESS }}" \
-              notificationsEnabled=${{ vars.NOTIFICATIONS_ENABLED == 'true' }} \
+              notificationsEnabled=${{ vars.NOTIFICATIONS_ENABLED != 'false' }} \
               smtpHost="${{ secrets.SMTP_HOST }}" \
               smtpUsername="${{ secrets.SMTP_USERNAME }}" \
               smtpPassword="${{ secrets.SMTP_PASSWORD }}" \
@@ -681,7 +681,7 @@ jobs:
               customDomain="${{ vars.CUSTOM_DOMAIN }}" \
               customDomainCertificateId="${{ steps.cert.outputs.id }}" \
               alertEmailAddress="${{ secrets.ALERT_EMAIL_ADDRESS }}" \
-              notificationsEnabled=${{ vars.NOTIFICATIONS_ENABLED == 'true' }} \
+              notificationsEnabled=${{ vars.NOTIFICATIONS_ENABLED != 'false' }} \
               smtpHost="${{ secrets.SMTP_HOST }}" \
               smtpUsername="${{ secrets.SMTP_USERNAME }}" \
               smtpPassword="${{ secrets.SMTP_PASSWORD }}" \
@@ -809,7 +809,7 @@ jobs:
               customDomain="${{ vars.CUSTOM_DOMAIN }}" \
               customDomainCertificateId="${{ steps.cert.outputs.id }}" \
               alertEmailAddress="${{ secrets.ALERT_EMAIL_ADDRESS }}" \
-              notificationsEnabled=${{ vars.NOTIFICATIONS_ENABLED == 'true' }} \
+              notificationsEnabled=${{ vars.NOTIFICATIONS_ENABLED != 'false' }} \
               smtpHost="${{ secrets.SMTP_HOST }}" \
               smtpUsername="${{ secrets.SMTP_USERNAME }}" \
               smtpPassword="${{ secrets.SMTP_PASSWORD }}" \

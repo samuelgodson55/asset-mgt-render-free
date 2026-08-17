@@ -29,7 +29,7 @@ except Exception:  # pragma: no cover - logging_config is optional
 log = logging.getLogger("errorbeacon.client")
 
 ERRORBEACON_URL = os.getenv("ERRORBEACON_URL", "http://errorbeacon:8000")
-ERRORBEACON_API_KEY = os.getenv("ERRORBEACON_API_KEY", "")
+ERRORBEACON_API_KEY = os.getenv("ERRORBEACON_INGEST_API_KEY", "") or os.getenv("ERRORBEACON_API_KEY", "")
 ERRORBEACON_APP = os.getenv("ERRORBEACON_APP", "asset-inventory-quotes")
 ERRORBEACON_ENVIRONMENT = os.getenv("ENVIRONMENT", "production")
 ERRORBEACON_RELEASE = os.getenv("APP_RELEASE", "")

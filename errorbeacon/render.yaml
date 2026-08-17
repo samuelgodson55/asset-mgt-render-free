@@ -25,7 +25,16 @@ services:
       # Render if this deployment is monitoring a production system.
       - key: ENVIRONMENT
         value: production
+      # Legacy single key: still read as a fallback by both ingest_auth and
+      # admin_auth if the scoped keys below are left unset, for deployments
+      # that haven't migrated yet. New setups should leave this blank and
+      # use the two scoped keys instead so a compromised backend's ingest
+      # key can't also resolve/silence incidents.
       - key: ERRORBEACON_API_KEY
+        sync: false
+      - key: ERRORBEACON_INGEST_API_KEY
+        sync: false
+      - key: ERRORBEACON_ADMIN_API_KEY
         sync: false
       - key: TELEGRAM_BOT_TOKEN
         sync: false
@@ -63,3 +72,37 @@ services:
         value: "10"
       - key: SPIKE_WINDOW_SECONDS
         value: "300"
+      - key: NOTIFICATIONS_ENABLED
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USERNAME
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: SMTP_USE_TLS
+        value: "true"
+      - key: SMTP_USE_SSL
+        value: "false"
+      - key: SMTP_FROM_EMAIL
+        sync: false
+      - key: EMAIL_PROVIDER
+        sync: false
+      - key: BREVO_API_KEY
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: ADMIN_NOTIFICATION_EMAILS
+        sync: false
+      - key: ERRORBEACON_EMAIL_FALLBACK_ENABLED
+        value: "true"
+      - key: ERRORBEACON_EMAIL_FALLBACK_AFTER_ATTEMPTS
+        value: "3"
+      - key: ERRORBEACON_EMAIL_FALLBACK_AFTER_SECONDS
+        value: "300"
+      - key: ERRORBEACON_RETENTION_DAYS
+        value: "90"
+      - key: ERRORBEACON_DB_WARN_MB
+        value: "4096"

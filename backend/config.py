@@ -466,15 +466,14 @@ class Settings(BaseSettings):
     #      DUE_SOON_REMINDER_DAYS (see below) that hasn't passed its due
     #      date yet.
     #
-    # NOTIFICATIONS_ENABLED is the single master switch: leave it "false"
-    # (the default) for local development with no mail server configured --
-    # every notification call below then just logs what it WOULD have sent
-    # and returns, instead of failing the whole request/task over a
-    # missing SMTP server. Flip it to "true" once SMTP_HOST/PORT/etc. below
+    # NOTIFICATIONS_ENABLED is the single master switch and defaults to true.
+    # Configure SMTP_HOST/PORT/etc. for actual delivery; if no mail transport
+    # is configured, notification calls fail safely without blocking the
+    # application request/task.
     # point at a real mail server (your own Postfix, SendGrid, Mailgun,
     # AWS SES SMTP endpoint, etc. all work identically here -- this is
     # plain RFC 5321 SMTP, no vendor-specific SDK).
-    NOTIFICATIONS_ENABLED: bool = False
+    NOTIFICATIONS_ENABLED: bool = True
     SMTP_HOST: str = ""
     SMTP_PORT: int = 587
     SMTP_USERNAME: str = ""

@@ -144,10 +144,16 @@ jobs:
       TF_VAR_postgres_password: ${{ secrets.POSTGRES_PASSWORD }}
       TF_VAR_jwt_secret_key: ${{ secrets.JWT_SECRET_KEY }}
       TF_VAR_errorbeacon_api_key: ${{ secrets.ERRORBEACON_API_KEY }}
+      TF_VAR_errorbeacon_ingest_api_key: ${{ secrets.ERRORBEACON_INGEST_API_KEY }}
+      TF_VAR_errorbeacon_admin_api_key: ${{ secrets.ERRORBEACON_ADMIN_API_KEY }}
       TF_VAR_errorbeacon_telegram_bot_token: ${{ secrets.ERRORBEACON_TELEGRAM_BOT_TOKEN }}
       TF_VAR_errorbeacon_telegram_chat_id: ${{ secrets.ERRORBEACON_TELEGRAM_CHAT_ID }}
       TF_VAR_errorbeacon_telegram_thread_id: ${{ vars.ERRORBEACON_TELEGRAM_THREAD_ID }}
       TF_VAR_errorbeacon_gemini_api_key: ${{ secrets.ERRORBEACON_GEMINI_API_KEY }}
+      TF_VAR_errorbeacon_groq_api_key: ${{ secrets.ERRORBEACON_GROQ_API_KEY }}
+      TF_VAR_errorbeacon_groq_model: ${{ vars.ERRORBEACON_GROQ_MODEL || 'llama-3.1-8b-instant' }}
+      TF_VAR_errorbeacon_openrouter_api_key: ${{ secrets.ERRORBEACON_OPENROUTER_API_KEY }}
+      TF_VAR_errorbeacon_openrouter_model: ${{ vars.ERRORBEACON_OPENROUTER_MODEL || 'openrouter/free' }}
       TF_VAR_errorbeacon_image: ${{ secrets.DOCKERHUB_USERNAME }}/errorbeacon-lite
       TF_VAR_errorbeacon_app: ${{ vars.ERRORBEACON_APP || 'asset-inventory-quotes' }}
       TF_VAR_root_admin_bootstrap_password: ${{ secrets.ROOT_ADMIN_BOOTSTRAP_PASSWORD }}
@@ -159,7 +165,7 @@ jobs:
       #   docker run --rm caddy:2-alpine caddy hash-password
       TF_VAR_deploy_status_user: ${{ vars.DEPLOY_STATUS_USER || 'admin' }}
       TF_VAR_deploy_status_password_hash: ${{ secrets.DEPLOY_STATUS_PASSWORD_HASH }}
-      TF_VAR_notifications_enabled: ${{ vars.NOTIFICATIONS_ENABLED || 'false' }}
+      TF_VAR_notifications_enabled: ${{ vars.NOTIFICATIONS_ENABLED || 'true' }}
       TF_VAR_smtp_host: ${{ secrets.SMTP_HOST }}
       TF_VAR_smtp_username: ${{ secrets.SMTP_USERNAME }}
       TF_VAR_smtp_password: ${{ secrets.SMTP_PASSWORD }}
