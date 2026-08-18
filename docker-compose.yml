@@ -137,10 +137,9 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     # `backend`, `worker`, and `beat` all build from the same Dockerfile
-    # (`build:
-      context: .
-      dockerfile: backend/Dockerfile`) but need the SAME explicit `image:` tag -- without
-    # it, Compose tags each service's build output separately, and
+    # (`build: context: . / dockerfile: backend/Dockerfile`) but need the
+    # SAME explicit `image:` tag -- without it, Compose tags each
+    # service's build output separately, and
     # rebuilding just `backend` leaves `worker`/`beat` running a stale image.
     image: snipeit-lite-backend:local
     # NOTE: no `container_name` here (unlike the single-instance `db` and
