@@ -145,7 +145,7 @@ def db_engine(tmp_path, monkeypatch):
     monkeypatch.setattr(database, "SessionLocal", TestSessionLocal)
 
     # Tests that only need `db_session` (no HTTP client) never trigger
-    # main.py's `@app.on_event("startup")` handler -- that's the only place
+    # main.py's lifespan startup phase -- that's the only place
     # `database.init_db()`/`database.seed_db()` normally get called (see
     # main.py's on_startup()). Call them directly here too so both kinds of
     # test get a fully created, seeded database; `seed_db()` is idempotent
@@ -175,7 +175,7 @@ def client(db_engine):
     """
     A FastAPI TestClient wired to the swapped SQLite database above.
     Using `with TestClient(app) as c` (rather than plain `TestClient(app)`)
-    is what triggers main.py's `@app.on_event("startup")` handler, which is
+    is what triggers main.py's lifespan startup phase, which is
     what actually calls `database.init_db()` + `database.seed_db()` -- see
     main.py's on_startup(). Also overrides the `get_db` FastAPI dependency
     directly, since every route depends on that exact function object (see

@@ -463,7 +463,23 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install nginx + gettext (envsubst)
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq nginx-light gettext-base
+        # GitHub-hosted runners occasionally spend several minutes waiting on
+        # an APT mirror. Bound network waits/retries so this validation fails
+        # clearly instead of looking permanently stuck, while retaining APT
+        # installation as the portable path for a fresh runner.
+        run: |
+          set -euo pipefail
+          if command -v nginx >/dev/null 2>&1 && command -v envsubst >/dev/null 2>&1; then
+            echo "nginx and envsubst are already available on the runner; skipping APT."
+            exit 0
+          fi
+          sudo apt-get update -qq \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            -o DPkg::Lock::Timeout=60 \
+            nginx-light gettext-base
 
       - name: Render + validate + boot-test nginx/default.conf.template
         # Invoked via `bash` rather than `./nginx/test-config.sh` so this

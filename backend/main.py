@@ -57,10 +57,12 @@ Role model:
 """
 
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
+from starlette.concurrency import run_in_threadpool
 
 from database import init_db, seed_db, get_schema_status, engine as db_engine
 from config import settings
@@ -120,8 +122,31 @@ logger = logging.getLogger(__name__)
 setup_tracing(settings)
 instrument_sqlalchemy_engine(db_engine, settings)
 
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Run the same startup/shutdown work without FastAPI's deprecated hooks.
+
+    Keeping the actual work in ``on_startup``/``on_shutdown`` functions is
+    intentional: the test suite and operational tooling can still call those
+    functions directly, while FastAPI uses the supported lifespan protocol in
+    real server/TestClient lifecycles. No startup ordering or shutdown cleanup
+    is changed by this wrapper.
+    """
+    # FastAPI's old sync startup/shutdown event hooks were executed through
+    # Starlette's threadpool. Keep that behavior here because both functions
+    # perform blocking database/scheduler/telemetry work; calling them directly
+    # from this async lifespan would unnecessarily block the event loop.
+    await run_in_threadpool(on_startup)
+    try:
+        yield
+    finally:
+        await run_in_threadpool(on_shutdown)
+
+
 app = FastAPI(
     title="Custom Snipe-IT API",
+    lifespan=lifespan,
     # SECURITY: when settings.ENABLE_API_DOCS is False (set this in any
     # environment reachable from the public internet -- see config.py's
     # ENABLE_API_DOCS docstring), passing None here doesn't just hide these
@@ -135,7 +160,7 @@ app = FastAPI(
 
 
 # ---------------------------------------------------------------------------
-# APP STARTUP (Operations & Observability requirement #1)
+# APP LIFESPAN / STARTUP (Operations & Observability requirement #1)
 # ---------------------------------------------------------------------------
 # `init_db()` (create tables) and `seed_db()` (insert demo accounts/data)
 # used to run unconditionally the INSTANT this module was imported --
@@ -144,13 +169,12 @@ app = FastAPI(
 # opt out (see config.py's AUTO_INIT_DB/AUTO_SEED_DEMO_DATA docstring for
 # the full reasoning).
 #
-# Now both calls live inside a proper FastAPI **startup event handler** --
+# Now both calls live inside the FastAPI **lifespan startup phase** --
 # they only run once, right as the server actually starts serving requests
 # -- and each is individually gated by a settings flag so a production
 # deployment can disable them and rely on `alembic upgrade head` instead
 # (see README.md's "Database Migrations" and "Running in Production"
 # sections).
-@app.on_event("startup")
 def on_startup() -> None:
     # BUG FIX: wrap the first real database touch in a try/except that logs
     # a clear, actionable diagnostic before re-raising. Previously, if
@@ -211,7 +235,6 @@ def on_startup() -> None:
     backup_service.start_backup_scheduler()
 
 
-@app.on_event("shutdown")
 def on_shutdown() -> None:
     # Flushes any spans still buffered by telemetry.py's BatchSpanProcessor
     # and stops its background export thread -- a no-op when
