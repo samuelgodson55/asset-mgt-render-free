@@ -3,6 +3,13 @@
 This is the validation layer for the Asset Inventory Quotes application's
 **efficiency, speed, productivity and zero-downtime** goals.
 
+### Load-test runner reliability
+
+`scripts/load-test.py` uses per-worker HTTP/1.1 keep-alive connections and fully
+drains each response before reuse. It also reports HTTP status distribution and
+treats responses that do not match `--expected-status` as load-test failures.
+Use `--no-keep-alive` only for diagnostics.
+
 ## P1: dependency failure scenarios
 
 Run the local stack first:
