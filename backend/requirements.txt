@@ -32,7 +32,7 @@ chardet<6
 # replica (see backend/start.sh + render-start.sh) instead of requiring an
 # operator to manually keep Beat to a single instance.
 celery-redbeat==2.4.2
-google-api-python-client==2.143.0
+google-api-python-client==2.198.0
 google-auth==2.34.0
 
 # --- Distributed tracing (OpenTelemetry -- see backend/telemetry.py) -------
