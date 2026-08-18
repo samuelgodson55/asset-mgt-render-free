@@ -765,11 +765,19 @@ walkthrough.
 
 For this Terraform VM path:
 
-- Set `OTEL_ENABLED=true` to enable tracing.
+- Set `OTEL_ENABLED=true` **before the application processes are started or
+  redeployed** if you want their OpenTelemetry instrumentation enabled.
 - `OTEL_EXPORTER_OTLP_ENDPOINT` defaults to `http://jaeger:4318`, the
   internal Docker service.
-- Jaeger is an opt-in Compose profile; start it with
-  `docker compose -f docker-compose.vm.yml --profile tracing up -d`.
+- Use `scripts/telemetry.sh` (already deployed to `/opt/snipeit/scripts/`) to manage Jaeger without touching the active
+  application stack:
+  - `./scripts/telemetry.sh on` starts **only** Jaeger.
+  - `./scripts/telemetry.sh off` stops/removes **only** Jaeger.
+  - `./scripts/telemetry.sh status` shows the telemetry state.
+  - `./scripts/telemetry.sh ui` prints the SSH-only UI instructions.
+- The helper never runs `docker compose down`, never changes `ACTIVE_SLOT`,
+  and never stops Caddy, backend, frontend, PostgreSQL, Redis, worker, or
+  beat. This is important during blue/green VM rollouts.
 - **Jaeger's UI is SSH-only.** The VM Compose file deliberately does not
   publish 16686, 4317, or 4318 to the VM host/public interface.
 - From your workstation use
@@ -781,6 +789,12 @@ For this Terraform VM path:
   `OTEL_TRACES_SAMPLE_RATIO`, `OTEL_CONSOLE_EXPORTER`, and
   `APPLICATIONINSIGHTS_CONNECTION_STRING` remain available for the VM path
   when you intentionally use another collector/destination.
+- `OTEL_ENABLED` is a process-start gate in the current backend
+  implementation. Starting/stopping Jaeger alone does not dynamically turn
+  instrumentation on or off inside an already-running backend process. To
+  fully disable application telemetry, set `OTEL_ENABLED=false` and use the
+  normal controlled VM deployment/restart workflow; stop Jaeger separately
+  with `./scripts/telemetry.sh off`.
 
  `WORKER_MEM_LIMIT`, `WORKER_MEM_RESERVATION`,
 `BEAT_MEM_LIMIT`, `BEAT_MEM_RESERVATION`, `FRONTEND_MEM_LIMIT`,

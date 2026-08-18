@@ -2041,6 +2041,8 @@ that produced it (`otelTraceID`/`otelSpanID`), so you can jump from "a
 user reported error X, here's their `request_id`" straight to the exact
 trace that produced it.
 
+The telemetry helper auto-detects local versus Terraform VM execution, so the normal command is simply `./scripts/telemetry.sh on|off|status|logs|ui`; no `local`/`vm` suffix is required. The VM deployment copies the helper into `/opt/snipeit/scripts/`.
+
 **Off by default** — `OTEL_ENABLED=false`, matching every other opt-in
 flag in this app. Turning it on costs nothing until you also point it at
 somewhere to send spans. `OTEL_SERVICE_NAME` (default
@@ -2093,23 +2095,30 @@ For local Jaeger, keep `OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318`.
 The browser never receives the Docker-internal `jaeger` hostname; it always
 posts to the application's same-origin telemetry proxy.
 
-### Try it locally in 3 steps (no Azure account needed)
+### Try it locally (no Azure account needed)
 
-1. Set `OTEL_ENABLED=true` in your `.env` (see `.env.example`).
-2. `docker compose --profile tracing up` — this also starts a local
-   Jaeger UI (`docker-compose.yml`'s `jaeger` service), which every
-   backend/worker/beat container already points at by default.
-   RUN ```
-   docker compose --profile tracing up
-   ```
-3. Use the app for a bit (log in, check something out, trigger an
-   export), then open **http://localhost:16686**. Pick `backend` (or
+1. Set `OTEL_ENABLED=true` and keep
+   `OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318` in your `.env`.
+2. Start the application normally:
+   `docker compose up -d`.
+3. Start **only** Jaeger:
+   `./scripts/telemetry.sh on`.
+4. Use the app for a bit (log in, check something out, trigger an export),
+   then open **http://localhost:16686**. Pick `backend` (or
    `backend-worker`) from the Service dropdown, click Find Traces, and
-   click into any one trace to see its full waterfall — the HTTP
-   request span at the top, its child SQL query spans nested underneath,
-   and (if it enqueued one) the Celery task span it kicked off, all in
-   one continuous timeline even though the task ran in a different
-   container.
+   click into any one trace to see its full waterfall — the HTTP request
+   span at the top, its child SQL query spans nested underneath, and (if it
+   enqueued one) the Celery task span it kicked off.
+
+When finished, stop only the tracing infrastructure:
+
+```bash
+./scripts/telemetry.sh off
+```
+
+The helper never shuts down the application stack. See
+[`docs/TELEMETRY.md`](docs/TELEMETRY.md) for the process-start behavior of
+`OTEL_ENABLED` and the VM/ACA/external-collector workflows.
 
 ### Running it in Azure (Application Insights)
 
@@ -2230,7 +2239,7 @@ The Jaeger service is opt-in on the VM. Enable `OTEL_ENABLED=true` in the VM
 environment and start the tracing Compose profile:
 
 ```bash
-docker compose -f docker-compose.vm.yml --profile tracing up -d
+./scripts/telemetry.sh on
 ```
 
 Then use the SSH tunnel above. The complete VM procedure is also documented
