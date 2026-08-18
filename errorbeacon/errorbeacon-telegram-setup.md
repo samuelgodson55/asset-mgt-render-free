@@ -611,6 +611,111 @@ python3 -c "import os, urllib.request; req = urllib.request.Request('http://loca
 Then check Telegram — the message should arrive within a couple of seconds
 (alerts are processed by a small worker pool, see `ALERT_WORKERS`).
 
+#### Full pipeline test (multiple scenarios in one script)
+
+A single `/v1/test` call only proves ErrorBeacon accepted and queued *one* event.
+To exercise classification, dedup, and spike detection together in the same
+session, write a small script to `/tmp` inside the shell and run it. `requests`
+is already installed in the image — it's what `tg_delivery()` itself uses for
+Telegram/AI calls — so there's no need to fight `urllib` for anything beyond a
+one-liner:
+
+```bash
+cat > /tmp/eb_test.py <<'PYEOF'
+import requests, time, os
+
+BASE = "http://localhost:8000"
+IH = {"X-API-Key": os.environ["ERRORBEACON_INGEST_API_KEY"], "Content-Type": "application/json"}
+AH = {"X-API-Key": os.environ["ERRORBEACON_ADMIN_API_KEY"]}
+
+def post_event(payload):
+    r = requests.post(f"{BASE}/v1/events", headers=IH, json=payload, timeout=10)
+    print(f"  -> {r.status_code} {r.text[:200]}")
+
+print("=== 1. basic error ===")
+post_event({"app": "asset-inventory-quotes", "environment": "production", "severity": "error",
+            "error_type": "ClientError", "message": "Manual shell test error",
+            "status_code": 500, "component": "backend"})
+
+print("=== 2. critical (keyword-triggered) ===")
+post_event({"app": "asset-inventory-quotes", "environment": "production", "severity": "error",
+            "error_type": "OperationalError", "message": "database unavailable: connection refused",
+            "status_code": 500, "component": "database", "operation": "startup"})
+
+print("=== 3. info (should NOT alert) ===")
+post_event({"app": "asset-inventory-quotes", "environment": "production", "severity": "info",
+            "message": "Readiness probe retry", "category": "healthcheck", "expected": True})
+
+print("=== 4. dedup (same fingerprint x2 within 60s) ===")
+for i in range(2):
+    post_event({"app": "asset-inventory-quotes", "message": "dedup shell test", "error_type": "ClientError"})
+    time.sleep(2)
+
+print("=== 5. spike (12 distinct request_ids, same fingerprint) ===")
+for i in range(12):
+    post_event({"app": "asset-inventory-quotes", "message": "spike shell test",
+                "error_type": "ClientError", "request_id": f"spike-{i}"})
+
+print("\nWaiting 20s for workers to process...")
+time.sleep(20)
+
+print("\n=== Recent incidents ===")
+r = requests.get(f"{BASE}/v1/incidents?limit=20", headers=AH, timeout=10)
+for inc in r.json():
+    print(f"{inc['id']}  {inc['severity']:<8} occ={inc['occurrence_count']:<3} "
+          f"tg={inc['telegram_status']:<10} ai={inc['ai_status']:<15} spike={inc['spike_detected']}  {inc['message'][:50]}")
+PYEOF
+python3 /tmp/eb_test.py
+```
+
+What the output should look like, and why:
+
+- **Event 1 (basic error):** `"queued":true`, `occurrence:1`.
+- **Event 2 (critical):** also `"queued":true` — `database unavailable: connection
+  refused` at `status_code: 500` hits one of `classify()`'s critical keyword
+  matches, so it's promoted to `critical` even though the payload's own
+  `severity` field said `error`.
+- **Event 3 (info/healthcheck):** `"queued":false` — this is correct, not a
+  bug. `should_notify()` filters out anything classified `info` (which
+  `category="healthcheck"` forces) before it ever reaches the alert queue, so
+  it's recorded but never paged.
+- **Event 4 (dedup):** the first call returns `"queued":true occurrence:1`; the
+  second, sent ~2s later with an identical fingerprint, returns `"queued":false
+  occurrence:2` — inside `DEDUP_SECONDS` (60 by default) a repeat only bumps
+  `occurrence_count`, it does not re-alert.
+- **Event 5 (spike):** occurrences 2–9 all come back `"queued":false` (same
+  dedup behavior as above), then occurrence 10 flips back to `"queued":true` —
+  that's the spike path in `persist()`: crossing `SPIKE_THRESHOLD` (10 within
+  `SPIKE_WINDOW_SECONDS`, 300 by default) forces a fresh alert even mid-dedup-
+  window, and that specific message carries the 🔥 ERROR SPIKE DETECTED marker.
+- The final incidents table should show every row with `tg=sent` and
+  `ai=complete` (or `ai=disabled` if `AI_ENABLED=false`) once the 20-second
+  wait elapses — that table, not the 200 on ingest, is the actual end-to-end
+  proof that Telegram delivery and AI enrichment both completed.
+
+If a row still shows `ai=pending` or `ai=queued` well past the 20s wait, that's
+not necessarily a bug — it depends on how many AI providers are configured and
+their current latency/rate limits. Bump `time.sleep(20)` and re-run the
+incidents query, or check `/healthz`'s `ai_queue_depth`.
+
+To also exercise deployment-regression detection, repeat the basic-error
+payload a few seconds later with a different `"release"` value — same
+fingerprint, different release within the last 7 days triggers ⚠️ POSSIBLE
+DEPLOYMENT REGRESSION.
+
+Clean up test noise afterward with `/resolve <incident_id>` from Telegram, or
+`POST /v1/incidents/{id}/resolve` with `ERRORBEACON_ADMIN_API_KEY`, so these
+don't clutter the incidents list — or just let `ERRORBEACON_RETENTION_DAYS`
+age them out naturally once resolved.
+
+When done
+exit or Ctrl D
+
+# to view the file
+ls /tmp
+# to delete
+rm /tmp/eb_test.py
+
 **Windows / Git Bash gotcha:** if `az containerapp exec` fails immediately with
 something like:
 

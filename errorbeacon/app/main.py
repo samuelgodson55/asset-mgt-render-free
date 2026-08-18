@@ -612,13 +612,26 @@ def persist(e):
         # New incident (either genuinely new fingerprint, or the prior one was resolved).
         incident_id = uuid.uuid4().hex[:12]
         context_json = json.dumps(clean(e.context), default=str)
-        ai_status = 'pending' if AI_ENABLED and _providers() else 'disabled'
+        # should_notify() decides whether this incident is ever supposed to
+        # page (info-classified, healthcheck, expected, or a non-alerted
+        # chaos test). That decision was previously only checked once, by
+        # process() before calling enqueue() -- it was never written to the
+        # DB. Because telegram_status/ai_status defaulted to 'pending'
+        # regardless, telegram_recovery_loop()/ai_recovery_loop() -- which
+        # only look at DB status, not should_notify() -- would pick these
+        # incidents up a few seconds later and deliver them anyway. Persist
+        # the suppression as a terminal status so the recovery loops' own
+        # 'pending' queries never match these rows in the first place.
+        notify = should_notify(e)
+        ai_status = ('pending' if AI_ENABLED and _providers() else 'disabled') if notify else 'suppressed'
+        telegram_status = 'pending' if notify else 'suppressed'
         c.execute(
             '''INSERT INTO incidents(
                 id,created_at,app,environment,severity,error_type,message,traceback,request_id,
                 method,path,status_code,user_id,release,host,component,operation,category,
-                context_json,fingerprint,last_seen_at,spike_detected,deployment_regression,ai_status
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                context_json,fingerprint,last_seen_at,spike_detected,deployment_regression,ai_status,
+                telegram_status
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
             (
                 incident_id, now, e.app, e.environment, classify(e), e.error_type,
                 redact(e.message, 5000), redact(e.traceback), e.request_id, e.method,
@@ -627,7 +640,7 @@ def persist(e):
                 redact(e.release, 200) if e.release else None,
                 redact(e.host, 300) if e.host else None,
                 e.component, e.operation, e.category, context_json, fp, now,
-                int(spike), int(regression), ai_status,
+                int(spike), int(regression), ai_status, telegram_status,
             ),
         )
         c.execute('UPDATE incident_events SET incident_id=? WHERE id=?', (incident_id, event_id))
