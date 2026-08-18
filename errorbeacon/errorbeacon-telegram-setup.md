@@ -592,6 +592,12 @@ python3 -c "import urllib.request; print(urllib.request.urlopen('http://localhos
 # Look for "telegram_configured": true in the output. If it's false, the
 # TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID secrets never made it into this
 # revision -- see section 12 below.
+# OR to accomplish same result
+python3 -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3).read().decode())"
+
+#for a more detailed information, use this command
+#it calls the ERRORBEACON_ADMIN_API_KEY adminkey
+python3 -c "import urllib.request, os; req = urllib.request.Request('http://127.0.0.1:8000/v1/health', headers={'X-API-Key': os.environ['ERRORBEACON_ADMIN_API_KEY']}); print(urllib.request.urlopen(req, timeout=5).read().decode())"
 
 # 2. Fire the test alert
 python3 -c "

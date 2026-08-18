@@ -245,13 +245,61 @@ def test_ai_with_retry_retries_and_returns_normalized_analysis(monkeypatch):
         attempts['n'] += 1
         if attempts['n'] < 2:
             raise RuntimeError('temporary provider failure')
-        return 'ROOT CAUSE:\nDatabase unavailable\n\nIMPACT:\nRequests depending on the database fail.\n\nNEXT STEPS:\nRestore database connectivity.\n\nCONFIDENCE:\nHIGH'
+        return 'gemini', 'ROOT CAUSE:\nDatabase unavailable\n\nIMPACT:\nRequests depending on the database fail.\n\nNEXT STEPS:\nRestore database connectivity.\n\nCONFIDENCE:\nHIGH'
 
     monkeypatch.setattr(main, 'ai', fake_ai)
     result = main.ai_with_retry(e)
     assert attempts['n'] == 2
     assert result is not None
-    assert 'ROOT CAUSE:' in result and 'IMPACT:' in result and 'NEXT STEPS:' in result
+    provider_name, analysis = result
+    assert provider_name == 'gemini'
+    assert 'ROOT CAUSE:' in analysis and 'IMPACT:' in analysis and 'NEXT STEPS:' in analysis
+
+
+def test_ai_returns_provider_name_alongside_analysis(monkeypatch):
+    """ai() must report WHICH provider in the fallback chain actually produced
+    the analysis, not just the analysis text -- this is what lets
+    ai_provider_used get persisted per-incident instead of only appearing in
+    logs at the moment the call happened."""
+    monkeypatch.setattr(main, 'AI_ENABLED', True)
+    monkeypatch.setattr(main, 'GROQ_KEY', 'test-key')
+    monkeypatch.setattr(main, 'GEMINI_KEY', '')
+    monkeypatch.setattr(main, 'OPENROUTER_KEY', '')
+
+    def fake_call(provider, url, key, model, prompt, extra_headers=None):
+        return 'ROOT CAUSE:\nX\n\nIMPACT:\nY\n\nNEXT STEPS:\nZ\n\nCONFIDENCE:\nHIGH'
+
+    monkeypatch.setattr(main, '_call_openai_compatible', fake_call)
+    e = main.ErrorEvent(app='test', environment='development', message='boom', error_type='ValueError')
+    result = main.ai(e)
+    assert result is not None
+    provider_name, analysis = result
+    assert provider_name == 'groq'
+    assert 'ROOT CAUSE:' in analysis
+
+
+def test_save_ai_and_notify_persists_provider_used(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, 'DATA_DIR', tmp_path)
+    monkeypatch.setattr(main, 'DB_PATH', tmp_path / 'errorbeacon.db')
+    main.init_db()
+    e = main.ErrorEvent(app='test', environment='development', message='boom', error_type='ValueError', path='/x', status_code=500)
+    incident, *_ = main.persist(e)
+
+    monkeypatch.setattr(main, 'tg_delivery', lambda *a, **k: main.TelegramDelivery('sent'))
+    assert main._save_ai_and_notify(
+        e, incident, 1, False, False,
+        'ROOT CAUSE:\nCause\n\nIMPACT:\nImpact\n\nNEXT STEPS:\nFix\n\nCONFIDENCE:\nHIGH',
+        'groq',
+    ) is True
+
+    c = main.db()
+    row = c.execute(
+        'SELECT ai_status,ai_provider_used FROM incidents WHERE id=?', (incident,)
+    ).fetchone()
+    c.close()
+
+    assert row['ai_status'] == 'complete'
+    assert row['ai_provider_used'] == 'groq'
 
 
 def test_telegram_timeout_is_unknown_and_not_automatically_retried(tmp_path, monkeypatch):

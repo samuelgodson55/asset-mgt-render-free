@@ -345,7 +345,8 @@ def init_db():
                             fallback_sent_at TEXT,
                             ai_failure_email_sent_at TEXT,
                             resolved_at TEXT,
-                            resolved_reason TEXT
+                            resolved_reason TEXT,
+                            ai_provider_used TEXT
                         )
                     ''')
                     c.execute('''
@@ -393,6 +394,7 @@ def init_db():
                         'ai_failure_email_sent_at': 'ALTER TABLE incidents ADD COLUMN ai_failure_email_sent_at TEXT',
                         'resolved_at': 'ALTER TABLE incidents ADD COLUMN resolved_at TEXT',
                         'resolved_reason': 'ALTER TABLE incidents ADD COLUMN resolved_reason TEXT',
+                        'ai_provider_used': 'ALTER TABLE incidents ADD COLUMN ai_provider_used TEXT',
                     }
                     cols = {r[1] for r in c.execute('PRAGMA table_info(incidents)')}
                     for column_name, alter_sql in migrations.items():
@@ -835,6 +837,9 @@ def _providers():
 
     return providers
 def ai(e):
+    """Returns (provider_name, analysis_text) on success, or None if AI is
+    disabled/unconfigured. Raises the last provider's error if every
+    configured provider in the chain failed."""
     if not AI_ENABLED:
         return None
     providers=_providers()
@@ -852,7 +857,7 @@ def ai(e):
             if not result:
                 raise AIProviderError(name,f'{name} response did not contain usable analysis sections')
             log.info('%s analysis generated for request_id=%s',name,e.request_id)
-            return result
+            return name,result
         except AIProviderError as ex:
             last=ex
             log.warning('%s rate limited; failing over without retry' if ex.rate_limited else '%s analysis failed; failing over without retry',name)
@@ -864,7 +869,8 @@ def ai(e):
     return None
 
 def ai_with_retry(e):
-    """Try the configured provider chain once per queue attempt; never hammer a rate-limited provider."""
+    """Try the configured provider chain once per queue attempt; never hammer a rate-limited provider.
+    Returns (provider_name, analysis_text) on success, or None."""
     if not AI_ENABLED or not _providers():
         return None
     attempts=max(1,AI_RETRIES)
@@ -1322,14 +1328,14 @@ def _ai_mark_retry(i, error):
         c.close()
     _ai_release(i)
 
-def _save_ai_and_notify(e,i,occ,spike,regression,a):
+def _save_ai_and_notify(e,i,occ,spike,regression,a,provider_name=None):
     if not a:
         return False
     with _db_lock:
         c=db()
         c.execute(
-            'UPDATE incidents SET ai_analysis=?,ai_status=?,ai_next_retry_at=NULL,ai_last_error=NULL WHERE id=?',
-            (redact(a,5000),'telegram_pending',i),
+            'UPDATE incidents SET ai_analysis=?,ai_status=?,ai_next_retry_at=NULL,ai_last_error=NULL,ai_provider_used=? WHERE id=?',
+            (redact(a,5000),'telegram_pending',provider_name,i),
         )
         c.commit()
         c.close()
@@ -1430,9 +1436,10 @@ def ai_worker():
         except queue.Empty:
             continue
         try:
-            a=ai_with_retry(e)
-            if a:
-                _save_ai_and_notify(e,i,occ,spike,regression,a)
+            result=ai_with_retry(e)
+            if result:
+                provider_name,a=result
+                _save_ai_and_notify(e,i,occ,spike,regression,a,provider_name)
             else:
                 _ai_mark_retry(i, RuntimeError('AI analysis unavailable or rejected'))
         except Exception as ex:
@@ -1912,7 +1919,7 @@ def incidents(limit:int=50, app_name:str|None=None, app:str|None=None, environme
     if end_date: clauses.append('last_seen_at<=?'); params.append(end_date)
     where=(' WHERE '+' AND '.join(clauses)) if clauses else ''
     with _db_lock:
-        c=db(); rows=c.execute(f'SELECT id,created_at,app,environment,severity,error_type,message,request_id,path,status_code,release,component,operation,occurrence_count,last_seen_at,resolved,resolved_at,resolved_reason,telegram_sent,telegram_status,telegram_attempts,telegram_last_error,fallback_status,fallback_attempts,fallback_last_error,fallback_sent_at,ai_status,ai_analysis,ai_attempts,ai_last_error,ai_failure_email_sent_at,spike_detected,deployment_regression,silenced_until FROM incidents{where} ORDER BY last_seen_at DESC LIMIT ?',params+[limit]).fetchall(); c.close()
+        c=db(); rows=c.execute(f'SELECT id,created_at,app,environment,severity,error_type,message,request_id,path,status_code,release,component,operation,occurrence_count,last_seen_at,resolved,resolved_at,resolved_reason,telegram_sent,telegram_status,telegram_attempts,telegram_last_error,fallback_status,fallback_attempts,fallback_last_error,fallback_sent_at,ai_status,ai_analysis,ai_attempts,ai_last_error,ai_provider_used,ai_failure_email_sent_at,spike_detected,deployment_regression,silenced_until FROM incidents{where} ORDER BY last_seen_at DESC LIMIT ?',params+[limit]).fetchall(); c.close()
     return [dict(r) for r in rows]
 
 @app.get('/v1/incidents/{incident_id}',dependencies=[Depends(admin_auth)])
