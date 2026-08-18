@@ -213,6 +213,18 @@ celery_app.conf.update(
 # from `worker` in a trace waterfall view.
 @worker_process_init.connect(weak=False)
 def _init_worker_tracing(**_kwargs) -> None:
+    # BUG FIX (spurious "No module named 'telemetry'" on every worker/beat
+    # boot, even with OTEL_ENABLED=false): Celery only puts the app's cwd
+    # (/app) on sys.path temporarily, while it loads this `-A celery_app`
+    # module itself (see Dockerfile's PYTHONPATH=/app fix, which is the
+    # real/permanent fix for that). This early-return is a second,
+    # belt-and-suspenders layer on top of that: when tracing is disabled,
+    # skip the `from telemetry import ...` line entirely rather than
+    # importing it just to have setup_tracing() no-op internally -- so a
+    # disabled OTEL_ENABLED can never trigger an import-time failure here,
+    # regardless of environment/packaging quirks.
+    if not settings.OTEL_ENABLED:
+        return
     from telemetry import instrument_celery, instrument_redis, instrument_sqlalchemy_engine, setup_tracing
     setup_tracing(settings, service_name=f"{settings.OTEL_SERVICE_NAME}-worker")
     instrument_celery(settings)
@@ -228,6 +240,9 @@ def _init_worker_tracing(**_kwargs) -> None:
 
 @beat_init.connect(weak=False)
 def _init_beat_tracing(**_kwargs) -> None:
+    # See _init_worker_tracing's comment above -- same fix, same reasoning.
+    if not settings.OTEL_ENABLED:
+        return
     from telemetry import instrument_redis, setup_tracing
     setup_tracing(settings, service_name=f"{settings.OTEL_SERVICE_NAME}-beat")
     instrument_redis(settings)

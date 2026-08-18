@@ -6,11 +6,14 @@ import { createRoot } from "react-dom/client";
 import "./index.css";
 import App from "./App.tsx";
 import { installGlobalErrorBeacon } from "./lib/errorbeacon";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 
 installGlobalErrorBeacon();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <App />
+    <ErrorBoundary>
+      <App />
+    </ErrorBoundary>
   </StrictMode>
 );
