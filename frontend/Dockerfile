@@ -100,7 +100,7 @@
 # installs the -gnu variant, one npm already resolves correctly every time.
 # This only affects the discarded BUILD stage; the shipped image is still
 # nginx:1.30-alpine (see Stage 3 below), so final image size is unaffected.
-FROM node:24-slim AS frontend-build
+FROM node:26-slim AS frontend-build
 
 ARG BUILD_ENV=development
 ENV BUILD_ENV=${BUILD_ENV}
@@ -149,7 +149,7 @@ RUN node build-frontend/build.js /build/frontend-src /build/frontend-out
 # frontend-app/ npm install), not just "built but unused" -- and,
 # symmetrically, what makes the react-only target genuinely free of
 # build-frontend/build.js's own minify/obfuscate pipeline.
-FROM node:24-slim AS frontend-app-build
+FROM node:26-slim AS frontend-app-build
 
 WORKDIR /build
 
