@@ -366,6 +366,8 @@ export interface PublicConfig {
   // previously read `show_stock`, which no real response ever contained,
   // so every consumer silently read `undefined` from a live backend.
   show_stock_to_staff_customer?: boolean;
+  maintenance_mode: boolean;
+  maintenance_message: string;
 }
 
 export interface CatalogAsset {

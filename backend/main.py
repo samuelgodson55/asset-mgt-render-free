@@ -73,6 +73,7 @@ from middleware.rate_limit import RateLimitMiddleware
 from middleware.security_headers import SecurityHeadersMiddleware
 from middleware.clean_urls import CleanUrlsMiddleware
 from middleware.spa_fallback import SpaFallbackMiddleware
+from middleware.maintenance_mode import MaintenanceModeMiddleware
 
 from api.auth_api import router as auth_router
 from api.assets_api import router as assets_router
@@ -85,6 +86,7 @@ from api.quotations_api import router as quotations_router
 from api.notifications_api import router as notifications_router
 from api.reports_api import router as reports_router
 from api.telemetry_api import router as telemetry_router
+from api.maintenance_api import router as maintenance_router
 
 # ---------------------------------------------------------------------------
 # STRUCTURED LOGGING -- configure this FIRST, before anything else in the
@@ -312,6 +314,9 @@ app.add_middleware(
     max_requests=settings.LOGIN_RATE_LIMIT_MAX,
     window_seconds=settings.LOGIN_RATE_LIMIT_WINDOW_SECONDS,
 )
+# Maintenance is added before RequestContext because middleware executes in reverse registration order:
+# RequestContext must remain outside it so planned 503 responses still receive X-Request-ID.
+app.add_middleware(MaintenanceModeMiddleware)
 app.add_middleware(RequestContextMiddleware)
 
 # Frontend is served by an nginx container on port 8080 in docker-compose.
@@ -454,6 +459,7 @@ app.include_router(quotations_router, prefix="/api")
 app.include_router(notifications_router, prefix="/api")
 app.include_router(reports_router, prefix="/api")
 app.include_router(telemetry_router, prefix="/api")
+app.include_router(maintenance_router, prefix="/api")
 
 # ---------------------------------------------------------------------------
 # STATIC FRONTEND (free-tier single-service deployment only)

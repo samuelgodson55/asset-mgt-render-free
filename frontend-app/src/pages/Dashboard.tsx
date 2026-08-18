@@ -213,7 +213,7 @@ export function Dashboard() {
           </div>
           {privileged ? (
             <div className="flex flex-col divide-y divide-border-soft">
-              {attention.length === 0 && <p className="text-[12px] text-text-faint py-6 text-center">Nothing overdue. Ledger's clean.</p>}
+              {attention.length === 0 && <p className="text-[12px] text-text-faint py-6 text-center">Nothing overdue. All clear.</p>}
               {attention.map((c) => {
                 const clickable = c.entity_id != null;
                 return (

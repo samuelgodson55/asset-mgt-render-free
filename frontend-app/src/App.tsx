@@ -9,6 +9,7 @@ import { ThemeProvider } from "./lib/theme";
 import { CustodyProvider } from "./lib/custodyContext";
 import { QuoteDetailProvider } from "./lib/quoteDetailContext";
 import { isFullAdmin, isPrivileged } from "./lib/roles";
+import { MaintenanceGate } from "./components/MaintenanceGate";
 
 // Every authenticated page is loaded on demand (React.lazy + Vite's
 // automatic code-splitting) instead of all landing in one ~1MB bundle
@@ -71,6 +72,7 @@ export default function App() {
   return (
     <ThemeProvider>
       <AuthProvider>
+        <MaintenanceGate>
         <BrowserRouter>
           <Routes>
             <Route path="/login" element={<Login />} />
@@ -138,6 +140,7 @@ export default function App() {
             </Route>
           </Routes>
         </BrowserRouter>
+        </MaintenanceGate>
       </AuthProvider>
     </ThemeProvider>
   );

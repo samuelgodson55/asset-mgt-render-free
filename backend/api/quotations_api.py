@@ -27,12 +27,12 @@ router = APIRouter(tags=["quotations"])
 
 
 @router.get("/config/public")
-def get_public_config():
+def get_public_config(db: Session = Depends(get_db)):
     """Non-secret config the frontend needs before rendering the catalog/cart
     (currency, stock-visibility flag) AND before rendering its own page
     chrome (site_name -- drives the navbar brand + <title> on every page,
     including the unauthenticated login page, via js/ui.js's applySiteName())."""
-    return quotation_service.get_public_config()
+    return quotation_service.get_public_config(db)
 
 
 @router.get("/assets/catalog")

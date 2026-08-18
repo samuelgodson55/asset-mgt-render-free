@@ -1,3 +1,8 @@
+## RedBeat Redis timeout configuration
+
+- Explicitly configured `redbeat_redis_options` with the existing 2-second Redis connect/read timeouts instead of relying on RedBeat's deprecated fallback to Celery `broker_transport_options`.
+- Added a regression assertion to `backend/tests/test_redbeat_scheduling.py` so the explicit RedBeat options cannot be accidentally removed.
+
 ## 4.1.3 - ErrorBeacon security hardening
 
 - Minimized public ErrorBeacon `/healthz`; detailed diagnostics moved behind admin authentication at `/v1/health`.

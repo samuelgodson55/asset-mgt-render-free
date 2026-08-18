@@ -151,12 +151,12 @@ function RecoveryCodesCard() {
 
   const download = () => {
     if (!codes) return;
-    const text = ["Ledger -- 2FA recovery codes (regenerated)", "Each code works ONCE.", "", ...codes].join("\n");
+    const text = ["2FA recovery codes (regenerated)", "Each code works ONCE.", "", ...codes].join("\n");
     const blob = new Blob([text], { type: "text/plain" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "ledger-recovery-codes.txt";
+    a.download = "recovery-codes.txt";
     a.click();
     URL.revokeObjectURL(url);
     setDownloaded(true);

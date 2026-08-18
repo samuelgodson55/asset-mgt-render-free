@@ -189,6 +189,7 @@ def login(db: Session, req: LoginRequest) -> dict:
             setup_token = create_mfa_token(user, MFA_SETUP_TOKEN_PURPOSE)
             logger.info("2FA enrollment started", extra={"user_id": user.id, "email": user.email})
             return {
+                "role": user.role,
                 "mfa_setup_required": True,
                 "message": "Two-factor authentication setup is required for this account.",
                 "mfa_setup_token": setup_token,
@@ -201,6 +202,7 @@ def login(db: Session, req: LoginRequest) -> dict:
         pending_token = create_mfa_token(user, MFA_PENDING_TOKEN_PURPOSE)
         logger.info("Password verified, awaiting 2FA code", extra={"user_id": user.id, "email": user.email})
         return {
+            "role": user.role,
             "mfa_required": True,
             "message": "Enter your two-factor authentication code to continue.",
             "mfa_pending_token": pending_token,

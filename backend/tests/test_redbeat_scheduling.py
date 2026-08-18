@@ -134,6 +134,10 @@ def test_celery_app_is_configured_with_redbeat():
         "once per replica instead of once, total"
     )
     assert conf.redbeat_redis_url, "redbeat_redis_url must be set for the scheduler above to have anywhere to store its lock"
+    assert conf.redbeat_redis_options == {
+        "socket_connect_timeout": 2,
+        "socket_timeout": 2,
+    }, "RedBeat Redis timeouts must be explicit instead of relying on broker_transport_options fallback"
 
 
 def test_only_one_replica_can_hold_the_beat_lock_at_once(clean_redis):

@@ -12,7 +12,7 @@ update_identity() for the actual flow.
 
 import logging
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, HTTPException, Depends, Request, Response
 from sqlalchemy.orm import Session
 
 from config import settings
@@ -23,6 +23,7 @@ from schemas.auth_schema import (
     ForgotPasswordRequest, ResetPasswordRequest, IdentityUpdateRequest,
 )
 import services.auth_service as auth_service
+import services.maintenance_service as maintenance_service
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +115,18 @@ def _set_session_cookie(response: Response, token: str) -> None:
 
 @router.post("/login")
 def login(req: LoginRequest, db: Session = Depends(get_db), response: Response = None):
+    # Maintenance must NOT allow the public /auth/login endpoint to become a
+    # back door. We still run the normal credential verification first so the
+    # root Super Admin can authenticate and complete its mandatory MFA flow,
+    # but ordinary users never receive a session while maintenance is active.
     result = auth_service.login(db, req)
+    maintenance_active = maintenance_service.get_status(db)["enabled"]
+    if maintenance_active and result.get("role") != "super_admin":
+        raise HTTPException(
+            status_code=503,
+            detail="The application is currently undergoing maintenance.",
+            headers={"Cache-Control": "no-store"},
+        )
     # SECURITY: only a result carrying a real session `token` (i.e. a
     # normal, fully-completed login) gets the HttpOnly cookie set here.
     # A super_admin login that still needs 2FA (mfa_required/

@@ -21,6 +21,16 @@
   --color-rust: #C86A4A;
   --color-rust-soft: #E08D6A;
   --color-sky: #6B93C8;
+  /* Semantic aliases used by shared/admin UI components. Keeping these
+     aliases on the same token system makes light mode switch the actual
+     foreground/background values instead of falling back to browser/default
+     colors. */
+  --color-background: var(--color-ink);
+  --color-card: var(--color-surface);
+  --color-foreground: var(--color-text);
+  --color-muted: var(--color-surface-raised);
+  --color-muted-foreground: var(--color-text-muted);
+  --color-ring: var(--color-brass);
 }
 
 html {
@@ -81,14 +91,20 @@ html.light {
   --color-border-soft: #E2E4F0;
   --color-text: #14151F;
   --color-text-muted: #545A70;
-  --color-text-faint: #8A8FA6;
+  --color-text-faint: #62697C;
   --color-brass: #966016;
-  --color-brass-soft: #B87D1F;
+  --color-brass-soft: #7B4E0B;
   --color-moss: #167A4C;
   --color-moss-soft: #106239;
   --color-rust: #C43D1B;
   --color-rust-soft: #9C2F13;
   --color-sky: #2456A8;
+  --color-background: var(--color-ink);
+  --color-card: var(--color-surface);
+  --color-foreground: var(--color-text);
+  --color-muted: var(--color-surface-raised);
+  --color-muted-foreground: var(--color-text-muted);
+  --color-ring: var(--color-brass);
 }
 
 /* Every color-ish property gets a short shared transition while this

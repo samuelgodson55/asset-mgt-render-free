@@ -26,6 +26,16 @@ import { reportClientError, setLastRequestId } from './errorbeacon.js';
 
 export const API_URL = '/api';
 
+export class MaintenanceModeError extends Error { constructor(message = "The application is currently undergoing maintenance.") { super(message); this.name = "MaintenanceModeError"; this.status = 503; } }
+
+function dispatchMaintenanceIfNeeded(response, body) {
+  if (response?.status === 503 && body?.code === "MAINTENANCE_MODE") {
+    window.dispatchEvent(new Event("asset-app:maintenance"));
+    return true;
+  }
+  return false;
+}
+
 // Small fetch wrapper that automatically attaches the Authorization header
 // and JSON-parses the response, throwing a readable Error on failure.
 export async function apiRequest(path, options = {}) {

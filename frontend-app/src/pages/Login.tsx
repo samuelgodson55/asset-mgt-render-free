@@ -7,7 +7,7 @@ import {
 import { useNavigate } from "react-router-dom";
 import QRCode from "qrcode";
 import { useAuth } from "../lib/useAuth";
-import { ApiError, auth as authApi } from "../lib/api";
+import { ApiError, auth as authApi, quotationsApi } from "../lib/api";
 import { ThemeToggle } from "../components/ThemeToggle";
 
 /** Reads (and, once read, strips) `?reset_token=...` off the current URL --
@@ -34,7 +34,7 @@ const STEPS = [
   { key: "recovery", label: "Done" },
 ] as const;
 
-function Brand({ compact = false }: { compact?: boolean }) {
+function Brand({ compact = false, siteName = "Asset Management" }: { compact?: boolean; siteName?: string }) {
   return (
     <div className={`flex items-center gap-2.5 ${compact ? "" : "mb-8"}`}>
       <svg width="22" height="22" viewBox="0 0 32 32">
@@ -42,7 +42,7 @@ function Brand({ compact = false }: { compact?: boolean }) {
         <circle cx="9" cy="9" r="2.4" fill="#0F1219" />
       </svg>
       <div>
-        <p className="font-display font-semibold text-text leading-none">Ledger</p>
+        <p className="font-display font-semibold text-text leading-none">{siteName}</p>
         <p className="text-[10px] text-text-faint mt-0.5">Asset Management</p>
       </div>
     </div>
@@ -593,7 +593,7 @@ function RecoveryCodesScreen({ codes }: { codes: string[] }) {
 
   const download = () => {
     const text = [
-      "Ledger -- 2FA recovery codes",
+      "2FA recovery codes",
       "Each code works ONCE. Store this file somewhere safe (a password manager, not your Downloads folder long-term).",
       "",
       ...codes,
@@ -602,7 +602,7 @@ function RecoveryCodesScreen({ codes }: { codes: string[] }) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "ledger-recovery-codes.txt";
+    a.download = "recovery-codes.txt";
     a.click();
     URL.revokeObjectURL(url);
     setDownloaded(true);
@@ -735,6 +735,24 @@ export function Login() {
   // AuthContext since resetting a password never issues a session.
   const [resetToken, setResetToken] = useState(() => readAndStripResetToken());
   const [forgotOpen, setForgotOpen] = useState(false);
+  const [siteName, setSiteName] = useState("Asset Management");
+
+  // Use the same public site-name setting as the rest of the React shell.
+  // Login is outside Layout, so it owns this small bootstrap fetch.
+  useEffect(() => {
+    let cancelled = false;
+    quotationsApi.publicConfig()
+      .then((config) => {
+        if (cancelled) return;
+        const configuredName = config.site_name?.trim();
+        if (configuredName) setSiteName(configuredName);
+        document.title = configuredName ? `${configuredName} — Asset Management` : "Asset Management";
+      })
+      .catch(() => {
+        if (!cancelled) document.title = "Asset Management";
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   // Navigate once a real session actually exists -- covers plain login,
   // mfa/verify, and mfa/setup/confirm alike. Held back while recoveryCodes
@@ -765,7 +783,7 @@ export function Login() {
 
         <ThemeToggle className="absolute top-5 right-5 z-10" />
         <div className="absolute top-5 left-5 z-10 lg:hidden">
-          <Brand compact />
+          <Brand compact siteName={siteName} />
         </div>
 
         <AnimatePresence mode="wait">

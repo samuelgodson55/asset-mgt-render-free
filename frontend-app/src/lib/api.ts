@@ -39,6 +39,11 @@ export class ApiError extends Error {
   }
 }
 
+export class MaintenanceModeError extends ApiError {
+  constructor(message = "The application is currently undergoing maintenance.") { super(503, message); this.name = "MaintenanceModeError"; }
+}
+
+
 /**
  * FastAPI error bodies aren't always `{ detail: string }`. Validation
  * failures (422s) come back as `{ detail: [{ loc, msg, type }, ...] }`,
@@ -117,6 +122,20 @@ async function rawFetch<T = unknown>(path: string, init?: RequestInit): Promise<
 
     const requestId = res.headers.get("x-request-id");
     if (requestId) setLastRequestId(requestId);
+
+    // Planned maintenance is an expected application state, not a transient outage.
+    // Detect it before the generic 503 retry path so open clients do not hammer the API.
+    if (res.status === 503) {
+      try {
+        const body = await res.clone().json();
+        if (body?.code === "MAINTENANCE_MODE") {
+          if (typeof window !== "undefined") window.dispatchEvent(new Event("asset-app:maintenance"));
+          throw new MaintenanceModeError(extractErrorMessage(body, "The application is currently undergoing maintenance."));
+        }
+      } catch (err) {
+        if (err instanceof MaintenanceModeError) throw err;
+      }
+    }
 
     // Safe reads may survive a brief proxy/container restart. Never retry
     // mutations: a POST/PUT/PATCH/DELETE may already have changed state.
@@ -1032,6 +1051,11 @@ export const assetsApi = {
 // for the two-halves shape (self-service cart/history vs Admin/Manager
 // Quotes tab) this mirrors.
 // ---------------------------------------------------------------------------
+
+export const maintenanceApi = {
+  status: () => rawFetch<{ enabled: boolean; message: string; updated_at?: string | null; updated_by?: string | null }>("/maintenance/status"),
+  update: (payload: { enabled: boolean; message: string }) => rawFetch<{ enabled: boolean; message: string; updated_at?: string | null; updated_by?: string | null }>("/maintenance/status", { method: "PUT", body: JSON.stringify(payload) }),
+};
 
 export const quotationsApi = {
   publicConfig: () => rawFetch<PublicConfig>("/config/public"),

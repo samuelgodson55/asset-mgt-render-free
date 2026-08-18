@@ -232,11 +232,23 @@ def _outsider_brief(outsider: Optional["models.Outsider"]) -> Optional[dict]:
 # before it can render the catalog/cart correctly (currency, whether to
 # show stock columns at all). Safe for any authenticated user to read.
 # ---------------------------------------------------------------------------
-def get_public_config() -> dict:
+def get_public_config(db: Session | None = None) -> dict:
+    # Maintenance is runtime-editable, unlike the environment-backed values below.
+    if db is None:
+        from database import SessionLocal
+        db = SessionLocal()
+        try:
+            status = __import__("services.maintenance_service", fromlist=["get_status"]).get_status(db)
+        finally:
+            db.close()
+    else:
+        status = __import__("services.maintenance_service", fromlist=["get_status"]).get_status(db)
     return {
         "currency_code": settings.CURRENCY_CODE,
         "show_stock_to_staff_customer": settings.CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER,
         "site_name": settings.SITE_NAME,
+        "maintenance_mode": status["enabled"],
+        "maintenance_message": status["message"],
     }
 
 

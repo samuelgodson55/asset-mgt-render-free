@@ -20,6 +20,7 @@ import {
   Percent,
   UserMinus,
   DatabaseBackup,
+  Wrench,
 } from "lucide-react";
 import { useAuth } from "../lib/useAuth";
 import { isFullAdmin, isTrueSuperAdmin, isPrivileged } from "../lib/roles";
@@ -32,6 +33,7 @@ import { DeletedUsersPanel } from "./admin/DeletedUsersPanel";
 import { DeletedAssetsPanel } from "./admin/DeletedAssetsPanel";
 import { AuditPanel } from "./admin/AuditPanel";
 import { QuotesPanel } from "./admin/QuotesPanel";
+import { MaintenanceModePanel } from "./admin/MaintenanceModePanel";
 
 // =============================================================================
 // Admin / Manager -- two separate pages/routes (/admin, /manager) sharing
@@ -92,7 +94,7 @@ function AdminOrManagerPage({ variant }: { variant: "admin" | "manager" }) {
   // that just happens to share a tab group with System Backups.
   const canSettings = !isManager && (demo || isFullAdmin(user?.role));
 
-  type Tab = { key: "import" | "backups" | "users" | "outsiders" | "audit" | "quotes" | "deleted-assets" | "deleted-users" | "settings"; label: string; icon: typeof FileSpreadsheet };
+  type Tab = { key: "import" | "backups" | "maintenance" | "users" | "outsiders" | "audit" | "quotes" | "deleted-assets" | "deleted-users" | "settings"; label: string; icon: typeof FileSpreadsheet };
   const tabs = useMemo<Tab[]>(() => {
     const list: Tab[] = [];
     if (canDirectory) list.push({ key: "users", label: "User Directory", icon: UsersIcon });
@@ -103,6 +105,7 @@ function AdminOrManagerPage({ variant }: { variant: "admin" | "manager" }) {
     if (canDeletedAssets) list.push({ key: "deleted-assets", label: "Deleted Assets", icon: Boxes });
     if (canDeletedAssets) list.push({ key: "deleted-users", label: "Deleted Users", icon: UserMinus });
     if (canBackups) list.push({ key: "backups", label: "System Backups", icon: DatabaseBackup });
+    if (canBackups) list.push({ key: "maintenance", label: "Maintenance Mode", icon: Wrench });
     if (canSettings) list.push({ key: "settings", label: "Settings", icon: Percent });
     return list;
   }, [canImport, canBackups, canDirectory, canDeletedAssets, canSettings]);
@@ -195,6 +198,7 @@ function AdminOrManagerPage({ variant }: { variant: "admin" | "manager" }) {
           {tab === "deleted-assets" && canDeletedAssets && <DeletedAssetsPanel />}
           {tab === "deleted-users" && canDeletedAssets && <DeletedUsersPanel />}
           {tab === "backups" && canBackups && <SystemBackupsPanel />}
+          {tab === "maintenance" && canBackups && <MaintenanceModePanel />}
           {tab === "settings" && canSettings && <SettingsPanel />}
         </>
       )}

@@ -27,6 +27,7 @@ import { checkAccess, startIdleWatchdog, login, confirmMfaSetup, verifyMfa, redi
 import { qrcode } from './vendor/qrcode.js';
 import { closeModal, switchTab, toggleRoute, toggleAdhocExisting, toggleCapacityEdit, toggleNameEdit, toggleCategoryEdit, togglePriceEdit, changePage, setSearch, setPerPage, openRowDetailsFromElement, initSwipeNav, initModalBackdropDismiss, switchDashboardTab, initDashSwipeNav, initSearchClearButtons, downloadTextFile } from './ui.js';
 import { toggleTheme, initThemeToggle } from './theme.js';
+import { initMaintenanceMode, initMaintenanceControls } from './maintenance.js';
 import { refreshDashboard } from './dashboard.js';
 import { initNotificationBell, toggleNotificationDropdown, closeNotificationDropdown, refreshNotifications } from './components/notifications.js';
 
@@ -753,7 +754,10 @@ function checkForPasswordResetLink() {
   return true;
 }
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
+  // Global maintenance gate runs before page-specific data loading.
+  if (await initMaintenanceMode()) return;
+  initMaintenanceControls();
   if (checkForPasswordResetLink()) {
     showAuthScreen('reset-password-screen');
     document.getElementById('reset-password-new')?.focus();

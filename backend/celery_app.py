@@ -130,6 +130,16 @@ celery_app.conf.update(
     # another replica picks it up automatically on its next tick. No
     # manual "only run Beat on one replica" bookkeeping required.
     redbeat_redis_url=settings.REDIS_URL,
+    # Keep RedBeat's Redis client configuration explicit. RedBeat 2.4.x
+    # currently falls back to Celery's `broker_transport_options` when this
+    # is omitted, but that fallback is deprecated and will be removed in a
+    # future RedBeat release. Keeping the same bounded Redis timeouts here
+    # preserves the existing startup/retry behavior without relying on the
+    # deprecated fallback path.
+    redbeat_redis_options={
+        "socket_connect_timeout": 2,
+        "socket_timeout": 2,
+    },
     beat_scheduler="redbeat.RedBeatScheduler",
     # How long the leader's lock is held before it must renew -- longer
     # than beat's own tick interval so a healthy leader always renews in

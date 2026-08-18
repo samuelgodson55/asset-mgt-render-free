@@ -69,9 +69,29 @@ export function Layout() {
   const [headerSearch, setHeaderSearch] = useState("");
   const [searchBusy, setSearchBusy] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
+  const [siteName, setSiteName] = useState("Asset Management");
   const [mobileSearchOpen, setMobileSearchOpen] = useState(false);
   const { user, demo, logout } = useAuth();
   const navigate = useNavigate();
+
+  // The site name is an administrator-controlled setting returned by the
+  // public configuration endpoint. Keep the React shell branded from the
+  // same source as the rest of the application instead of hardcoding
+  // "Ledger" into the navigation chrome.
+  useEffect(() => {
+    let cancelled = false;
+    quotationsApi.publicConfig()
+      .then((config) => {
+        if (cancelled) return;
+        const configuredName = config.site_name?.trim();
+        if (configuredName) setSiteName(configuredName);
+        document.title = configuredName ? `${configuredName} — Asset Management` : "Asset Management";
+      })
+      .catch(() => {
+        if (!cancelled) document.title = "Asset Management";
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   // Owned here, above every routed page, so ANY page (Notifications' "View
   // ->" rows, a directory row, an extension request) can open the same
@@ -302,7 +322,7 @@ export function Layout() {
                 <circle cx="9" cy="9" r="2.4" fill="#0F1219" />
               </svg>
               <div>
-                <p className="font-display font-semibold text-[15px] leading-none text-text">Ledger</p>
+                <p className="font-display font-semibold text-[15px] leading-none text-text">{siteName}</p>
                 <p className="text-[10px] text-text-faint tracking-wide mt-0.5">Asset Management</p>
               </div>
             </div>

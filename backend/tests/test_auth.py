@@ -7,7 +7,7 @@ hardcoded Super Admin identity, and that a JWT actually gates protected
 routes.
 """
 
-from conftest import DEMO_USERS
+from conftest import DEMO_USERS, SUPER_ADMIN
 
 
 def test_login_succeeds_for_every_seeded_role(client):
@@ -106,3 +106,34 @@ def test_update_password_rejects_weak_new_password(as_staff):
         json={"user_id": me["id"], "new_password": "weak", "current_password": "Staff123!"},
     )
     assert response.status_code == 422
+
+
+def test_maintenance_mode_blocks_non_super_admin_login(as_super_admin, client):
+    su_client, headers = as_super_admin
+    enabled = su_client.put(
+        "/api/maintenance/status",
+        headers=headers,
+        json={"enabled": True, "message": "Maintenance test"},
+    )
+    assert enabled.status_code == 200
+    assert enabled.json()["enabled"] is True
+
+    # The login endpoint must remain reachable so the root Super Admin can
+    # complete its MFA flow, but ordinary users must never receive a session
+    # while maintenance is active.
+    for role, creds in DEMO_USERS.items():
+        response = client.post("/api/auth/login", json=creds)
+        assert response.status_code == 503, f"{role} was allowed to log in during maintenance"
+        assert response.json()["detail"] == "The application is currently undergoing maintenance."
+
+
+def test_maintenance_mode_keeps_super_admin_mfa_entry_available(as_super_admin, client):
+    # The root Super Admin is the sole maintenance-mode exception. The
+    # password step may therefore return an MFA challenge (rather than 503),
+    # but must not issue a session cookie until MFA is completed.
+    response = client.post("/api/auth/login", json=SUPER_ADMIN)
+    assert response.status_code == 200
+    body = response.json()
+    assert body.get("role") == "super_admin"
+    assert body.get("mfa_required") or body.get("mfa_setup_required")
+    assert "access_token" not in response.cookies
