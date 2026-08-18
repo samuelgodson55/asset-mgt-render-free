@@ -142,17 +142,30 @@ async function processJs(code, relPath) {
   let output = minified.code || "";
 
   if (mode === "production") {
+    // Keep production obfuscation deliberately conservative.  The legacy
+    // frontend is an event-driven multi-page application: main.js wires
+    // DOMContentLoaded, submit, click, and change handlers at runtime.
+    // javascript-obfuscator's control-flow flattening + dead-code injection
+    // + self-defending combination has historically been able to produce
+    // output that imports cleanly but changes runtime event wiring.  That is
+    // exactly the dangerous failure mode behind the historical "login -> ?"
+    // incident: the page looks healthy, but the submit listener never runs.
+    //
+    // We still obfuscate production JavaScript (compact output, hexadecimal
+    // identifiers, and encoded string literals), but leave program flow and
+    // function identity intact.  This gives us the security/size benefit
+    // without transforming the code paths that browsers use for event
+    // dispatch.  The production CI test deliberately exercises the real
+    // login submit listener after this transformation.
     const obfuscated = JavaScriptObfuscator.obfuscate(output, {
       compact: true,
-      controlFlowFlattening: true,
-      controlFlowFlatteningThreshold: 0.75,
-      deadCodeInjection: true,
-      deadCodeInjectionThreshold: 0.4,
+      controlFlowFlattening: false,
+      deadCodeInjection: false,
       stringArray: true,
       stringArrayEncoding: ["base64"],
       stringArrayThreshold: 0.75,
       identifierNamesGenerator: "hexadecimal",
-      selfDefending: true,
+      selfDefending: false,
       renameGlobals: false,
       disableConsoleOutput: false,
     });

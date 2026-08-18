@@ -755,39 +755,15 @@ function checkForPasswordResetLink() {
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
-  // Global maintenance gate runs before page-specific data loading.
-  if (await initMaintenanceMode()) return;
-  initMaintenanceControls();
-  if (checkForPasswordResetLink()) {
-    showAuthScreen('reset-password-screen');
-    document.getElementById('reset-password-new')?.focus();
-  }
-  checkAccess();
-  startIdleWatchdog();
-  wireDelegatedEvents();
-  initThemeToggle();
-  // GET /config/public needs no auth, and every page -- including the
-  // unauthenticated login page (index.html) -- shows the deployment's
-  // brand name in its navbar/login header and <title>, so this runs here
-  // unconditionally rather than only inside the `if (session)` block
-  // below. See components/quotation.js's loadPublicConfig() /
-  // js/ui.js's applySiteName().
-  loadPublicConfig();
-  // Only does anything on admin.html/manager.html, where the Asset
-  // Inventory / User Directory / Ad-Hoc Directory tabs exist -- a no-op
-  // (returns immediately) on every other page.
-  initSwipeNav();
-  // Only does anything on staff.html/customer.html, where the My Items /
-  // Equipment Quotation top-level tabs exist -- a no-op everywhere else.
-  initDashSwipeNav();
-  // App-wide (every page with a modal) -- lets a click on the dimmed
-  // backdrop behind any modal close it, same as its Cancel/X button.
-  initModalBackdropDismiss();
-
-  // --- Login form + 2FA screens (index.html) ---
-  // See the module-scope pendingMfaToken/showAuthScreen/cancelMfaFlow
-  // declarations near CLICK_ACTIONS above for the shared 2FA state this
-  // handler and the 'cancel-mfa' click action both use.
+  // IMPORTANT: wire the login submit listener BEFORE the first await below.
+  // The maintenance check is asynchronous (it calls /api/config/public), so
+  // putting all form wiring after `await initMaintenanceMode()` creates a
+  // small but real race: a test harness -- or a very fast user interaction --
+  // can dispatch the submit event while the async bootstrap is suspended.
+  // In that window the browser falls back to the native form submission and
+  // the historical `/index.html?` login symptom returns.  The login handler
+  // itself still performs the real authentication request asynchronously;
+  // only the listener registration needs to happen synchronously.
   const loginForm = document.getElementById('login-form');
   if (loginForm) {
     wireSubmitGuard(loginForm, async (e) => {
@@ -822,6 +798,37 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     });
   }
+
+  // Global maintenance gate runs before page-specific data loading.
+  // This is intentionally the first async operation, but it can no longer
+  // prevent the login listener above from being registered.
+  if (await initMaintenanceMode()) return;
+  initMaintenanceControls();
+  if (checkForPasswordResetLink()) {
+    showAuthScreen('reset-password-screen');
+    document.getElementById('reset-password-new')?.focus();
+  }
+  checkAccess();
+  startIdleWatchdog();
+  wireDelegatedEvents();
+  initThemeToggle();
+  // GET /config/public needs no auth, and every page -- including the
+  // unauthenticated login page (index.html) -- shows the deployment's
+  // brand name in its navbar/login header and <title>, so this runs here
+  // unconditionally rather than only inside the `if (session)` block
+  // below. See components/quotation.js's loadPublicConfig() /
+  // js/ui.js's applySiteName().
+  loadPublicConfig();
+  // Only does anything on admin.html/manager.html, where the Asset
+  // Inventory / User Directory / Ad-Hoc Directory tabs exist -- a no-op
+  // (returns immediately) on every other page.
+  initSwipeNav();
+  // Only does anything on staff.html/customer.html, where the My Items /
+  // Equipment Quotation top-level tabs exist -- a no-op everywhere else.
+  initDashSwipeNav();
+  // App-wide (every page with a modal) -- lets a click on the dimmed
+  // backdrop behind any modal close it, same as its Cancel/X button.
+  initModalBackdropDismiss();
 
   const mfaVerifyForm = document.getElementById('mfa-verify-form');
   if (mfaVerifyForm) {
