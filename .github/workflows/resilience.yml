@@ -72,7 +72,15 @@ jobs:
           --max-p95-ms ${{ inputs.max_p95_ms }}
 
       - name: P1 dependency chaos test
-        run: ./scripts/chaos-test.sh
+        # Invoked via `bash` after an explicit `chmod +x`, not run directly
+        # -- same fix as ci.yml's nginx-config job applies to
+        # nginx/test-config.sh: a script can lose its executable bit across
+        # certain zip exports or a Windows checkout, which fails with
+        # "Permission denied" / exit code 126 even though the script itself
+        # is fine. See that job's own comment for the full story.
+        run: |
+          chmod +x ./scripts/chaos-test.sh
+          bash ./scripts/chaos-test.sh
 
       - name: Collect service state on failure
         if: failure()
