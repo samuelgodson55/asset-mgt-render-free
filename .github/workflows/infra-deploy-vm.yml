@@ -843,7 +843,7 @@ jobs:
 
       - name: Upload deployment failure diagnostics
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: terraform-deployment-failure-${{ github.run_id }}
           path: infra-vm/terraform-debug-artifact/
