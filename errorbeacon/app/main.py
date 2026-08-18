@@ -1237,7 +1237,7 @@ def keyboard(incident_id):
             buttons.extend([{'text':'🔕 1h','callback_data':f'silence:{incident_id}:3600'},{'text':'🔕 4h','callback_data':f'silence:{incident_id}:14400'},{'text':'🔕 24h','callback_data':f'silence:{incident_id}:86400'}])
     return {'inline_keyboard':[buttons[:4],buttons[4:]] if len(buttons)>4 else [buttons]}
 
-def telegram_message(e,i,occ,analysis=None,spike=False,regression=False):
+def telegram_message(e,i,occ,analysis=None,spike=False,regression=False,provider=None):
     parts=[f'🚨 <b>ErrorBeacon {html.escape(classify(e).upper())}</b>']
     if e.category == 'chaos_test':
         parts.append('🧪 <b>CONTROLLED CHAOS TEST</b>')
@@ -1264,14 +1264,16 @@ def telegram_message(e,i,occ,analysis=None,spike=False,regression=False):
         parts.append(f'<b>Release:</b> <code>{html.escape(e.release[:200])}</code>')
     parts += [f'<b>Occurrences:</b> {occ}', f'<b>Incident:</b> <code>{html.escape(i)}</code>']
     if analysis and str(analysis).strip():
-        parts.append('\n<b>🤖 AI Analysis</b>\n'+html.escape(redact(analysis,1700)))
+        header = f'\n<b>🤖 AI Analysis (via {html.escape(provider)})</b>\n' if provider else '\n<b>🤖 AI Analysis</b>\n'
+        parts.append(header+html.escape(redact(analysis,1700)))
     if e.traceback:
         parts.append('\n<b>Traceback</b>\n<pre>'+html.escape(redact(e.traceback,1300))+'</pre>')
     text='\n'.join(parts)
     if len(text)>4080 and e.traceback:
         text='\n'.join(parts[:-1])
     if len(text)>4080 and analysis:
-        ai_part='\n<b>🤖 AI Analysis</b>\n'+html.escape(redact(analysis,900))
+        ai_header = f'\n<b>🤖 AI Analysis (via {html.escape(provider)})</b>\n' if provider else '\n<b>🤖 AI Analysis</b>\n'
+        ai_part=ai_header+html.escape(redact(analysis,900))
         base='\n'.join(parts[:(-2 if e.traceback else -1)])
         text=base+'\n'+ai_part
     if len(text)>4080:
@@ -1350,7 +1352,7 @@ def _save_ai_and_notify(e,i,occ,spike,regression,a,provider_name=None):
 
     result = tg_delivery(
         'sendMessage',
-        telegram_message(e,i,occ,a,spike,regression),
+        telegram_message(e,i,occ,a,spike,regression,provider=provider_name),
         keyboard(i),
     )
     with _db_lock:
@@ -1397,6 +1399,7 @@ def _retry_ai_telegram(x):
         telegram_message(
             e,x['id'],x['occurrence_count'],a,
             bool(x['spike_detected']),bool(x['deployment_regression']),
+            provider=x['ai_provider_used'],
         ),
         keyboard(x['id']),
     )

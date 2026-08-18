@@ -31,6 +31,23 @@ jobs:
         with:
           python-version: '3.11'
 
+      # docker-compose.yml deliberately has NO fallback for JWT_SECRET_KEY
+      # (`${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in your .env file}`) -- every
+      # other var it interpolates (POSTGRES_PASSWORD, DATABASE_URL, the
+      # ERRORBEACON_*/TELEGRAM_* keys, ...) has a working `:-default` that's
+      # fine for a disposable CI run, so this is the one value this job
+      # actually has to supply itself. This runner has no repo `.env` (it's
+      # gitignored, see .env.example's own header) and no persistent VM to
+      # carry one across runs the way deploy-azure-vm.yml's SSH+`.env` step
+      # does, so a fresh throwaway secret is generated on every run instead
+      # -- nothing here needs to be stable across runs, it just needs to
+      # exist and be long enough that config.py's production-mode length
+      # check would pass too (it doesn't apply at ENVIRONMENT=development,
+      # docker-compose.yml's default here, but there's no reason to ship a
+      # value that would fail it).
+      - name: Generate ephemeral .env for this run
+        run: echo "JWT_SECRET_KEY=$(openssl rand -hex 32)" >> .env
+
       - name: Build and start local stack
         run: docker compose up -d --build
 
