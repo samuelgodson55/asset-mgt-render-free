@@ -7,8 +7,12 @@ import "./index.css";
 import App from "./App.tsx";
 import { installGlobalErrorBeacon } from "./lib/errorbeacon";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { installBrowserTelemetry } from "./lib/browserTelemetry";
 
 installGlobalErrorBeacon();
+// Telemetry initialization is deliberately fire-and-forget. The application
+// renders immediately even if /api/config/public or the collector is down.
+void installBrowserTelemetry();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

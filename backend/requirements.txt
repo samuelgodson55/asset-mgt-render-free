@@ -36,57 +36,33 @@ google-api-python-client==2.198.0
 google-auth==2.34.0
 
 # --- Distributed tracing (OpenTelemetry -- see backend/telemetry.py) -------
-# Always installed (even though every function in telemetry.py stays a
-# no-op until settings.OTEL_ENABLED is set true -- see that file's module
-# docstring) so flipping the flag on later never requires a fresh image
-# build/rollout, just a config change. `opentelemetry-exporter-otlp-proto-
-# grpc` is deliberately NOT listed here: HTTP/protobuf (the default --
-# OTEL_EXPORTER_OTLP_PROTOCOL in config.py) needs nothing beyond `requests`
-# (already a transitive dependency of several packages above) and works
-# through any outbound HTTP proxy/firewall a corporate network might
-# enforce; add that package yourself if you specifically want the lower-
-# overhead gRPC transport (see telemetry.py's setup_tracing() for where
-# OTEL_EXPORTER_OTLP_PROTOCOL="grpc" is read).
-opentelemetry-api==1.27.0
-opentelemetry-sdk==1.27.0
-opentelemetry-exporter-otlp-proto-http==1.27.0
-opentelemetry-instrumentation-fastapi==0.48b0
-opentelemetry-instrumentation-sqlalchemy==0.48b0
-opentelemetry-instrumentation-celery==0.48b0
-opentelemetry-instrumentation-redis==0.48b0
-opentelemetry-instrumentation-logging==0.48b0
-# Lets telemetry.py export spans straight to an Azure Application Insights
-# resource (via APPLICATIONINSIGHTS_CONNECTION_STRING -- see config.py and
-# infra/main.bicep's `otelAzureMonitorEnabled` param) using the SAME
-# manually-configured TracerProvider/instrumentors above, as one more
-# BatchSpanProcessor alongside the generic OTLP one -- NOT the separate,
-# heavier `azure-monitor-opentelemetry` "distro" package, which does its
-# own auto-instrumentation and would double-instrument everything this
-# file already instruments by hand. Pinned to a `~=1.26`-compatible
-# release (see opentelemetry-api/-sdk above) rather than latest, which
-# currently drags in opentelemetry-sdk 1.43.x and breaks the pins above.
-azure-monitor-opentelemetry-exporter==1.0.0b34
-# BUG FIX / PIN: every opentelemetry-instrumentation-* package above
-# imports `pkg_resources` (to check installed-package versions against
-# what it supports) the moment it's imported -- not only when
-# OTEL_ENABLED=true actually calls `.instrument()`. `pkg_resources` used
-# to ship inside `setuptools`, but setuptools>=81 dropped it entirely, and
-# neither this app's Docker image (backend/Dockerfile's `python -m venv`)
-# nor a bare `python -m venv` anywhere else bundles setuptools by default
-# on modern Python -- so without this pin, a perfectly correct `pip
-# install -r requirements.txt` can still produce a container that raises
-# `ModuleNotFoundError: No module named 'pkg_resources'` the instant any
-# api/*.py route that happens to import telemetry.py's lazy-imported
-# instrumentors runs. Pinning below <81 keeps `pkg_resources` present and
-# working; bump this once the opentelemetry-instrumentation-* packages
-# above no longer need it (upstream is actively migrating away from it).
-# NOTE: `pip-audit` (ci.yml's non-blocking scan step) will flag this pin
-# against PYSEC-2026-3447 -- a MANIFEST.in exclusion bypass that only
-# matters when BUILDING a source distribution (`python -m build --sdist`)
-# on a normalization-preserving filesystem (macOS APFS/HFS+). This app
-# never builds an sdist of anything, in Docker or otherwise -- irrelevant
-# here, and the tradeoff (an unpinned/>=81 setuptools breaks
-# pkg_resources outright, per this comment's own opening paragraph) isn't
-# close.
-setuptools<81
+# Keep the core API/SDK/exporter versions aligned. OpenTelemetry's Python
+# contrib release train uses the same minor release family as the core SDK:
+# 0.64b0 is the contrib line paired with the 1.43.x core line.
+#
+# These versions also match the Azure Monitor exporter below. Keeping the
+# whole stack on one compatible release train is important because mixing
+# the older 0.48b0/1.27.0 instrumentation with a newer exporter can produce
+# dependency conflicts and, more subtly, runtime instrumentation failures.
+#
+# The packages remain installed even when OTEL_ENABLED=false so enabling
+# tracing is a configuration-only change rather than requiring a new image.
+# HTTP/protobuf is still the default transport. The gRPC exporter is not
+# installed unless an operator explicitly needs OTEL_EXPORTER_OTLP_PROTOCOL=grpc.
+opentelemetry-api==1.43.0
+opentelemetry-sdk==1.43.0
+opentelemetry-exporter-otlp-proto-http==1.43.0
+opentelemetry-instrumentation-fastapi==0.64b0
+opentelemetry-instrumentation-sqlalchemy==0.64b0
+opentelemetry-instrumentation-celery==0.64b0
+opentelemetry-instrumentation-redis==0.64b0
+opentelemetry-instrumentation-logging==0.64b0
+# Export spans directly to Azure Application Insights when
+# APPLICATIONINSIGHTS_CONNECTION_STRING is configured. This is the exporter
+# package only -- deliberately NOT the azure-monitor-opentelemetry distro,
+# because telemetry.py owns provider creation and instrumentation explicitly.
+#
+# b56 declares opentelemetry-api/sdk~=1.43.0, so it intentionally stays on
+# the same 1.43.x core line above.
+azure-monitor-opentelemetry-exporter==1.0.0b56
 pypdf==5.9.0

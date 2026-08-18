@@ -758,35 +758,31 @@ Terraform → `cloud-init.yaml` first-boot → `sync-secrets-vm.yml`
 ongoing-sync chain as the SLA-nudge settings above
 (`infra-vm/variables.tf`'s `send_quotation_recipient_emails`).
 
-Also optional — distributed tracing (OpenTelemetry, off by default; see
-`README.md`'s **Distributed Tracing** section for the full walkthrough,
-which covers this VM path via `docker-compose.vm.yml`'s opt-in `jaeger`
-service the same way it covers local Docker Compose):
-`OTEL_ENABLED` (**Variable**), `OTEL_SERVICE_NAME` (**Variable**),
-`OTEL_EXPORTER_OTLP_ENDPOINT` (**Variable** — defaults to this VM's own
-`jaeger` service, no need to set it yourself for that path),
-`OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_TRACES_SAMPLE_RATIO` (**Variable**),
-`OTEL_CONSOLE_EXPORTER` (**Variable**), `APPLICATIONINSIGHTS_CONNECTION_STRING`
-(only if pointing this VM at an Application Insights resource you
-provisioned some other way — this VM path doesn't provision one itself,
-unlike the Container Apps path's `infra/main.bicep`).
+Also optional — distributed tracing (OpenTelemetry, off by default). See
+[`README.md`'s Distributed Tracing section](README.md#distributed-tracing-opentelemetry)
+and [`docs/TELEMETRY.md`](docs/TELEMETRY.md) for the deployment-specific
+walkthrough.
 
-Also optional — app config overrides (all **Variables**, each with a
-working default baked into `sync-secrets-vm.yml` if left unset, so none
-of these are required for a working deploy): `POSTGRES_USER` (default
-`admin`), `POSTGRES_DB` (default `asset_db`), `JWT_ALGORITHM` (default
-`HS256`), `JWT_EXPIRY_HOURS` (default `12`), `SITE_NAME` (default
-`Snipe-IT Lite`), `ENABLE_API_DOCS` (default `false`), `SMTP_PORT`
-(default `587`), `DISPLAY_TIMEZONE` (default `Africa/Lagos`),
-`CURRENCY_CODE` (default `NGN`), `ENABLE_AUTO_BACKUP` (default `true`).
-See [Environment Variables Reference](README.md#environment-variables-reference)
-in `README.md` for what each one actually does.
+For this Terraform VM path:
 
-Also optional — per-service memory tuning (all **Variables**; see [Per-service
-memory limits](#per-service-memory-limits) below for what each defends
-against and its default): `DB_MEM_LIMIT`, `DB_MEM_RESERVATION`,
-`REDIS_MEM_LIMIT`, `REDIS_MEM_RESERVATION`, `BACKEND_MEM_LIMIT`,
-`BACKEND_MEM_RESERVATION`, `WORKER_MEM_LIMIT`, `WORKER_MEM_RESERVATION`,
+- Set `OTEL_ENABLED=true` to enable tracing.
+- `OTEL_EXPORTER_OTLP_ENDPOINT` defaults to `http://jaeger:4318`, the
+  internal Docker service.
+- Jaeger is an opt-in Compose profile; start it with
+  `docker compose -f docker-compose.vm.yml --profile tracing up -d`.
+- **Jaeger's UI is SSH-only.** The VM Compose file deliberately does not
+  publish 16686, 4317, or 4318 to the VM host/public interface.
+- From your workstation use
+  `ssh -L 16686:127.0.0.1:16686 <ssh-user>@<vm-host>`, then open
+  `http://localhost:16686`.
+- Do **not** add an Azure NSG rule for port 16686 and do not publish
+  `16686:16686` or `4317/4318` from `docker-compose.vm.yml`.
+- `OTEL_SERVICE_NAME`, `OTEL_EXPORTER_OTLP_HEADERS`,
+  `OTEL_TRACES_SAMPLE_RATIO`, `OTEL_CONSOLE_EXPORTER`, and
+  `APPLICATIONINSIGHTS_CONNECTION_STRING` remain available for the VM path
+  when you intentionally use another collector/destination.
+
+ `WORKER_MEM_LIMIT`, `WORKER_MEM_RESERVATION`,
 `BEAT_MEM_LIMIT`, `BEAT_MEM_RESERVATION`, `FRONTEND_MEM_LIMIT`,
 `FRONTEND_MEM_RESERVATION`, `CADDY_MEM_LIMIT`, `CADDY_MEM_RESERVATION`.
 Setting these here (rather than hand-editing `/opt/snipeit/.env` on the

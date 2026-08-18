@@ -249,6 +249,17 @@ def get_public_config(db: Session | None = None) -> dict:
         "site_name": settings.SITE_NAME,
         "maintenance_mode": status["enabled"],
         "maintenance_message": status["message"],
+        # This is deliberately a boolean only. It lets the browser obey the
+        # SAME master OTEL_ENABLED switch without exposing exporter URLs,
+        # credentials, or any backend-only telemetry configuration.
+        "otel_enabled": (
+            settings.OTEL_ENABLED
+            and bool(settings.OTEL_EXPORTER_OTLP_ENDPOINT)
+            and settings.OTEL_EXPORTER_OTLP_PROTOCOL.lower() != "grpc"
+        ),
+        # Reuse the backend sampling decision so browser-created root traces
+        # have the same approximate sampling rate as backend-created roots.
+        "otel_trace_sample_ratio": settings.OTEL_TRACES_SAMPLE_RATIO,
     }
 
 

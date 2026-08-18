@@ -1120,13 +1120,13 @@ services:
   # with OTEL_ENABLED=true in /opt/snipeit/.env (see .env.example).
   #
   # DELIBERATELY no host `ports:` publish here, unlike docker-compose.yml's
-  # version (which is fine publishing to localhost on a developer's own
-  # laptop) -- this is a shared VM, and Jaeger's UI/OTLP receiver ship with
-  # no authentication of their own. Reach the UI over the same Cloudflare
-  # Tunnel used for SSH instead (see DEPLOYMENT_VM.md), e.g.
-  # `ssh -L 16686:localhost:16686 <ssh_hostname>` for the UI; backend/worker/
-  # beat above already reach the OTLP receiver over the internal
-  # "jaeger:4318" service name and need no port publish at all.
+  # local-development version. This is a shared VM and Jaeger's UI/OTLP
+  # receiver do not provide the application's authentication boundary.
+  # The UI is therefore SSH-only: from the administrator's workstation use
+  # `ssh -L 16686:127.0.0.1:16686 <ssh-user>@<vm-host>`, then open
+  # `http://localhost:16686`. Do NOT expose 16686 through the Azure NSG.
+  # Backend/worker/beat reach OTLP over the internal "jaeger:4318" service
+  # name and need no host port publish at all.
   #
   # Jaeger v2 (OTLP enabled on 4317/4318 by default) -- see
   # docker-compose.yml's `jaeger` service for the full writeup.

@@ -245,3 +245,39 @@ def test_client_error_requires_message(client, monkeypatch):
     response = client.post("/api/telemetry/client-error", json={})
 
     assert response.status_code == 422
+
+
+def test_public_config_reports_browser_otel_only_when_http_export_is_configured(monkeypatch):
+    """The public flag never exposes exporter secrets and follows OTEL_ENABLED."""
+    from config import settings
+    from services.quotation_service import get_public_config
+
+    class FakeDB:
+        pass
+
+    monkeypatch.setattr(settings, "OTEL_ENABLED", False)
+    monkeypatch.setattr(settings, "OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318")
+    monkeypatch.setattr(settings, "OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
+    monkeypatch.setattr(settings, "OTEL_TRACES_SAMPLE_RATIO", 0.25)
+
+    # The service's maintenance lookup is isolated here so the assertion
+    # covers only the telemetry fields added to the public configuration.
+    import services.maintenance_service as maintenance_service
+    monkeypatch.setattr(
+        maintenance_service,
+        "get_status",
+        lambda _db: {"enabled": False, "message": ""},
+    )
+
+    config = get_public_config(FakeDB())
+    assert config["otel_enabled"] is False
+    assert config["otel_trace_sample_ratio"] == 0.25
+
+    monkeypatch.setattr(settings, "OTEL_ENABLED", True)
+    config = get_public_config(FakeDB())
+    assert config["otel_enabled"] is True
+
+    monkeypatch.setattr(settings, "OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
+    config = get_public_config(FakeDB())
+    assert config["otel_enabled"] is False
+

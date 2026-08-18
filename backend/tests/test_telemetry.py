@@ -182,6 +182,41 @@ def test_setup_tracing_enabled_configures_provider_and_is_idempotent(_reset_trac
     assert second is True
 
 
+def test_setup_tracing_enables_trace_context_in_log_records(_reset_tracing, monkeypatch):
+    """
+    Regression test for the OpenTelemetry logging stack upgrade.
+
+    Newer opentelemetry-instrumentation-logging releases make trace-context
+    injection opt-in. The application deliberately keeps its existing logging
+    format, so setup_tracing() must request injection explicitly instead of
+    enabling set_logging_format=True (which would change the application's
+    output format).
+    """
+    import opentelemetry.instrumentation.logging as otel_logging
+
+    captured = {}
+
+    class _FakeLoggingInstrumentor:
+        def instrument(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(
+        otel_logging,
+        "LoggingInstrumentor",
+        _FakeLoggingInstrumentor,
+    )
+
+    enabled = _fake_settings(
+        OTEL_ENABLED=True,
+        OTEL_CONSOLE_EXPORTER=True,
+    )
+    assert telemetry.setup_tracing(enabled) is True
+    assert captured == {
+        "set_logging_format": False,
+        "inject_trace_context": True,
+    }
+
+
 def test_setup_tracing_http_otlp_endpoint_gets_v1_traces_path_appended(_reset_tracing, monkeypatch):
     """
     Regression test for a real bug: OTLPSpanExporter (http/protobuf) only

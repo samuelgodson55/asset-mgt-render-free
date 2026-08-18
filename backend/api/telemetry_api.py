@@ -30,6 +30,12 @@ instead of a second, weaker one.
 """
 
 import json
+import logging
+from urllib.error import URLError
+from urllib.request import Request as UrlRequest
+from urllib.request import urlopen
+
+from starlette.concurrency import run_in_threadpool
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field, field_validator
@@ -38,6 +44,8 @@ from config import settings
 from integrations.fastapi_errorbeacon import report_client_event
 from utils.client_ip import resolve_client_ip
 from utils.rate_limiter import RedisFixedWindowLimiter
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(prefix="/telemetry", tags=["telemetry"])
@@ -55,6 +63,19 @@ _limiter = RedisFixedWindowLimiter(
     max_requests=20,
     window_seconds=60,
 )
+
+# Browser OTLP is intentionally a server-side proxy. The browser never sees
+# OTEL_EXPORTER_OTLP_HEADERS (which may contain an API key) and never talks
+# directly to a collector that requires those credentials. The proxy is
+# enabled only when the same OTEL_ENABLED master switch is on and the backend
+# has an OTLP/HTTP endpoint configured.
+_trace_limiter = RedisFixedWindowLimiter(
+    settings.REDIS_URL,
+    key_prefix="rl:otel-browser-traces",
+    max_requests=120,
+    window_seconds=60,
+)
+MAX_TRACE_BODY_BYTES = 256 * 1024
 
 MAX_CONTEXT_BYTES = 32768
 MAX_CONTEXT_DEPTH = 10
@@ -94,6 +115,96 @@ class ClientErrorPayload(BaseModel):
     def validate_context(cls, value):
         return _validate_context(value)
 
+
+
+def _browser_otlp_endpoint() -> str | None:
+    """Return the configured OTLP/HTTP trace URL, or None when unavailable.
+
+    Browser telemetry deliberately does not support the backend's gRPC
+    exporter. The standard OTLP/HTTP JSON encoding is used here so the
+    browser can send standards-compliant traces without shipping a second
+    binary protobuf runtime into the React bundle.
+    """
+    if not settings.OTEL_ENABLED:
+        return None
+    if settings.OTEL_EXPORTER_OTLP_PROTOCOL.lower() == "grpc":
+        return None
+    endpoint = settings.OTEL_EXPORTER_OTLP_ENDPOINT.strip()
+    if not endpoint:
+        return None
+    return endpoint if endpoint.rstrip("/").endswith("/v1/traces") else f"{endpoint.rstrip('/')}/v1/traces"
+
+
+def _forward_browser_trace(body: bytes, endpoint: str) -> None:
+    """Forward one already-validated OTLP/HTTP JSON batch using server secrets."""
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    # OTEL_EXPORTER_OTLP_HEADERS stays server-side; it is never serialized
+    # into the browser bundle or returned by /api/config/public.
+    for pair in settings.OTEL_EXPORTER_OTLP_HEADERS.split(","):
+        pair = pair.strip()
+        if not pair or "=" not in pair:
+            continue
+        key, _, value = pair.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if key:
+            headers[key] = value
+
+    request = UrlRequest(endpoint, data=body, headers=headers, method="POST")
+    with urlopen(request, timeout=5) as response:
+        response.read(4096)
+
+
+@router.post("/traces", status_code=202)
+async def browser_traces(request: Request):
+    """Receive browser OTLP/HTTP JSON and forward it without blocking the app.
+
+    The endpoint intentionally returns 202 even if the upstream collector is
+    unavailable. Telemetry must never turn a working asset-management request
+    into an application error. The browser exporter is fire-and-forget and
+    retries its own batch later.
+    """
+    endpoint = _browser_otlp_endpoint()
+    if endpoint is None:
+        return {"accepted": False, "reason": "browser_otel_unavailable"}
+
+    ip = resolve_client_ip(
+        request.headers.get,
+        request.client.host if request.client else None,
+    )
+    blocked, _retry_after = _trace_limiter.check(ip)
+    if blocked:
+        return {"accepted": False, "reason": "rate_limited"}
+
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > MAX_TRACE_BODY_BYTES:
+                return {"accepted": False, "reason": "payload_too_large"}
+        except ValueError:
+            return {"accepted": False, "reason": "invalid_content_length"}
+
+    body = await request.body()
+    if len(body) > MAX_TRACE_BODY_BYTES:
+        return {"accepted": False, "reason": "payload_too_large"}
+
+    try:
+        payload = json.loads(body)
+        resource_spans = payload.get("resourceSpans")
+        if not isinstance(resource_spans, list) or not resource_spans:
+            return {"accepted": False, "reason": "invalid_otlp_payload"}
+    except (json.JSONDecodeError, TypeError):
+        return {"accepted": False, "reason": "invalid_json"}
+
+    try:
+        await run_in_threadpool(_forward_browser_trace, body, endpoint)
+    except (OSError, URLError, TimeoutError, ValueError) as exc:
+        # Exporter failures are deliberately isolated from application logic.
+        logger.warning("browser OTLP export failed: %s", exc)
+    return {"accepted": True}
 
 @router.post("/client-error", status_code=202)
 def client_error(payload: ClientErrorPayload, request: Request):

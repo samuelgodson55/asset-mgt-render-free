@@ -33,6 +33,7 @@ ALLOWLIST_PREFIXES = (
     "/api/config/public",
     "/api/maintenance/",
     "/api/telemetry/client-error",
+    "/api/telemetry/traces",
     "/api/health",
     "/health",
     "/healthz",

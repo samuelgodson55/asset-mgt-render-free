@@ -2050,12 +2050,58 @@ it's what shows up in Jaeger's/Application Insights' service picker
 from it), so change it if you're running more than one deployment of
 this app and want to tell their traces apart in a shared collector.
 
+### Browser tracing and safety
+
+The React browser participates in the same distributed trace when
+OpenTelemetry is enabled. It emits standards-compliant OTLP/HTTP JSON spans
+and W3C `traceparent` headers; FastAPI continues that trace and the existing
+SQLAlchemy/Redis/Celery instrumentation remains underneath it. A typical
+waterfall is:
+
+```text
+Browser: ui.click.Checkout
+  └── Browser: POST /api/checkouts
+        └── Backend: POST /api/checkouts
+              ├── PostgreSQL: SELECT ...
+              ├── PostgreSQL: UPDATE ...
+              └── Redis: ...
+```
+
+Browser tracing is controlled by the **same** `OTEL_ENABLED` setting. The
+browser receives only non-secret `otel_enabled` and
+`otel_trace_sample_ratio` values from `/api/config/public`.
+
+The browser posts batches to the same-origin `POST /api/telemetry/traces`.
+The backend proxies those batches to `OTEL_EXPORTER_OTLP_ENDPOINT` and adds
+`OTEL_EXPORTER_OTLP_HEADERS` server-side, so API keys/tokens never enter the
+React bundle or browser requests. The endpoint is bounded to 256 KiB and
+rate-limited.
+
+For browser tracing, use an **OTLP/HTTP** collector endpoint. The browser
+proxy intentionally does not support the backend's gRPC exporter. If the
+backend is using only an Application Insights connection string and no
+OTLP/HTTP endpoint, backend tracing can still work, but browser spans remain
+disabled.
+
+The browser records API request method/path/status and safe UI action names.
+It deliberately does **not** record cookies, Authorization headers, request
+bodies, response bodies, passwords, query strings, or arbitrary visible form
+text. Telemetry failures are fire-and-forget and never cause an application
+request to fail.
+
+For local Jaeger, keep `OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318`.
+The browser never receives the Docker-internal `jaeger` hostname; it always
+posts to the application's same-origin telemetry proxy.
+
 ### Try it locally in 3 steps (no Azure account needed)
 
 1. Set `OTEL_ENABLED=true` in your `.env` (see `.env.example`).
 2. `docker compose --profile tracing up` — this also starts a local
    Jaeger UI (`docker-compose.yml`'s `jaeger` service), which every
    backend/worker/beat container already points at by default.
+   RUN ```
+   docker compose --profile tracing up
+   ```
 3. Use the app for a bit (log in, check something out, trigger an
    export), then open **http://localhost:16686**. Pick `backend` (or
    `backend-worker`) from the Service dropdown, click Find Traces, and
@@ -2137,6 +2183,58 @@ there to dial down ingestion further if you ever do.
    `SRE_STRATEGY.md`'s existing alert queries already use for container
    logs — traces just show up as more tables (`requests`, `dependencies`)
    in the same place.
+
+### Deployment paths and safe access
+
+Telemetry uses the same `OTEL_ENABLED` switch in every deployment. The
+collector/viewer is a deployment choice; enabling tracing does **not** require
+making Jaeger's UI or OTLP ports public.
+
+| Deployment | Trace destination | How to view traces |
+|---|---|---|
+| Local Docker Compose | Jaeger at `jaeger:4318` | Open `http://localhost:16686` on the development machine |
+| Terraform-managed Azure VM | Jaeger at `jaeger:4318` on the VM's private Docker network | **SSH tunnel only:** `ssh -L 16686:127.0.0.1:16686 <ssh-user>@<vm-host>` then open `http://localhost:16686` locally |
+| Azure Container Apps | Application Insights, when `OTEL_AZURE_MONITOR_ENABLED=true` | Azure Portal → Application Insights → Transaction search / Application Map |
+| Any deployment with an OTLP/HTTP collector | The configured `OTEL_EXPORTER_OTLP_ENDPOINT` | Use that collector's UI (for example, Grafana Cloud, Honeycomb, or a self-hosted collector backend) |
+
+#### Terraform VM: Jaeger is SSH-only
+
+The VM Compose file deliberately publishes **neither 16686 nor 4317/4318 to
+the VM host**. Backend, worker, and beat containers send OTLP to the internal
+`jaeger:4318` service name.
+
+To inspect Jaeger from your own workstation:
+
+```bash
+ssh -L 16686:127.0.0.1:16686 <ssh-user>@<vm-host>
+```
+
+Keep that SSH session open and browse to:
+
+```text
+http://localhost:16686
+```
+
+Close the SSH session when finished. **Do not add an Azure NSG rule for
+16686, do not publish `16686:16686` in `docker-compose.vm.yml`, and do not
+publish 4317/4318 to the public interface.** Jaeger's UI and OTLP receivers
+do not provide the application authentication boundary, so SSH is the
+intended administrative access path for this shared VM.
+
+If the VM is reached through an SSH-capable access mechanism rather than a
+direct public SSH address, use that mechanism's normal SSH hostname in the
+same `-L` command. The important property is that the remote end of the
+tunnel is `127.0.0.1:16686` on the VM.
+
+The Jaeger service is opt-in on the VM. Enable `OTEL_ENABLED=true` in the VM
+environment and start the tracing Compose profile:
+
+```bash
+docker compose -f docker-compose.vm.yml --profile tracing up -d
+```
+
+Then use the SSH tunnel above. The complete VM procedure is also documented
+in `DEPLOYMENT_VM.md` and `docs/TELEMETRY.md`.
 
 ### Fast paths that don't require opening Jaeger at all
 

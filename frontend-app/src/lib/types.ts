@@ -368,6 +368,11 @@ export interface PublicConfig {
   show_stock_to_staff_customer?: boolean;
   maintenance_mode: boolean;
   maintenance_message: string;
+  // Browser tracing follows the backend's single OTEL_ENABLED master switch.
+  // The backend only reports true when a browser-safe OTLP/HTTP export path
+  // is actually configured; no exporter URL or secret is exposed here.
+  otel_enabled?: boolean;
+  otel_trace_sample_ratio?: number;
 }
 
 export interface CatalogAsset {

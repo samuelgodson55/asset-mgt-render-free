@@ -290,7 +290,14 @@ def setup_tracing(settings, service_name: Optional[str] = None) -> bool:
     # it was logged -- see this module's docstring for exactly what this
     # adds and why logging_config.py needs no changes to pick it up.
     from opentelemetry.instrumentation.logging import LoggingInstrumentor
-    LoggingInstrumentor().instrument(set_logging_format=False)
+    # Keep the application's existing log format, but explicitly opt in to
+    # trace-context fields. Newer OpenTelemetry logging instrumentation makes
+    # this injection opt-in; relying on the old implicit behavior would silently
+    # remove otelTraceID/otelSpanID from otherwise valid structured log records.
+    LoggingInstrumentor().instrument(
+        set_logging_format=False,
+        inject_trace_context=True,
+    )
 
     _tracing_configured = True
     return True
@@ -367,7 +374,10 @@ def instrument_fastapi_app(app, settings) -> None:
         from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
     except ImportError:
         return
-    FastAPIInstrumentor.instrument_app(app, excluded_urls="healthz,readyz")
+    FastAPIInstrumentor.instrument_app(
+        app,
+        excluded_urls="healthz,readyz,telemetry/traces,telemetry/client-error",
+    )
 
 
 def instrument_sqlalchemy_engine(engine, settings) -> None:
