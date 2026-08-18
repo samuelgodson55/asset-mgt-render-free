@@ -349,13 +349,29 @@ def decide_extension_request(db: Session, request_id: int, decision: ExtensionDe
     different date than what was originally requested, otherwise to
     exactly what was requested.
     """
-    extension_request = db.query(models.ExtensionRequest).filter(models.ExtensionRequest.id == request_id).first()
+    # Serialize concurrent decisions on this exact request -- same reasoning
+    # as checkout_service.return_checkout()'s row lock: without it, two
+    # privileged users acting on the same pending request at once (e.g. one
+    # approves while another denies) can both pass the `status != "pending"`
+    # check before either commits, and whichever commit lands last silently
+    # wins the `status` column -- even though the OTHER decision's side
+    # effect (checkout.due_date changed, on approve) already went through.
+    # Locking here makes the second transaction block until the first
+    # commits, so it correctly re-reads "already decided" and is rejected.
+    extension_request = db.query(models.ExtensionRequest).filter(
+        models.ExtensionRequest.id == request_id
+    ).with_for_update().first()
     if not extension_request:
         raise HTTPException(status_code=404, detail="Extension request not found.")
     if extension_request.status != "pending":
         raise HTTPException(status_code=400, detail=f"This request was already {extension_request.status}.")
 
-    checkout = extension_request.checkout
+    # Lock the checkout row too: approving writes checkout.due_date, and
+    # extend_checkout_directly() below can be mutating the very same row
+    # concurrently through the other extension path.
+    checkout = db.query(models.AssetCheckout).filter(
+        models.AssetCheckout.id == extension_request.checkout_id
+    ).with_for_update().first()
     if not checkout:
         raise HTTPException(status_code=404, detail="The underlying checkout record no longer exists.")
 
@@ -440,9 +456,15 @@ def extend_checkout_directly(db: Session, checkout_id: int, req: DirectExtension
     a Manager can do this for any active checkout, same as an Admin/Super
     Admin.
     """
+    # Same row-lock reasoning as decide_extension_request() above -- without
+    # it, two concurrent direct-extension calls on the same checkout (or one
+    # of these racing a concurrent decide_extension_request() approval) can
+    # both read the same stale due_date, both pass the "must be later" check
+    # against it, and both commit -- silently losing whichever one committed
+    # first instead of correctly re-validating against it.
     checkout = db.query(models.AssetCheckout).filter(
         models.AssetCheckout.id == checkout_id, models.AssetCheckout.status == "active"
-    ).first()
+    ).with_for_update().first()
     if not checkout:
         raise HTTPException(status_code=404, detail="Active checkout record not found.")
 

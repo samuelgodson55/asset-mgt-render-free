@@ -112,6 +112,20 @@ def get_current_user(
     if not db_user or db_user.is_deleted or not db_user.is_active:
         raise HTTPException(status_code=401, detail="This account is no longer active. Please log in again.")
 
+    # Same principle as the deactivation check above, applied to role
+    # changes: the JWT's "role"/"department" claims are baked in at login
+    # time and would otherwise stay stale -- keep working at the OLD
+    # privilege level -- for up to JWT_EXPIRY_HOURS after an Admin is
+    # demoted to Staff (or any other role change). db_user is already
+    # fetched above for the active/deleted check, so refresh these two
+    # claims onto the returned payload here at no extra DB cost. Every
+    # require_super_admin/require_privileged_role gate reads user["role"]
+    # straight from this returned dict, so this makes a downgrade take
+    # effect on the very next request instead of silently waiting out
+    # the token's remaining lifetime.
+    payload["role"] = db_user.role
+    payload["department"] = db_user.department
+
     return payload
 
 
