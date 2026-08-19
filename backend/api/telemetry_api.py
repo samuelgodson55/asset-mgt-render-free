@@ -363,12 +363,18 @@ def _sanitize_browser_otlp_payload(payload: object) -> dict | None:
                     for raw_attr in raw_attrs[:32]:
                         if not isinstance(raw_attr, dict):
                             continue
-                        safe_attr = _safe_browser_attribute(
-                            raw_attr.get("key"),
-                            raw_attr.get("value"),
-                        )
+                        attr_key = raw_attr.get("key")
+                        attr_value = raw_attr.get("value")
+                        safe_attr = _safe_browser_attribute(attr_key, attr_value)
                         if safe_attr is not None:
                             attrs.append(safe_attr)
+                        elif attr_key in SAFE_BROWSER_ATTRIBUTE_KEYS:
+                            # A client-controlled value for an allow-listed key
+                            # must use the exact safe OTLP type. Silently dropping
+                            # a malformed value would make the security contract
+                            # ambiguous and would allow a trace with a forged
+                            # attribute shape to be accepted.
+                            return None
 
                 raw_status = raw_span.get("status")
                 status_code = raw_status.get("code") if isinstance(raw_status, dict) else 0
