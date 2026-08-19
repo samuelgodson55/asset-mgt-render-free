@@ -12,6 +12,26 @@ by `OTEL_ENABLED`.**
 - Telemetry failures are isolated and must not make normal application
   requests fail.
 
+## Contents
+
+- [What a trace contains](#what-a-trace-contains)
+  - [Browser telemetry security boundary](#browser-telemetry-security-boundary)
+  - [Sampling contract](#sampling-contract)
+  - [Finding application errors quickly](#finding-application-errors-quickly)
+  - [Correlating with ErrorBeacon via request ID](#correlating-with-errorbeacon-via-request-id)
+  - [Jaeger UX shortcuts](#jaeger-ux-shortcuts)
+- [Business operation naming](#business-operation-naming)
+- [Deployment matrix](#deployment-matrix)
+  - [1. Local Docker Compose + Jaeger](#1-local-docker-compose--jaeger)
+  - [2. Terraform-managed Azure VM + Jaeger](#2-terraform-managed-azure-vm--jaeger)
+  - [3. Azure Container Apps](#3-azure-container-apps)
+  - [4. External OTLP collector](#4-external-otlp-collector)
+- [Telemetry helper safety contract](#telemetry-helper-safety-contract)
+- [Troubleshooting](#troubleshooting)
+  - [Jaeger UI is empty on the VM](#jaeger-ui-is-empty-on-the-vm)
+  - [Browser spans are missing but backend spans exist](#browser-spans-are-missing-but-backend-spans-exist)
+- [Security rule](#security-rule)
+
 ### One command in both local and VM environments
 
 `./scripts/telemetry.sh` now detects its deployment target automatically. Run the
@@ -155,6 +175,22 @@ The browser only exports the boolean error marker and a safe exception type.
 It never exports exception messages, stacks, request bodies, credentials,
 cookies, query strings, or authorization headers.
 
+### Correlating with ErrorBeacon via request ID
+
+Every request gets an `X-Request-ID`, and `RequestContextMiddleware` stamps it
+onto the active span as the tag `app.request_id`. ErrorBeacon alerts (backend
+exceptions, Celery/startup errors, and browser-reported client errors) all
+carry this same `request_id`.
+
+Given a `request_id` from an alert, search Jaeger with:
+
+```text
+app.request_id=<id>
+```
+
+in the **Tags** field. This jumps directly to the trace for that request
+without needing an approximate time range.
+
 ### Jaeger UX shortcuts
 
 The local Jaeger instance is configured with a small **Quick Investigations**
@@ -174,18 +210,32 @@ behavior or expose telemetry credentials.
 
 ## Business operation naming
 
-Search Jaeger using stable operation names rather than generic DOM events:
+Search Jaeger using stable operation names rather than generic DOM events.
+
+Full set of allowed business operation names (also the server-side allow-list
+for browser-submitted spans, `SAFE_BROWSER_OPERATION_NAMES`):
 
 ```text
-checkout.complete
-checkin.complete
-asset.create
-asset.quantity.update
-user.create
-quote.approve
-quote.checkout
-backup.restore
-auth.login
+asset.category.update, asset.create, asset.delete, asset.department.update,
+asset.exception.flag, asset.exception.recall, asset.import, asset.name.update,
+asset.price.update, asset.purge, asset.quantity.update, asset.restore,
+audit.export.start,
+auth.login, auth.logout, auth.mfa.recovery_codes.regenerate, auth.mfa.setup,
+auth.mfa.verify, auth.password.forgot, auth.password.reset, auth.password.update,
+backup.create, backup.delete, backup.restore, backup.restore.upload,
+checkin.complete, checkout.complete, checkout.extend, checkout.extend.bulk,
+checkout.extension.decide, checkout.extension.request,
+maintenance.update,
+outsider.convert_to_user, outsider.delete, outsider.update,
+profile.update,
+quote.approve, quote.assign, quote.checkout, quote.create, quote.delete,
+quote.discount.update, quote.item.add, quote.item.remove, quote.item.update,
+quote.my_item.add, quote.my_item.remove, quote.my_item.update,
+quote.notifications.read, quote.outsourced_item.add, quote.outsourced_item.remove,
+quote.paid, quote.submit, quote.update,
+settings.digest.update, settings.vat.update,
+user.convert_to_outsider, user.create, user.delete, user.password.reset,
+user.purge, user.restore, user.update
 ```
 
 UI spans are intentionally separate:
