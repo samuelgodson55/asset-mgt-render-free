@@ -14,13 +14,22 @@ layer that prevents health/recovery operations from running.
 import json
 import logging
 
-import jwt
-from database import SessionLocal
-from security import decode_access_token
+from fastapi import HTTPException
+from deps import resolve_user_from_token
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-import models
 import services.maintenance_service as maintenance_service
+
+# Deliberately NOT `from database import SessionLocal` at module level: that
+# binds to the sessionmaker object database.py had at import time, which is
+# permanent for the life of the process in production but breaks the test
+# suite's per-test DB swap (tests/conftest.py's db_engine fixture
+# monkeypatches the *attribute* `database.SessionLocal`, which an
+# already-bound `from ... import` name doesn't see). Importing the module
+# and reading `database.SessionLocal` at call time instead picks up
+# whichever engine is current -- same pattern already used by
+# services/quotation_service.py's own lazy DB access, for the same reason.
+import database
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +37,14 @@ logger = logging.getLogger(__name__)
 # /api/auth/ is intentionally allowed through so the login endpoint can verify
 # the caller and return the appropriate maintenance response rather than the
 # middleware hiding the authentication flow completely.
+#
+# Only prefixes that can actually appear here belong in this tuple -- the
+# gate below already only runs for paths starting with "/api/" (see
+# `__call__`), so a handful of non-"/api/"-prefixed entries ("/docs",
+# "/openapi.json", "/health", "/healthz") used to sit in this list without
+# ever being reachable. They're handled by the `not path.startswith("/api/")`
+# check instead and are left out here to avoid implying this middleware
+# consults them.
 ALLOWLIST_PREFIXES = (
     "/api/auth/",
     "/api/config/public",
@@ -35,10 +52,6 @@ ALLOWLIST_PREFIXES = (
     "/api/telemetry/client-error",
     "/api/telemetry/traces",
     "/api/health",
-    "/health",
-    "/healthz",
-    "/docs",
-    "/openapi.json",
 )
 
 
@@ -51,10 +64,13 @@ class MaintenanceModeMiddleware:
     def _super_admin(self, scope: Scope) -> bool:
         """Return True only for an active, database-backed Super Admin.
 
-        The JWT role is treated as a hint, not as the final authorization
-        decision.  Looking up the user in the database prevents an old token
-        from retaining maintenance access after the account is disabled or
-        its role is changed.
+        Reuses `deps.resolve_user_from_token()` -- the exact same
+        decode-JWT-then-recheck-the-database logic `get_current_user()` (and
+        therefore every FastAPI route's `require_true_super_admin` gate)
+        runs -- rather than a hand-rolled, easy-to-drift copy. That means
+        this check now also honors the AUTH_EPOCH post-restore invalidation
+        and the `is_deleted` flag, not just `is_active`, matching what the
+        real `/api/maintenance/status` PUT route requires of the same token.
         """
         headers = {key.lower(): value for key, value in scope.get("headers", [])}
         token = None
@@ -75,33 +91,18 @@ class MaintenanceModeMiddleware:
         if not token:
             return False
 
+        db = database.SessionLocal()
         try:
-            payload = decode_access_token(token)
-            if payload.get("role") != "super_admin":
-                return False
-
-            email = payload.get("email") or payload.get("sub")
-            if not email:
-                return False
-
-            db = SessionLocal()
-            try:
-                user = (
-                    db.query(models.User)
-                    .filter(models.User.email == email)
-                    .first()
-                )
-                return bool(
-                    user
-                    and user.is_active
-                    and user.role == "super_admin"
-                )
-            finally:
-                db.close()
-        except (jwt.InvalidTokenError, Exception):
-            # Maintenance protection must never crash the entire API because
-            # a stale/malformed token was supplied by a client.
+            user = resolve_user_from_token(token, db)
+            return user.get("role") == "super_admin"
+        except HTTPException:
+            # Expired, malformed, revoked, or pre-restore-epoch token: not a
+            # valid Super Admin session. Maintenance protection must never
+            # crash the entire API because a stale/malformed token was
+            # supplied by a client, so this is deliberately swallowed here.
             return False
+        finally:
+            db.close()
 
     async def __call__(
         self,
@@ -124,8 +125,9 @@ class MaintenanceModeMiddleware:
             return
 
         db = None
+        status = None
         try:
-            db = SessionLocal()
+            db = database.SessionLocal()
             status = maintenance_service.get_status(db)
             if not status["enabled"]:
                 await self.app(scope, receive, send)
@@ -144,9 +146,17 @@ class MaintenanceModeMiddleware:
             await self.app(scope, receive, send)
             return
 
+        # Surface the admin-configured message (set via PUT
+        # /api/maintenance/status) instead of a hardcoded generic string, so
+        # locked-out users actually see what the Super Admin typed in.
+        message = (
+            status["message"]
+            if status and status.get("message")
+            else "The application is currently undergoing maintenance."
+        )
         body = json.dumps(
             {
-                "detail": "The application is currently undergoing maintenance.",
+                "detail": message,
                 "code": "MAINTENANCE_MODE",
             }
         ).encode()

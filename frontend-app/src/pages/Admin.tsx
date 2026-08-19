@@ -72,6 +72,12 @@ function AdminOrManagerPage({ variant }: { variant: "admin" | "manager" }) {
   // would let that action expose or tamper with the very accounts meant
   // to be holding it accountable.
   const canBackups = !isManager && (demo || isTrueSuperAdmin(user?.role));
+  // PUT /maintenance/status is require_true_super_admin too -- kept as its
+  // own flag (rather than reusing canBackups, which happens to share the
+  // exact same gate) for the same reason canSettings is kept separate from
+  // canBackups below: a name tied to the feature it guards, not to
+  // whichever other feature happened to share its backend role check.
+  const canMaintenance = !isManager && (demo || isTrueSuperAdmin(user?.role));
   const canDirectory = demo || isPrivileged(user?.role);
   // reset-password/delete/restore/purge (deps.require_super_admin) treat
   // Admin and Super Admin identically on the backend -- mirrored here as
@@ -105,10 +111,10 @@ function AdminOrManagerPage({ variant }: { variant: "admin" | "manager" }) {
     if (canDeletedAssets) list.push({ key: "deleted-assets", label: "Deleted Assets", icon: Boxes });
     if (canDeletedAssets) list.push({ key: "deleted-users", label: "Deleted Users", icon: UserMinus });
     if (canBackups) list.push({ key: "backups", label: "System Backups", icon: DatabaseBackup });
-    if (canBackups) list.push({ key: "maintenance", label: "Maintenance Mode", icon: Wrench });
+    if (canMaintenance) list.push({ key: "maintenance", label: "Maintenance Mode", icon: Wrench });
     if (canSettings) list.push({ key: "settings", label: "Settings", icon: Percent });
     return list;
-  }, [canImport, canBackups, canDirectory, canDeletedAssets, canSettings]);
+  }, [canImport, canBackups, canMaintenance, canDirectory, canDeletedAssets, canSettings]);
 
   const [tab, setTab] = useState<Tab["key"] | null>(tabs[0]?.key ?? null);
   useEffect(() => {
@@ -198,7 +204,7 @@ function AdminOrManagerPage({ variant }: { variant: "admin" | "manager" }) {
           {tab === "deleted-assets" && canDeletedAssets && <DeletedAssetsPanel />}
           {tab === "deleted-users" && canDeletedAssets && <DeletedUsersPanel />}
           {tab === "backups" && canBackups && <SystemBackupsPanel />}
-          {tab === "maintenance" && canBackups && <MaintenanceModePanel />}
+          {tab === "maintenance" && canMaintenance && <MaintenanceModePanel />}
           {tab === "settings" && canSettings && <SettingsPanel />}
         </>
       )}

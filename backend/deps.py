@@ -36,25 +36,21 @@ security = HTTPBearer(auto_error=False)
 _FULL_ADMIN_ROLES = ("super_admin", "admin")
 
 
-def get_current_user(
-    request: Request,
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
-    db: Session = Depends(get_db),
-) -> dict:
+def resolve_user_from_token(token: str, db: Session) -> dict:
     """
-    Decodes and validates the bearer JWT from either the Authorization header
-    or an HttpOnly session cookie. Returns a small dict describing who's
-    logged in: {sub, name, email, role, department}. Any route that depends
-    on this simply requires "you must be logged in".
-    """
-    token = None
-    if credentials is not None:
-        token = credentials.credentials
-    if not token:
-        token = request.cookies.get("access_token")
-    if not token:
-        raise HTTPException(status_code=401, detail="Invalid authentication token.")
+    Decode + fully validate a bearer JWT against the database and return the
+    same small dict `get_current_user()` returns: {sub, name, email, role,
+    department}. Raises HTTPException(401) for anything invalid.
 
+    This is the single source of truth for "is this token currently good",
+    factored out of `get_current_user()` so that any *non-route* caller that
+    needs the exact same auth decision -- notably
+    `middleware/maintenance_mode.py`, which runs outside FastAPI's dependency
+    injection and previously reimplemented a trimmed-down version of these
+    checks by hand -- can call it directly instead of drifting out of sync
+    with the checks below (in particular the AUTH_EPOCH and is_deleted
+    checks, which the middleware's old copy was missing).
+    """
     try:
         payload = decode_access_token(token)
     except jwt.ExpiredSignatureError:
@@ -127,6 +123,28 @@ def get_current_user(
     payload["department"] = db_user.department
 
     return payload
+
+
+def get_current_user(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    db: Session = Depends(get_db),
+) -> dict:
+    """
+    Decodes and validates the bearer JWT from either the Authorization header
+    or an HttpOnly session cookie. Returns a small dict describing who's
+    logged in: {sub, name, email, role, department}. Any route that depends
+    on this simply requires "you must be logged in".
+    """
+    token = None
+    if credentials is not None:
+        token = credentials.credentials
+    if not token:
+        token = request.cookies.get("access_token")
+    if not token:
+        raise HTTPException(status_code=401, detail="Invalid authentication token.")
+
+    return resolve_user_from_token(token, db)
 
 
 def require_super_admin(user: dict = Depends(get_current_user)) -> dict:

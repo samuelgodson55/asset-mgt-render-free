@@ -72,8 +72,11 @@ export default function App() {
   return (
     <ThemeProvider>
       <AuthProvider>
-        <MaintenanceGate>
+        {/* MaintenanceGate must sit INSIDE BrowserRouter -- it uses
+            useLocation() to scope the ?maintenance_admin=1 bypass to the
+            /login route specifically (see its own docstring). */}
         <BrowserRouter>
+        <MaintenanceGate>
           <Routes>
             <Route path="/login" element={<Login />} />
             <Route
@@ -139,8 +142,8 @@ export default function App() {
               />
             </Route>
           </Routes>
-        </BrowserRouter>
         </MaintenanceGate>
+        </BrowserRouter>
       </AuthProvider>
     </ThemeProvider>
   );

@@ -1157,17 +1157,25 @@ export const assetsApi = {
 };
 
 // ---------------------------------------------------------------------------
-// Quotation feature -- ported from the legacy frontend's
-// js/components/quotation.js. Backed by backend/api/quotations_api.py +
-// backend/services/quotation_service.py; see that module's own docstring
-// for the two-halves shape (self-service cart/history vs Admin/Manager
-// Quotes tab) this mirrors.
+// Maintenance mode -- backed by backend/api/maintenance_api.py +
+// backend/services/maintenance_service.py. `status()` is intentionally
+// callable while logged out (see that route's own docstring: it powers
+// MaintenanceGate.tsx's public overlay); `update()` requires the real
+// Super Admin session server-side regardless of what the UI shows.
 // ---------------------------------------------------------------------------
 
 export const maintenanceApi = {
   status: () => rawFetch<{ enabled: boolean; message: string; updated_at?: string | null; updated_by?: string | null }>("/maintenance/status"),
   update: (payload: { enabled: boolean; message: string }) => rawFetch<{ enabled: boolean; message: string; updated_at?: string | null; updated_by?: string | null }>("/maintenance/status", { method: "PUT", body: JSON.stringify(payload) }),
 };
+
+// ---------------------------------------------------------------------------
+// Quotation feature -- ported from the legacy frontend's
+// js/components/quotation.js. Backed by backend/api/quotations_api.py +
+// backend/services/quotation_service.py; see that module's own docstring
+// for the two-halves shape (self-service cart/history vs Admin/Manager
+// Quotes tab) this mirrors.
+// ---------------------------------------------------------------------------
 
 export const quotationsApi = {
   publicConfig: () => rawFetch<PublicConfig>("/config/public"),

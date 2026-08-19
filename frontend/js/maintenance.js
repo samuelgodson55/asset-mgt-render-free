@@ -83,9 +83,17 @@ function overlay(config) {
  * `maintenance_admin=1` is a deliberate UI escape hatch for the login page;
  * it does not grant authorization.  The backend still requires the actual
  * Super Admin credentials/session before allowing maintenance administration.
+ *
+ * Scoped to the login page specifically (detected the same way the rest of
+ * main.js's bootstrap does: presence of #login-form), not honored on
+ * admin/manager/staff/customer.html -- otherwise the same query param would
+ * silently suppress the maintenance overlay on any page in the bundle, not
+ * just the one it's meant for. Real data stays protected server-side
+ * either way; this only affects whether the client-side overlay renders.
  */
 export async function initMaintenanceMode() {
-  if (new URLSearchParams(location.search).has('maintenance_admin')) {
+  const onLoginPage = !!document.getElementById('login-form');
+  if (onLoginPage && new URLSearchParams(location.search).has('maintenance_admin')) {
     return false;
   }
 
