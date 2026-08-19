@@ -238,15 +238,28 @@ def _safe_browser_attribute(key: object, value: object) -> dict | None:
         elif key == "error.type":
             if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,127}", text):
                 return None
+        elif key == "error":
+            # "error" is boolean-only (see the boolValue branch below). A
+            # stringValue here is a forged/mismatched attribute shape, not a
+            # legitimate encoding of the same fact, so it must be rejected
+            # rather than silently accepted as free-form text.
+            return None
         return {"key": key, "value": {"stringValue": text}}
 
     if "intValue" in value:
+        # Only "http.response.status_code" is an integer-typed attribute.
+        # Every other allow-listed key is string- or bool-typed (see the
+        # stringValue/boolValue branches); accepting an intValue for one of
+        # those would be the same forged-attribute-shape problem as the
+        # "error" stringValue case above, just for a different key.
+        if key != "http.response.status_code":
+            return None
         raw = value.get("intValue")
         try:
             number = int(raw)
         except (TypeError, ValueError):
             return None
-        if key == "http.response.status_code" and not 100 <= number <= 599:
+        if not 100 <= number <= 599:
             return None
         return {"key": key, "value": {"intValue": str(number)}}
 
