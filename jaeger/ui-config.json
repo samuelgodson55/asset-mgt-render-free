@@ -1,0 +1,52 @@
+{
+  "themes": {
+    "enabled": true
+  },
+  "dependencies": {
+    "menuEnabled": true,
+    "dagMaxNumServices": 50
+  },
+  "monitor": {
+    "menuEnabled": false
+  },
+  "search": {
+    "maxLookback": {
+      "label": "7 Days",
+      "value": "7d"
+    },
+    "maxLimit": 100
+  },
+  "traceIdDisplayLength": 12,
+  "criticalPathEnabled": true,
+  "topTagPrefixes": [
+    "error",
+    "app.",
+    "http.",
+    "db.",
+    "rpc.",
+    "exception."
+  ],
+  "menu": [
+    {
+      "label": "Quick Investigations",
+      "items": [
+        {
+          "label": "Errors \u2014 Last 1 Hour",
+          "url": "/search?lookback=1h&limit=50&tags=%7B%22error%22%3Atrue%7D"
+        },
+        {
+          "label": "Checkout Traces \u2014 Last 1 Hour",
+          "url": "/search?service=snipeit-lite-frontend&operation=checkout.complete&lookback=1h&limit=50"
+        },
+        {
+          "label": "Slow Traces \u2014 Over 1 Second",
+          "url": "/search?lookback=1h&minDuration=1s&limit=50"
+        },
+        {
+          "label": "Recent Traces \u2014 Last 15 Minutes",
+          "url": "/search?lookback=15m&limit=50"
+        }
+      ]
+    }
+  ]
+}

@@ -630,6 +630,7 @@ export function AssetDrawer({
                     )}
                     {canManage && (
                       <button
+                        data-otel-action="asset.delete"
                         onClick={deletePool}
                         disabled={deleting}
                         className="flex-1 flex items-center justify-center gap-1.5 border border-rust/40 hover:bg-rust/10 disabled:opacity-60 text-rust-soft text-[13px] rounded-[3px] py-2.5 transition-colors"

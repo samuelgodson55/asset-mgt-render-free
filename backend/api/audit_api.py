@@ -20,6 +20,8 @@ enqueue that work and let the frontend poll for it, never to build the
 file itself.
 """
 
+from telemetry import trace_operation
+
 import datetime
 import os
 from typing import Optional
@@ -49,6 +51,7 @@ def get_audit_logs(
 
 
 @router.post("/export")
+@trace_operation("audit.export.start")
 def start_audit_export(
     format: str = Query("csv", description="Export format: 'csv' or 'pdf'."),
     start_date: Optional[datetime.date] = Query(None),

@@ -5,6 +5,8 @@ Everything under /assets: pool CRUD, capacity, maintenance exceptions,
 reconciliation check-in, the advanced checkout flow, and CSV batch import.
 """
 
+from telemetry import trace_operation
+
 from typing import Optional, Literal
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query, Response
 from fastapi.responses import StreamingResponse
@@ -30,6 +32,7 @@ def _validate_export_format(format: str) -> str:
 
 
 @router.post("", response_model=dict)
+@trace_operation("asset.create")
 def create_asset_type(asset: AssetTypeCreate, db: Session = Depends(get_db), user: dict = Depends(require_super_admin)):
     return asset_service.create_asset_type(db, asset, user)
 
@@ -106,42 +109,50 @@ def get_asset_details(asset_id: int, db: Session = Depends(get_db), user: dict =
 
 
 @router.put("/{asset_id}/quantity")
+@trace_operation("asset.quantity.update")
 def update_asset_quantity(asset_id: int, payload: QuantityUpdateRequest, db: Session = Depends(get_db), user: dict = Depends(require_super_admin)):
     return asset_service.update_asset_quantity(db, asset_id, payload, user)
 
 
 @router.put("/{asset_id}/name")
+@trace_operation("asset.name.update")
 def update_asset_name(asset_id: int, payload: NameUpdateRequest, db: Session = Depends(get_db), user: dict = Depends(require_super_admin)):
     return asset_service.update_asset_name(db, asset_id, payload, user)
 
 
 @router.put("/{asset_id}/category")
+@trace_operation("asset.category.update")
 def update_asset_category(asset_id: int, payload: CategoryUpdateRequest, db: Session = Depends(get_db), user: dict = Depends(require_super_admin)):
     return asset_service.update_asset_category(db, asset_id, payload, user)
 
 
 @router.put("/{asset_id}/department")
+@trace_operation("asset.department.update")
 def update_asset_department(asset_id: int, payload: DepartmentUpdateRequest, db: Session = Depends(get_db), user: dict = Depends(require_super_admin)):
     return asset_service.update_asset_department(db, asset_id, payload, user)
 
 
 @router.put("/{asset_id}/price")
+@trace_operation("asset.price.update")
 def update_asset_price(asset_id: int, payload: PriceUpdateRequest, db: Session = Depends(get_db), user: dict = Depends(require_super_admin)):
     return asset_service.update_asset_price(db, asset_id, payload, user)
 
 
 @router.delete("/{asset_id}")
+@trace_operation("asset.delete")
 def delete_asset_type(asset_id: int, db: Session = Depends(get_db), user: dict = Depends(require_super_admin)):
     return asset_service.delete_asset_type(db, asset_id, user)
 
 
 @router.post("/{asset_id}/restore")
+@trace_operation("asset.restore")
 def restore_asset_type(asset_id: int, db: Session = Depends(get_db), user: dict = Depends(require_super_admin)):
     """Reverses a soft delete: returns the pool to active inventory. See services/asset_service.py -> restore_asset_type()."""
     return asset_service.restore_asset_type(db, asset_id, user)
 
 
 @router.post("/{asset_id}/purge")
+@trace_operation("asset.purge")
 def purge_asset_type(asset_id: int, db: Session = Depends(get_db), user: dict = Depends(require_super_admin)):
     """
     Permanently anonymizes a soft-deleted pool's name so it's free to be
@@ -152,25 +163,30 @@ def purge_asset_type(asset_id: int, db: Session = Depends(get_db), user: dict = 
 
 
 @router.post("/{asset_id}/exception")
+@trace_operation("asset.exception.flag")
 def flag_asset_exception(asset_id: int, exc: ExceptionCreate, db: Session = Depends(get_db), user: dict = Depends(require_super_admin)):
     return asset_service.flag_asset_exception(db, asset_id, exc, user)
 
 
 @router.post("/{asset_id}/exception/{exception_id}/recall")
+@trace_operation("asset.exception.recall")
 def recall_asset_exception(asset_id: int, exception_id: int, db: Session = Depends(get_db), user: dict = Depends(require_super_admin)):
     return asset_service.recall_asset_exception(db, asset_id, exception_id, user)
 
 
 @router.post("/{asset_id}/checkin")
+@trace_operation("checkin.complete")
 def checkin_asset(asset_id: int, quantity: int = Query(1, ge=1), db: Session = Depends(get_db), user: dict = Depends(require_super_admin)):
     return asset_service.checkin_asset(db, asset_id, quantity, user)
 
 
 @router.post("/{asset_id}/checkout_advanced")
+@trace_operation("checkout.complete")
 def checkout_advanced(asset_id: int, req: AdvancedCheckoutRequest, db: Session = Depends(get_db), user: dict = Depends(require_privileged_role)):
     return asset_service.checkout_advanced(db, asset_id, req, user)
 
 
 @router.post("/import")
+@trace_operation("asset.import")
 def import_assets_from_csv(file: UploadFile = File(...), db: Session = Depends(get_db), user: dict = Depends(require_super_admin)):
     return asset_service.import_assets_from_csv(db, file, user)

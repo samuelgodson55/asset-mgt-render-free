@@ -706,7 +706,7 @@ export function QuoteDetailDrawer({
                   <input type="checkbox" checked={paymentConfirmed} onChange={(e) => setPaymentConfirmed(e.target.checked)} className="mt-0.5" />
                   <span>I confirm the customer payment has been received and verified.</span>
                 </label>
-                <button onClick={markPaid} disabled={!paymentConfirmed || busyKey === "paid"} className="w-full flex items-center justify-center gap-1.5 bg-moss/15 hover:bg-moss/25 disabled:opacity-50 text-moss-soft text-[12px] font-medium rounded-[3px] py-2 transition-colors">
+                <button data-otel-action="quote.paid" onClick={markPaid} disabled={!paymentConfirmed || busyKey === "paid"} className="w-full flex items-center justify-center gap-1.5 bg-moss/15 hover:bg-moss/25 disabled:opacity-50 text-moss-soft text-[12px] font-medium rounded-[3px] py-2 transition-colors">
                   {busyKey === "paid" ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle2 size={13} />}
                   {busyKey === "paid" ? "Recording payment…" : "Mark as paid"}
                 </button>
@@ -733,12 +733,12 @@ export function QuoteDetailDrawer({
             {mode === "admin" && (
               <div className="flex gap-2">
                 {data.status === "submitted" && (
-                  <button onClick={approve} disabled={busyKey === "approve"} className="flex-1 bg-moss/15 hover:bg-moss/25 disabled:opacity-60 text-moss-soft text-[12.5px] font-medium rounded-[3px] py-2 transition-colors">
+                  <button data-otel-action="quote.approve" onClick={approve} disabled={busyKey === "approve"} className="flex-1 bg-moss/15 hover:bg-moss/25 disabled:opacity-60 text-moss-soft text-[12.5px] font-medium rounded-[3px] py-2 transition-colors">
                     {busyKey === "approve" ? "Approving…" : "Approve"}
                   </button>
                 )}
                 {(data.status === "submitted" || data.status === "approved") && (
-                  <button onClick={remove} disabled={busyKey === "delete"} className="flex-1 bg-rust/10 hover:bg-rust/20 disabled:opacity-60 text-rust-soft text-[12.5px] font-medium rounded-[3px] py-2 transition-colors">
+                  <button data-otel-action="quote.delete" onClick={remove} disabled={busyKey === "delete"} className="flex-1 bg-rust/10 hover:bg-rust/20 disabled:opacity-60 text-rust-soft text-[12.5px] font-medium rounded-[3px] py-2 transition-colors">
                     {busyKey === "delete" ? "Deleting…" : "Delete quotation"}
                   </button>
                 )}

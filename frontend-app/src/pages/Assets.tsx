@@ -177,7 +177,7 @@ export function Assets() {
             <Download size={12} /> Export
           </button>
           {canManage && (
-            <button onClick={() => setCreating(true)} className="flex items-center gap-1.5 bg-brass hover:bg-brass-soft text-ink font-medium text-[12px] rounded-[3px] px-3 py-2 transition-colors">
+            <button data-otel-action="asset.create.open" onClick={() => setCreating(true)} className="flex items-center gap-1.5 bg-brass hover:bg-brass-soft text-ink font-medium text-[12px] rounded-[3px] px-3 py-2 transition-colors">
               <Plus size={12} /> New pool
             </button>
           )}

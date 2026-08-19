@@ -365,3 +365,15 @@ def test_shutdown_tracing_flushes_without_raising(_reset_tracing):
     enabled = _fake_settings(OTEL_ENABLED=True, OTEL_CONSOLE_EXPORTER=True)
     assert telemetry.setup_tracing(enabled) is True
     telemetry.shutdown_tracing()
+
+
+def test_trace_operation_is_a_noop_when_tracing_is_disabled(_reset_tracing):
+    calls = []
+
+    @telemetry.trace_operation("asset.create")
+    def operation():
+        calls.append("called")
+        return {"ok": True}
+
+    assert operation() == {"ok": True}
+    assert calls == ["called"]

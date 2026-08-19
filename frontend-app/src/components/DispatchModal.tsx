@@ -266,7 +266,7 @@ export function DispatchModal({
 
             {error && <div className="bg-rust/10 border border-rust/30 text-rust-soft text-[12px] rounded-[3px] px-3 py-2.5">{error}</div>}
 
-            <button type="submit" disabled={submitting} className="mt-1 flex items-center justify-center gap-1.5 bg-brass hover:bg-brass-soft disabled:opacity-60 text-ink font-medium text-[13px] rounded-[3px] py-2.5 transition-colors">
+            <button data-otel-action="checkout" type="submit" disabled={submitting} className="mt-1 flex items-center justify-center gap-1.5 bg-brass hover:bg-brass-soft disabled:opacity-60 text-ink font-medium text-[13px] rounded-[3px] py-2.5 transition-colors">
               {submitting && <Loader2 size={13} className="animate-spin" />}
               {submitting ? "Dispatching…" : "Dispatch"}
             </button>

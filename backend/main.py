@@ -67,7 +67,15 @@ from starlette.concurrency import run_in_threadpool
 from database import init_db, seed_db, get_schema_status, engine as db_engine
 from config import settings
 from logging_config import configure_logging
-from telemetry import setup_tracing, shutdown_tracing, instrument_fastapi_app, instrument_sqlalchemy_engine
+from telemetry import (
+    setup_tracing,
+    shutdown_tracing,
+    instrument_fastapi_app,
+    instrument_http_error_tags,
+    instrument_sqlalchemy_engine,
+    instrument_celery,
+    instrument_redis,
+)
 from integrations.fastapi_errorbeacon import report_background_exception
 from middleware.error_handling import UnhandledExceptionMiddleware
 from middleware.request_context import RequestContextMiddleware
@@ -121,6 +129,8 @@ logger = logging.getLogger(__name__)
 # Celery's prefork pool needs a `worker_process_init` signal instead.
 setup_tracing(settings)
 instrument_sqlalchemy_engine(db_engine, settings)
+instrument_redis(settings)
+instrument_celery(settings)
 
 
 @asynccontextmanager
@@ -356,15 +366,14 @@ app.add_middleware(
 )
 app.add_middleware(SecurityHeadersMiddleware)
 
-# TRACING -- deliberately called LAST, after every `app.add_middleware(...)`
-# call above: per this file's own "MIDDLEWARE STACK" comment, the LAST
-# middleware added ends up OUTERMOST, seeing every request first and every
-# response last. FastAPIInstrumentor.instrument_app() adds its own ASGI
-# middleware the same way (add_middleware under the hood) -- placing it
-# here makes the resulting span cover the FULL request lifecycle (CORS,
-# rate limiting, security headers, and the actual route handler alike),
-# not just whatever happened to run after some earlier-added layer. A
-# no-op when settings.OTEL_ENABLED is false -- see telemetry.py.
+# TRACING -- the FastAPI server span is the outermost telemetry layer, so
+# the pure-ASGI error-tagging middleware is registered immediately BEFORE it. This lets
+# the error-tagging middleware run inside the active server span and mark
+# 4xx/5xx responses with the stable `error=true` tag that Jaeger's Search
+# page can filter. FastAPIInstrumentor is still added LAST so its server span
+# covers the FULL request lifecycle (CORS, rate limiting, security headers,
+# and the actual route handler alike). Both are no-ops when OTEL is disabled.
+instrument_http_error_tags(app, settings)
 instrument_fastapi_app(app, settings)
 
 # --- OPENAPI CLEANUP ---

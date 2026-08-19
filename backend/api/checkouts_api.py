@@ -16,6 +16,8 @@ POST /checkouts/bulk-extend                             -- direct grant, one due
 See services/extension_service.py for the full workflow writeup.
 """
 
+from telemetry import trace_operation
+
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
@@ -58,6 +60,7 @@ def get_active_checkouts(
 
 
 @router.post("/{checkout_id}/return")
+@trace_operation("checkin.complete")
 def return_checkout(checkout_id: int, req: ReturnRequest, db: Session = Depends(get_db), user: dict = Depends(require_privileged_role)):
     return checkout_service.return_checkout(db, checkout_id, req, user)
 
@@ -95,6 +98,7 @@ def get_due_soon_checkouts(
 
 
 @router.post("/{checkout_id}/extension-requests")
+@trace_operation("checkout.extension.request")
 def request_extension(
     checkout_id: int, req: ExtensionRequestCreate, db: Session = Depends(get_db), user: dict = Depends(get_current_user),
 ):
@@ -142,6 +146,7 @@ def get_my_extension_decisions(
 
 
 @router.post("/extension-requests/{request_id}/decision")
+@trace_operation("checkout.extension.decide")
 def decide_extension_request(
     request_id: int, decision: ExtensionDecisionRequest, db: Session = Depends(get_db), user: dict = Depends(require_privileged_role),
 ):
@@ -150,6 +155,7 @@ def decide_extension_request(
 
 
 @router.post("/{checkout_id}/extend")
+@trace_operation("checkout.extend")
 def extend_checkout(
     checkout_id: int, req: DirectExtensionRequest, db: Session = Depends(get_db), user: dict = Depends(require_privileged_role),
 ):
@@ -167,6 +173,7 @@ def extend_checkout(
 # NOTE ON ROUTE ORDERING: same reasoning as "/overdue" above -- this is a
 # literal path with no {checkout_id} segment.
 @router.post("/bulk-extend")
+@trace_operation("checkout.extend.bulk")
 def bulk_extend_checkouts(
     req: BulkExtendRequest, db: Session = Depends(get_db), user: dict = Depends(require_privileged_role),
 ):

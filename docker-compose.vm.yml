@@ -1135,6 +1135,12 @@ services:
     container_name: snipeit_lite_jaeger
     profiles: ["tracing"]
     restart: unless-stopped
+    # UI-only Jaeger configuration. The file is read-only and contains no
+    # application or exporter secrets.
+    command:
+      - "--set=extensions.jaeger_query.ui.config_file=/etc/jaeger/ui-config.json"
+    volumes:
+      - ./jaeger/ui-config.json:/etc/jaeger/ui-config.json:ro
     mem_limit: ${JAEGER_MEM_LIMIT:-256m}
     mem_reservation: ${JAEGER_MEM_RESERVATION:-96m}
     logging:

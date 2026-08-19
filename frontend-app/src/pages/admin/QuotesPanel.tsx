@@ -192,6 +192,7 @@ function FulfillmentPanel({ onCheckedOut }: { onCheckedOut: () => void }) {
                 <div className="shrink-0 flex items-center gap-2">
                   <span className="font-mono text-[12.5px] text-text-muted">{formatPrice(q.total)}</span>
                   <button
+                    data-otel-action="quote.checkout"
                     onClick={() => checkout(q)}
                     disabled={checkingOutId === q.id}
                     className="flex items-center gap-1.5 bg-moss/15 hover:bg-moss/25 disabled:opacity-60 text-moss-soft text-[11.5px] font-medium rounded-[3px] px-2.5 py-1.5 transition-colors"
@@ -392,6 +393,7 @@ export function QuotesPanel() {
                       <div className="flex items-center justify-end gap-1.5 flex-wrap">
                         {q.status === "submitted" && (
                           <button
+                            data-otel-action="quote.approve"
                             onClick={() => approve(q)}
                             disabled={approvingId === q.id}
                             className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-moss/50 hover:text-moss-soft transition-colors disabled:opacity-50"

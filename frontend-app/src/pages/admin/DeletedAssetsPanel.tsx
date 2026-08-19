@@ -104,8 +104,8 @@ export function DeletedAssetsPanel() {
                 <td className="hidden sm:table-cell px-5 py-3 text-text-muted">{a.deleted_at ? formatWhen(a.deleted_at) : "—"}</td>
                 <td className="px-5 py-3 text-right">
                   <div className="flex items-center justify-end gap-1.5 flex-wrap">
-                    <button onClick={() => restore(a)} disabled={busyId === a.id} className="rounded-md border border-moss/40 px-2 py-1 text-[11px] font-medium text-moss-soft hover:bg-moss/10 disabled:opacity-50 transition-colors">Restore</button>
-                    <button onClick={() => purge(a)} disabled={busyId === a.id} className="rounded-md border border-rust/40 px-2 py-1 text-[11px] font-medium text-rust-soft hover:bg-rust/10 disabled:opacity-50 transition-colors">Purge</button>
+                    <button data-otel-action="asset.restore" onClick={() => restore(a)} disabled={busyId === a.id} className="rounded-md border border-moss/40 px-2 py-1 text-[11px] font-medium text-moss-soft hover:bg-moss/10 disabled:opacity-50 transition-colors">Restore</button>
+                    <button data-otel-action="asset.purge" onClick={() => purge(a)} disabled={busyId === a.id} className="rounded-md border border-rust/40 px-2 py-1 text-[11px] font-medium text-rust-soft hover:bg-rust/10 disabled:opacity-50 transition-colors">Purge</button>
                   </div>
                 </td>
               </tr>

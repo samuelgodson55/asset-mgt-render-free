@@ -5,6 +5,8 @@ System-user account provisioning, directory listing, self-service items,
 per-user custody lookup, properties-assigned exports, and delete.
 """
 
+from telemetry import trace_operation
+
 from typing import Optional, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.orm import Session
@@ -33,6 +35,7 @@ def _file_response(content: bytes, media_type: str, filename: str) -> Response:
 
 
 @router.post("")
+@trace_operation("user.create")
 def create_user(req: UserCreateRequest, db: Session = Depends(get_db), user: dict = Depends(require_privileged_role)):
     return user_service.create_user(db, req, user)
 
@@ -127,6 +130,7 @@ def export_user_assigned_items(
 
 
 @router.patch("/{user_id}")
+@trace_operation("user.update")
 def update_user(user_id: int, req: UserUpdateRequest, db: Session = Depends(get_db), user: dict = Depends(require_privileged_role)):
     """
     Edits an existing account's identity details and RBAC role. Super
@@ -138,11 +142,13 @@ def update_user(user_id: int, req: UserUpdateRequest, db: Session = Depends(get_
 
 
 @router.delete("/{user_id}")
+@trace_operation("user.delete")
 def delete_user(user_id: int, db: Session = Depends(get_db), user: dict = Depends(require_super_admin)):
     return user_service.delete_user(db, user_id, user)
 
 
 @router.post("/{user_id}/convert-to-outsider")
+@trace_operation("user.convert_to_outsider")
 def convert_user_to_outsider(user_id: int, req: UserConvertToOutsiderRequest, db: Session = Depends(get_db), user: dict = Depends(require_privileged_role)):
     """
     Revokes an account's login access and turns it into an Ad-Hoc
@@ -157,6 +163,7 @@ def convert_user_to_outsider(user_id: int, req: UserConvertToOutsiderRequest, db
 
 
 @router.post("/{user_id}/reset-password")
+@trace_operation("user.password.reset")
 def reset_user_password(user_id: int, req: UserPasswordResetRequest, db: Session = Depends(get_db), user: dict = Depends(require_super_admin)):
     """
     Admin/Super Admin "forgot password" recovery: sets a brand-new password
@@ -167,12 +174,14 @@ def reset_user_password(user_id: int, req: UserPasswordResetRequest, db: Session
 
 
 @router.post("/{user_id}/restore")
+@trace_operation("user.restore")
 def restore_user(user_id: int, db: Session = Depends(get_db), user: dict = Depends(require_super_admin)):
     """Reverses a soft delete: re-enables login and returns the account to the User Directory. See services/user_service.py -> restore_user()."""
     return user_service.restore_user(db, user_id, user)
 
 
 @router.post("/{user_id}/purge")
+@trace_operation("user.purge")
 def purge_user(user_id: int, db: Session = Depends(get_db), user: dict = Depends(require_super_admin)):
     """
     Permanently anonymizes a soft-deleted account's email/username so

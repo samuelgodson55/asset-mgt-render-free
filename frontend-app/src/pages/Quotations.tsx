@@ -480,6 +480,7 @@ export function Quotations() {
 
                   <div className="flex items-center gap-2">
                     <button
+                      data-otel-action="quote.submit"
                       onClick={submitOrder}
                       disabled={submitting || cart.items.length === 0}
                       className="flex-1 flex items-center justify-center gap-1.5 bg-brass hover:bg-brass-soft disabled:opacity-60 text-ink text-[12.5px] font-semibold rounded-[3px] py-2.5 transition-colors"

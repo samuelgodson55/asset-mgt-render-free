@@ -96,6 +96,7 @@ function ExtendModal({
           />
         </label>
         <button
+          data-otel-action="checkout.extend"
           onClick={submit}
           disabled={submitting}
           className="w-full flex items-center justify-center gap-2 bg-brass hover:bg-brass-soft disabled:opacity-60 text-ink font-medium text-[13px] rounded-[3px] py-2.5 transition-colors"
@@ -475,6 +476,7 @@ export function CustodyDrawer({
             </label>
             <div className="flex items-center gap-2">
               <button
+                data-otel-action="checkin.bulk"
                 onClick={() => bulkReturn(Array.from(selected))}
                 disabled={selected.size === 0 || bulkBusy}
                 className="text-[11px] font-medium text-moss-soft hover:text-moss disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
@@ -483,6 +485,7 @@ export function CustodyDrawer({
               </button>
               <span className="text-text-faint text-[11px]">·</span>
               <button
+                data-otel-action="checkout.extend.bulk"
                 onClick={() => setBulkExtendOpen(true)}
                 disabled={selected.size === 0 || bulkBusy}
                 className="text-[11px] font-medium text-brass-soft hover:text-brass disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
@@ -491,6 +494,7 @@ export function CustodyDrawer({
               </button>
               <span className="text-text-faint text-[11px]">·</span>
               <button
+                data-otel-action="checkin.bulk"
                 onClick={processAllReturns}
                 disabled={bulkBusy}
                 className="text-[11px] font-medium text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
@@ -564,6 +568,7 @@ export function CustodyDrawer({
                       {item.pending_extension && item.pending_extension_request_id ? (
                         <>
                           <button
+                            data-otel-action="checkout.extension.approve"
                             onClick={() => approveExtension(item)}
                             disabled={busy}
                             className="flex items-center gap-1 border border-moss/40 bg-moss/10 hover:bg-moss/20 disabled:opacity-60 text-moss-soft text-[11px] font-medium rounded-[3px] px-2.5 py-1.5 transition-colors"
@@ -571,6 +576,7 @@ export function CustodyDrawer({
                             {decidingId === item.checkout_id ? <Loader2 size={11} className="animate-spin" /> : <Check size={11} />} Approve
                           </button>
                           <button
+                            data-otel-action="checkout.extension.deny"
                             onClick={() => setDenyTarget({ requestId: item.pending_extension_request_id!, assetName: item.asset_name })}
                             disabled={busy}
                             className="flex items-center gap-1 border border-border-soft hover:border-rust/50 hover:text-rust-soft disabled:opacity-60 text-text-muted text-[11px] font-medium rounded-[3px] px-2.5 py-1.5 transition-colors"
@@ -580,6 +586,7 @@ export function CustodyDrawer({
                         </>
                       ) : (
                         <button
+                          data-otel-action="checkout.extend"
                           onClick={() => setExtendTarget(item)}
                           disabled={busy}
                           className="flex items-center gap-1 border border-border-soft hover:border-brass/50 hover:text-brass-soft disabled:opacity-60 text-text-muted text-[11px] font-medium rounded-[3px] px-2.5 py-1.5 transition-colors"
@@ -589,6 +596,7 @@ export function CustodyDrawer({
                       )}
 
                       <button
+                        data-otel-action="checkin"
                         onClick={() => returnItem(item, qty)}
                         disabled={busy}
                         className="flex items-center gap-1 border border-border-soft hover:border-moss/50 hover:text-moss-soft disabled:opacity-60 text-text-muted text-[11px] font-medium rounded-[3px] px-2.5 py-1.5 transition-colors ml-auto"

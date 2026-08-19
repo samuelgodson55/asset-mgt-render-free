@@ -21,6 +21,8 @@ validation, request-ID fallback, which IP gets checked), not about
 proving the shared limiter's own Redis behavior again.
 """
 
+import json
+
 import api.telemetry_api as telemetry_api
 
 
@@ -281,3 +283,206 @@ def test_public_config_reports_browser_otel_only_when_http_export_is_configured(
     config = get_public_config(FakeDB())
     assert config["otel_enabled"] is False
 
+
+
+# ---------------------------------------------------------------------------
+# Browser OTLP proxy security boundary
+# ---------------------------------------------------------------------------
+
+def test_browser_trace_proxy_forwards_only_allowlisted_safe_fields(client, monkeypatch):
+    from config import settings
+
+    _install_fake_limiter(monkeypatch, blocked=False)
+    monkeypatch.setattr(settings, "OTEL_ENABLED", True)
+    monkeypatch.setattr(settings, "OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318")
+    monkeypatch.setattr(settings, "OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
+
+    captured = {}
+
+    def _capture_forward(body, endpoint):
+        captured["body"] = body
+        captured["endpoint"] = endpoint
+
+    monkeypatch.setattr(telemetry_api, "_forward_browser_trace", _capture_forward)
+
+    payload = {
+        "resourceSpans": [{
+            "resource": {
+                "attributes": [
+                    {"key": "service.name", "value": {"stringValue": "attacker-controlled"}},
+                    {"key": "authorization", "value": {"stringValue": "Bearer SUPER-SECRET"}},
+                ]
+            },
+            "scopeSpans": [{
+                "scope": {"name": "evil", "version": "1"},
+                "spans": [{
+                    "traceId": "0123456789abcdef0123456789abcdef",
+                    "spanId": "0123456789abcdef",
+                    "parentSpanId": "fedcba9876543210",
+                    "name": "checkout.complete",
+                    "kind": 1,
+                    "startTimeUnixNano": "1787090000000000000",
+                    "endTimeUnixNano": "1787090000001000000",
+                    "attributes": [
+                        {"key": "app.operation", "value": {"stringValue": "checkout.complete"}},
+                        {"key": "ui.action", "value": {"stringValue": "ui.click.checkout"}},
+                        {"key": "authorization", "value": {"stringValue": "Bearer SUPER-SECRET"}},
+                        {"key": "http.request.header.cookie", "value": {"stringValue": "session=SECRET"}},
+                        {"key": "exception.message", "value": {"stringValue": "password=SECRET"}},
+                        {"key": "http.response.status_code", "value": {"intValue": "200"}},
+                    ],
+                    "events": [{
+                        "name": "exception",
+                        "attributes": [{"key": "password", "value": {"stringValue": "SECRET"}}],
+                    }],
+                    "links": [{
+                        "traceId": "11111111111111111111111111111111",
+                        "spanId": "1111111111111111",
+                    }],
+                    "status": {"code": 1},
+                }],
+            }],
+        }]
+    }
+
+    response = client.post("/api/telemetry/traces", json=payload)
+
+    assert response.status_code == 202
+    assert response.json()["accepted"] is True
+    assert captured["endpoint"] == "http://collector:4318/v1/traces"
+
+    forwarded = json.loads(captured["body"])
+    assert forwarded["resourceSpans"][0]["resource"]["attributes"] == [
+        {"key": "service.name", "value": {"stringValue": "snipeit-lite-frontend"}},
+        {"key": "service.version", "value": {"stringValue": "0.1.0"}},
+        {"key": "deployment.environment", "value": {"stringValue": "browser"}},
+    ]
+    span = forwarded["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+    assert span["name"] == "checkout.complete"
+    assert "events" not in span
+    assert "links" not in span
+    keys = {item["key"] for item in span["attributes"]}
+    assert keys == {"app.operation", "ui.action", "http.response.status_code"}
+    assert "SUPER-SECRET" not in captured["body"].decode("utf-8")
+    assert "SECRET" not in captured["body"].decode("utf-8")
+
+
+def test_browser_trace_proxy_rejects_unsafe_span_names_and_ids(client, monkeypatch):
+    from config import settings
+
+    _install_fake_limiter(monkeypatch, blocked=False)
+    monkeypatch.setattr(settings, "OTEL_ENABLED", True)
+    monkeypatch.setattr(settings, "OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318")
+    monkeypatch.setattr(settings, "OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
+
+    captured = {}
+    monkeypatch.setattr(
+        telemetry_api,
+        "_forward_browser_trace",
+        lambda body, endpoint: captured.update(body=body, endpoint=endpoint),
+    )
+
+    payload = {
+        "resourceSpans": [{
+            "scopeSpans": [{
+                "spans": [{
+                    "traceId": "not-a-trace-id",
+                    "spanId": "not-a-span",
+                    "name": "evil span with spaces",
+                    "kind": 2,
+                    "startTimeUnixNano": "1",
+                    "endTimeUnixNano": "2",
+                }]
+            }]
+        }]
+    }
+
+    response = client.post("/api/telemetry/traces", json=payload)
+    assert response.status_code == 202
+    assert response.json() == {"accepted": False, "reason": "invalid_otlp_payload"}
+    assert captured == {}
+
+
+def test_browser_trace_proxy_preserves_safe_error_boolean_attribute(client, monkeypatch):
+    from config import settings
+
+    _install_fake_limiter(monkeypatch, blocked=False)
+    monkeypatch.setattr(settings, "OTEL_ENABLED", True)
+    monkeypatch.setattr(settings, "OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318")
+    monkeypatch.setattr(settings, "OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
+
+    captured = {}
+    monkeypatch.setattr(
+        telemetry_api,
+        "_forward_browser_trace",
+        lambda body, endpoint: captured.update(body=body, endpoint=endpoint),
+    )
+
+    payload = {
+        "resourceSpans": [{
+            "scopeSpans": [{
+                "spans": [{
+                    "traceId": "0123456789abcdef0123456789abcdef",
+                    "spanId": "0123456789abcdef",
+                    "name": "checkout.complete",
+                    "kind": 1,
+                    "startTimeUnixNano": "1787090000000000000",
+                    "endTimeUnixNano": "1787090000001000000",
+                    "attributes": [
+                        {"key": "error", "value": {"boolValue": True}},
+                        {"key": "error.type", "value": {"stringValue": "ApiError"}},
+                    ],
+                    "status": {"code": 2},
+                }]
+            }]
+        }]
+    }
+
+    response = client.post("/api/telemetry/traces", json=payload)
+
+    assert response.status_code == 202
+    assert response.json()["accepted"] is True
+    span = json.loads(captured["body"])["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+    attrs = {item["key"]: item["value"] for item in span["attributes"]}
+    assert attrs["error"] == {"boolValue": True}
+    assert attrs["error.type"] == {"stringValue": "ApiError"}
+
+
+def test_browser_trace_proxy_rejects_non_boolean_error_attribute(client, monkeypatch):
+    from config import settings
+
+    _install_fake_limiter(monkeypatch, blocked=False)
+    monkeypatch.setattr(settings, "OTEL_ENABLED", True)
+    monkeypatch.setattr(settings, "OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318")
+    monkeypatch.setattr(settings, "OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
+
+    captured = {}
+    monkeypatch.setattr(
+        telemetry_api,
+        "_forward_browser_trace",
+        lambda body, endpoint: captured.update(body=body, endpoint=endpoint),
+    )
+
+    payload = {
+        "resourceSpans": [{
+            "scopeSpans": [{
+                "spans": [{
+                    "traceId": "0123456789abcdef0123456789abcdef",
+                    "spanId": "0123456789abcdef",
+                    "name": "checkout.complete",
+                    "kind": 1,
+                    "startTimeUnixNano": "1787090000000000000",
+                    "endTimeUnixNano": "1787090000001000000",
+                    "attributes": [
+                        {"key": "error", "value": {"stringValue": "true"}},
+                    ],
+                    "status": {"code": 2},
+                }]
+            }]
+        }]
+    }
+
+    response = client.post("/api/telemetry/traces", json=payload)
+    assert response.status_code == 202
+    assert response.json() == {"accepted": False, "reason": "invalid_otlp_payload"}
+    assert captured == {}

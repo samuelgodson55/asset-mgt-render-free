@@ -4,6 +4,8 @@ api/outsiders.py
 Ad-Hoc (Unlinked) Directory: external individuals with no login account.
 """
 
+from telemetry import trace_operation
+
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.orm import Session
@@ -58,6 +60,7 @@ def get_outsider_assigned_items(outsider_id: int, db: Session = Depends(get_db),
 
 
 @router.patch("/{outsider_id}")
+@trace_operation("outsider.update")
 def update_outsider(outsider_id: int, req: OutsiderUpdateRequest, db: Session = Depends(get_db), user: dict = Depends(require_privileged_role)):
     """
     Edits an ad-hoc individual's name/contact details/company. Both a
@@ -68,6 +71,7 @@ def update_outsider(outsider_id: int, req: OutsiderUpdateRequest, db: Session = 
 
 
 @router.post("/{outsider_id}/convert-to-user")
+@trace_operation("outsider.convert_to_user")
 def convert_outsider_to_user(outsider_id: int, req: OutsiderConvertToUserRequest, db: Session = Depends(get_db), user: dict = Depends(require_privileged_role)):
     """
     Turns an ad-hoc individual into a real, log-in-capable user account
@@ -81,6 +85,7 @@ def convert_outsider_to_user(outsider_id: int, req: OutsiderConvertToUserRequest
 
 
 @router.delete("/{outsider_id}")
+@trace_operation("outsider.delete")
 def delete_outsider(outsider_id: int, db: Session = Depends(get_db), user: dict = Depends(require_privileged_role)):
     """
     Deletes an ad-hoc individual's profile (soft delete -- see

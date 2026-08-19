@@ -88,8 +88,10 @@ USAGE
     instrument_sqlalchemy_engine(engine, settings)  # any process touching the DB directly
 """
 
+import inspect
 import logging
-from typing import Optional
+from functools import wraps
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +124,73 @@ def _parse_otlp_headers(raw: str) -> dict:
         if key:
             headers[key] = value
     return headers
+
+
+def trace_operation(name: str):
+    """Decorate a high-value application operation with a safe business span.
+
+    The decorator records only the stable operation name and exception type.
+    It deliberately does not record exception messages, request bodies,
+    function arguments, headers, cookies, or return values because those may
+    contain credentials or personal data.
+    """
+    safe_name = str(name).strip().lower()[:80]
+    if not safe_name or any(ch not in "abcdefghijklmnopqrstuvwxyz0123456789._-" for ch in safe_name):
+        raise ValueError(f"Invalid telemetry operation name: {name!r}")
+
+    def decorator(func: Callable[..., Any]):
+        if inspect.iscoroutinefunction(func):
+            @wraps(func)
+            async def async_wrapper(*args, **kwargs):
+                if not _tracing_configured:
+                    return await func(*args, **kwargs)
+                try:
+                    from opentelemetry import trace
+                    from opentelemetry.trace import Status, StatusCode
+                except ImportError:
+                    return await func(*args, **kwargs)
+
+                tracer = trace.get_tracer("asset-mgt-render-free/business", "1.1.0")
+                with tracer.start_as_current_span(safe_name) as span:
+                    span.set_attribute("app.operation", safe_name)
+                    try:
+                        result = await func(*args, **kwargs)
+                    except Exception as exc:
+                        span.set_status(Status(StatusCode.ERROR))
+                        span.set_attribute("error", True)
+                        span.set_attribute("exception.type", type(exc).__name__)
+                        raise
+                    else:
+                        span.set_status(Status(StatusCode.OK))
+                        return result
+            return async_wrapper
+
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            if not _tracing_configured:
+                return func(*args, **kwargs)
+            try:
+                from opentelemetry import trace
+                from opentelemetry.trace import Status, StatusCode
+            except ImportError:
+                return func(*args, **kwargs)
+
+            tracer = trace.get_tracer("asset-mgt-render-free/business", "1.1.0")
+            with tracer.start_as_current_span(safe_name) as span:
+                span.set_attribute("app.operation", safe_name)
+                try:
+                    result = func(*args, **kwargs)
+                except Exception as exc:
+                    span.set_status(Status(StatusCode.ERROR))
+                    span.set_attribute("error", True)
+                    span.set_attribute("exception.type", type(exc).__name__)
+                    raise
+                else:
+                    span.set_status(Status(StatusCode.OK))
+                    return result
+        return wrapper
+
+    return decorator
 
 
 def setup_tracing(settings, service_name: Optional[str] = None) -> bool:
@@ -355,6 +424,71 @@ def shutdown_tracing() -> None:
         shutdown_fn()
 
 
+class _HttpErrorTagMiddleware:
+    """ASGI middleware that tags HTTP failures without BaseHTTPMiddleware.
+
+    A pure ASGI wrapper preserves OpenTelemetry ContextVar propagation while
+    the FastAPI server span is active. It observes only the response status
+    and exception type; it never inspects request headers, bodies, cookies,
+    query strings, or exception messages.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        try:
+            from opentelemetry import trace
+            from opentelemetry.trace import Status, StatusCode
+        except ImportError:
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_error_tag(message):
+            if message.get("type") == "http.response.start":
+                status_code = int(message.get("status", 0))
+                if status_code >= 400:
+                    span = trace.get_current_span()
+                    if span.is_recording():
+                        span.set_status(Status(StatusCode.ERROR))
+                        span.set_attribute("error", True)
+                        span.set_attribute("http.response.status_code", status_code)
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_with_error_tag)
+        except Exception as exc:
+            span = trace.get_current_span()
+            if span.is_recording():
+                span.set_status(Status(StatusCode.ERROR))
+                span.set_attribute("error", True)
+                span.set_attribute("exception.type", type(exc).__name__)
+            raise
+
+
+def instrument_http_error_tags(app, settings) -> None:
+    """Mark failed HTTP responses on the active server span.
+
+    Jaeger v2's normal Search page exposes a Tags field rather than a
+    ``status = ERROR`` control. A small, stable ``error=true`` tag makes
+    failed requests discoverable from that UI without introducing a fake
+    ``errors`` business operation or duplicating traces.
+
+    The tag is deliberately limited to HTTP failures (4xx/5xx) and records
+    only the exception *type* on an exception path. It never copies request
+    bodies, headers, credentials, cookies, query strings, or exception
+    messages into telemetry.
+    """
+    if not settings.OTEL_ENABLED:
+        return
+    app.add_middleware(_HttpErrorTagMiddleware)
+
+
+
 def instrument_fastapi_app(app, settings) -> None:
     """
     Wraps every route on `app` in its own span. Safe to call even when
@@ -412,11 +546,11 @@ def instrument_redis(settings) -> None:
 
 def instrument_celery(settings) -> None:
     """
-    Adds one span per Celery task execution AND propagates trace context
-    through the task message itself (see this module's docstring) -- call
-    this from the `worker`/`beat` process only (celery_app.py's
-    `worker_process_init`/`beat_init` signal handlers), never from a
-    process that merely enqueues tasks via `.delay(...)`.
+    Adds Celery task/producer instrumentation and propagates trace context
+    through task messages. The API process calls this once after its own
+    TracerProvider is configured so `.delay()` can inject the current trace
+    context. Worker/Beat processes call it from their Celery lifecycle
+    signals so prefork tracing remains fork-safe.
     """
     if not settings.OTEL_ENABLED:
         return

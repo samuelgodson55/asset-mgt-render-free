@@ -153,6 +153,7 @@ EOF
   ui)
     if [[ "$TARGET" == "local" ]]; then
         echo "Jaeger UI: ${UI_URL}"
+        echo "Quick error search: ${UI_URL}/search?lookback=1h&limit=50&tags=%7B%22error%22%3Atrue%7D"
     else
       echo "Terraform VM Jaeger is SSH-only."
       echo
@@ -161,6 +162,9 @@ EOF
       echo
       echo "Then open:"
       echo "  ${UI_URL}"
+      echo
+      echo "Quick error search:"
+      echo "  ${UI_URL}/search?lookback=1h&limit=50&tags=%7B%22error%22%3Atrue%7D"
       echo
       echo "The VM Compose file does not publish Jaeger's UI/OTLP ports publicly."
     fi

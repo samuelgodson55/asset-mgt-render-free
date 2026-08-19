@@ -10,6 +10,8 @@ mfa_verify()/request_password_reset()/confirm_password_reset()/
 update_identity() for the actual flow.
 """
 
+from telemetry import trace_operation
+
 import logging
 
 from fastapi import APIRouter, HTTPException, Depends, Request, Response
@@ -114,6 +116,7 @@ def _set_session_cookie(response: Response, token: str) -> None:
 
 
 @router.post("/login")
+@trace_operation("auth.login")
 def login(req: LoginRequest, db: Session = Depends(get_db), response: Response = None):
     # Maintenance must NOT allow the public /auth/login endpoint to become a
     # back door. We still run the normal credential verification first so the
@@ -141,6 +144,7 @@ def login(req: LoginRequest, db: Session = Depends(get_db), response: Response =
 
 
 @router.post("/mfa/setup/confirm")
+@trace_operation("auth.mfa.setup")
 def mfa_setup_confirm(req: MfaSetupConfirmRequest, db: Session = Depends(get_db), response: Response = None):
     result = auth_service.mfa_setup_confirm(db, req.mfa_setup_token, req.code)
     _set_session_cookie(response, result["token"])
@@ -149,6 +153,7 @@ def mfa_setup_confirm(req: MfaSetupConfirmRequest, db: Session = Depends(get_db)
 
 
 @router.post("/mfa/verify")
+@trace_operation("auth.mfa.verify")
 def mfa_verify(req: MfaVerifyRequest, db: Session = Depends(get_db), response: Response = None):
     result = auth_service.mfa_verify(db, req.mfa_pending_token, req.code)
     # SECURITY: a correct RECOVERY code doesn't grant a session here --
@@ -165,6 +170,7 @@ def mfa_verify(req: MfaVerifyRequest, db: Session = Depends(get_db), response: R
 
 
 @router.post("/logout")
+@trace_operation("auth.logout")
 def logout(response: Response):
     response.set_cookie(
         key="access_token",
@@ -188,11 +194,13 @@ def get_my_profile(db: Session = Depends(get_db), user: dict = Depends(get_curre
 
 
 @router.post("/update-password")
+@trace_operation("auth.password.update")
 def update_password(req: PasswordUpdateRequest, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
     return auth_service.update_password(db, req, user)
 
 
 @router.post("/mfa/recovery-codes/regenerate")
+@trace_operation("auth.mfa.recovery_codes.regenerate")
 def regenerate_recovery_codes(req: RecoveryCodesRegenerateRequest, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
     return auth_service.regenerate_recovery_codes(db, user, req.password)
 
@@ -205,16 +213,19 @@ def regenerate_recovery_codes(req: RecoveryCodesRegenerateRequest, db: Session =
 # either route below: by definition, whoever is calling these doesn't
 # have (or has lost) a way to log in yet.
 @router.post("/forgot-password")
+@trace_operation("auth.password.forgot")
 def forgot_password(req: ForgotPasswordRequest, request: Request, db: Session = Depends(get_db)):
     return auth_service.request_password_reset(db, req, frontend_base_url=_resolve_frontend_base_url(request))
 
 
 @router.post("/reset-password")
+@trace_operation("auth.password.reset")
 def reset_password(req: ResetPasswordRequest, db: Session = Depends(get_db)):
     return auth_service.confirm_password_reset(db, req)
 
 
 # --- Self-service identity rotation (name / username / email / phone / company) --
 @router.patch("/me")
+@trace_operation("profile.update")
 def update_my_identity(req: IdentityUpdateRequest, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
     return auth_service.update_identity(db, req, user)

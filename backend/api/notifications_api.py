@@ -11,6 +11,8 @@ since this is an operational/notification-routing setting, not something
 every role needs to read.
 """
 
+from telemetry import trace_operation
+
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
@@ -29,6 +31,7 @@ def get_digest_recipients(db: Session = Depends(get_db), user: dict = Depends(re
 
 
 @router.put("/settings/digest-recipients")
+@trace_operation("settings.digest.update")
 def update_digest_recipients(
     payload: DigestRecipientsUpdateRequest,
     db: Session = Depends(get_db),

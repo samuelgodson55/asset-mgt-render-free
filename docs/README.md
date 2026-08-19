@@ -2055,45 +2055,94 @@ this app and want to tell their traces apart in a shared collector.
 ### Browser tracing and safety
 
 The React browser participates in the same distributed trace when
-OpenTelemetry is enabled. It emits standards-compliant OTLP/HTTP JSON spans
-and W3C `traceparent` headers; FastAPI continues that trace and the existing
-SQLAlchemy/Redis/Celery instrumentation remains underneath it. A typical
-waterfall is:
+OpenTelemetry is enabled. It uses the application's dependency-free browser
+bridge, emits OTLP/HTTP JSON, and injects W3C `traceparent` only into
+same-origin `/api/*` requests made through the API layer.
+
+Important workflows use three distinct semantic layers:
 
 ```text
-Browser: ui.click.Checkout
-  └── Browser: POST /api/checkouts
-        └── Backend: POST /api/checkouts
-              ├── PostgreSQL: SELECT ...
-              ├── PostgreSQL: UPDATE ...
-              └── Redis: ...
+Browser intent
+  ui.click.checkout
+    └── Application operation
+          checkout.complete
+            └── HTTP POST /api/assets/:id/checkout_advanced
+                  └── Backend operation
+                        checkout.complete
+                          ├── PostgreSQL
+                          ├── Redis
+                          └── Celery → worker
 ```
 
+The same pattern is used for important asset, check-in, user, quotation,
+maintenance, backup, and authentication operations. Generic DOM clicks are
+not traced just because they are buttons: only controls explicitly marked
+with `data-otel-action` receive a UI span. This keeps Jaeger searchable and
+prevents arbitrary visible DOM text from becoming telemetry.
+
 Browser tracing is controlled by the **same** `OTEL_ENABLED` setting. The
-browser receives only non-secret `otel_enabled` and
+browser receives only the non-secret `otel_enabled` and
 `otel_trace_sample_ratio` values from `/api/config/public`.
 
-The browser posts batches to the same-origin `POST /api/telemetry/traces`.
-The backend proxies those batches to `OTEL_EXPORTER_OTLP_ENDPOINT` and adds
-`OTEL_EXPORTER_OTLP_HEADERS` server-side, so API keys/tokens never enter the
-React bundle or browser requests. The endpoint is bounded to 256 KiB and
-rate-limited.
+The browser sends batches to same-origin `POST /api/telemetry/traces`. That
+endpoint is a security boundary, not a blind OTLP tunnel: it rebuilds the
+client payload from an allow-list before forwarding it, fixes the frontend
+service identity, limits span count/size, rejects unsafe span IDs/names, and
+drops arbitrary attributes, events, links, headers, cookies, exception
+messages, and other unapproved data. The server-side
+`OTEL_EXPORTER_OTLP_HEADERS` value is added only by the backend and is never
+forwarded from the browser.
 
-For browser tracing, use an **OTLP/HTTP** collector endpoint. The browser
-proxy intentionally does not support the backend's gRPC exporter. If the
-backend is using only an Application Insights connection string and no
-OTLP/HTTP endpoint, backend tracing can still work, but browser spans remain
-disabled.
+The browser trace payload deliberately excludes:
 
-The browser records API request method/path/status and safe UI action names.
-It deliberately does **not** record cookies, Authorization headers, request
-bodies, response bodies, passwords, query strings, or arbitrary visible form
-text. Telemetry failures are fire-and-forget and never cause an application
-request to fail.
+- cookies and session credentials
+- `Authorization` headers
+- request or response bodies
+- passwords
+- MFA codes and recovery codes
+- password-reset tokens
+- query strings
+- arbitrary form/DOM text
+- exception messages and stack traces
+- exporter authentication headers
 
-For local Jaeger, keep `OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318`.
-The browser never receives the Docker-internal `jaeger` hostname; it always
-posts to the application's same-origin telemetry proxy.
+URLs are normalized before browser spans are exported: numeric/UUID path
+identifiers become `:id`, and backup restore/download filenames become
+`:file`. Backend HTTP spans remain the authoritative source for detailed
+server-side route information.
+
+### Fast Jaeger error investigation
+
+Jaeger v2's Search page exposes failed-span filtering through **Tags**, not a
+separate status search box. This project marks failed HTTP/business/browser
+spans with the safe boolean tag `error=true`.
+
+For local development:
+
+```text
+Jaeger → Quick Investigations → Errors — Last 1 Hour
+```
+
+or enter this in the Search page's **Tags** field:
+
+```text
+error=true
+```
+
+The local Jaeger UI also provides shortcuts for checkout traces, slow traces,
+and recent traces. These are UI-only conveniences configured in
+`jaeger/ui-config.json`; they do not expose application secrets or change
+trace collection behavior.
+
+The browser sampling decision is also consistent within a trace. A sampled
+UI interaction carries that decision through its business operation and HTTP
+client span instead of independently sampling each layer and producing
+partial traces. When an operation is not sampled, its child HTTP span is not
+sampled either.
+
+Telemetry failures are fire-and-forget and never make a normal application
+request fail. With `OTEL_ENABLED=false`, the browser installs no telemetry
+listeners or API tracing hooks and sends nothing.
 
 ### Try it locally (no Azure account needed)
 

@@ -66,7 +66,7 @@ function CreateUserModal({ open, onClose, onCreated, roleOptions }: { open: bool
         <input value={form.department_role} onChange={(e) => setForm({ ...form, department_role: e.target.value })} placeholder="Title/role in department (optional)" className={formInputClass} />
         <input required type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="Initial password" className={formInputClass} />
         {error && <ErrorBanner>{error}</ErrorBanner>}
-        <button type="submit" disabled={submitting} className="bg-brass hover:bg-brass-soft disabled:opacity-60 text-ink font-medium text-[13px] rounded-[3px] py-2.5 transition-colors">
+        <button data-otel-action="user.create" type="submit" disabled={submitting} className="bg-brass hover:bg-brass-soft disabled:opacity-60 text-ink font-medium text-[13px] rounded-[3px] py-2.5 transition-colors">
           {submitting ? "Creating…" : "Create account"}
         </button>
       </form>
@@ -109,7 +109,7 @@ function ResetPasswordModal({ target, onClose, onDone }: { target: UserRow | nul
         <input required type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="New password" className={formInputClass} />
         <input required type="password" value={adminPassword} onChange={(e) => setAdminPassword(e.target.value)} placeholder="Your current password" className={formInputClass} />
         {error && <ErrorBanner>{error}</ErrorBanner>}
-        <button type="submit" disabled={submitting} className="bg-brass hover:bg-brass-soft disabled:opacity-60 text-ink font-medium text-[13px] rounded-[3px] py-2.5 transition-colors">
+        <button data-otel-action="user.password.reset" type="submit" disabled={submitting} className="bg-brass hover:bg-brass-soft disabled:opacity-60 text-ink font-medium text-[13px] rounded-[3px] py-2.5 transition-colors">
           {submitting ? "Resetting…" : "Reset password"}
         </button>
       </form>
@@ -158,7 +158,7 @@ function EditUserModal({ target, onClose, onDone, roleOptions }: { target: UserR
           {roleOptions.map((r) => <option key={r} value={r}>{r}</option>)}
         </select>
         {error && <ErrorBanner>{error}</ErrorBanner>}
-        <button type="submit" disabled={submitting} className="bg-brass hover:bg-brass-soft disabled:opacity-60 text-ink font-medium text-[13px] rounded-[3px] py-2.5 transition-colors">
+        <button data-otel-action="user.update" type="submit" disabled={submitting} className="bg-brass hover:bg-brass-soft disabled:opacity-60 text-ink font-medium text-[13px] rounded-[3px] py-2.5 transition-colors">
           {submitting ? "Saving…" : "Save changes"}
         </button>
       </form>
@@ -339,9 +339,9 @@ export function UsersPanel({
                   <div className="flex items-center justify-end gap-1.5 flex-wrap">
                     <button onClick={() => openCustody("user", u.id, u.name)} className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-sky/50 hover:text-sky transition-colors">Custody</button>
                     {canEditRow(u.role) && <button onClick={() => setEditing(u)} title="Edit" className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-brass/50 hover:text-brass-soft transition-colors"><Pencil size={11} /></button>}
-                    {canManage && <button onClick={() => setResetting(u)} title="Reset password" className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-brass/50 hover:text-brass-soft transition-colors"><KeyRound size={11} /></button>}
+                    {canManage && <button data-otel-action="user.password.reset.open" onClick={() => setResetting(u)} title="Reset password" className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-brass/50 hover:text-brass-soft transition-colors"><KeyRound size={11} /></button>}
                     {canEditRow(u.role) && <button onClick={() => setRevoking(u)} title="Revoke access (convert to Ad-Hoc)" className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-rust/50 hover:text-rust-soft transition-colors"><UserMinus size={11} /></button>}
-                    {canManage && <button onClick={() => remove(u)} title="Delete" className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-rust/50 hover:text-rust-soft transition-colors"><Trash2 size={11} /></button>}
+                    {canManage && <button data-otel-action="user.delete" onClick={() => remove(u)} title="Delete" className="rounded-md border border-border-soft px-2 py-1 text-[11px] font-medium text-text-muted hover:border-rust/50 hover:text-rust-soft transition-colors"><Trash2 size={11} /></button>}
                   </div>
                 </td>
               </tr>

@@ -16,6 +16,8 @@ See services/backup_service.py for the actual pg_dump/psql/Google Drive
 implementation -- this router is intentionally thin.
 """
 
+from telemetry import trace_operation
+
 import logging
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
@@ -63,6 +65,7 @@ def list_backups(user: dict = Depends(require_true_super_admin)):
 
 
 @router.post("/create")
+@trace_operation("backup.create")
 def create_backup_now(user: dict = Depends(require_true_super_admin)):
     """
     "Backup Now" button. Runs pg_dump synchronously -- a full dump of this
@@ -100,6 +103,7 @@ def download_backup(filename: str, user: dict = Depends(require_true_super_admin
 
 
 @router.delete("/{filename}")
+@trace_operation("backup.delete")
 def delete_backup(filename: str, user: dict = Depends(require_true_super_admin)):
     """Removes a local backup file (and its index entry). Does NOT touch any copy already uploaded to Google Drive."""
     backup_service.delete_backup(filename)
@@ -129,6 +133,7 @@ def restore_status(user: dict = Depends(require_true_super_admin)):
 
 
 @router.post("/restore/{filename}")
+@trace_operation("backup.restore")
 def restore_from_local(filename: str, user: dict = Depends(require_true_super_admin)):
     """
     Restores from a backup already sitting on local disk. DESTRUCTIVE: the
@@ -159,6 +164,7 @@ def restore_from_local(filename: str, user: dict = Depends(require_true_super_ad
 
 
 @router.post("/restore-upload")
+@trace_operation("backup.restore.upload")
 async def restore_from_upload(
     file: UploadFile = File(...),
     user: dict = Depends(require_true_super_admin),

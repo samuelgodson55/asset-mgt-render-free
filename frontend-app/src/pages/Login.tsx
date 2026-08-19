@@ -165,6 +165,7 @@ function LoginForm({
         {error && <ErrorBanner message={error} />}
 
         <button
+          data-otel-action="auth.login"
           type="submit"
           disabled={submitting}
           className="mt-2 flex items-center justify-center gap-2 bg-gradient-to-b from-brass-soft to-brass hover:brightness-110 disabled:opacity-60 text-ink font-semibold text-[13.5px] rounded-[4px] py-3 transition-all shadow-[0_1px_0_0_rgba(255,255,255,0.25)_inset,0_8px_20px_-10px_var(--color-brass)] group"

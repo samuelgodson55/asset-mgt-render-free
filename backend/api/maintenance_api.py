@@ -1,3 +1,5 @@
+from telemetry import trace_operation
+
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from database import get_db
@@ -12,5 +14,6 @@ def maintenance_status(db: Session = Depends(get_db)):
     return maintenance_service.get_status(db)
 
 @router.put("/status")
+@trace_operation("maintenance.update")
 def update_maintenance_status(payload: MaintenanceStatusUpdate, db: Session = Depends(get_db), user: dict = Depends(require_true_super_admin)):
     return maintenance_service.update_status(db, payload.enabled, payload.message, user)

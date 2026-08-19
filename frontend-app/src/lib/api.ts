@@ -1,4 +1,5 @@
 import { reportClientError, setLastRequestId } from "./errorbeacon";
+import { runBusinessOperation, telemetryFetch, type BrowserTelemetrySpan } from "./browserTelemetry";
 import { mockAssets, mockCheckouts, mockExtensions, mockNotifications, mockStats, mockBackups, mockBackupStatus, mockDigestRecipients, mockAuditLogs, mockCatalog, mockQuotationCart, mockReportsDashboard } from "./mock";
 import type { AssetType, Checkout, ExtensionRequest, NotificationItem, DashboardStats, BackupEntry, BackupStatus, RestoreResult, ImportResult, MyItem, ProfileDetail, UserRow, OutsiderRow, CustodyItem, AuditLogEntry, PublicConfig, CatalogAsset, QuotationCartOrDetail, QuotationListRow, FulfillmentQueueRow, QuotationOutsourcedItemCreate, QuotationOutsourceShortfallItem, AssetDetails, DeletedAssetRow, DeletedUserRow, RosterUser, BulkExtendResult, MyExtensionDecision, QuotationNotification, ReportsDashboard } from "./types";
 
@@ -82,7 +83,7 @@ function retryDelayMs(attempt: number): number {
   return API_RETRY_BASE_DELAY_MS * 2 ** attempt + jitter;
 }
 
-async function rawFetch<T = unknown>(path: string, init?: RequestInit): Promise<T> {
+async function rawFetchInternal<T = unknown>(path: string, init?: RequestInit, parentSpan?: BrowserTelemetrySpan | null): Promise<T> {
   const method = String(init?.method ?? "GET").toUpperCase();
   const retrySafe = SAFE_RETRY_METHODS.has(method);
   let lastNetworkError: unknown = null;
@@ -90,11 +91,11 @@ async function rawFetch<T = unknown>(path: string, init?: RequestInit): Promise<
   for (let attempt = 0; attempt < (retrySafe ? API_RETRY_ATTEMPTS : 1); attempt += 1) {
     let res: Response;
     try {
-      res = await fetch(`${API_BASE}${path}`, {
+      res = await telemetryFetch(`${API_BASE}${path}`, {
         credentials: "include",
         headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
         ...init,
-      });
+      }, parentSpan);
     } catch (err) {
       // A transport/network failure is already ambiguous from the browser's
       // point of view: the request may have left the machine even if no
@@ -166,6 +167,100 @@ async function rawFetch<T = unknown>(path: string, init?: RequestInit): Promise<
   throw lastNetworkError instanceof Error ? lastNetworkError : new Error("Request failed after retries");
 }
 
+const BUSINESS_OPERATION_RULES: Array<{ method: string; pattern: RegExp; operation: string }> = [
+  { method: "POST", pattern: /^\/auth\/login$/, operation: "auth.login" },
+  { method: "POST", pattern: /^\/auth\/mfa\/verify$/, operation: "auth.mfa.verify" },
+  { method: "POST", pattern: /^\/auth\/mfa\/setup\/confirm$/, operation: "auth.mfa.setup" },
+  { method: "POST", pattern: /^\/auth\/logout$/, operation: "auth.logout" },
+  { method: "POST", pattern: /^\/auth\/forgot-password$/, operation: "auth.password.forgot" },
+  { method: "POST", pattern: /^\/auth\/reset-password$/, operation: "auth.password.reset" },
+  { method: "POST", pattern: /^\/auth\/update-password$/, operation: "auth.password.update" },
+  { method: "POST", pattern: /^\/auth\/mfa\/recovery-codes\/regenerate$/, operation: "auth.mfa.recovery_codes.regenerate" },
+  { method: "PATCH", pattern: /^\/auth\/me$/, operation: "profile.update" },
+
+  { method: "POST", pattern: /^\/assets\/\d+\/checkout_advanced$/, operation: "checkout.complete" },
+  { method: "POST", pattern: /^\/assets\/\d+\/checkin$/, operation: "checkin.complete" },
+  { method: "POST", pattern: /^\/assets\/\d+\/exception$/, operation: "asset.exception.flag" },
+  { method: "POST", pattern: /^\/assets\/\d+\/exception\/\d+\/recall$/, operation: "asset.exception.recall" },
+  { method: "POST", pattern: /^\/assets\/\d+\/restore$/, operation: "asset.restore" },
+  { method: "POST", pattern: /^\/assets\/\d+\/purge$/, operation: "asset.purge" },
+  { method: "POST", pattern: /^\/assets$/, operation: "asset.create" },
+  { method: "PUT", pattern: /^\/assets\/\d+\/quantity$/, operation: "asset.quantity.update" },
+  { method: "PUT", pattern: /^\/assets\/\d+\/name$/, operation: "asset.name.update" },
+  { method: "PUT", pattern: /^\/assets\/\d+\/category$/, operation: "asset.category.update" },
+  { method: "PUT", pattern: /^\/assets\/\d+\/department$/, operation: "asset.department.update" },
+  { method: "PUT", pattern: /^\/assets\/\d+\/price$/, operation: "asset.price.update" },
+  { method: "DELETE", pattern: /^\/assets\/\d+$/, operation: "asset.delete" },
+  { method: "POST", pattern: /^\/assets\/import$/, operation: "asset.import" },
+
+  { method: "POST", pattern: /^\/checkouts\/\d+\/return$/, operation: "checkin.complete" },
+  { method: "POST", pattern: /^\/checkouts\/\d+\/extend$/, operation: "checkout.extend" },
+  { method: "POST", pattern: /^\/checkouts\/bulk-extend$/, operation: "checkout.extend.bulk" },
+  { method: "POST", pattern: /^\/checkouts\/\d+\/extension-requests$/, operation: "checkout.extension.request" },
+  { method: "POST", pattern: /^\/checkouts\/extension-requests\/\d+\/decision$/, operation: "checkout.extension.decide" },
+
+  { method: "POST", pattern: /^\/users$/, operation: "user.create" },
+  { method: "PATCH", pattern: /^\/users\/\d+$/, operation: "user.update" },
+  { method: "DELETE", pattern: /^\/users\/\d+$/, operation: "user.delete" },
+  { method: "POST", pattern: /^\/users\/\d+\/restore$/, operation: "user.restore" },
+  { method: "POST", pattern: /^\/users\/\d+\/purge$/, operation: "user.purge" },
+  { method: "POST", pattern: /^\/users\/\d+\/convert-to-outsider$/, operation: "user.convert_to_outsider" },
+  { method: "POST", pattern: /^\/users\/\d+\/reset-password$/, operation: "user.password.reset" },
+
+  { method: "PATCH", pattern: /^\/outsiders\/\d+$/, operation: "outsider.update" },
+  { method: "DELETE", pattern: /^\/outsiders\/\d+$/, operation: "outsider.delete" },
+  { method: "POST", pattern: /^\/outsiders\/\d+\/convert-to-user$/, operation: "outsider.convert_to_user" },
+
+  { method: "POST", pattern: /^\/quotations\/items$/, operation: "quote.item.add" },
+  { method: "PUT", pattern: /^\/quotations\/items\/\d+$/, operation: "quote.item.update" },
+  { method: "DELETE", pattern: /^\/quotations\/items\/\d+$/, operation: "quote.item.remove" },
+  { method: "POST", pattern: /^\/quotations\/submit$/, operation: "quote.submit" },
+  { method: "POST", pattern: /^\/quotations\/\d+\/approve$/, operation: "quote.approve" },
+  { method: "POST", pattern: /^\/quotations\/\d+\/checkout$/, operation: "quote.checkout" },
+  { method: "POST", pattern: /^\/quotations\/\d+\/paid$/, operation: "quote.paid" },
+  { method: "POST", pattern: /^\/quotations\/\d+\/assign$/, operation: "quote.assign" },
+  { method: "POST", pattern: /^\/quotations\/\d+\/outsourced-items$/, operation: "quote.outsourced_item.add" },
+  { method: "DELETE", pattern: /^\/quotations\/\d+\/outsourced-items\/\d+$/, operation: "quote.outsourced_item.remove" },
+  { method: "POST", pattern: /^\/quotations$/, operation: "quote.create" },
+  { method: "PUT", pattern: /^\/quotations\/\d+\/discount$/, operation: "quote.discount.update" },
+  { method: "PUT", pattern: /^\/quotations\/\d+$/, operation: "quote.update" },
+  { method: "DELETE", pattern: /^\/quotations\/\d+$/, operation: "quote.delete" },
+  { method: "POST", pattern: /^\/quotations\/me\/\d+\/items$/, operation: "quote.my_item.add" },
+  { method: "PUT", pattern: /^\/quotations\/me\/\d+\/items\/\d+$/, operation: "quote.my_item.update" },
+  { method: "DELETE", pattern: /^\/quotations\/me\/\d+\/items\/\d+$/, operation: "quote.my_item.remove" },
+  { method: "POST", pattern: /^\/quotations\/me\/notifications\/read$/, operation: "quote.notifications.read" },
+
+  { method: "POST", pattern: /^\/backup\/create$/, operation: "backup.create" },
+  { method: "POST", pattern: /^\/backup\/restore\/[^/]+$/, operation: "backup.restore" },
+  { method: "POST", pattern: /^\/backup\/restore-upload$/, operation: "backup.restore.upload" },
+  { method: "DELETE", pattern: /^\/backup\/[^/]+$/, operation: "backup.delete" },
+
+  { method: "POST", pattern: /^\/audit-logs\/export$/, operation: "audit.export.start" },
+  { method: "PUT", pattern: /^\/maintenance\/status$/, operation: "maintenance.update" },
+  { method: "PUT", pattern: /^\/settings\/digest-recipients$/, operation: "settings.digest.update" },
+  { method: "PUT", pattern: /^\/settings\/vat$/, operation: "settings.vat.update" },
+];
+
+function businessOperationForRequest(method: string, path: string): string | null {
+  const cleanPath = path.split("?", 1)[0];
+  return BUSINESS_OPERATION_RULES.find(
+    (rule) => rule.method === method && rule.pattern.test(cleanPath),
+  )?.operation ?? null;
+}
+
+async function rawFetch<T = unknown>(path: string, init?: RequestInit): Promise<T> {
+  const method = String(init?.method ?? "GET").toUpperCase();
+  const operation = businessOperationForRequest(method, path);
+
+  if (!operation) return rawFetchInternal<T>(path, init);
+
+  return runBusinessOperation(
+    operation,
+    (parentSpan) => rawFetchInternal<T>(path, init, parentSpan),
+    [],
+  );
+}
+
 /**
  * Same contract as rawFetch, but for multipart/form-data bodies (file
  * uploads) -- deliberately does NOT set a Content-Type header itself, so
@@ -173,13 +268,13 @@ async function rawFetch<T = unknown>(path: string, init?: RequestInit): Promise<
  * value, which a hardcoded `application/json` (rawFetch's default) would
  * clobber and break.
  */
-async function rawFetchMultipart<T = unknown>(path: string, formData: FormData, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
+async function rawFetchMultipartInternal<T = unknown>(path: string, formData: FormData, init?: RequestInit, parentSpan?: BrowserTelemetrySpan | null): Promise<T> {
+  const res = await telemetryFetch(`${API_BASE}${path}`, {
     method: "POST",
     credentials: "include",
     body: formData,
     ...init,
-  });
+  }, parentSpan);
   const requestId = res.headers.get("x-request-id");
   if (requestId) setLastRequestId(requestId);
   if (!res.ok) {
@@ -197,6 +292,23 @@ async function rawFetchMultipart<T = unknown>(path: string, formData: FormData, 
     throw new ApiError(res.status, message);
   }
   return (await res.json()) as T;
+}
+
+async function rawFetchMultipart<T = unknown>(
+  path: string,
+  formData: FormData,
+  init?: RequestInit,
+): Promise<T> {
+  const method = String(init?.method ?? "POST").toUpperCase();
+  const operation = businessOperationForRequest(method, path);
+
+  if (!operation) return rawFetchMultipartInternal<T>(path, formData, init);
+
+  return runBusinessOperation(
+    operation,
+    (parentSpan) => rawFetchMultipartInternal<T>(path, formData, init, parentSpan),
+    [],
+  );
 }
 
 /**

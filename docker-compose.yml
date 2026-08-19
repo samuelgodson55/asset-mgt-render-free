@@ -710,6 +710,13 @@ services:
     container_name: snipeit_lite_jaeger
     profiles: ["tracing"]
     restart: unless-stopped
+    # Jaeger v2 uses its built-in all-in-one configuration by default.
+    # This small UI-only override adds clean, application-specific quick
+    # searches without changing trace collection/storage behavior.
+    command:
+      - "--set=extensions.jaeger_query.ui.config_file=/etc/jaeger/ui-config.json"
+    volumes:
+      - ./jaeger/ui-config.json:/etc/jaeger/ui-config.json:ro
     ports:
       # Jaeger UI -- open http://localhost:16686 once both this and
       # `backend` (with OTEL_ENABLED=true) are running, and click any

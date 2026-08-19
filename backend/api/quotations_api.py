@@ -9,6 +9,8 @@ view / edit / assign any submitted Quotation), the admin-only global VAT
 setting, and PDF export.
 """
 
+from telemetry import trace_operation
+
 from typing import Optional
 from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy.orm import Session
@@ -81,6 +83,7 @@ def get_my_quotation_notifications(limit: int = Query(20, ge=1, le=quotation_ser
 
 
 @router.post("/quotations/me/notifications/read")
+@trace_operation("quote.notifications.read")
 def mark_my_quotation_notifications_read(payload: QuotationNotificationsReadRequest, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
     """Self-service: marks the given notification ids (only ones addressed to the caller) as read."""
     return quotation_service.mark_quotation_notifications_read(db, user, payload.notification_ids)
@@ -104,6 +107,7 @@ def export_my_submitted_quotation(quotation_id: int, db: Session = Depends(get_d
 
 
 @router.put("/quotations/me/{quotation_id}/items/{item_id}")
+@trace_operation("quote.my_item.update")
 def update_my_submitted_quotation_item(quotation_id: int, item_id: int, payload: QuotationItemQuantityUpdate, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
     """Lets the requester adjust a quantity on their OWN quotation while it's still \"submitted\"
     (unapproved) -- nested under /quotations/me/... so it never collides with the Admin/Manager-only
@@ -112,12 +116,14 @@ def update_my_submitted_quotation_item(quotation_id: int, item_id: int, payload:
 
 
 @router.delete("/quotations/me/{quotation_id}/items/{item_id}")
+@trace_operation("quote.my_item.remove")
 def remove_my_submitted_quotation_item(quotation_id: int, item_id: int, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
     """Lets the requester remove a line from their OWN quotation while it's still \"submitted\" (unapproved)."""
     return quotation_service.remove_my_submitted_item(db, user, quotation_id, item_id)
 
 
 @router.post("/quotations/me/{quotation_id}/items")
+@trace_operation("quote.my_item.add")
 def add_my_submitted_quotation_item(quotation_id: int, payload: QuotationItemCreate, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
     """Lets the requester/assignee add another catalog asset to their OWN quotation while it's
     still \"submitted\" (unapproved) -- nested under /quotations/me/... so it never collides with
@@ -126,21 +132,25 @@ def add_my_submitted_quotation_item(quotation_id: int, payload: QuotationItemCre
 
 
 @router.post("/quotations/items")
+@trace_operation("quote.item.add")
 def add_quotation_item(payload: QuotationItemCreate, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
     return quotation_service.add_item(db, user, payload)
 
 
 @router.put("/quotations/items/{item_id}")
+@trace_operation("quote.item.update")
 def update_quotation_item(item_id: int, payload: QuotationItemQuantityUpdate, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
     return quotation_service.update_item_quantity(db, user, item_id, payload)
 
 
 @router.delete("/quotations/items/{item_id}")
+@trace_operation("quote.item.remove")
 def remove_quotation_item(item_id: int, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
     return quotation_service.remove_item(db, user, item_id)
 
 
 @router.post("/quotations/submit")
+@trace_operation("quote.submit")
 def submit_quotation(db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
     """Finalizes the caller's current draft: stamps it with a Quotation ID (e.g. "QT-000001") an
     Admin/Manager can pull up in the Quotes tab, adjust, and assign to a user."""
@@ -171,6 +181,7 @@ def list_quotations(
 
 
 @router.post("/quotations")
+@trace_operation("quote.create")
 def create_quotation(payload: QuotationCreateRequest, db: Session = Depends(get_db), user: dict = Depends(require_privileged_role)):
     """Admin/Manager starts a brand new Quotation directly from the Quotes tab (e.g. building
     one on a user's behalf), optionally assigned to a user immediately. Starts empty --
@@ -179,6 +190,7 @@ def create_quotation(payload: QuotationCreateRequest, db: Session = Depends(get_
 
 
 @router.delete("/quotations/{quotation_id}")
+@trace_operation("quote.delete")
 def delete_quotation(quotation_id: int, db: Session = Depends(get_db), user: dict = Depends(require_privileged_role)):
     """Admin/Manager-only: permanently deletes a submitted or approved
     quotation. Fulfilled and paid quotations are retained for operational and
@@ -202,12 +214,14 @@ def get_quotation(quotation_id: int, db: Session = Depends(get_db), user: dict =
 
 
 @router.put("/quotations/{quotation_id}")
+@trace_operation("quote.update")
 def update_quotation(quotation_id: int, payload: QuotationMetaUpdate, db: Session = Depends(get_db), user: dict = Depends(require_privileged_role)):
     """Updates the Admin/Manager-facing notes on a Quotation."""
     return quotation_service.update_quotation_meta(db, user, quotation_id, payload)
 
 
 @router.put("/quotations/{quotation_id}/discount")
+@trace_operation("quote.discount.update")
 def update_quotation_discount(quotation_id: int, payload: QuotationDiscountUpdateRequest, db: Session = Depends(get_db), user: dict = Depends(require_privileged_role)):
     """Admin/Manager sets the discount percentage (0-100) on a single Quotation,
     editable right up until it's fulfilled -- same as any other line on the quote."""
@@ -215,22 +229,26 @@ def update_quotation_discount(quotation_id: int, payload: QuotationDiscountUpdat
 
 
 @router.post("/quotations/{quotation_id}/items")
+@trace_operation("quote.item.add")
 def add_quotation_item_admin(quotation_id: int, payload: QuotationItemCreate, db: Session = Depends(get_db), user: dict = Depends(require_privileged_role)):
     """Admin/Manager adds (or updates) a line on someone else's submitted Quotation."""
     return quotation_service.admin_add_item(db, user, quotation_id, payload)
 
 
 @router.put("/quotations/{quotation_id}/items/{item_id}")
+@trace_operation("quote.item.update")
 def update_quotation_item_admin(quotation_id: int, item_id: int, payload: QuotationItemQuantityUpdate, db: Session = Depends(get_db), user: dict = Depends(require_privileged_role)):
     return quotation_service.admin_update_item_quantity(db, user, quotation_id, item_id, payload)
 
 
 @router.delete("/quotations/{quotation_id}/items/{item_id}")
+@trace_operation("quote.item.remove")
 def remove_quotation_item_admin(quotation_id: int, item_id: int, db: Session = Depends(get_db), user: dict = Depends(require_privileged_role)):
     return quotation_service.admin_remove_item(db, user, quotation_id, item_id)
 
 
 @router.post("/quotations/{quotation_id}/outsourced-items")
+@trace_operation("quote.outsourced_item.add")
 def add_quotation_outsourced_item(quotation_id: int, payload: QuotationOutsourcedItemCreate, db: Session = Depends(get_db), user: dict = Depends(require_privileged_role)):
     """Manager/Admin-only: adds a \"not currently in inventory\" line, with its own
     name/description/price, to a submitted Quotation. The requester can see this
@@ -240,18 +258,21 @@ def add_quotation_outsourced_item(quotation_id: int, payload: QuotationOutsource
 
 
 @router.delete("/quotations/{quotation_id}/outsourced-items/{item_id}")
+@trace_operation("quote.outsourced_item.remove")
 def remove_quotation_outsourced_item(quotation_id: int, item_id: int, db: Session = Depends(get_db), user: dict = Depends(require_privileged_role)):
     """Manager/Admin-only: removes a previously-added outsourced (not-in-inventory) line."""
     return quotation_service.admin_remove_outsourced_item(db, user, quotation_id, item_id)
 
 
 @router.post("/quotations/{quotation_id}/assign")
+@trace_operation("quote.assign")
 def assign_quotation(quotation_id: int, payload: QuotationAssignRequest, db: Session = Depends(get_db), user: dict = Depends(require_privileged_role)):
     """Assigns (or clears the assignment of) a submitted Quotation to a user."""
     return quotation_service.assign_quotation(db, user, quotation_id, payload)
 
 
 @router.post("/quotations/{quotation_id}/approve")
+@trace_operation("quote.approve")
 def approve_quotation(quotation_id: int, db: Session = Depends(get_db), user: dict = Depends(require_privileged_role)):
     """Admin/Manager-only: flips a submitted Quotation to \"approved\" -- the green
     Ready for Pickup badge -- and locks it against further item/notes/assignment edits."""
@@ -259,12 +280,14 @@ def approve_quotation(quotation_id: int, db: Session = Depends(get_db), user: di
 
 
 @router.post("/quotations/{quotation_id}/paid")
+@trace_operation("quote.paid")
 def mark_quotation_paid(quotation_id: int, payload: QuotationPaidRequest, db: Session = Depends(get_db), user: dict = Depends(require_privileged_role)):
     """Admin/Manager-only: records payment for a fulfilled quotation and moves it to terminal `paid`."""
     return quotation_service.mark_quotation_paid(db, user, quotation_id, payload)
 
 
 @router.post("/quotations/{quotation_id}/checkout")
+@trace_operation("quote.checkout")
 def checkout_quotation(quotation_id: int, payload: QuotationCheckoutRequest = QuotationCheckoutRequest(), db: Session = Depends(get_db), user: dict = Depends(require_privileged_role)):
     """Admin/Manager-only: the Fulfillment Drawer's \"physical bulk checkout\" action --
     turns every line item on an approved Quotation into a real AssetCheckout, evaluating
@@ -295,6 +318,7 @@ def get_vat_setting(db: Session = Depends(get_db), user: dict = Depends(get_curr
 
 
 @router.put("/settings/vat")
+@trace_operation("settings.vat.update")
 def update_vat_setting(payload: VatUpdateRequest, db: Session = Depends(get_db), user: dict = Depends(require_super_admin)):
     """Admin/Super Admin only -- changes the global VAT applied to every Quotation immediately."""
     return quotation_service.set_vat_percent(db, payload, user)
