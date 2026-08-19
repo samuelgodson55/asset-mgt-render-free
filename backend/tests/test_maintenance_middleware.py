@@ -100,8 +100,10 @@ def test_stale_pre_restore_super_admin_token_does_not_bypass_gate(client, db_ses
     _enable_maintenance(db_session)
 
     # Simulate a restore happening AFTER this token was issued: write an
-    # AUTH_EPOCH in the future relative to the token's `iat`.
-    future_epoch = (datetime.datetime.utcnow() + datetime.timedelta(days=1)).isoformat()
+    # AUTH_EPOCH in the future relative to the token's `iat`, using the same
+    # aware-UTC helper production code uses (services/backup_service.py) --
+    # not the deprecated, naive datetime.datetime.utcnow().
+    future_epoch = (models.utc_now() + datetime.timedelta(days=1)).isoformat()
     db_session.add(models.AppSetting(key=AUTH_EPOCH_SETTING_KEY, value=future_epoch, updated_by="system"))
     db_session.commit()
 
