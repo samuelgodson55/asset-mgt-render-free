@@ -17,7 +17,13 @@ MAX_DUE_DATE_YEARS_AHEAD = 5
 
 class AssetTypeCreate(BaseModel):
     name: str
-    total_quantity: int
+    # ge=0: mirrors QuantityUpdateRequest.new_total below and the CSV
+    # importer's parse_quantity() -- every other path that sets a pool's
+    # total_quantity already rejects a negative value server-side; this is
+    # the one that didn't. A negative total here would flow straight into
+    # services/stock.py's `available = total_quantity - outbound -
+    # isolated` formula and start the pool at negative available stock.
+    total_quantity: int = Field(..., ge=0)
     custom_fields: Optional[Dict[str, str]] = {}
 
     # Optional -- which internal category this pool's equipment

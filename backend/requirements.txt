@@ -1,12 +1,33 @@
-fastapi==0.111.0
+# SECURITY UPDATE (see pip-audit findings from the code-review pass):
+# fastapi bumped 0.111.0 -> 0.141.1 specifically to pull in a starlette line
+# that actually has the CVE fixes below -- fastapi 0.111.0 pinned
+# starlette<0.38.0, and several of these were only fixed upstream in
+# starlette's 1.x line, which no 0.11x fastapi release can resolve to.
+# Verified: `pip install -r requirements.txt` resolves cleanly, `pip-audit`
+# reports zero known vulnerabilities, and the health-check test suite
+# passes unchanged against the new versions.
+fastapi==0.141.1
+# Pinned explicitly (previously left to resolve transitively off fastapi's
+# constraint) so it can't quietly drift back to a vulnerable version on a
+# future fastapi-only bump. Fixes: PYSEC-2026-161 (unvalidated Host header
+# lets request.url.hostname be spoofed, CVSS 6.5), PYSEC-2026-1941/1943
+# (multipart-upload DoS blocking the event loop), PYSEC-2026-248/249/2280/2281
+# (further request-smuggling/parsing issues) -- all unfixed as of 0.37.2.
+starlette==1.6.0
 uvicorn==0.30.1
 psycopg2-binary==2.9.9
 sqlalchemy==2.0.51
 pwdlib[argon2]==0.2.1
 pyjwt==2.13.0
 pyotp==2.9.0
-cryptography==43.0.1
-python-multipart==0.0.9
+# 43.0.1 -> 50.0.0: clears 6 known advisories (PYSEC-2026-36/3552/3553/3554,
+# GHSA-537c-gmf6-5ccf). Only Fernet is used in this codebase (security.py,
+# services/auth_service.py) -- a stable, unchanged API across this jump.
+cryptography==50.0.0
+# 0.0.9 -> 0.0.32: clears 7 known advisories in the multipart form-data
+# parser (PYSEC-2026-1851/1852/3036-3040), used by every UploadFile-based
+# route (CSV import, backup restore-upload).
+python-multipart==0.0.32
 pydantic-settings==2.4.0
 alembic==1.18.5
 reportlab==4.2.5
@@ -20,7 +41,9 @@ redis==8.0.1
 # explicitly means a change to one of those transitive dependencies can
 # no longer silently change (or drop) the version this app actually
 # relies on.
-requests==2.32.3
+# 2.32.3 -> 2.33.0: clears PYSEC-2026-2275 (also picks up the 2.32.4 fix
+# for PYSEC-2026-1872 along the way).
+requests==2.33.0
 # Keep requests encoding-detection dependencies on versions it supports.
 charset-normalizer==3.3.2
 chardet<6
@@ -65,4 +88,6 @@ opentelemetry-instrumentation-logging==0.64b0
 # b56 declares opentelemetry-api/sdk~=1.43.0, so it intentionally stays on
 # the same 1.43.x core line above.
 azure-monitor-opentelemetry-exporter==1.0.0b56
-pypdf==5.9.0
+# 5.9.0 -> 6.15.0: clears the long list of PYSEC-2026-3xxx advisories against
+# pypdf's parser (used by services/export_service.py's PDF export paths).
+pypdf==6.15.0

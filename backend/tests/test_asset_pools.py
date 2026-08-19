@@ -27,6 +27,20 @@ def test_admin_can_create_and_view_asset_pool(as_admin):
     assert body["price"] == 999.5
 
 
+def test_create_asset_pool_rejects_negative_total_quantity(as_admin):
+    """AssetTypeCreate.total_quantity must reject negatives, same as
+    QuantityUpdateRequest.new_total (PUT .../quantity) and the CSV
+    importer's parse_quantity() already do -- a negative total would flow
+    straight into services/stock.py's Available formula and start the
+    pool at negative available stock."""
+    client, headers = as_admin
+    response = client.post(
+        "/api/assets", headers=headers,
+        json={"name": "Negative Quantity Pool", "total_quantity": -1},
+    )
+    assert response.status_code == 422, response.text
+
+
 def test_admin_can_edit_asset_department_without_changing_category(as_admin):
     client, headers = as_admin
     create = client.post(
