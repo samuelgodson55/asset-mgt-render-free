@@ -24,14 +24,21 @@
 #              fires the scheduled overdue/due-soon digest jobs on a timer.
 #              Split from `worker` so `worker` can be scaled to multiple
 #              replicas without duplicating the scheduled jobs.
-#   frontend - the static site (index.html/admin.html/js/*) PLUS an nginx
-#              reverse proxy in front of it, built from frontend/Dockerfile.
-#              nginx serves the frontend directly and transparently forwards
-#              every /api/* request to the backend container over Docker's
-#              internal network -- see nginx/default.conf.template for the
-#              full explanation. This is also the ONLY multi-tier-portable
-#              piece: the exact same image runs on Render/cloud too, just
-#              with different BACKEND_HOST/BACKEND_PORT env vars.
+#   frontend - the frontend app PLUS an nginx reverse proxy in front of it,
+#              built from frontend/Dockerfile. By default this is the React
+#              "Ledger" SPA (frontend-app/, built to static assets by Vite);
+#              set FRONTEND_BUILD_TARGET=frontend-legacy-only in .env to
+#              ship the older vanilla-JS static site (index.html/admin.html/
+#              js/*) instead -- see that service's own `target:` comment
+#              below and frontend-app/README.md's "Detaching this app"
+#              section. Whichever one is built, nginx serves it directly and
+#              transparently forwards every /api/* request to the backend
+#              container over Docker's internal network -- see
+#              nginx/default.react.conf.template (React) /
+#              nginx/default.conf.template (legacy) for the full
+#              explanation. This is also the ONLY multi-tier-portable piece:
+#              the exact same image runs on Render/cloud too, just with
+#              different BACKEND_HOST/BACKEND_PORT env vars.
 #
 # Plus one OPT-IN seventh service, behind a Compose profile so it never
 # starts unless you ask for it:
@@ -928,12 +935,17 @@ services:
       # stage that shipped both side-by-side has been removed -- see
       # frontend/Dockerfile's own top-of-file comment), so this arg always
       # resolves to a real, explicit choice: FRONTEND_BUILD_TARGET in .env
-      # controls it, defaulting to "frontend-legacy-only" (the smaller,
-      # longer-proven surface) if left unset. Set
-      # FRONTEND_BUILD_TARGET=frontend-react-only in .env to build the
-      # React SPA instead; see frontend/Dockerfile's own stage comments and
-      # frontend-app/README.md's "Detaching this app" section.
-      target: ${FRONTEND_BUILD_TARGET:-frontend-legacy-only}
+      # controls it, defaulting to "frontend-react-only" (the React
+      # "Ledger" SPA) if left unset -- this now matches the default used by
+      # every other deploy path (ACA/VM CI both already default to "react"
+      # when their own FRONTEND_BUILD_TARGET Actions variable is unset; see
+      # .github/workflows/deploy-azure-aca.yml and deploy-azure-vm.yml), so
+      # local Docker Compose and cloud deploys no longer disagree about
+      # which frontend ships out of the box. Set
+      # FRONTEND_BUILD_TARGET=frontend-legacy-only in .env to build the
+      # legacy static site instead; see frontend/Dockerfile's own stage
+      # comments and frontend-app/README.md's "Detaching this app" section.
+      target: ${FRONTEND_BUILD_TARGET:-frontend-react-only}
     container_name: snipeit_lite_frontend
     restart: unless-stopped
     environment:

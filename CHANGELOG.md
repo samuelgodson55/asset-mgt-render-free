@@ -1,27 +1,8 @@
-## 2026-08-19 — DB exhaustion hardening
-
-- Background Celery/Beat database work now has a deployment-wide Redis admission gate.
-- PgBouncer API pool sizing reserves background capacity instead of competing with it.
-- Notification and SLA tasks close DB sessions before SMTP/email I/O.
-- Celery prefetch is limited to one task so background DB work cannot hide behind a large local broker reservation.
-
 # Changelog
-
-## v13 — balanced DB concurrency and per-operation timeout escape hatch
-
-- Increased ACA's auto-derived PgBouncer server budget from 4x to 5x PostgreSQL vCores.
-  The default `Standard_B2s` therefore moves from 8 to 10 server-side connections,
-  while retaining the 10% operational headroom and one background connection reserve.
-- Changed adaptive SQLAlchemy pool splitting so each process keeps its full calculated
-  share in `pool_size` with `max_overflow=0` by default. This avoids needless overflow
-  connection churn when PgBouncer is already doing transaction pooling.
-- Kept the global 30s PostgreSQL statement timeout. Added a documented, per-operation
-  `SET LOCAL statement_timeout` helper for explicitly reviewed heavy operations, so a
-  future report can receive a longer timeout without weakening customer-facing queries.
-- Added regression coverage for the stable pool split and the per-operation timeout helper.
 
 ## Table of Contents
 
+- [v1.0.9 — 2026-08-20](#v109---2026-08-20)
 - [v1.0.8 — 2026-08-19](#v108---2026-08-19)
 - [v1.0.7 — 2026-08-18](#v107---2026-08-18)
 - [v1.0.6 — 2026-08-05](#v106---2026-08-05)
@@ -38,6 +19,50 @@ reflects how the system has matured in reliability, deployment discipline,
 observability, and operational trust.
 
 <!-- release-notes-insertion-point -->
+
+## [v1.0.9] - 2026-08-20
+
+### Highlights
+- Closed out the remaining background-DB exhaustion risk left after v1.0.8's
+  pool-sizing work, so Celery/Beat load can no longer starve API requests of
+  PostgreSQL connections.
+- Fixed a production-only ErrorBeacon startup failure on Azure Container
+  Apps caused by SQLite locking over an Azure Files (SMB) share.
+- Completed the global header search feature (quotations, checkout codes,
+  and assets) and fixed a related production routing bug it surfaced.
+
+### Added
+- Added a deployment-wide Redis admission gate for background Celery/Beat
+  database work, so scheduled and queued jobs are throttled the same way
+  HTTP requests already are.
+- Added a global header search bar that resolves quotations, checkout
+  codes (`COxx`), and assets, and jumps the user to the matching custody
+  ledger (with auto-highlight/scroll), quotation ledger, or asset ledger,
+  including deep-link support (`?highlight=`, `?tab=`, `?openQuote=`) and
+  a dedicated classifier (`lib/globalSearch.ts`) with unit test coverage.
+
+### Changed
+- PgBouncer's API-facing pool sizing now reserves background capacity
+  instead of competing with it for server-side connections.
+- Notification and SLA Celery tasks now close their DB session before
+  SMTP/email I/O, instead of holding a connection for the duration of the
+  send.
+- Celery prefetch is limited to one task per worker (`worker_prefetch_multiplier=1`)
+  so background DB work can no longer hide behind a large local broker
+  reservation.
+
+### Fixed
+- Fixed ErrorBeacon's Azure Container Apps deployment failing to start
+  with `sqlite3.OperationalError: database is locked`. Root cause was
+  Azure Files (SMB) not reliably granting SQLite's POSIX byte-range locks;
+  fixed by adding `mountOptions: 'nobrl'` to the `errorbeacon-data` volume
+  in `infra/main.bicep`.
+- Fixed the production SPA fallback in `nginx/default.react.conf.template`
+  404/403'ing on refresh or deep-link of the `/assets` route, because
+  Vite's build output directory (`dist/assets/`) collided with the app's
+  own `/assets` route under the old `try_files $uri $uri/ /index.html;`
+  rule. Changed to `try_files $uri /index.html;` and added a regression
+  check in `nginx/test-config.sh`.
 
 ## [v1.0.8] - 2026-08-19
 

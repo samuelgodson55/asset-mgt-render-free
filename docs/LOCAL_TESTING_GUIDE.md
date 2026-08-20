@@ -70,6 +70,24 @@ This starts, in order: `db` → `pgbouncer` → `redis` → `migrate`
 - App/API: http://localhost:8080
 - Swagger docs: http://localhost:8080/docs
 
+**Which frontend you get:** `docker compose up --build` ships the React
+"Ledger" SPA (`frontend-app/`) at http://localhost:8080 by default —
+`docker-compose.yml`'s `frontend.build.args.target` now defaults to
+`frontend-react-only`, matching what the ACA/VM CI deploy paths already
+default to. If you need to test the older vanilla-JS site
+(`frontend/index.html`/`admin.html`/etc.) instead, set
+`FRONTEND_BUILD_TARGET=frontend-legacy-only` in `.env` and rebuild just
+that service:
+
+```bash
+docker compose up -d --build frontend
+```
+
+Switching back later means setting `FRONTEND_BUILD_TARGET` back to
+`frontend-react-only` (or removing the line) and rebuilding the same way
+— editing `.env` alone does **not** change an already-running container,
+since `target` is a build-time arg, not a runtime env var.
+
 **What to check first**, since this is the pooling fix:
 
 ```bash

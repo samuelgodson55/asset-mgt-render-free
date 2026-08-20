@@ -1,3 +1,11 @@
+// Guards a specific regression class for src/lib/api.ts's list endpoints:
+// filters (search/category/status/overdue-vs-due-soon) must be sent to
+// the backend as query params and applied server-side across the FULL
+// dataset, not applied client-side to just the current page's results
+// (which would silently under-report matches on later pages). Asserts on
+// the actual fetch() URL rather than the response, so a regression that
+// drops a filter param would fail here even if the (mocked) response
+// still looks fine.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { assetsApi, myItemsApi } from "../../src/lib/api";
 

@@ -1,8 +1,15 @@
+// Admin panel (React SPA) for the site-wide maintenance-mode toggle -- the
+// UI counterpart to backend/api/maintenance_api.py. Only ever mounted for
+// the true root Super Admin (see the surrounding Admin.tsx tab guard),
+// since toggling this can lock every other user out of the app.
 import { useEffect, useState } from "react";
 import { AlertTriangle, Power, Wrench } from "lucide-react";
 import { maintenanceApi } from "../../lib/api";
 import { ErrorBanner } from "../../components/ui/ErrorBanner";
 
+// Kept in sync with backend/schemas/maintenance_schema.py's own default so
+// the textarea shows sensible placeholder copy before the real status has
+// loaded, rather than an empty box.
 const DEFAULT_MESSAGE = "We are currently performing scheduled maintenance. Please check back shortly.";
 
 export function MaintenanceModePanel() {
@@ -10,6 +17,8 @@ export function MaintenanceModePanel() {
   const [message, setMessage] = useState(DEFAULT_MESSAGE);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Separate from `busy` -- gates the initial "Loading…" skeleton on
+  // first mount only, so a later save-in-progress doesn't re-trigger it.
   const [loaded, setLoaded] = useState(false);
 
   const load = async () => {
@@ -29,6 +38,9 @@ export function MaintenanceModePanel() {
   }, []);
 
   const save = async (next: boolean) => {
+    // A confirm() dialog here on purpose -- this is one of the few admin
+    // actions that instantly locks out every other signed-in user, so a
+    // misclick shouldn't be one accidental button press away.
     const question = next
       ? "Enable maintenance mode? Other users will immediately be blocked from the application."
       : "Disable maintenance mode and restore normal access for users?";
@@ -56,6 +68,9 @@ export function MaintenanceModePanel() {
   }
 
   return (
+    // Panel border/background shifts to a "brass" accent while maintenance
+    // is live, so this stays visually distinct from every other admin
+    // panel while it's actually affecting production traffic.
     <section className={`rounded-xl border p-5 ${enabled ? "border-brass/40 bg-brass/[0.04]" : "border-border bg-surface"}`}>
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div>

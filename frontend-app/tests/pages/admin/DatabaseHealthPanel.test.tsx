@@ -1,3 +1,10 @@
+// Covers src/pages/admin/DatabaseHealthPanel.tsx (the React SPA's
+// equivalent of frontend/js/components/db-health.js) against a fixed,
+// hand-built GET /diagnostics/db-pool snapshot. The snapshot deliberately
+// describes a "configured but not actually in use" PgBouncer -- i.e.
+// USE_PGBOUNCER=true but database_route.in_use is false -- specifically to
+// exercise the panel's mismatch-detection/"Attention" warning path, not
+// just its happy-path rendering.
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { DatabaseHealthPanel } from "../../../src/pages/admin/DatabaseHealthPanel";
@@ -18,6 +25,9 @@ vi.mock("../../../src/lib/api", async () => {
   };
 });
 
+// A realistic full snapshot of GET /diagnostics/db-pool's response shape
+// (see backend/db_pool_metrics.py) -- reused across every test below so
+// each one only needs to assert on the rendering, not rebuild the fixture.
 const SNAPSHOT: DbPoolDiagnostics = {
   database_route: {
     configured: true,
@@ -81,6 +91,10 @@ describe("<DatabaseHealthPanel />", () => {
   });
 
   it("flags attention-level health when PgBouncer is configured but not actually routed", async () => {
+    // This is the mismatch case the SNAPSHOT fixture was built for:
+    // `configured.use_pgbouncer` is true but `database_route.in_use` is
+    // false, which should surface as an explicit warning rather than
+    // silently rendering as if everything were fine.
     dbPoolMock.mockResolvedValue(SNAPSHOT);
     render(<DatabaseHealthPanel />);
 

@@ -126,11 +126,14 @@ build has to say which one it wants):
 
 or, via Compose, set in `.env`:
 
-    FRONTEND_BUILD_TARGET=frontend-react-only
+    FRONTEND_BUILD_TARGET=frontend-legacy-only
 
 then `docker compose up -d --build frontend`. (Leaving `FRONTEND_BUILD_TARGET` unset
-defaults to `frontend-legacy-only` — the smaller, longer-proven surface — so an
-unconfigured environment doesn't silently start shipping this app.)
+now defaults to `frontend-react-only` — this app — matching the default already used
+by the ACA/VM CI deploy paths, so local Docker Compose and cloud deploys no longer
+disagree about which frontend ships out of the box. Set
+`FRONTEND_BUILD_TARGET=frontend-legacy-only` explicitly if you want the older
+vanilla-JS site instead.)
 
 What choosing `frontend-react-only` skips (and, symmetrically, what
 `frontend-legacy-only` skips):

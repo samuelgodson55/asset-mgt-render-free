@@ -125,6 +125,22 @@ who uses it.
   table, or a "Delete Asset Pool" button inside that pool's own Properties
   Hub modal.
 
+### Global Search (everyone, React frontend)
+
+- **One search bar, three record types** — the header search bar (React
+  frontend only) accepts a checkout code (`COxx`), a quotation reference,
+  or an asset/pool name, classifies which kind it is
+  (`lib/globalSearch.ts`), and takes you straight to the matching record
+  instead of running a generic keyword search.
+- **Checkout codes** jump to the Custody ledger with the matched row
+  auto-scrolled-to and briefly highlighted (`CustodyDrawer`,
+  `lib/custody-context.ts`); this also works as a deep link
+  (`?highlight=`) so a shared URL lands on the same highlighted row.
+- **Quotation references** jump to the Quotes panel and open the matching
+  quote (`QuotesPanel.tsx`, `?openQuote=` deep link).
+- **Asset/pool names** jump to the relevant tab of the asset ledger
+  (`?tab=` deep link).
+
 ### Custody & Returns (Super Admin / Manager)
 
 - **Custody Ledger** — open any user's or ad-hoc individual's page to see

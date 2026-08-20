@@ -1,13 +1,34 @@
+// Legacy-site admin panel: renders a live snapshot of the DB connection
+// pooling stack (app -> PgBouncer -> Postgres) by calling
+// GET /diagnostics/db-pool (see backend/api/diagnostics_api.py and
+// backend/db_pool_metrics.py for what feeds that endpoint). Pure
+// template-string DOM rendering to match the rest of frontend/js/
+// components/* -- no framework here, just innerHTML swaps -- see
+// frontend-app/src/pages/admin/DatabaseHealthPanel.tsx for the React
+// SPA's equivalent of this same panel.
 import { apiRequest } from '../api.js';
 
+// Minimal HTML-escaping helper -- every value interpolated into the
+// template strings below (host names, pool numbers, error messages) goes
+// through this first, since some of it (route.host, err.message) could in
+// principle contain untrusted/unexpected characters.
 const esc = (value) => String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+// Formats a number with locale thousands separators, or an em-dash when
+// the value is missing/non-numeric (e.g. a metric the admin probe
+// couldn't reach yet).
 const num = (v) => Number.isFinite(Number(v)) ? Number(v).toLocaleString() : '—';
 
+// Small green/red status badge used throughout this panel (PgBouncer
+// reachable?, in use?, Postgres connected?) -- `ok` picks the color,
+// `label` is the text shown inside it.
 function statusPill(ok, label) {
   const cls = ok ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400' : 'border-rose-500/30 bg-rose-500/10 text-rose-400';
   return `<span class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-semibold ${cls}"><span class="h-1.5 w-1.5 rounded-full ${ok ? 'bg-emerald-400' : 'bg-rose-400'}"></span>${esc(label)}</span>`;
 }
 
+// Fetches and renders the full DB-health panel into #dbHealthContent.
+// Called on initial admin-panel load and again by the "Refresh" button's
+// data-action="refresh-db-health" handler (wired in main.js).
 export async function loadDbHealth() {
   const root = document.getElementById('dbHealthContent');
   if (!root) return;
@@ -22,6 +43,11 @@ export async function loadDbHealth() {
     const inUse = route.in_use === true;
     const reachable = pg?.reachable === true;
     const waiting = Number(pg?.cl_waiting || 0);
+    // "Server" here means PgBouncer's own connections OUT to real
+    // Postgres (as opposed to "client" connections IN from the app) --
+    // this is the number that actually matters for exhaustion risk, since
+    // Postgres itself has a hard max_connections ceiling that PgBouncer
+    // is specifically there to protect.
     const serverTotal = Number(pg?.sv_active || 0) + Number(pg?.sv_idle || 0);
     const serverCapacity = pg?.default_pool_size != null ? Number(pg.default_pool_size) + Number(pg.reserve_pool_size || 0) : cfg.pgbouncer_server_pool_size;
     const pressure = serverCapacity ? Math.round((serverTotal / serverCapacity) * 100) : null;
@@ -51,6 +77,9 @@ export async function loadDbHealth() {
         <div class="mt-4 grid grid-cols-1 gap-2 text-[12px] text-slate-400 sm:grid-cols-3"><div>Pool mode: <span class="font-mono text-slate-200">${esc(pg?.pool_mode || '—')}</span></div><div>Default pool: <span class="font-mono text-slate-200">${num(pg?.default_pool_size)}</span></div><div>Reserve pool: <span class="font-mono text-slate-200">${num(pg?.reserve_pool_size)}</span></div></div>
       </div>`;
   } catch (err) {
+    // Network/parse errors, or the backend endpoint itself returning a
+    // non-2xx (e.g. permissions), all land here -- show an inline error
+    // instead of leaving the "Checking…" placeholder up forever.
     root.innerHTML = `<div class="rounded-xl border border-rose-500/30 bg-rose-500/5 p-4 text-[13px] text-rose-300">Unable to load database diagnostics. ${esc(err?.message || 'Please retry.')}</div>`;
   }
 }

@@ -1,3 +1,11 @@
+// <Admin /> and <Manager /> (src/pages/Admin.tsx) render from the SAME
+// underlying panel set/component tree, differing only in which page
+// component wraps it -- these tests guard against that shared plumbing
+// leaking the wrong header/pill/tab-set between the two roles (e.g. a
+// `manager`-role user hitting the /manager route must never see
+// Admin-only tabs, and a full `admin`/`super_admin` visiting /manager
+// directly must still get the restricted Manager view, not an
+// role-upgraded one).
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -5,10 +13,16 @@ import { Admin, Manager } from "../../src/pages/Admin";
 import { CustodyProvider } from "../../src/lib/custodyContext";
 import type { AuthUser } from "../../src/lib/api";
 
+// vi.hoisted so this mock factory (below) can reference useAuthMock even
+// though vi.mock() calls are hoisted above the rest of the module.
 const { useAuthMock } = vi.hoisted(() => ({ useAuthMock: vi.fn() }));
 
 vi.mock("../../src/lib/useAuth", () => ({ useAuth: useAuthMock }));
 
+// Stub out every list/catalog network call the Admin/Manager panels make
+// on mount with empty-but-valid responses -- this suite only cares about
+// header/tab-set rendering, not the panels' own data, and importActual
+// keeps every other export (types, non-mocked API functions) real.
 vi.mock("../../src/lib/api", async () => {
   const actual = await vi.importActual<typeof import("../../src/lib/api")>("../../src/lib/api");
   return {
@@ -20,6 +34,9 @@ vi.mock("../../src/lib/api", async () => {
   };
 });
 
+// Renders either page as a given logged-in role -- CustodyProvider is
+// required because the shared panel tree reads custody-drawer context
+// even when nothing in these tests actually opens the drawer.
 function renderPage(Page: typeof Admin | typeof Manager, role: string) {
   useAuthMock.mockReturnValue({
     user: { name: "Test User", email: "t@example.com", role } satisfies AuthUser,
