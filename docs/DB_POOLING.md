@@ -171,3 +171,47 @@ with `SERVER_TLS_SSLMODE=require`, so the database leg remains encrypted.
 `sslmode=require`. When `PGBOUNCER_HOST` is unset (Azure managed PgBouncer),
 the backend preserves the direct URL's TLS settings for the managed pooler
 endpoint.
+
+### Admin-console telemetry protocol
+
+PgBouncer's special `pgbouncer` admin database accepts the PostgreSQL simple query protocol for `SHOW` commands. The application therefore uses a short-lived psycopg2/libpq connection for `SHOW POOLS`, `SHOW STATS`, and optional `SHOW CONFIG` telemetry instead of sending those commands through SQLAlchemy. A failed telemetry probe is non-fatal and must never be interpreted as application-route failure.
+
+
+## Customer-facing concurrency balance
+
+For the default ACA `Standard_B2s` PostgreSQL SKU (2 vCores), the infrastructure
+auto-derives the self-hosted PgBouncer server pool at **5x vCores = 10** total
+server connections. This is the upper end of the documented 2-5x starting range: it
+adds application headroom without treating PostgreSQL's much larger
+`max_connections` value as a target.
+
+The application still keeps 10% of that pool unused, reserves 1 connection for
+background DB work, and divides the remaining API budget across the worst-case
+backend replica count. The resulting SQLAlchemy pool is stable (the process share
+is `pool_size`, with `max_overflow=0` by default) because PgBouncer already handles
+transaction-level reuse. This avoids creating short-lived overflow connections
+just to service ordinary request bursts.
+
+This is deliberately different from PostgreSQL's `max_connections` number. For
+example, a server reporting `429` does **not** mean the application should try to
+use 429 concurrent database sessions. PostgreSQL's CPU, memory, query workload,
+PgBouncer's server pool, and the application's concurrency guard are separate
+capacity layers.
+
+## Per-operation statement-timeout escape hatch
+
+The normal database transaction timeout is `DB_STATEMENT_TIMEOUT_MS=30000` (30s).
+Keep that global default: it protects customer-facing requests from a slow query
+holding a scarce connection indefinitely.
+
+If a **specific, reviewed, bounded** operation later proves that it legitimately
+needs more time, do not raise the global timeout. Use
+`database.set_transaction_statement_timeout(session, milliseconds)` immediately
+before that operation. The helper issues `SET LOCAL statement_timeout`, so the
+override applies only to the current transaction and disappears automatically
+when the transaction ends. This is safe with PgBouncer transaction pooling and
+prevents a report-specific exception from weakening timeouts for customer traffic.
+
+Do not use the escape hatch for an unbounded query. First add/verify indexes,
+limit the date range/rows, and inspect the query plan; only then give that one
+operation a justified longer timeout.

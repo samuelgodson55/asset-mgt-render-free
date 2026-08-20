@@ -257,14 +257,16 @@ class Settings(BaseSettings):
     # notice and fix -- the moment either changes), database.py now works
     # this out ITSELF at startup: it asks the target Postgres server what
     # its real `max_connections`/`superuser_reserved_connections` budget
-    # is, divides that by how many DB-connecting processes can exist at
-    # once (`BACKEND_MAX_REPLICAS` below x 1 or 2 processes/replica
-    # depending on RUN_EMBEDDED_WORKER), and sizes `pool_size`/
-    # `max_overflow` to fit -- see database.py's `_compute_pool_sizing()`.
-    # That self-adjusts automatically if the Postgres SKU is resized or
-    # `backendMaxReplicas` changes, with zero code/config edits and
-    # without ever needing anyone to log into prod and tune a number by
-    # hand. DB_POOL_SIZE/DB_MAX_OVERFLOW below are an ESCAPE HATCH only --
+    # is, divides that by the number of API worker processes that can exist
+    # at once, and sizes `pool_size`/`max_overflow` to fit -- see
+    # database.py's `_compute_pool_sizing()`. In ACA, the embedded Celery
+    # worker is protected by the separate deployment-wide background DB
+    # reserve, so it is not counted as another full API-pool owner; counting
+    # it twice would unnecessarily collapse each API process to a one-
+    # connection pool on small PgBouncer budgets. The sizing self-adjusts
+    # automatically if the Postgres SKU, `backendMaxReplicas`, or Uvicorn
+    # worker count changes. DB_POOL_SIZE/DB_MAX_OVERFLOW below are an ESCAPE
+    # HATCH only --
     # leave them unset (the default) to get the automatic behavior; set
     # both to force a fixed, non-adaptive size instead (e.g. for a
     # database that can't be probed, or a deliberately different budget).
@@ -284,11 +286,11 @@ class Settings(BaseSettings):
     # single backend container, no autoscaling) and for any other
     # single-process deployment that never sets this env var.
     BACKEND_MAX_REPLICAS: int = 1
-    # DIRECT override for "how many separate OS processes, across the
-    # WHOLE deployment, can be importing database.py (and therefore
-    # holding their own pool open) at the same moment" -- for deployment
-    # shapes `BACKEND_MAX_REPLICAS x (1 or 2 depending on
-    # RUN_EMBEDDED_WORKER)` doesn't fit.
+    # DIRECT override for "how many separate API worker processes, across
+    # the WHOLE deployment, need a full share of the request pool" -- for
+    # deployment shapes that don't fit the default backend-replica x
+    # Uvicorn-worker calculation. Background Celery/Beat DB work is budgeted
+    # separately through DB_BACKGROUND_CONNECTION_RESERVE.
     #
     # That derivation assumes every DB-connecting process is an
     # interchangeable `backend` replica (each optionally running several

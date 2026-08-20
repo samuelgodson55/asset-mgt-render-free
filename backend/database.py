@@ -116,14 +116,23 @@ def _pgbouncer_server_pool_budget() -> int:
 
 
 def _split_process_budget(total_budget: int, total_processes: int) -> tuple[int, int]:
-    """Split a global DB budget without ever exceeding it in aggregate."""
+    """Split a global DB budget without exceeding it in aggregate.
+
+    Keep each process's full share in SQLAlchemy's persistent pool instead of
+    splitting a tiny share between ``pool_size`` and ``max_overflow``. With
+    PgBouncer already providing transaction pooling, short-lived SQLAlchemy
+    overflow connections add churn without adding database capacity. A stable
+    pool also means the normal request path does not need to create an overflow
+    connection during a burst before PgBouncer can reuse an existing server
+    connection. ``max_overflow`` remains available through the explicit
+    DB_POOL_SIZE/DB_MAX_OVERFLOW escape hatch for a deployment that has measured
+    a different workload shape.
+    """
     total_budget = max(int(total_budget), 1)
     total_processes = max(int(total_processes), 1)
     per_process_budget = max(total_budget // total_processes, 1)
     per_process_budget = min(per_process_budget, 20)
-    pool_size = max(per_process_budget // 2, 1)
-    max_overflow = per_process_budget - pool_size
-    return pool_size, max_overflow
+    return per_process_budget, 0
 
 
 def _apply_explicit_pool_override(
@@ -212,9 +221,16 @@ def _compute_pool_sizing(database_url: str) -> "tuple[int, int]":
         environment = os.environ.get("ENVIRONMENT", "development").strip().lower()
         is_production = environment in ("production", "prod")
         uvicorn_workers = int(os.environ.get("UVICORN_WORKERS", "1")) if is_production else 1
-        embedded_worker = os.environ.get("RUN_EMBEDDED_WORKER", "false").lower() == "true"
-        processes_per_replica = uvicorn_workers + (1 if embedded_worker else 0)
-        total_processes = max(settings.BACKEND_MAX_REPLICAS, 1) * processes_per_replica
+        # The embedded Celery worker is deliberately NOT counted as another
+        # full API-pool owner. Its DB work is already protected by the
+        # deployment-wide DB_BACKGROUND_CONNECTION_RESERVE /
+        # DB_BACKGROUND_CONCURRENCY_LIMIT lease below. Counting that process
+        # here as well double-reserves capacity and, on a small ACA deployment,
+        # can collapse a healthy PgBouncer budget into a one-connection API
+        # pool per Uvicorn process. The Celery process still has its own
+        # SQLAlchemy pool, but it can only admit the separately-reserved
+        # background DB work, so it must not consume another full API share.
+        total_processes = max(settings.BACKEND_MAX_REPLICAS, 1) * max(uvicorn_workers, 1)
 
     if settings.USE_PGBOUNCER:
         pgbouncer_budget = pgbouncer_effective_budget()
@@ -395,6 +411,29 @@ if settings.DB_STATEMENT_TIMEOUT_MS > 0 and engine.url.get_backend_name().starts
     @event.listens_for(engine, "begin")
     def _set_transaction_statement_timeout(conn):
         conn.exec_driver_sql(f"SET LOCAL statement_timeout = {int(settings.DB_STATEMENT_TIMEOUT_MS)}")
+
+
+def set_transaction_statement_timeout(session, timeout_ms: int) -> None:
+    """Raise/lower the timeout for one explicitly-known heavy operation.
+
+    The normal application default remains ``DB_STATEMENT_TIMEOUT_MS``. This
+    helper is an intentional per-operation escape hatch for a query that has
+    been reviewed and proven safe to run longer (for example, a bounded admin
+    report on a much larger dataset). It uses ``SET LOCAL``, so the override
+    disappears automatically at transaction end and cannot leak into a later
+    request, which is essential when PgBouncer is in transaction-pool mode.
+
+    Only a positive integer number of milliseconds is accepted. The caller is
+    responsible for choosing a justified value; do not use this helper as a
+    blanket replacement for the global timeout.
+    """
+    bind = session.get_bind()
+    if bind is None or not bind.dialect.name.startswith("postgresql"):
+        return
+    timeout_ms = int(timeout_ms)
+    if timeout_ms <= 0:
+        raise ValueError("timeout_ms must be a positive integer")
+    session.connection().exec_driver_sql(f"SET LOCAL statement_timeout = {timeout_ms}")
 
 
 # Create a session factory for generating isolated database transactions

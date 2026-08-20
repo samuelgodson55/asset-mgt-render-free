@@ -209,13 +209,15 @@ param backendMaxReplicas int = 3
 @description('Route application DB traffic through the supported pooler for this deployment. For ACA this provisions and routes through the self-hosted `pgbouncer` Container App (see `pgbouncerApp` below), NOT Azure Flexible Server\'s managed PgBouncer server parameters; for local/VM Compose the service-level pooler is used. The default is true; set false only as a deliberate break-glass fallback.')
 param usePgbouncer bool = true
 
-@description('Optional server-side pool size (`DEFAULT_POOL_SIZE` + `RESERVE_POOL_SIZE`) for the self-hosted `pgbouncer` Container App, per user/database pair. Set to 0 to auto-derive a conservative value from the Azure PostgreSQL compute SKU (4x vCores, within Azure\'s recommended 2-5x-vCore starting range). The application also applies a separate safety margin and live max_connections cap. Set an explicit value only when deliberately tuning PgBouncer.')
+@description('Optional server-side pool size (`DEFAULT_POOL_SIZE` + `RESERVE_POOL_SIZE`) for the self-hosted `pgbouncer` Container App, per user/database pair. Set to 0 to auto-derive a balanced value from the Azure PostgreSQL compute SKU (5x vCores, the upper end of Azure\'s recommended 2-5x-vCore starting range). The application also applies a separate safety margin and live max_connections cap. Set an explicit value only when deliberately tuning PgBouncer.')
 @minValue(0)
 param pgbouncerServerPoolSize int = 0
 
 // Azure's own guidance recommends starting PgBouncer conservatively at roughly
-// 2-5x vCores and then tuning from real workload metrics. Keep the default at
-// 4x vCores, rather than assuming Azure's generic default_pool_size=50. This
+// 2-5x vCores and then tuning from real workload metrics. Use the upper end
+// (5x) for this customer-facing app: it gives the API more concurrency headroom
+// without turning the 2-vCore database into a large concurrent-query swarm.
+// This remains well below PostgreSQL's much larger max_connections ceiling.
 // mapping covers the supported SKUs used by this deployment; an unknown SKU
 // deliberately falls back to 2 vCores so a new/renamed SKU cannot silently
 // create an oversized pool.
@@ -242,7 +244,7 @@ var postgresSkuVcores = {
   Standard_E64s_v3: 64
 }
 var detectedPostgresVcores = contains(postgresSkuVcores, postgresSkuName) ? int(postgresSkuVcores[postgresSkuName]) : 2
-var autoPgbouncerServerPoolSize = max(1, detectedPostgresVcores * 4)
+var autoPgbouncerServerPoolSize = max(1, detectedPostgresVcores * 5)
 var effectivePgbouncerServerPoolSize = pgbouncerServerPoolSize > 0 ? pgbouncerServerPoolSize : autoPgbouncerServerPoolSize
 
 @description('Minimum `frontend` replicas. 0 = scale-to-zero (cold start on first request after idle -- static-file + proxy responses are fast, so it\'s much shorter than `backend`\'s, but not zero). 1 = always warm, no cold start, small extra cost. `infra-deploy.yml` passes 1 here for production and 0 for staging -- see that workflow\'s "Resolve replica floors" step -- so this parameter\'s own default only applies to a manual/direct bicep deploy that skips the pipeline.')

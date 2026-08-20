@@ -67,7 +67,7 @@ function RestoreModal({
       <ModalEyebrow icon={<ShieldAlert size={16} />} label="Destructive action" tone="danger" />
       <h2 className="font-display text-lg font-semibold text-text">Restore the database?</h2>
         <p className="text-[13px] text-text-muted mt-2">
-          This replaces the <span className="text-text">entire</span> database with <span className="font-mono text-[12px] text-text break-all">{targetLabel}</span>. A safety backup of the current state is taken first, but everyone -- including you -- will be signed out immediately after.
+          This replaces the <span className="text-text">entire</span> database with <span className="font-mono text-[12px] text-text break-all">{targetLabel}</span>. A fresh safety backup <span className="text-text">must succeed before any destructive step begins</span>. The restore also preserves the current Super Admin credentials and immutable audit history, then signs everyone out so all sessions start from the restored state.
         </p>
 
         {pending.mode === "upload" && (

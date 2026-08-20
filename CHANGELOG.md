@@ -7,6 +7,19 @@
 
 # Changelog
 
+## v13 — balanced DB concurrency and per-operation timeout escape hatch
+
+- Increased ACA's auto-derived PgBouncer server budget from 4x to 5x PostgreSQL vCores.
+  The default `Standard_B2s` therefore moves from 8 to 10 server-side connections,
+  while retaining the 10% operational headroom and one background connection reserve.
+- Changed adaptive SQLAlchemy pool splitting so each process keeps its full calculated
+  share in `pool_size` with `max_overflow=0` by default. This avoids needless overflow
+  connection churn when PgBouncer is already doing transaction pooling.
+- Kept the global 30s PostgreSQL statement timeout. Added a documented, per-operation
+  `SET LOCAL statement_timeout` helper for explicitly reviewed heavy operations, so a
+  future report can receive a longer timeout without weakening customer-facing queries.
+- Added regression coverage for the stable pool split and the per-operation timeout helper.
+
 ## Table of Contents
 
 - [v1.0.8 — 2026-08-19](#v108---2026-08-19)

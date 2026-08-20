@@ -45,6 +45,52 @@ def test_pool_sizing_is_capped_by_pgbouncer_pool_when_enabled(monkeypatch):
     assert pool_size + max_overflow <= 7
 
 
+
+def test_embedded_celery_worker_does_not_double_reserve_api_pool(monkeypatch):
+    """ACA's embedded Celery process uses the separate background DB reserve;
+    it must not also consume a full API pool share. With an 8-connection
+    PgBouncer budget, 10% headroom and one background slot, three API
+    replicas should get two pooled connections each instead of one.
+    """
+    monkeypatch.setattr(settings, "DB_POOL_SIZE", None)
+    monkeypatch.setattr(settings, "DB_MAX_OVERFLOW", None)
+    monkeypatch.setattr(settings, "DB_EXPECTED_PROCESSES", None)
+    monkeypatch.setattr(settings, "BACKEND_MAX_REPLICAS", 3)
+    monkeypatch.setattr(settings, "USE_PGBOUNCER", True)
+    monkeypatch.setattr(settings, "PGBOUNCER_SERVER_POOL_SIZE", 8)
+    monkeypatch.setattr(settings, "PGBOUNCER_SAFETY_MARGIN_PERCENT", 10)
+    monkeypatch.setattr(settings, "DB_BACKGROUND_CONNECTION_RESERVE", 1)
+    monkeypatch.setattr(settings, "DB_BACKGROUND_CONCURRENCY_LIMIT", 1)
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("UVICORN_WORKERS", "1")
+    monkeypatch.setenv("RUN_EMBEDDED_WORKER", "true")
+
+    pool_size, max_overflow = database._compute_pool_sizing("postgresql://x/y")
+
+    assert (pool_size, max_overflow) == (2, 0)
+    assert (pool_size + max_overflow) * 3 + 1 <= 8
+
+def test_small_process_share_stays_in_persistent_pool(monkeypatch):
+    """When the global budget gives each API process two connections, both
+    should be persistent pool slots rather than 1 pooled + 1 overflow.
+    PgBouncer already handles server-side transaction reuse, so this avoids
+    unnecessary SQLAlchemy connection churn during normal bursts.
+    """
+    monkeypatch.setattr(settings, "DB_POOL_SIZE", None)
+    monkeypatch.setattr(settings, "DB_MAX_OVERFLOW", None)
+    monkeypatch.setattr(settings, "DB_EXPECTED_PROCESSES", 3)
+    monkeypatch.setattr(settings, "USE_PGBOUNCER", True)
+    monkeypatch.setattr(settings, "PGBOUNCER_SERVER_POOL_SIZE", 10)
+    monkeypatch.setattr(settings, "PGBOUNCER_SAFETY_MARGIN_PERCENT", 10)
+    monkeypatch.setattr(settings, "DB_BACKGROUND_CONNECTION_RESERVE", 1)
+    monkeypatch.setattr(settings, "DB_BACKGROUND_CONCURRENCY_LIMIT", 1)
+    monkeypatch.setattr(database, "_probe_postgres_connection_budget", lambda url: None)
+
+    pool_size, max_overflow = database._compute_pool_sizing("postgresql://x/y")
+
+    assert (pool_size, max_overflow) == (2, 0)
+
+
 def test_pool_sizing_ignores_pgbouncer_pool_when_disabled(monkeypatch):
     """Direct-to-Postgres (USE_PGBOUNCER=false, e.g. render.yaml's Free-plan
     break-glass path) must keep sizing off the real Postgres budget --

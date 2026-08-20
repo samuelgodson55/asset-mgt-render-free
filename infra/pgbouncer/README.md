@@ -6,7 +6,8 @@ feature so the default Burstable PostgreSQL SKU remains supported.
 
 The deployment:
 
-1. derives one authoritative server-side pool budget from the PostgreSQL SKU;
+1. derives one authoritative server-side pool budget from the PostgreSQL SKU (5x
+   vCores by default in ACA, within the documented 2-5x starting range);
 2. splits that budget across the fixed PgBouncer replicas;
 3. keeps `PGBOUNCER_SAFETY_MARGIN_PERCENT` (10% in ACA) unused as headroom;
 4. reserves background DB capacity separately; and

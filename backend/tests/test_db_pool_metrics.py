@@ -22,6 +22,14 @@ def test_pgbouncer_pool_snapshot_is_none_when_pgbouncer_is_disabled(monkeypatch)
     assert db_pool_metrics.pgbouncer_pool_snapshot() is None
 
 
+
+def test_pgbouncer_probe_uses_psycopg2_simple_protocol(monkeypatch):
+    """The PgBouncer admin console requires the simple query protocol; the
+    telemetry probe must not route SHOW commands through SQLAlchemy's extended
+    protocol path. This is a structural regression guard for the live probe.
+    """
+    assert "psycopg2.connect" in inspect.getsource(db_pool_metrics.pgbouncer_pool_snapshot)
+
 def test_postgres_activity_snapshot_is_none_against_sqlite():
     # tests/conftest.py's db_engine fixture points DIRECT_DATABASE_URL at
     # a SQLite file, not Postgres -- the ground-truth probe must recognize

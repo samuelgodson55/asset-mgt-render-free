@@ -25,7 +25,10 @@ snapshots so an operator can actually look:
 
   2. pgbouncer_pool_snapshot() -- PgBouncer's own SHOW POOLS/SHOW STATS
      view (client connections waiting, server connections active/idle,
-     average time a client spends waiting for a server connection).
+     average time a client spends waiting for a server connection). The
+     PgBouncer admin database only supports the PostgreSQL simple query
+     protocol, so this probe uses a short-lived psycopg2/libpq connection
+     rather than SQLAlchemy's normal extended-protocol path.
      `cl_waiting` > 0 and a rising `avg_wait_time_us` are the clearest
      "the server pool itself is undersized" signal -- direct evidence
      for whether the safety margin can be tightened. Requires
@@ -62,6 +65,7 @@ and can never perturb pool-sizing-at-startup behavior.
 import logging
 import threading
 
+import psycopg2
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.pool import NullPool
@@ -135,45 +139,56 @@ def _database_route_snapshot() -> dict:
 
 
 def pgbouncer_pool_snapshot() -> dict | None:
-    """Best-effort SHOW POOLS + SHOW STATS against PgBouncer's built-in
-    admin console (the virtual `pgbouncer` database), authenticated as
-    the same DB user already used for the real application database --
-    see infra/main.bicep's / docker-compose*.yml's ADMIN_USERS on the
-    `pgbouncer` service. Returns None (never raises) when PgBouncer
-    isn't in use or the admin console isn't reachable; callers must
-    treat that as "no data available" rather than "zero load".
+    """Best-effort PgBouncer admin-console snapshot.
+
+    PgBouncer's special ``pgbouncer`` database only supports PostgreSQL's
+    *simple query protocol*. SQLAlchemy/psycopg2 can otherwise use the
+    extended protocol, which is why the old SQLAlchemy ``SHOW POOLS`` probe
+    could report "unavailable" even though the application route itself was
+    healthy. Use a short-lived psycopg2/libpq connection and execute the SHOW
+    commands without parameters so libpq uses the simple protocol.
+
+    This is telemetry only: failure returns None and never affects request
+    handling.
     """
     if not settings.USE_PGBOUNCER:
         return None
+
     try:
         admin_url = make_url(settings.DATABASE_URL).set(database="pgbouncer")
-        admin_engine = create_engine(
-            admin_url,
-            poolclass=NullPool,
-            connect_args={"connect_timeout": _PROBE_CONNECT_TIMEOUT_SECONDS},
+        # psycopg2/libpq's PQexec path is the simple query protocol when no
+        # parameters are supplied. PgBouncer explicitly requires that for
+        # its admin console. Keep the connection unpooled and autocommit so
+        # SHOW commands never leave an admin-console transaction open.
+        conn = psycopg2.connect(
+            admin_url.render_as_string(hide_password=False),
+            connect_timeout=_PROBE_CONNECT_TIMEOUT_SECONDS,
         )
         try:
-            with admin_engine.connect() as conn:
-                # PgBouncer's admin console doesn't support transactions;
-                # every command against it is implicitly autocommit-ish,
-                # but SQLAlchemy still opens one client-side unless told
-                # not to -- AUTOCOMMIT keeps this a single round trip per
-                # statement instead of an implicit BEGIN PgBouncer's admin
-                # database doesn't actually support.
-                conn = conn.execution_options(isolation_level="AUTOCOMMIT")
-                pools = conn.execute(text("SHOW POOLS")).mappings().all()
-                stats = conn.execute(text("SHOW STATS")).mappings().all()
+            conn.set_session(autocommit=True)
+            with conn.cursor() as cur:
+                cur.execute("SHOW POOLS")
+                pool_columns = [d.name for d in cur.description]
+                pools = [dict(zip(pool_columns, row)) for row in cur.fetchall()]
+
+                cur.execute("SHOW STATS")
+                stats_columns = [d.name for d in cur.description]
+                stats = [dict(zip(stats_columns, row)) for row in cur.fetchall()]
+
+                # SHOW CONFIG is optional telemetry. If the account is only a
+                # stats user, the two load snapshots above still remain useful.
+                try:
+                    cur.execute("SHOW CONFIG")
+                    config_columns = [d.name for d in cur.description]
+                    config_rows = [dict(zip(config_columns, row)) for row in cur.fetchall()]
+                except Exception:
+                    config_rows = []
         finally:
-            admin_engine.dispose()
+            conn.close()
     except Exception:
         logger.debug("db_pool_metrics: PgBouncer admin console probe failed", exc_info=True)
         return None
 
-    # SHOW POOLS has one row per (database, user) pair. This deployment
-    # only ever routes a single database/user pair through this
-    # PgBouncer, so summing across rows is safe and gives one clean set
-    # of numbers rather than requiring callers to know PgBouncer's
-    # per-pool row shape.
     totals = {
         "cl_active": 0,
         "cl_waiting": 0,
@@ -185,42 +200,22 @@ def pgbouncer_pool_snapshot() -> dict | None:
     for row in pools:
         for key in ("cl_active", "cl_waiting", "sv_active", "sv_idle", "sv_used"):
             totals[key] += int(row.get(key, 0) or 0)
-        totals["maxwait_seconds"] = max(totals["maxwait_seconds"], int(row.get("maxwait", 0) or 0))
+        totals["maxwait_seconds"] = max(
+            totals["maxwait_seconds"], int(row.get("maxwait", 0) or 0)
+        )
 
     if stats:
-        # SHOW STATS has one row per database; same single-database
-        # assumption as above.
         row = stats[0]
         totals["avg_query_time_us"] = int(row.get("avg_query_time", 0) or 0)
-        # The direct "is the server pool undersized" number: average time
-        # a client spent WAITING for a free server connection, not
-        # running a query.
         totals["avg_wait_time_us"] = int(row.get("avg_wait_time", 0) or 0)
 
+    config = {str(r.get("key")): r.get("value") for r in config_rows}
     totals["reachable"] = True
     totals["in_use"] = True
-    totals["pool_mode"] = None
-    totals["max_client_conn"] = None
-    totals["default_pool_size"] = None
-    totals["reserve_pool_size"] = None
-    try:
-        admin_url = make_url(settings.DATABASE_URL).set(database="pgbouncer")
-        admin_engine = create_engine(admin_url, poolclass=NullPool, connect_args={"connect_timeout": _PROBE_CONNECT_TIMEOUT_SECONDS})
-        try:
-            with admin_engine.connect() as conn:
-                conn = conn.execution_options(isolation_level="AUTOCOMMIT")
-                config_rows = conn.execute(text("SHOW CONFIG" )).mappings().all()
-        finally:
-            admin_engine.dispose()
-        config = {str(r.get("key")): r.get("value") for r in config_rows}
-        totals["pool_mode"] = config.get("pool_mode")
-        totals["max_client_conn"] = int(config["max_client_conn"]) if config.get("max_client_conn") is not None else None
-        totals["default_pool_size"] = int(config["default_pool_size"]) if config.get("default_pool_size") is not None else None
-        totals["reserve_pool_size"] = int(config["reserve_pool_size"]) if config.get("reserve_pool_size") is not None else None
-    except Exception:
-        # SHOW POOLS succeeded, so PgBouncer is definitely reachable/in use;
-        # SHOW CONFIG may simply be restricted by the admin user.
-        pass
+    totals["pool_mode"] = config.get("pool_mode")
+    totals["max_client_conn"] = int(config["max_client_conn"]) if config.get("max_client_conn") is not None else None
+    totals["default_pool_size"] = int(config["default_pool_size"]) if config.get("default_pool_size") is not None else None
+    totals["reserve_pool_size"] = int(config["reserve_pool_size"]) if config.get("reserve_pool_size") is not None else None
     return totals
 
 

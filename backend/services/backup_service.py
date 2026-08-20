@@ -213,7 +213,7 @@ BACKUP_LOCK_KEY = "backup:create-lock"
 # self-clears instead of wedging every future backup (or restore -- see
 # _acquire_restore_lock's cross-check below) behind a lock nobody will ever
 # release.
-BACKUP_LOCK_TTL_SECONDS = 900
+BACKUP_LOCK_TTL_SECONDS = 2700
 
 
 class BackupInProgressError(RuntimeError):
@@ -829,6 +829,20 @@ def _detect_schema_revision(conn) -> str:
     ):
         return revision
     revision = "0016_quotation_paid_status"
+
+    # 0017 enforces the single-Super-Admin invariant with a partial unique
+    # index. create_all()/legacy backups may already have the invariant even
+    # when alembic_version is absent, so detect the physical index before
+    # deciding that the schema is safe to stamp.
+    index_names = {idx.get("name") for idx in inspector.get_indexes("users")}
+    if "uq_users_single_super_admin" not in index_names:
+        return revision
+    revision = "0017_single_super_admin"
+
+    # 0018 adds per-user credential revocation timestamps.
+    if not has_column("users", "credentials_changed_at"):
+        return revision
+    revision = "0018_credentials_changed_at"
 
     return revision
 
@@ -1595,7 +1609,33 @@ def _reconcile_post_restore_asset_activity(
 
 
 
-def _snapshot_audit_logs(engine) -> list[dict]:
+def _create_restore_snapshot_engine():
+    """Create a short-lived, unpooled engine for restore preflight snapshots.
+
+    The restore endpoint is authenticated through ``get_db()``, so the
+    request can already be holding the application's ONLY SQLAlchemy pool
+    connection while this function runs. With a small production pool (the
+    live dashboard showed ``pool_size=1``), opening another connection from
+    ``database.engine`` can block forever waiting for the very request that is
+    trying to create the snapshot.
+
+    Restore preflight is intentionally independent of the request pool: it
+    uses the authoritative DIRECT_DATABASE_URL with NullPool, just like the
+    existing pg_dump/psql maintenance path. This connection is read-only in
+    practice and is disposed before the destructive schema reset begins.
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.engine import make_url
+    from sqlalchemy.pool import NullPool
+
+    url = make_url(settings.DIRECT_DATABASE_URL or settings.DATABASE_URL)
+    kwargs = {"poolclass": NullPool, "pool_pre_ping": True}
+    if url.get_backend_name().startswith("postgresql"):
+        kwargs["connect_args"] = {"connect_timeout": 5}
+    return create_engine(url, **kwargs)
+
+
+def _snapshot_audit_logs(conn) -> list[dict]:
     """Capture the live audit ledger before the destructive restore.
 
     AuditLog is append-only and therefore unlike users/checkouts/quotations
@@ -1604,28 +1644,34 @@ def _snapshot_audit_logs(engine) -> list[dict]:
     immutable row content against the restored ledger and re-inserts only
     rows that are missing, letting Postgres assign fresh ids safely.
 
-    The snapshot is deliberately read through a dedicated connection before
-    pg_terminate_backend() so no ORM transaction survives into the destructive
-    DROP SCHEMA window.
+    ``conn`` is deliberately supplied by the dedicated restore-snapshot
+    engine, never the application's request pool. A genuinely brand-new
+    database may not have an audit table yet; in that case there is no audit
+    history to preserve and the later Alembic reconciliation will create it.
+    Any other snapshot failure is fatal: silently proceeding could erase
+    audit history.
     """
-    from sqlalchemy import text as sa_text
+    from sqlalchemy import inspect as sa_inspect, text as sa_text
 
     try:
-        with engine.connect() as conn:
-            return [
-                dict(row)
-                for row in conn.execute(
-                    sa_text(
-                        'SELECT operator, action, target_type, target_id, details, "timestamp" '
-                        'FROM audit_logs ORDER BY "timestamp", id'
-                    )
-                ).mappings().all()
-            ]
+        if not sa_inspect(conn).has_table("audit_logs"):
+            logger.info("backup_service: no existing 'audit_logs' table to snapshot before restore.")
+            return []
+        return [
+            dict(row)
+            for row in conn.execute(
+                sa_text(
+                    'SELECT operator, action, target_type, target_id, details, "timestamp" '
+                    'FROM audit_logs ORDER BY "timestamp", id'
+                )
+            ).mappings().all()
+        ]
     except Exception as exc:
         logger.exception("backup_service: could not snapshot audit logs before restore")
         raise RuntimeError(
             "Restore aborted because the current audit ledger could not be snapshotted. "
-            "The restore will not proceed when doing so could erase audit history."
+            "The restore will not proceed when doing so could erase audit history. "
+            f"Snapshot error: {exc}"
         ) from exc
 
 
@@ -1745,152 +1791,126 @@ def _restore_backup_impl(filepath: str, take_safety_backup: bool = True) -> dict
     # `try:` block further down where this token's lock is actually held.
     _restore_window_lock_token = uuid.uuid4().hex
 
-    safety_entry = None
-    if take_safety_backup:
-        try:
-            # Reuses THIS restore's own lock token rather than acquiring a
-            # separate one -- this call runs sequentially, before anything
-            # destructive, against the still-fully-intact current database,
-            # so there's no real concurrency to protect against here; it
-            # would otherwise needlessly acquire-then-release the exact
-            # same lock a few lines before this function holds it properly
-            # for the actual dangerous window below.
-            safety_entry = create_backup(triggered_by="pre_restore_safety", _held_lock_token=_restore_window_lock_token)
-        except Exception:
-            # Log and continue -- refusing to let an admin restore a known-
-            # good backup just because the safety snapshot itself failed
-            # (e.g. the current DB is already in a broken state) would be
-            # worse than proceeding without one.
-            logger.exception("backup_service: pre-restore safety backup failed -- proceeding with restore anyway.")
-
     # ENTERPRISE HARDENING -- hold the SAME backup-vs-restore mutual
-    # exclusion lock as create_backup() for this entire destructive
-    # window (DROP SCHEMA -> psql restore -> schema reconciliation ->
-    # credential reconciliation below), so a manual/scheduled backup
-    # request that arrives mid-restore gets a clean, honest
-    # BackupInProgressError instead of silently capturing a torn,
-    # half-restored snapshot. Deliberately acquired AFTER the pre-restore
-    # safety backup above (not around it) -- that safety backup runs
-    # against the still-fully-intact CURRENT database, sequentially,
-    # before anything destructive happens, so it needs no protection from
-    # itself; it reuses this same lock instead of taking its own (see its
-    # `_held_lock_token=` call above).
+    # exclusion lock for the safety snapshot AND the entire destructive
+    # window. This prevents a manual/scheduled backup from racing the
+    # pre-restore safety dump and keeps the safety snapshot + restore as one
+    # serialized maintenance operation.
     _acquire_backup_lock(_restore_window_lock_token)
     try:
+        safety_entry = None
+        if take_safety_backup:
+            try:
+                # Reuses the lock already held by this restore instead of
+                # acquiring/releasing a second lock around the safety dump.
+                safety_entry = create_backup(
+                    triggered_by="pre_restore_safety",
+                    _held_lock_token=_restore_window_lock_token,
+                )
+            except Exception as exc:
+                # FAIL CLOSED. A destructive restore without a fresh safety
+                # snapshot is not safe: if the selected backup is wrong,
+                # incompatible, or the restore fails halfway through, there is no
+                # guaranteed way back to the exact live state that existed before
+                # the button was pressed.
+                logger.exception("backup_service: pre-restore safety backup failed -- refusing destructive restore")
+                raise RuntimeError(
+                    "Restore aborted before any database changes because the required "
+                    f"pre-restore safety backup could not be created: {exc}"
+                ) from exc
         # ENTERPRISE HARDENING -- credential continuity across a restore.
         #
-        # A restore's whole point is to replace the database with an OLDER
-        # snapshot -- but a person's LOGIN CREDENTIALS are the one thing
-        # that shouldn't silently roll back with it. Without this step,
-        # anyone who changed their password since the backup was taken
-        # (very plausibly true for EVERY account, on an "old backup"
-        # specifically) would be reverted to a password they may not
-        # remember, with no warning that it happened -- indistinguishable
-        # from being locked out. Worse for the Super Admin specifically:
-        # if the backup predates their current TOTP enrollment, or was
-        # enrolled with a different authenticator app since, restoring it
-        # could silently reinstate a secret/recovery-codes their CURRENT
-        # authenticator app can no longer produce codes for -- a genuine,
-        # hard lockout of the one account that can even perform another
-        # restore to fix it.
-        #
-        # Snapshot every current (pre-restore) user's real identity
-        # (matched back up by lower(email), the same unique key
-        # models.User.email already enforces) and password hash HERE,
-        # while the live database is still fully intact -- an ordinary
-        # Python list held for the rest of this single, synchronous
-        # function call, not written anywhere externally: this whole
-        # restore runs start-to-finish in one thread without ever
-        # returning control in between, so there's nothing else that could
-        # observe or invalidate it in the meantime. Applied back onto the
-        # restored data by _reconcile_post_restore_credentials() near the
-        # end of this function, well after the schema is fully migrated to
-        # head -- see that function's own docstring for exactly what it
-        # does for the Super Admin vs. every other account.
-        # BUG FIX -- this used to snapshot only 4 columns (id/email/role/
-        # password_hash). That was enough for the password-preservation
-        # half of the story, but _reconcile_post_restore_credentials()
-        # needs the FULL row now: both to make "most current profile
-        # used" actually apply to every profile field (not just the
-        # password) for accounts that exist in both places, and -- more
-        # importantly -- to be able to re-insert an account WHOLESALE
-        # when it existed pre-restore but has no row at all in the
-        # restored backup (see that function's own docstring for the bug
-        # this fixes: such an account used to simply vanish after a
-        # restore). `SELECT *` (rather than naming every column) so this
-        # snapshot automatically stays complete as the `users` table
-        # gains columns in future migrations, without needing a matching
-        # edit here every time.
+        # All pre-restore snapshots below use a dedicated DIRECT_DATABASE_URL
+        # connection. The request's auth dependency may still be holding the
+        # only application-pool slot, so using database.engine here would make
+        # a pool_size=1 deployment wait on itself and falsely report that the
+        # audit ledger could not be snapshotted.
+        snapshot_engine = _create_restore_snapshot_engine()
         try:
-            with database_module.engine.connect() as _snap_conn:
-                _pre_restore_users = [
-                    {**dict(row), "email_lc": dict(row)["email"].lower()}
-                    for row in _snap_conn.execute(sa_text("SELECT * FROM users")).mappings().all()
-                ]
-        except Exception:
-            # `users` might not exist at all yet (e.g. restoring into a
-            # brand-new, never-initialized database) -- nothing to
-            # preserve in that case, and that's fine; the restored
-            # backup's own data is all there is.
-            logger.info(
-                "backup_service: no existing 'users' table to snapshot credentials "
-                "from before this restore -- nothing to preserve.", exc_info=True,
-            )
-            _pre_restore_users = []
-
-        # A real production restore must have exactly one authoritative root
-        # account in the live database before anything destructive happens.
-        # This check belongs here, at the full restore boundary, rather than
-        # inside the unit-testable reconciliation helper, because the helper
-        # also supports partial snapshots used to exercise ordinary-user
-        # reconciliation rules.
-        current_super_admin_count = sum(
-            1 for row in _pre_restore_users if row.get("role") == "super_admin"
-        )
-        if _pre_restore_users and current_super_admin_count != 1:
-            raise RuntimeError(
-                "Restore aborted: the current database must contain exactly one super_admin "
-                f"account before restore; found {current_super_admin_count}. "
-                "Repair the root account first so the current root can remain authoritative."
-            )
-
-        # EXTENDED (checkouts/quotations/outsiders continuity): same
-        # "capture everything, while the live DB is still fully intact,
-        # for _reconcile_post_restore_asset_activity()/
-        # _reconcile_post_restore_outsiders() to apply afterward" pattern
-        # as `users` above -- see those two functions' own docstrings for
-        # exactly what problem this solves (a person's checkouts/
-        # quotations/ad-hoc-profile edits made AFTER the backup was taken
-        # otherwise silently reverting along with everything else a
-        # restore is supposed to roll back). Each table snapshotted
-        # independently so one missing/incompatible table (e.g. a
-        # genuinely ancient pre-restore schema mid-migration) doesn't
-        # blank out every other snapshot too.
-        def _safe_snapshot_table(table_name: str) -> list:
+            snapshot_conn = snapshot_engine.connect()
             try:
-                with database_module.engine.connect() as _snap_conn:
-                    return [
-                        dict(row) for row in _snap_conn.execute(sa_text(f"SELECT * FROM {table_name}")).mappings().all()
+                # A restore must preserve the current root account/profile.
+                # Snapshot every current user while the live database is still
+                # intact.
+                if sa_inspect(snapshot_conn).has_table("users"):
+                    _pre_restore_users = [
+                        {**dict(row), "email_lc": dict(row)["email"].lower()}
+                        for row in snapshot_conn.execute(sa_text("SELECT * FROM users")).mappings().all()
                     ]
-            except Exception:
-                logger.info(
-                    "backup_service: no existing '%s' table to snapshot before this restore -- "
-                    "nothing to preserve for it.", table_name, exc_info=True,
+                else:
+                    _pre_restore_users = []
+
+                current_super_admin_count = sum(
+                    1 for row in _pre_restore_users if row.get("role") == "super_admin"
                 )
-                return []
+                if _pre_restore_users and current_super_admin_count != 1:
+                    raise RuntimeError(
+                        "Restore aborted: the current database must contain exactly one super_admin "
+                        f"account before restore; found {current_super_admin_count}. "
+                        "Repair the root account first so the current root can remain authoritative."
+                    )
 
-        _pre_restore_outsiders = _safe_snapshot_table("outsiders")
-        _pre_restore_checkouts = _safe_snapshot_table("asset_checkouts")
-        _pre_restore_quotations = _safe_snapshot_table("quotations")
-        _pre_restore_quotation_items = _safe_snapshot_table("quotation_items")
-        _pre_restore_quotation_outsourced_items = _safe_snapshot_table("quotation_outsourced_items")
+                def _safe_snapshot_table(table_name: str) -> list:
+                    if not sa_inspect(snapshot_conn).has_table(table_name):
+                        logger.info(
+                            "backup_service: no existing '%s' table to snapshot before this restore -- "
+                            "nothing to preserve for it.", table_name,
+                        )
+                        return []
+                    try:
+                        return [
+                            dict(row)
+                            for row in snapshot_conn.execute(sa_text(f"SELECT * FROM {table_name}")).mappings().all()
+                        ]
+                    except Exception as exc:
+                        raise RuntimeError(
+                            f"Restore aborted because the current '{table_name}' table could not be snapshotted: {exc}"
+                        ) from exc
 
-        # AUDIT HISTORY IS IMMUTABLE. Snapshot it before the destructive
-        # schema replacement so entries created after the selected backup
-        # cannot disappear merely because restore rolled mutable tables back.
-        _pre_restore_audit_logs = _snapshot_audit_logs(database_module.engine)
+                _pre_restore_outsiders = _safe_snapshot_table("outsiders")
+                _pre_restore_checkouts = _safe_snapshot_table("asset_checkouts")
+                _pre_restore_quotations = _safe_snapshot_table("quotations")
+                _pre_restore_quotation_items = _safe_snapshot_table("quotation_items")
+                _pre_restore_quotation_outsourced_items = _safe_snapshot_table("quotation_outsourced_items")
+
+                # AUDIT HISTORY IS IMMUTABLE. Snapshot it before the destructive
+                # schema replacement so entries created after the selected backup
+                # cannot disappear merely because restore rolled mutable tables back.
+                _pre_restore_audit_logs = _snapshot_audit_logs(snapshot_conn)
+            finally:
+                snapshot_conn.close()
+        finally:
+            snapshot_engine.dispose()
+
+        #
+        # A restore's whole point is to replace the database with an OLDER
+        # snapshot, while the live root credentials and immutable audit trail
+        # remain authoritative. The preflight snapshots above are complete and
+        # were taken outside the request pool, so the destructive window can
+        # now begin safely.
 
         conn = _db_connection_kwargs()
+
+        # PRE-DESTRUCTIVE VALIDATION -- fully decompress and sanitize the dump
+        # before dropping anything. A corrupt/truncated gzip must never erase
+        # the live schema before we discover the file is unusable.
+        try:
+            with gzip.open(filepath, "rb") as gz_in:
+                sql_bytes = gz_in.read()
+        except (OSError, EOFError, gzip.BadGzipFile) as exc:
+            raise RuntimeError(
+                "Restore aborted before any database changes because the backup "
+                f"file could not be decompressed: {exc}"
+            ) from exc
+        if not sql_bytes.strip():
+            raise RuntimeError(
+                "Restore aborted before any database changes because the backup "
+                "contains no SQL statements."
+            )
+        # Backups created by older pg_dump 17 clients may contain this
+        # PostgreSQL-17-only GUC. Strip only the exact generated SET line so
+        # those dumps remain restorable on PostgreSQL 16.
+        sql_bytes = re.sub(rb"(?im)^SET transaction_timeout = .*?;\r?\n?", b"", sql_bytes)
 
         # BUG FIX -- "Restore failed: ... 'DROP SCHEMA public CASCADE; CREATE
         # SCHEMA public;'] timed out after 120 seconds", and the app appearing
@@ -2014,38 +2034,6 @@ def _restore_backup_impl(filepath: str, take_safety_backup: bool = True) -> dict
             # path either way.
             "--set", "ON_ERROR_STOP=1",
         ]
-        with gzip.open(filepath, "rb") as gz_in:
-            sql_bytes = gz_in.read()
-
-        # BUG FIX -- "Restore failed partway through: ERROR: unrecognized
-        # configuration parameter \"transaction_timeout\"", even with
-        # --single-transaction long since removed above (see that comment).
-        # Root cause turned out to be one level further back than the psql
-        # invocation itself: backend/Dockerfile used to install the generic,
-        # unversioned `postgresql-client` package, which resolved to a 17.x
-        # pg_dump -- and pg_dump 17.x writes `SET transaction_timeout = 0;`
-        # into the STANDARD PREAMBLE of every dump it produces, regardless of
-        # --single-transaction. `transaction_timeout` is itself a PG17+-only
-        # GUC, so a 16.x (or older) server -- like docker-compose.yml's
-        # `db: postgres:16-alpine` -- rejects that SET outright, and
-        # ON_ERROR_STOP correctly aborts the entire restore before a single
-        # real statement from the dump runs.
-        #
-        # The Dockerfile now pins postgresql-client to major version 16 (see
-        # its own comment) so this line never gets written into FUTURE
-        # backups. But every backup already taken with the old, mismatched
-        # image -- on disk or already uploaded to Drive -- already has this
-        # line baked into its bytes, and rebuilding the image doesn't rewrite
-        # backups that already exist. So this strips any such line here too,
-        # unconditionally, on every restore: a no-op for dumps that never had
-        # it (new backups, or ones taken by psql <17 to begin with), and the
-        # difference between "restorable" and "permanently broken" for the
-        # ones that do. Anchored to start-of-line and requires the trailing
-        # semicolon so it can only ever match pg_dump's own auto-generated
-        # SET statement, not e.g. a value inside a COPY block that happens to
-        # contain this text.
-        sql_bytes = re.sub(rb"(?im)^SET transaction_timeout = .*?;\r?\n?", b"", sql_bytes)
-
         result = subprocess.run(
             restore_cmd,
             input=sql_bytes,

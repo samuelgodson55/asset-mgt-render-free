@@ -3,8 +3,10 @@
 ## Azure ACA
 
 - A self-hosted `edoburu/pgbouncer` Container App is used.
-- The total server pool is derived from the PostgreSQL SKU at `4 x vCores` unless
-  `pgbouncerServerPoolSize > 0` is supplied explicitly.
+- The total server pool is derived from the PostgreSQL SKU at `5 x vCores` unless
+  `pgbouncerServerPoolSize > 0` is supplied explicitly. This is the upper end of
+  the documented 2-5x starting range and is intentionally balanced for the
+  customer-facing workload.
 - The application leaves 10% of the effective pool unused for operational headroom.
 - Background DB work reserves 1 connection by default.
 - The application probes direct PostgreSQL `max_connections` and

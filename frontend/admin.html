@@ -956,8 +956,7 @@
       <p class="text-[12px] text-slate-400">
         This will replace the ENTIRE current database with the contents of
         <span id="restoreModalTarget" class="font-semibold text-slate-200">this backup</span>.
-        Every asset, user, checkout, and audit record created since that backup was taken will be lost.
-        A safety backup of the current state is taken automatically right before this runs.
+        Mutable database state is rolled back to the selected backup. A fresh safety backup of the current state must succeed before any destructive step begins; the current Super Admin credentials and immutable audit history are preserved across the restore.
       </p>
 
       <div id="restoreUploadRow" class="hidden">

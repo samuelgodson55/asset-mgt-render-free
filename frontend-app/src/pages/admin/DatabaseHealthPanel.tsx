@@ -62,7 +62,7 @@ function healthFor(snapshot: DbPoolDiagnostics | null): { level: HealthLevel; la
   const attention = postgresPct >= 75 || (b?.cl_waiting ?? 0) > 0 || (pool.overflow ?? 0) > 0 || (pg.idle_in_transaction ?? 0) > 0 || (b?.avg_wait_time_us ?? 0) > 0 || routeMismatch || bouncerUnreachable;
   if (critical) return { level: "critical", label: "Critical", detail: "Connection pressure is high. Investigate before increasing traffic or pool limits." };
   if (routeMismatch) return { level: "attention", label: "Attention", detail: "PgBouncer is configured but the API isn't actually routed through it right now." };
-  if (bouncerUnreachable) return { level: "attention", label: "Attention", detail: "PgBouncer's admin console couldn't be reached for a live probe." };
+  if (bouncerUnreachable) return { level: "attention", label: "Attention", detail: "The API is routed through PgBouncer, but its admin console probe is unavailable. This is a telemetry gap, not proof that the application route is down." };
   if (attention) return { level: "attention", label: "Attention", detail: "The database is showing a pressure signal worth watching." };
   return { level: "healthy", label: "Healthy", detail: "Connection pools have headroom and no clients are waiting." };
 }
@@ -290,7 +290,7 @@ export function DatabaseHealthPanel() {
           </div>
           <dl className="space-y-3 text-[11px]">
             <div className="flex justify-between gap-3"><dt className="text-text-faint">Endpoint</dt><dd className="font-mono text-text">{route?.host ?? "—"}:{route?.port ?? "—"}</dd></div>
-            <div className="flex justify-between items-center gap-3"><dt className="text-text-faint">PgBouncer reachable</dt><dd><StatusPill ok={bouncerReachable} okLabel="Healthy" badLabel="No live probe" /></dd></div>
+            <div className="flex justify-between items-center gap-3"><dt className="text-text-faint">PgBouncer admin probe</dt><dd><StatusPill ok={bouncerReachable} okLabel="Available" badLabel="No live probe" /></dd></div>
             {route?.configured && (
               <div className="flex justify-between gap-3"><dt className="text-text-faint">Expected pooler</dt><dd className="font-mono text-text">{route?.expected_pooler_host ?? "—"}:{route?.expected_pooler_port ?? "—"}</dd></div>
             )}
@@ -307,8 +307,8 @@ export function DatabaseHealthPanel() {
         </section>
         <section className="rounded-[5px] border border-border-soft bg-surface p-5">
           <div className="flex items-center justify-between gap-2 mb-4">
-            <div className="flex items-center gap-2"><Waves size={16} className="text-moss-soft" /><h3 className="font-display text-sm font-semibold text-text">PgBouncer</h3></div>
-            <StatusPill ok={bouncerReachable} okLabel="Live" badLabel="Unavailable" />
+            <div className="flex items-center gap-2"><Waves size={16} className="text-moss-soft" /><h3 className="font-display text-sm font-semibold text-text">PgBouncer telemetry</h3></div>
+            <StatusPill ok={bouncerReachable} okLabel="Live admin probe" badLabel="Admin probe unavailable" />
           </div>
           <div className="grid grid-cols-2 gap-x-5 gap-y-4 text-[11px]">
             <div><span className="text-text-faint">Active clients</span><p className="font-mono text-text text-base mt-1">{b?.cl_active ?? "—"}</p></div>

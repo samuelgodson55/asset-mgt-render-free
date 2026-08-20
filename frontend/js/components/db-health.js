@@ -29,10 +29,10 @@ export async function loadDbHealth() {
       <div class="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <div class="rounded-xl border border-border bg-card p-4">
           <div class="flex items-center justify-between"><h3 class="text-[13px] font-semibold text-slate-100">Application route</h3>${statusPill(inUse, inUse ? 'PgBouncer in use' : (cfg.use_pgbouncer ? 'Configured, not in use' : 'Direct PostgreSQL'))}</div>
-          <dl class="mt-4 space-y-2 text-[12px]"><div class="flex justify-between gap-3"><dt class="text-slate-500">Endpoint</dt><dd class="font-mono text-slate-300">${esc(route.host || '—')}:${esc(route.port || '—')}</dd></div><div class="flex justify-between gap-3"><dt class="text-slate-500">PgBouncer reachable</dt><dd>${statusPill(reachable, reachable ? 'Healthy' : 'No live admin probe')}</dd></div></dl>
+          <dl class="mt-4 space-y-2 text-[12px]"><div class="flex justify-between gap-3"><dt class="text-slate-500">Endpoint</dt><dd class="font-mono text-slate-300">${esc(route.host || '—')}:${esc(route.port || '—')}</dd></div><div class="flex justify-between gap-3"><dt class="text-slate-500">PgBouncer admin probe</dt><dd>${statusPill(reachable, reachable ? 'Available' : 'No live probe')}</dd></div></dl>
         </div>
         <div class="rounded-xl border border-border bg-card p-4">
-          <div class="flex items-center justify-between"><h3 class="text-[13px] font-semibold text-slate-100">PgBouncer pool</h3>${statusPill(reachable, reachable ? 'Live' : 'Unavailable')}</div>
+          <div class="flex items-center justify-between"><h3 class="text-[13px] font-semibold text-slate-100">PgBouncer telemetry</h3>${statusPill(reachable, reachable ? 'Live admin probe' : 'Admin probe unavailable')}</div>
           <dl class="mt-4 grid grid-cols-2 gap-3 text-[12px]"><div><dt class="text-slate-500">Clients</dt><dd class="mt-1 text-[16px] font-bold text-slate-100">${num(pg?.cl_active)}</dd></div><div><dt class="text-slate-500">Waiting</dt><dd class="mt-1 text-[16px] font-bold ${waiting ? 'text-amber-400' : 'text-emerald-400'}">${num(waiting)}</dd></div><div><dt class="text-slate-500">Server active</dt><dd class="mt-1 font-semibold text-slate-200">${num(pg?.sv_active)}</dd></div><div><dt class="text-slate-500">Server idle</dt><dd class="mt-1 font-semibold text-slate-200">${num(pg?.sv_idle)}</dd></div></dl>
         </div>
         <div class="rounded-xl border border-border bg-card p-4">
