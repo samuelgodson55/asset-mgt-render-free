@@ -21,6 +21,7 @@ import {
   UserMinus,
   DatabaseBackup,
   Wrench,
+  Activity,
 } from "lucide-react";
 import { useAuth } from "../lib/useAuth";
 import { isFullAdmin, isTrueSuperAdmin, isPrivileged } from "../lib/roles";
@@ -34,6 +35,7 @@ import { DeletedAssetsPanel } from "./admin/DeletedAssetsPanel";
 import { AuditPanel } from "./admin/AuditPanel";
 import { QuotesPanel } from "./admin/QuotesPanel";
 import { MaintenanceModePanel } from "./admin/MaintenanceModePanel";
+import { DatabaseHealthPanel } from "./admin/DatabaseHealthPanel";
 
 // =============================================================================
 // Admin / Manager -- two separate pages/routes (/admin, /manager) sharing
@@ -78,6 +80,7 @@ function AdminOrManagerPage({ variant }: { variant: "admin" | "manager" }) {
   // canBackups below: a name tied to the feature it guards, not to
   // whichever other feature happened to share its backend role check.
   const canMaintenance = !isManager && (demo || isTrueSuperAdmin(user?.role));
+  const canDatabaseHealth = !isManager && (demo || isTrueSuperAdmin(user?.role));
   const canDirectory = demo || isPrivileged(user?.role);
   // reset-password/delete/restore/purge (deps.require_super_admin) treat
   // Admin and Super Admin identically on the backend -- mirrored here as
@@ -100,7 +103,7 @@ function AdminOrManagerPage({ variant }: { variant: "admin" | "manager" }) {
   // that just happens to share a tab group with System Backups.
   const canSettings = !isManager && (demo || isFullAdmin(user?.role));
 
-  type Tab = { key: "import" | "backups" | "maintenance" | "users" | "outsiders" | "audit" | "quotes" | "deleted-assets" | "deleted-users" | "settings"; label: string; icon: typeof FileSpreadsheet };
+  type Tab = { key: "import" | "backups" | "maintenance" | "database-health" | "users" | "outsiders" | "audit" | "quotes" | "deleted-assets" | "deleted-users" | "settings"; label: string; icon: typeof FileSpreadsheet };
   const tabs = useMemo<Tab[]>(() => {
     const list: Tab[] = [];
     if (canDirectory) list.push({ key: "users", label: "User Directory", icon: UsersIcon });
@@ -112,9 +115,10 @@ function AdminOrManagerPage({ variant }: { variant: "admin" | "manager" }) {
     if (canDeletedAssets) list.push({ key: "deleted-users", label: "Deleted Users", icon: UserMinus });
     if (canBackups) list.push({ key: "backups", label: "System Backups", icon: DatabaseBackup });
     if (canMaintenance) list.push({ key: "maintenance", label: "Maintenance Mode", icon: Wrench });
+    if (canDatabaseHealth) list.push({ key: "database-health", label: "Database Health", icon: Activity });
     if (canSettings) list.push({ key: "settings", label: "Settings", icon: Percent });
     return list;
-  }, [canImport, canBackups, canMaintenance, canDirectory, canDeletedAssets, canSettings]);
+  }, [canImport, canBackups, canMaintenance, canDatabaseHealth, canDirectory, canDeletedAssets, canSettings]);
 
   const [tab, setTab] = useState<Tab["key"] | null>(tabs[0]?.key ?? null);
   useEffect(() => {
@@ -147,7 +151,7 @@ function AdminOrManagerPage({ variant }: { variant: "admin" | "manager" }) {
           <p className="text-text-muted text-sm mt-1">
             {isManager
               ? "Directories, quotes, and the audit trail — scoped to what a Manager can see and do."
-              : "Directories, audit trail, inventory import, and system-level backup controls."}
+              : "Directories, audit trail, inventory import, system health, and system-level backup controls."}
           </p>
         </div>
         <span
@@ -205,6 +209,7 @@ function AdminOrManagerPage({ variant }: { variant: "admin" | "manager" }) {
           {tab === "deleted-users" && canDeletedAssets && <DeletedUsersPanel />}
           {tab === "backups" && canBackups && <SystemBackupsPanel />}
           {tab === "maintenance" && canMaintenance && <MaintenanceModePanel />}
+          {tab === "database-health" && canDatabaseHealth && <DatabaseHealthPanel />}
           {tab === "settings" && canSettings && <SettingsPanel />}
         </>
       )}

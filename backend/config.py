@@ -123,23 +123,47 @@ class Settings(BaseSettings):
     def route_database_through_pgbouncer(self):
         """Keep the direct URL authoritative and derive the pooler endpoint safely.
 
-        The operator-facing switch is only USE_PGBOUNCER.  Deployments that
-        run a local pooler (Compose/VM) inject PGBOUNCER_HOST automatically;
-        Azure ACA leaves it unset so the managed Azure PgBouncer endpoint uses
-        the same PostgreSQL hostname on port 6432.  TLS is never disabled by
-        this routing layer.
+        The operator-facing switch is only USE_PGBOUNCER. Deployments that
+        run the repository's self-hosted pooler (ACA/Compose/VM) inject
+        PGBOUNCER_HOST automatically. Azure managed PgBouncer, if used by a
+        future deployment, leaves it unset so the PostgreSQL hostname is reused
+        on port 6432.
         """
         if self.DIRECT_DATABASE_URL is None:
             self.DIRECT_DATABASE_URL = self.DATABASE_URL
         direct_url = make_url(self.DIRECT_DATABASE_URL)
         if self.USE_PGBOUNCER:
             pooler_host = self.PGBOUNCER_HOST or direct_url.host
-            # Preserve all connection options (especially sslmode=require).
-            # Only the endpoint changes; credentials/database/query semantics
-            # remain authoritative in DIRECT_DATABASE_URL.
+
+            # There are two supported pooler topologies:
+            #
+            # 1. Azure managed PgBouncer: PGBOUNCER_HOST is intentionally
+            #    unset, so the pooler endpoint is the Azure PostgreSQL hostname.
+            #    The client must keep sslmode=require.
+            #
+            # 2. Self-hosted PgBouncer (ACA/VM/Compose): PGBOUNCER_HOST is
+            #    explicitly set (normally "pgbouncer"). The current edoburu
+            #    image is configured for TLS on the *upstream* PostgreSQL leg
+            #    (SERVER_TLS_SSLMODE=require), but it does not terminate TLS on
+            #    its client-facing 6432 listener. Passing sslmode=require to
+            #    that listener therefore fails with:
+            #      "server does not support SSL, but SSL was required"
+            #
+            # Keep DIRECT_DATABASE_URL untouched and secure. Only the
+            # self-hosted pooler's client-side connection uses plaintext on the
+            # private/internal Container Apps network; PgBouncer immediately
+            # opens its own TLS connection to Azure PostgreSQL.
+            query = dict(direct_url.query)
+            if self.PGBOUNCER_HOST:
+                query["sslmode"] = "disable"
+
+            # Only the pooler endpoint and, for self-hosted poolers, the
+            # client-side SSL mode change. Credentials/database semantics stay
+            # authoritative in DIRECT_DATABASE_URL.
             self.DATABASE_URL = direct_url.set(
                 host=pooler_host,
                 port=self.PGBOUNCER_PORT,
+                query=query,
             ).render_as_string(hide_password=False)
         else:
             self.DATABASE_URL = self.DIRECT_DATABASE_URL
@@ -175,8 +199,11 @@ class Settings(BaseSettings):
     # default. Set false only for a deliberate direct-Postgres break-glass path.
     USE_PGBOUNCER: bool = True
     # Internal deployment detail, not a user-facing switch. Local Docker/VM
-    # deployments set this automatically to their pgbouncer service name.
-    # Azure managed PgBouncer leaves it unset and reuses the database hostname.
+    # and ACA self-hosted PgBouncer deployments set this automatically to their
+    # pooler's service name. Azure managed PgBouncer leaves it unset and reuses
+    # the database hostname. An explicit host also tells routing that the
+    # client-facing pooler listener is plain TCP while the pooler->Postgres leg
+    # remains TLS-protected.
     PGBOUNCER_HOST: str | None = None
     PGBOUNCER_PORT: int = 6432
     # BUG FIX (PgBouncer review: "hung requests" / "server closed the

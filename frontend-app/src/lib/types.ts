@@ -605,3 +605,37 @@ export interface ReportsDashboard {
   quotation_turnaround: QuotationTurnaroundReport;
 }
 
+
+export interface DbPoolDiagnostics {
+  sqlalchemy_pool: {
+    pool_size?: number;
+    checked_out?: number;
+    checked_in?: number;
+    overflow?: number;
+  } | null;
+  pgbouncer_pool: {
+    cl_active?: number;
+    cl_waiting?: number;
+    sv_active?: number;
+    sv_idle?: number;
+    sv_used?: number;
+    maxwait_seconds?: number;
+    avg_query_time_us?: number;
+    avg_wait_time_us?: number;
+  } | null;
+  postgres_activity: {
+    max_connections?: number;
+    total_connections?: number;
+    active?: number;
+    idle?: number;
+    idle_in_transaction?: number;
+  } | null;
+  configured: {
+    use_pgbouncer: boolean;
+    pgbouncer_server_pool_size: number;
+    pgbouncer_safety_margin_percent: number;
+    db_background_connection_reserve: number;
+    db_background_concurrency_limit: number;
+    db_connection_safety_margin: number;
+  };
+}

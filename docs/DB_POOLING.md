@@ -158,3 +158,16 @@ None of the probing above ever holds a connection open outside the sampling
 window itself -- each uses a short-lived, unpooled connection with a tight
 connect timeout, the same pattern `_probe_postgres_connection_budget()`
 already uses for pool sizing at startup.
+
+
+## TLS topology
+
+When `PGBOUNCER_HOST` is explicitly set (the self-hosted ACA/VM/Compose
+pooler), the backend connects to the pooler's internal `6432` listener without
+client-side TLS. The self-hosted PgBouncer then connects to Azure PostgreSQL
+with `SERVER_TLS_SSLMODE=require`, so the database leg remains encrypted.
+
+`DIRECT_DATABASE_URL` is never modified and continues to use
+`sslmode=require`. When `PGBOUNCER_HOST` is unset (Azure managed PgBouncer),
+the backend preserves the direct URL's TLS settings for the managed pooler
+endpoint.

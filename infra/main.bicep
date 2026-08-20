@@ -1079,9 +1079,10 @@ var pgbouncerDefaultPoolSize = max(1, pgbouncerDefaultPoolSizeTotal / pgbouncerR
 //
 // SERVER_TLS_SSLMODE=require because Flexible Server enforces SSL on its
 // public FQDN regardless (see `databaseUrl`'s own comment below) --
-// PgBouncer needs to be told to negotiate TLS on that upstream leg the
-// same way the direct `sslmode=require` connections elsewhere in this
-// file already do.
+// PgBouncer negotiates TLS on this UPSTREAM leg. Its client-facing 6432
+// listener remains plain TCP inside the private ACA environment; backend
+// routing therefore strips sslmode=require only for this self-hosted pooler
+// endpoint while DIRECT_DATABASE_URL remains sslmode=require.
 resource pgbouncerApp 'Microsoft.App/containerApps@2024-03-01' = if (usePgbouncer) {
   name: 'pgbouncer'
   location: location

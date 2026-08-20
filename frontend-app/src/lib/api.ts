@@ -1,7 +1,7 @@
 import { reportClientError, setLastRequestId } from "./errorbeacon";
 import { runBusinessOperation, telemetryFetch, type BrowserTelemetrySpan } from "./browserTelemetry";
 import { mockAssets, mockCheckouts, mockExtensions, mockNotifications, mockStats, mockBackups, mockBackupStatus, mockDigestRecipients, mockAuditLogs, mockCatalog, mockQuotationCart, mockReportsDashboard } from "./mock";
-import type { AssetType, Checkout, ExtensionRequest, NotificationItem, DashboardStats, BackupEntry, BackupStatus, RestoreResult, ImportResult, MyItem, ProfileDetail, UserRow, OutsiderRow, CustodyItem, AuditLogEntry, PublicConfig, CatalogAsset, QuotationCartOrDetail, QuotationListRow, FulfillmentQueueRow, QuotationOutsourcedItemCreate, QuotationOutsourceShortfallItem, AssetDetails, DeletedAssetRow, DeletedUserRow, RosterUser, BulkExtendResult, MyExtensionDecision, QuotationNotification, ReportsDashboard } from "./types";
+import type { AssetType, Checkout, ExtensionRequest, NotificationItem, DashboardStats, BackupEntry, BackupStatus, RestoreResult, ImportResult, MyItem, ProfileDetail, UserRow, OutsiderRow, CustodyItem, AuditLogEntry, PublicConfig, CatalogAsset, QuotationCartOrDetail, QuotationListRow, FulfillmentQueueRow, QuotationOutsourcedItemCreate, QuotationOutsourceShortfallItem, AssetDetails, DeletedAssetRow, DeletedUserRow, RosterUser, BulkExtendResult, MyExtensionDecision, QuotationNotification, ReportsDashboard, DbPoolDiagnostics } from "./types";
 
 
 // Points at the FastAPI backend. In production this app is built with
@@ -778,6 +778,11 @@ export const api = {
   getExtensionRequests: () => tryLoad(loadExtensionRequests, mockExtensions),
   getNotifications: (privileged: boolean) => tryLoad(() => loadNotifications(privileged), mockNotifications),
   getStats: (privileged: boolean) => tryLoad(() => loadStats(privileged), mockStats),
+};
+
+
+export const diagnosticsApi = {
+  dbPool: () => rawFetch<DbPoolDiagnostics>("/diagnostics/db-pool"),
 };
 
 // ---------------------------------------------------------------------------
