@@ -159,7 +159,7 @@ class UnhandledExceptionMiddleware:
 
         try:
             await self.app(scope, receive, send_wrapper)
-        except sqlalchemy.exc.TimeoutError as exc:
+        except sqlalchemy.exc.TimeoutError:
             # See _pool_exhaustion_response() above -- every pooled/
             # overflow connection was already checked out for longer than
             # settings.DB_POOL_TIMEOUT_SECONDS. Expected, self-recovering
