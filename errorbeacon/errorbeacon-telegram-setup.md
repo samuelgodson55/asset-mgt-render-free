@@ -218,7 +218,7 @@ AI_ENABLED=true
 
 # 1. First provider
 GROQ_API_KEY=<Groq API key>
-GROQ_MODEL=llama-3.1-8b-instant
+GROQ_MODEL=llama-3.3-70b-versatile
 
 # 2. Primary Gemini
 GEMINI_API_KEY=<Gemini API key>
@@ -259,7 +259,7 @@ Set:
 
 ```env
 GROQ_API_KEY=<your Groq key>
-GROQ_MODEL=llama-3.1-8b-instant
+GROQ_MODEL=llama-3.3-70b-versatile
 ```
 
 Groq is attempted first whenever its key is present.
@@ -396,7 +396,7 @@ TELEGRAM_THREAD_ID=
 AI_ENABLED=true
 
 GROQ_API_KEY=
-GROQ_MODEL=llama-3.1-8b-instant
+GROQ_MODEL=llama-3.3-70b-versatile
 
 GEMINI_API_KEY=
 GEMINI_MODEL=gemini-2.5-flash-lite
@@ -460,7 +460,7 @@ TELEGRAM_THREAD_ID=
 AI_ENABLED=true
 
 GROQ_API_KEY=
-GROQ_MODEL=llama-3.1-8b-instant
+GROQ_MODEL=llama-3.3-70b-versatile
 
 GEMINI_API_KEY=
 GEMINI_MODEL=gemini-2.5-flash-lite
@@ -813,7 +813,7 @@ mechanism will try the chain again according to the AI retry settings.
 
 | Order | Log name | Env var(s) | Default model | Requires |
 |---|---|---|---|---|
-| 1 | `groq` | `GROQ_MODEL` | `llama-3.1-8b-instant` | `GROQ_API_KEY` |
+| 1 | `groq` | `GROQ_MODEL` | `llama-3.3-70b-versatile` | `GROQ_API_KEY` |
 | 2 | `gemini` | `GEMINI_MODEL` | `gemini-2.5-flash-lite` | `GEMINI_API_KEY` |
 | 3 | `gemini-fallback` | `GEMINI_FALLBACK_MODEL` | `gemini-2.5-flash` | `GEMINI_API_KEY` (same key as #2; only added when this model differs from `GEMINI_MODEL`) |
 | 4 | `openrouter` | `OPENROUTER_MODEL` | `openrouter/free` | `OPENROUTER_API_KEY` |
@@ -855,7 +855,7 @@ ERRORBEACON_OPENROUTER_SITE_URL  optional
 Defaults are provided by the deployment code:
 
 ```text
-Groq:             llama-3.1-8b-instant
+Groq:             llama-3.3-70b-versatile
 Gemini primary:   gemini-2.5-flash-lite
 Gemini fallback:  gemini-2.5-flash
 OpenRouter:       openrouter/free
@@ -1274,7 +1274,7 @@ GEMINI_FALLBACK_MODEL=gemini-2.5-flash
 AI_ENABLED=true
 
 GROQ_API_KEY=<groq key>
-GROQ_MODEL=llama-3.1-8b-instant
+GROQ_MODEL=llama-3.3-70b-versatile
 
 GEMINI_API_KEY=<gemini key>
 GEMINI_MODEL=gemini-2.5-flash-lite

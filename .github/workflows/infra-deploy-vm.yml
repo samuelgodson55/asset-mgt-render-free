@@ -150,7 +150,7 @@ jobs:
       TF_VAR_errorbeacon_telegram_thread_id: ${{ vars.ERRORBEACON_TELEGRAM_THREAD_ID }}
       TF_VAR_errorbeacon_gemini_api_key: ${{ secrets.ERRORBEACON_GEMINI_API_KEY }}
       TF_VAR_errorbeacon_groq_api_key: ${{ secrets.ERRORBEACON_GROQ_API_KEY }}
-      TF_VAR_errorbeacon_groq_model: ${{ vars.ERRORBEACON_GROQ_MODEL || 'llama-3.1-8b-instant' }}
+      TF_VAR_errorbeacon_groq_model: ${{ vars.ERRORBEACON_GROQ_MODEL || 'llama-3.3-70b-versatile' }}
       TF_VAR_errorbeacon_openrouter_api_key: ${{ secrets.ERRORBEACON_OPENROUTER_API_KEY }}
       TF_VAR_errorbeacon_openrouter_model: ${{ vars.ERRORBEACON_OPENROUTER_MODEL || 'openrouter/free' }}
       TF_VAR_errorbeacon_image: ${{ secrets.DOCKERHUB_USERNAME }}/errorbeacon-lite

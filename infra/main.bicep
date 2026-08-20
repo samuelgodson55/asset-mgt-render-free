@@ -112,7 +112,7 @@ param errorBeaconGeminiModel string = 'gemini-2.5-flash-lite'
 param errorBeaconGeminiFallbackModel string = 'gemini-2.5-flash'
 @secure()
 param errorBeaconGroqApiKey string = ''
-param errorBeaconGroqModel string = 'llama-3.1-8b-instant'
+param errorBeaconGroqModel string = 'llama-3.3-70b-versatile'
 @secure()
 param errorBeaconOpenRouterApiKey string = ''
 param errorBeaconOpenRouterModel string = 'openrouter/free'
