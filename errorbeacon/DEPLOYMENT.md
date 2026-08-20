@@ -48,6 +48,12 @@ ERRORBEACON_DIGEST_ENABLED=true
 ERRORBEACON_DIGEST_INTERVAL_HOURS=24
 ERRORBEACON_STARTUP_SELF_TEST=false
 ADMIN_NOTIFICATION_EMAILS=admin@example.com
+# Reverse direction of the monitored application's ERRORBEACON_URL below -- lets
+# the Telegram /apphealth command poll the monitored app's own /healthz, /readyz
+# and /health/dependencies. Optional; each deployment target below sets its own
+# correct value/default -- see that target's section.
+BACKEND_URL=http://backend:8000
+BACKEND_HEALTH_TIMEOUT_SECONDS=5
 ```
 
 Monitored application:
@@ -87,7 +93,7 @@ curl -X POST http://127.0.0.1:8787/v1/test-telegram -H "X-API-Key: YOUR_KEY"
 curl -X POST http://127.0.0.1:8787/v1/test-email -H "X-API-Key: YOUR_KEY"
 ```
 
-When both applications run in one Compose project, use `http://errorbeacon:8000` from the backend. Do not use `localhost` from one container to reach another.
+When both applications run in one Compose project, use `http://errorbeacon:8000` from the backend. Do not use `localhost` from one container to reach another. The reverse direction (`BACKEND_URL`, used by ErrorBeacon's `/apphealth` Telegram command) defaults to `http://backend:8000` and works as-is in this same Compose project.
 
 # 4. Render Free
 
@@ -113,6 +119,8 @@ Plan: Free
 ```
 
 Set the secret environment variables in Render. Do not commit `.env`. Keep `ERRORBEACON_TRUST_PROXY_HEADERS=false` on Render Free because ErrorBeacon is itself publicly reachable and clients can spoof proxy headers.
+
+ErrorBeacon here is a fully standalone Render Web Service with no shared network to the monitored application, so `BACKEND_URL` (the `/apphealth` Telegram command's target) has no working default and is left unset. `/apphealth` reports itself as not configured until you set `BACKEND_URL` to the monitored app's public URL in this service's own Render environment variables.
 
 To reduce cold starts, use a free external uptime monitor to request `/healthz` every five minutes. This is only a practical workaround; Render can still restart the service and the monitor's filesystem is not durable.
 
@@ -160,6 +168,8 @@ Unlike Compose/VM, the backend does not reach it at `http://errorbeacon:8000`. A
 http://errorbeacon.internal.<environment-default-domain>
 ```
 
+The reverse direction (`BACKEND_URL`, used by the `/apphealth` Telegram command) works the same way: `infra-deploy.yml` resolves backend's own internal-ingress FQDN with `az containerapp show` before each deployment and Bicep sets `BACKEND_URL` to it automatically -- nothing to configure by hand. It's a plain resolved parameter rather than a Bicep-internal resource reference, because `backend` already depends on `errorbeacon` (for `ERRORBEACON_URL` above); a reference back the other way inside Bicep itself would be a circular dependency. On the very first deploy of a brand-new environment, `backend` doesn't exist yet, so this resolves to empty and `/apphealth` reports itself as not configured until the next deploy.
+
 # 7. Azure VM
 
 The integrated `docker-compose.vm.yml` includes ErrorBeacon as an isolated service:
@@ -185,13 +195,15 @@ The backend reaches it through:
 http://errorbeacon:8000
 ```
 
+The reverse direction (`BACKEND_URL`, used by the `/apphealth` Telegram command) points at `http://backend-green:8000` by default -- the fixed, always-on production slot, not `backend-blue`, which only exists transiently during a rollout -- and reaches it directly rather than through Caddy/nginx, since nginx's reverse proxy only forwards `/healthz`/`/readyz` externally, not `/health/dependencies`.
+
 Deploy/update normally with your existing VM workflow. No separate public ErrorBeacon endpoint is necessary.
 
 # 8. Kubernetes and other Docker hosts
 
 Run one ErrorBeacon replica when Telegram polling is enabled. Mount `/data` to persistent storage and expose port 8000 only to the monitored application/network.
 
-The same environment variables and API key rules apply.
+The same environment variables and API key rules apply. Set `BACKEND_URL` to wherever the monitored application is reachable on your cluster/network if you want the `/apphealth` Telegram command to work; leave it unset otherwise.
 
 # 9. Production checklist
 

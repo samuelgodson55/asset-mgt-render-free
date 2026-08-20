@@ -170,17 +170,22 @@ ERRORBEACON_URL=http://errorbeacon:8000
 ERRORBEACON_INGEST_API_KEY=YOUR_GENERATED_KEY
 ```
 
-ACA uses the internal service name:
+ACA does **not** use that short Docker-style service name reliably. `infra/main.bicep` resolves ErrorBeacon's actual internal-ingress FQDN from the live resource and sets `ERRORBEACON_URL` to that automatically -- nothing to configure by hand there.
 
-```text
-http://errorbeacon:8000
-```
-
-VM Compose uses the same private Docker DNS name.
+VM Compose uses the same private Docker DNS name as plain Docker Compose above.
 
 The browser never receives `ERRORBEACON_INGEST_API_KEY`. Browser errors are forwarded through the backend telemetry endpoint.
 
 The frontend reporter stores the latest `X-Request-ID` returned by any same-origin API response and attaches it to later browser exceptions. URLs are sanitized before reporting, including password-reset tokens and other sensitive query parameters.
+
+### The reverse direction: ErrorBeacon checking the backend
+
+`BACKEND_URL` (default `http://backend:8000`) is the other direction -- it's what the Telegram [`/apphealth`](#telegram-controls) command uses to poll the monitored backend's own `/healthz`, `/readyz` and `/health/dependencies`. It's optional; without it, `/apphealth` just reports itself as not configured.
+
+- **Docker Compose**: the default (`backend:8000`) works as-is.
+- **VM Compose**: `docker-compose.vm.yml` points this at `backend-green:8000` specifically, the fixed always-on production slot (not `backend-blue`, which only runs transiently during a rollout), and goes straight to the container rather than through Caddy/nginx -- nginx's reverse proxy only forwards `/healthz` and `/readyz`, not `/health/dependencies`, so routing through it would make that one check meaningless.
+- **ACA**: `infra/main.bicep` resolves backend's internal-ingress FQDN the same way it resolves ErrorBeacon's (see above) and sets `BACKEND_URL` automatically.
+- **Render**: ErrorBeacon runs as its own standalone Web Service here (see [Deployment](#deployment) below) with no shared network to the main app, so `BACKEND_URL` is unset by default. Set it to the main app's public URL in the ErrorBeacon service's Render dashboard if you want `/apphealth` to work in this shape.
 
 ## API
 
@@ -243,7 +248,7 @@ X-API-Key: YOUR_KEY
 
 ## Telegram controls
 
-The bot accepts `/help`, `/health`, `/incidents`, `/incident <id>`, `/stats [window]`, `/resolve <id>`, `/reopen <id>`, `/silence <id> <duration>`, `/unsilence <id>`, `/test`, `/testtelegram`, and `/testemail`. Silence accepts minute/hour/day values up to 24 hours. `/test` creates a controlled incident and exercises the normal alert/AI pipeline; `/testtelegram` tests Telegram delivery directly; `/testemail` tests the configured email fallback transport without creating an incident. Telegram polling listens for both callback buttons and messages, and only the configured `TELEGRAM_CHAT_ID` can issue commands. `/start` is an alias for `/help`.
+The bot accepts `/help`, `/health`, `/apphealth`, `/incidents`, `/incident <id>`, `/stats [window]`, `/resolve <id>`, `/reopen <id>`, `/silence <id> <duration>`, `/unsilence <id>`, `/test`, `/testtelegram`, and `/testemail`. Silence accepts minute/hour/day values up to 24 hours. `/test` creates a controlled incident and exercises the normal alert/AI pipeline; `/testtelegram` tests Telegram delivery directly; `/testemail` tests the configured email fallback transport without creating an incident. `/apphealth` polls the monitored backend's own `/healthz`, `/readyz` and `/health/dependencies` (see `BACKEND_URL` above) and reports each with a bounded timeout, so a slow or unreachable backend degrades to a failed check in the reply rather than hanging the command. Telegram polling listens for both callback buttons and messages, and only the configured `TELEGRAM_CHAT_ID` can issue commands. `/start` is an alias for `/help`.
 
 When Telegram remains explicitly failed or ambiguous long enough, ErrorBeacon escalates through the application's existing email notification transport. It reuses `NOTIFICATIONS_ENABLED`, `EMAIL_PROVIDER`, the existing SMTP/Brevo/Resend credentials, `SMTP_FROM_EMAIL`, and `ADMIN_NOTIFICATION_EMAILS`; there is no separate ErrorBeacon email provider configuration. AI permanent failures also get an email notification when Telegram cannot deliver that state.
 

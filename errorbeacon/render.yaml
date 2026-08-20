@@ -121,3 +121,17 @@ services:
         value: "3"
       - key: ERRORBEACON_STARTUP_SELF_TEST
         value: "false"
+      # Reverse direction of the main app's ERRORBEACON_URL (see render.yaml's own
+      # ERRORBEACON_URL comment). Powers the Telegram /apphealth command, which polls
+      # backend's /healthz, /readyz and /health/dependencies. Unlike Compose/ACA,
+      # ErrorBeacon on Render Free is a fully separate, standalone Web Service (see
+      # this file's own header comment) with no shared network to the main app --
+      # there is no in-network hostname to default to, so leaving this unset just
+      # means /apphealth's checks fail fast with a connection error (bounded by
+      # BACKEND_HEALTH_TIMEOUT_SECONDS below) rather than crashing. Set it to the
+      # main app's public URL (e.g. its RENDER_EXTERNAL_URL) if you want /apphealth
+      # to work here and are fine with the checks crossing the public internet.
+      - key: BACKEND_URL
+        sync: false
+      - key: BACKEND_HEALTH_TIMEOUT_SECONDS
+        value: "5"

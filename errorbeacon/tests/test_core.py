@@ -596,12 +596,50 @@ def test_http_incident_detail_and_stats(tmp_path, monkeypatch):
 
 def test_telegram_help_lists_operational_and_test_commands():
     help_text = main.handle_telegram_command('/help')
-    for command in ['/health', '/incidents', '/incident &lt;id&gt;', '/stats [window]', '/resolve &lt;id&gt;', '/reopen &lt;id&gt;', '/silence &lt;id&gt; &lt;duration&gt;', '/unsilence &lt;id&gt;', '/test', '/testtelegram', '/testemail', '/help']:
+    for command in ['/health', '/apphealth', '/incidents', '/incident &lt;id&gt;', '/stats [window]', '/resolve &lt;id&gt;', '/reopen &lt;id&gt;', '/silence &lt;id&gt; &lt;duration&gt;', '/unsilence &lt;id&gt;', '/test', '/testtelegram', '/testemail', '/help']:
         assert command in help_text
 
 
 def test_unknown_telegram_command_points_to_help():
     assert 'Use /help' in main.handle_telegram_command('/not-a-command')
+
+
+def test_apphealth_reports_all_checks_passing(monkeypatch):
+    monkeypatch.setattr(main, 'BACKEND_URL', 'http://backend:8000')
+
+    class _Resp:
+        status_code = 200
+        def json(self): return {'status': 'healthy'}
+
+    monkeypatch.setattr(main.requests, 'get', lambda url, timeout: _Resp())
+    text = main.handle_telegram_command('/apphealth')
+    assert 'Liveness' in text and 'Readiness' in text and 'Dependencies' in text
+    assert '✅ healthy' in text
+    assert '❌' not in text
+
+
+def test_apphealth_reports_individual_failures_without_crashing(monkeypatch):
+    monkeypatch.setattr(main, 'BACKEND_URL', 'http://backend:8000')
+
+    class _Resp:
+        status_code = 503
+        def json(self): return {'ready': False, 'reason': 'schema mismatch'}
+
+    def fake_get(url, timeout):
+        if url.endswith('/healthz'):
+            raise main.requests.exceptions.Timeout()
+        return _Resp()
+
+    monkeypatch.setattr(main.requests, 'get', fake_get)
+    text = main.handle_telegram_command('/apphealth')
+    assert 'timed out' in text
+    assert 'schema mismatch' in text
+    assert 'one or more checks failed' in text
+
+
+def test_apphealth_reports_when_backend_url_unset(monkeypatch):
+    monkeypatch.setattr(main, 'BACKEND_URL', '')
+    assert 'not configured' in main.handle_telegram_command('/apphealth')
 
 
 def test_admin_auth_does_not_trust_spoofed_proxy_ip_by_default(monkeypatch):

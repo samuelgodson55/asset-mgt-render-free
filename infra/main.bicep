@@ -129,6 +129,9 @@ param initialBackendImageTag string = ''
 @description('Image tag to use for the frontend during infrastructure creation/refresh. On refresh, the infra workflow passes the exact tag currently deployed instead of falling back to latest.')
 param initialFrontendImageTag string = ''
 
+@description('Internal-ingress FQDN of the currently-deployed `backend` Container App, resolved by infra-deploy.yml via `az containerapp show` BEFORE this deployment runs (see that workflow\'s "Resolve current ACA images" step). Lets ErrorBeacon\'s Telegram /apphealth command reach backend\'s /healthz, /readyz and /health/dependencies. This is a plain string parameter, not a symbolic `backendApp.properties...` reference, because `backendApp` already depends on `errorBeaconApp` (through errorBeaconUrl below) -- a reference back from `errorBeaconApp` to `backendApp` would be a circular resource dependency. Empty on the very first deploy of a new environment (backend does not exist yet); backendInternalUrl below and ErrorBeacon\'s own BACKEND_URL handling both treat empty as "not configured" rather than erroring.')
+param existingBackendFqdn string = ''
+
 @description('ACA backend ingress traffic to preserve during infrastructure deployment. The deployment workflow resolves latestRevision routing to explicit revision names before passing this value, so an infra refresh cannot redirect production traffic to an infra-created revision.')
 param backendTraffic array = [
   {
@@ -1064,6 +1067,23 @@ var frontendFqdn = 'frontend.${env.properties.defaultDomain}'
 var errorBeaconUrl = errorBeaconEnabled
   ? 'http://${errorBeaconApp.properties.configuration.ingress.fqdn}'
   : ''
+// Reverse direction of errorBeaconUrl above -- lets ErrorBeacon's Telegram
+// /apphealth command poll backend's /healthz, /readyz and /health/dependencies.
+// Sourced from the existingBackendFqdn parameter (resolved by infra-deploy.yml via
+// `az containerapp show` before this deployment runs) rather than a symbolic
+// `backendApp.properties...` reference: `backendApp` already depends on
+// `errorBeaconApp` through errorBeaconUrl's symbolic reference inside `sharedEnv`,
+// so a symbolic reference back from `errorBeaconApp` to `backendApp` here would be a
+// circular resource dependency. It's also deliberately NOT reconstructed from
+// env.properties.defaultDomain the way that might look tempting -- see
+// errorBeaconUrl's own comment above on why this template resolves real FQDNs from
+// their live resources instead of guessing ACA's internal DNS naming convention.
+// Empty when the parameter is empty (a brand-new environment, before `backend`
+// exists yet) -- BACKEND_URL is then left unset below, and ErrorBeacon's own
+// /apphealth handling already reports "not configured" rather than erroring on
+// that, the same way OPENROUTER_SITE_URL and others already tolerate a
+// not-yet-provisioned dependency elsewhere in this template.
+var backendInternalUrl = empty(existingBackendFqdn) ? '' : 'http://${existingBackendFqdn}'
 var publicOrigin = empty(customDomain) ? 'https://${frontendFqdn}' : 'https://${customDomain}'
 // Only a valid expression to evaluate when `appInsights` actually exists
 // (otelAzureMonitorEnabled=true) -- the ternary's false branch never
@@ -1387,6 +1407,10 @@ resource errorBeaconApp 'Microsoft.App/containerApps@2024-03-01' = if (errorBeac
             { name: 'ENVIRONMENT', value: runtimeEnvironment }
             { name: 'ERRORBEACON_INGEST_API_KEY', secretRef: 'errorbeacon-ingest-api-key' }
             { name: 'ERRORBEACON_ADMIN_API_KEY', secretRef: 'errorbeacon-admin-api-key' }
+            // Lets the Telegram /apphealth command poll backend's own health
+            // endpoints -- see backendInternalUrl's declaration above for why this
+            // is a hand-built FQDN rather than a symbolic `backendApp` reference.
+            { name: 'BACKEND_URL', value: backendInternalUrl }
             // ACA ingress is a controlled proxy boundary; allow ErrorBeacon to use the forwarded client IP.
             { name: 'ERRORBEACON_TRUST_PROXY_HEADERS', value: 'true' }
             { name: 'TELEGRAM_BOT_TOKEN', secretRef: 'telegram-bot-token' }

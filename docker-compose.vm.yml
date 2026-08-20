@@ -1000,6 +1000,21 @@ services:
       ERRORBEACON_DIGEST_ENABLED: ${ERRORBEACON_DIGEST_ENABLED:-true}
       ERRORBEACON_DIGEST_INTERVAL_HOURS: ${ERRORBEACON_DIGEST_INTERVAL_HOURS:-24}
       ERRORBEACON_STARTUP_SELF_TEST: ${ERRORBEACON_STARTUP_SELF_TEST:-false}
+      # Reverse direction of ERRORBEACON_URL above -- lets the Telegram /apphealth
+      # command poll backend's /healthz, /readyz and /health/dependencies directly.
+      # Deliberately backend-GREEN, not a "backend" alias: green is the fixed,
+      # always-on production slot (see this file's "ACTIVE_SLOT/COMPOSE_PROFILES ...
+      # permanently green" comment above); blue only exists transiently during a
+      # rollout, so it's never a sensible default target for a standing health check.
+      # Also deliberately NOT routed through Caddy/nginx: nginx's location blocks only
+      # proxy /healthz and /readyz (see nginx/default.conf.template's "public
+      # health/readiness checks" section) -- /health/dependencies has no matching
+      # location there and would silently fall through to the SPA catch-all (200 +
+      # index.html) under the React template, making that one check meaningless. Going
+      # straight to backend-green:8000 on the shared Compose network hits the real
+      # FastAPI routes for all three checks.
+      BACKEND_URL: ${BACKEND_URL:-http://backend-green:8000}
+      BACKEND_HEALTH_TIMEOUT_SECONDS: ${BACKEND_HEALTH_TIMEOUT_SECONDS:-5}
     volumes:
       - /mnt/docker-data/volumes/errorbeacon_data:/data
     healthcheck:

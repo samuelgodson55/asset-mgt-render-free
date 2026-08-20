@@ -85,6 +85,17 @@ RESEND_API_KEY = os.getenv('RESEND_API_KEY', '')
 ADMIN_NOTIFICATION_EMAILS = os.getenv('ADMIN_NOTIFICATION_EMAILS', '')
 EMAIL_TIMEOUT_SECONDS = max(3, int(os.getenv('ERRORBEACON_EMAIL_TIMEOUT_SECONDS', '10')))
 STARTUP_SELF_TEST = os.getenv('ERRORBEACON_STARTUP_SELF_TEST', 'false').lower() in {'1', 'true', 'yes', 'on'}
+# Reverse direction of ERRORBEACON_URL (see fastapi_errorbeacon.py): that var lets
+# `backend` reach this service; this one lets this service reach `backend` for the
+# Telegram /apphealth command. Same Docker-style short DNS default as
+# ERRORBEACON_URL's own default -- correct for docker-compose.yml/docker-compose.vm.yml
+# where both containers share one network, but NOT assumed to resolve on Azure
+# Container Apps (see infra/main.bicep's errorBeaconUrl comment on why ACA needs an
+# explicit FQDN instead) or on Render, where ErrorBeacon is deployed as a fully
+# separate, standalone service (see errorbeacon/render.yaml) with no shared network to
+# `backend` at all -- both of those shapes override or omit this explicitly.
+BACKEND_URL = os.getenv('BACKEND_URL', 'http://backend:8000').strip()
+BACKEND_HEALTH_TIMEOUT_SECONDS = max(1.0, float(os.getenv('BACKEND_HEALTH_TIMEOUT_SECONDS', '5')))
 from contextvars import ContextVar
 from starlette.types import ASGIApp, Receive, Scope, Send
 from shared.errorbeacon_sanitization import clean as _shared_clean, redact, sanitize_url
@@ -1669,6 +1680,7 @@ def _telegram_help():
         '',
         '<b>Monitoring</b>',
         '/health — service health, queues, DB and email diagnostics',
+        '/apphealth — remote check of the monitored backend\'s /healthz, /readyz, /health/dependencies',
         '/incidents — recent incidents with status and delivery state',
         '/incident &lt;id&gt; — full detail for one incident',
         '/stats [window] — aggregate stats; e.g. /stats 24h or /stats 7d',
@@ -1712,12 +1724,61 @@ def _telegram_stats(window='24h'):
         f'AI completion: {delivery["ai"]["completion_rate_percent"] if delivery["ai"]["completion_rate_percent"] is not None else "n/a"}%'
     ])
 
+def _backend_probe(path):
+    """Bounded-timeout GET against one backend health endpoint. Never raises --
+    a slow or unreachable backend must degrade to a failed check in the
+    Telegram reply, not an exception that drops the whole /apphealth command.
+    Returns (ok, status_code_or_None, detail_or_None)."""
+    url = BACKEND_URL.rstrip('/') + path
+    try:
+        r = requests.get(url, timeout=BACKEND_HEALTH_TIMEOUT_SECONDS)
+        ok = r.status_code == 200
+        detail = None
+        if not ok:
+            try:
+                body = r.json()
+                detail = body.get('reason') if isinstance(body, dict) else None
+            except ValueError:
+                pass
+        return ok, r.status_code, detail
+    except requests.exceptions.Timeout:
+        return False, None, f'timed out after {BACKEND_HEALTH_TIMEOUT_SECONDS:g}s'
+    except requests.exceptions.RequestException as ex:
+        return False, None, type(ex).__name__
+
+def _telegram_apphealth():
+    if not BACKEND_URL:
+        return '❌ <b>Backend health check unavailable.</b> BACKEND_URL is not configured.'
+    # /healthz: pure liveness, no DB. /readyz: schema/DB readiness. /health/dependencies:
+    # currently Redis. Same three endpoints backend/main.py exposes for its own probes/
+    # monitoring -- see that file's docstrings for why each is a separate endpoint.
+    checks = [
+        ('/healthz', 'Liveness'),
+        ('/readyz', 'Readiness (DB/schema)'),
+        ('/health/dependencies', 'Dependencies (Redis)'),
+    ]
+    lines = ['🩺 <b>Backend health</b>', f'Target: <code>{html.escape(BACKEND_URL)}</code>', '']
+    all_ok = True
+    for path, label in checks:
+        ok, status, detail = _backend_probe(path)
+        all_ok = all_ok and ok
+        line = f'{"✅" if ok else "❌"} <b>{label}</b>'
+        if status is not None:
+            line += f' — HTTP {status}'
+        if detail:
+            line += f' — {html.escape(str(detail)[:200])}'
+        lines.append(line)
+    lines.append('')
+    lines.append('Overall: ' + ('✅ healthy' if all_ok else '⚠️ one or more checks failed'))
+    return '\n'.join(lines)
+
 def handle_telegram_command(text):
     p=text.strip().split(); cmd=(p[0].split('@',1)[0].lower() if p else '')
     try:
         if cmd=='/help' or cmd=='/start': return _telegram_help()
         if cmd=='/health':
             h=health_payload(); return '\n'.join(['💚 <b>ErrorBeacon health</b>',f'Status: {h["status"]}',f'Telegram configured: {h["telegram_configured"]}',f'Email fallback configured: {h["email_fallback_configured"]}',f'Email provider: {h["email_provider"]}',f'Email missing: {", ".join(h["email"]["missing"]) or "none"}',f'DB: {h["db_size_mb"]:.1f} MB',f'AI queue: {h["ai_queue_depth"]}',f'AI pending: {h["ai_pending"]}'])
+        if cmd=='/apphealth': return _telegram_apphealth()
         if cmd=='/incidents': return _incidents_summary()
         if cmd=='/incident':
             if len(p)!=2: return 'Usage: /incident <incident_id>'

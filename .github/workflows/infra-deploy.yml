@@ -244,6 +244,28 @@ jobs:
           echo "frontend_tag=$FRONTEND_TAG" >> "$GITHUB_OUTPUT"
           echo "source=$SOURCE" >> "$GITHUB_OUTPUT"
 
+          # ErrorBeacon's Telegram /apphealth command polls backend's own health
+          # endpoints, so it needs backend's internal-ingress FQDN. Resolved here
+          # (rather than reconstructed in Bicep from the environment's default
+          # domain) for the same reason errorBeaconUrl is resolved from the live
+          # ErrorBeacon resource instead of guessed -- see that var's comment in
+          # main.bicep. A symbolic Bicep reference in the other direction isn't an
+          # option: backendApp already depends on errorBeaconApp (through
+          # errorBeaconUrl), so errorBeaconApp depending back on backendApp would be
+          # a circular resource dependency. Querying it here, before the deployment,
+          # and passing it in as a plain string parameter avoids that entirely.
+          # Empty on the very first-ever deploy (backend doesn't exist yet) --
+          # main.bicep leaves BACKEND_URL blank in that case, and ErrorBeacon's
+          # /apphealth command already reports "not configured" rather than
+          # erroring when that happens; the next infra-deploy.yml run (after backend
+          # exists) resolves it normally.
+          EXISTING_BACKEND_FQDN=""
+          if az containerapp show --name backend --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1; then
+            EXISTING_BACKEND_FQDN=$(az containerapp show --name backend --resource-group "$RESOURCE_GROUP" \
+              --query "properties.configuration.ingress.fqdn" -o tsv)
+          fi
+          echo "existing_backend_fqdn=$EXISTING_BACKEND_FQDN" >> "$GITHUB_OUTPUT"
+
       # COST LEVER: staging has no real users waiting on it, so `backend`
       # AND `frontend` both scale to zero when idle (min replicas 0 -- pure
       # cold-start-on-first-request tradeoff, ~$0 idle compute). Production
@@ -515,6 +537,7 @@ jobs:
               initialImageTag="latest" \
               initialBackendImageTag="${{ steps.current.outputs.backend_tag }}" \
               initialFrontendImageTag="${{ steps.current.outputs.frontend_tag }}" \
+              existingBackendFqdn="${{ steps.current.outputs.existing_backend_fqdn }}" \
               backendTraffic="$(cat "$RUNNER_TEMP/aca-traffic/backend.json")" \
               frontendTraffic="$(cat "$RUNNER_TEMP/aca-traffic/frontend.json")" \
               dockerHubUsername="${{ secrets.DOCKERHUB_USERNAME }}" \
@@ -671,6 +694,7 @@ jobs:
               initialImageTag="latest" \
               initialBackendImageTag="${{ steps.current.outputs.backend_tag }}" \
               initialFrontendImageTag="${{ steps.current.outputs.frontend_tag }}" \
+              existingBackendFqdn="${{ steps.current.outputs.existing_backend_fqdn }}" \
               backendTraffic="$(cat "$RUNNER_TEMP/aca-traffic/backend.json")" \
               frontendTraffic="$(cat "$RUNNER_TEMP/aca-traffic/frontend.json")" \
               dockerHubUsername="${{ secrets.DOCKERHUB_USERNAME }}" \
@@ -802,6 +826,7 @@ jobs:
               initialImageTag="latest" \
               initialBackendImageTag="${{ steps.current.outputs.backend_tag }}" \
               initialFrontendImageTag="${{ steps.current.outputs.frontend_tag }}" \
+              existingBackendFqdn="${{ steps.current.outputs.existing_backend_fqdn }}" \
               backendTraffic="$(cat "$RUNNER_TEMP/aca-traffic/backend.json")" \
               frontendTraffic="$(cat "$RUNNER_TEMP/aca-traffic/frontend.json")" \
               dockerHubUsername="${{ secrets.DOCKERHUB_USERNAME }}" \

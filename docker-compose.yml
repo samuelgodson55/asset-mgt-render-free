@@ -876,6 +876,11 @@ services:
       ALERT_QUEUE_SIZE: ${ALERT_QUEUE_SIZE:-1000}
       ALERT_WORKERS: ${ALERT_WORKERS:-3}
       TELEGRAM_POLLING: ${TELEGRAM_POLLING:-true}
+      # Reverse direction of ERRORBEACON_URL above -- lets the Telegram /apphealth
+      # command poll backend's /healthz, /readyz and /health/dependencies. `backend`
+      # is reachable by service name on this same Compose network.
+      BACKEND_URL: ${BACKEND_URL:-http://backend:8000}
+      BACKEND_HEALTH_TIMEOUT_SECONDS: ${BACKEND_HEALTH_TIMEOUT_SECONDS:-5}
     volumes:
       - errorbeacon_data:/data
     healthcheck:

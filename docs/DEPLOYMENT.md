@@ -1580,6 +1580,8 @@ There is deliberately no `ERRORBEACON_OPENROUTER_SITE_URL` variable -- it would 
 
 The backend receives the shared API key and `ERRORBEACON_URL` automatically through the Bicep deployment. Because `errorbeacon` runs with `ingress.external: false`, it's only reachable through the environment's ingress proxy (port 80/443, not its container's port 8000), so `ERRORBEACON_URL` is set to the internal FQDN with no port suffix: `http://errorbeacon.internal.<environment-default-domain>`. This differs from the `http://errorbeacon:8000` short-name form used by `docker-compose.yml`/`docker-compose.vm.yml` -- that form is Docker Compose-specific bridge-network DNS and does not apply to ACA.
 
+ErrorBeacon's Telegram `/apphealth` command (polls backend's own `/healthz`, `/readyz`, `/health/dependencies`) needs the reverse direction, `BACKEND_URL`. No new GitHub Environment value is needed for this -- `infra-deploy.yml`'s "Resolve current ACA images (or initial defaults)" step already queries `az containerapp show --name backend` before every deployment (the same way it resolves the currently-deployed image tags), reads `properties.configuration.ingress.fqdn`, and passes it into Bicep as the `existingBackendFqdn` parameter, which sets `BACKEND_URL` automatically. This is a resolved parameter rather than a symbolic Bicep reference to the `backend` resource, because `backend` already depends on `errorbeacon` (through `ERRORBEACON_URL` above) -- a Bicep-internal reference the other way would be a circular resource dependency. On the very first deployment of a brand-new environment, `backend` doesn't exist yet when this step runs, so `BACKEND_URL` resolves to empty and `/apphealth` reports itself as not configured until the next deployment.
+
 ### VM
 
 The VM Compose file includes an independent `errorbeacon` container with persistent storage under:
@@ -1589,6 +1591,8 @@ The VM Compose file includes an independent `errorbeacon` container with persist
 ```
 
 The VM deployment workflow builds/pushes `errorbeacon-lite`, writes its image tag and monitoring secrets to `/opt/snipeit/.env`, and starts it independently of the blue/green backend slots.
+
+Telegram `/apphealth`'s `BACKEND_URL` defaults to `http://backend-green:8000` here -- the fixed, always-on production slot, never `backend-blue` (only up transiently during a rollout) -- reached directly rather than through Caddy/nginx, since nginx's public reverse proxy only forwards `/healthz`/`/readyz`, not `/health/dependencies`.
 
 ### Local Docker
 
@@ -1604,9 +1608,13 @@ The backend uses the private Compose address:
 http://errorbeacon:8000
 ```
 
+Telegram `/apphealth`'s `BACKEND_URL` defaults to the same Compose network in reverse, `http://backend:8000`, and needs no further configuration here.
+
 ### Render Free
 
 Use the standalone `errorbeacon/` service with the included Render Blueprint. For a practical free warm-up, point a free external HTTP monitor such as UptimeRobot at `/healthz` every 5 minutes. This reduces cold-start exposure but is not an uptime guarantee. Render Free's filesystem is ephemeral, so use an external durable database if incident history must survive restarts.
+
+ErrorBeacon here has no shared network with the monitored application, so Telegram `/apphealth`'s `BACKEND_URL` is left unset by default (it reports itself as not configured). Set it to the monitored app's public URL in the ErrorBeacon service's own Render environment variables if you want that command to work in this shape.
 
 ## ErrorBeacon production monitoring
 
