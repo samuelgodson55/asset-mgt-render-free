@@ -204,7 +204,7 @@ param backendMaxReplicas int = 3
 @description('Route application DB traffic through the supported pooler for this deployment. For ACA with Azure Flexible Server this enables Azure managed PgBouncer on port 6432; for local/VM Compose the service-level pooler is used. The default is true; set false only as a deliberate break-glass fallback.')
 param usePgbouncer bool = true
 
-@description('Optional Azure Managed PgBouncer server-side pool size per user/database pair. Set to 0 to auto-derive a conservative value from the Azure PostgreSQL compute SKU (4x vCores, within Azure's recommended 2-5x-vCore starting range). The application also applies a separate safety margin and live max_connections cap. Set an explicit value only when deliberately tuning PgBouncer.')
+@description('Optional Azure Managed PgBouncer server-side pool size per user/database pair. Set to 0 to auto-derive a conservative value from the Azure PostgreSQL compute SKU (4x vCores, within Azure\'s recommended 2-5x-vCore starting range). The application also applies a separate safety margin and live max_connections cap. Set an explicit value only when deliberately tuning PgBouncer.')
 @minValue(0)
 param pgbouncerServerPoolSize int = 0
 

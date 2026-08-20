@@ -35,12 +35,13 @@ Thumbs.db
 **/__pycache__/
 **/*.py[cod]
 **/.venv/
+**/.venv*/
 **/venv/
+**/venv*/
 **/*.egg-info/
 **/.pytest_cache/
 **/.mypy_cache/
 **/.ruff_cache/
-.venv*
 
 # --- Logs / misc ---------------------------------------------------------------
 *.log

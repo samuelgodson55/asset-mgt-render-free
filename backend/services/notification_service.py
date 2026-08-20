@@ -62,6 +62,7 @@ from email.message import EmailMessage
 from typing import Iterable
 
 import requests
+from sqlalchemy import event
 from sqlalchemy.orm import Session
 
 import models
@@ -423,7 +424,5 @@ def _dispatch_pending_email_notifications_payloads(items: list[dict]) -> None:
 
 # Installed once for every SQLAlchemy Session.  We only touch sessions that
 # have pending email payloads, keeping this hook effectively free elsewhere.
-from sqlalchemy import event
-
 event.listen(Session, "after_commit", _dispatch_pending_email_notifications)
 event.listen(Session, "after_rollback", _clear_pending_email_notifications)

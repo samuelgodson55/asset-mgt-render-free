@@ -287,7 +287,7 @@ locals {
     site_name                             = var.site_name
     enable_api_docs                       = var.enable_api_docs
     notifications_enabled                 = var.notifications_enabled
-    use_pgbouncer                          = var.use_pgbouncer
+    use_pgbouncer                         = var.use_pgbouncer
     smtp_host                             = var.smtp_host
     smtp_port                             = var.smtp_port
     smtp_username                         = var.smtp_username

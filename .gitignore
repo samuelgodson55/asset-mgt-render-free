@@ -21,11 +21,12 @@
 Thumbs.db
 
 # --- Python (backend/) --------------------------------------------------------
-.venv*
 **/__pycache__/
 **/*.py[cod]
 **/.venv/
+**/.venv*/
 **/venv/
+**/venv*/
 **/*.egg-info/
 **/.pytest_cache/
 **/.mypy_cache/

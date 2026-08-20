@@ -1,7 +1,4 @@
 
-import logging
-from contextlib import contextmanager
-
 
 def test_background_db_slot_fails_open_when_redis_is_unavailable(monkeypatch):
     import db_admission
