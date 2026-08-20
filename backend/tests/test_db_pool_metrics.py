@@ -38,6 +38,7 @@ def test_register_gauges_is_idempotent_and_never_raises():
 def test_snapshot_all_returns_the_expected_top_level_shape():
     snap = db_pool_metrics.snapshot_all()
     assert set(snap.keys()) == {
+        "database_route",
         "sqlalchemy_pool",
         "pgbouncer_pool",
         "postgres_activity",
@@ -64,6 +65,7 @@ def test_diagnostics_endpoint_returns_snapshot_for_super_admin(as_super_admin):
     assert resp.status_code == 200
     body = resp.json()
     assert set(body.keys()) == {
+        "database_route",
         "sqlalchemy_pool",
         "pgbouncer_pool",
         "postgres_activity",

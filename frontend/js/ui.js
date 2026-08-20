@@ -344,17 +344,19 @@ export function switchTab(tab) {
   const adhoc = document.getElementById('adhocDirectorySection');
   const quotes = document.getElementById('quotesSection');
   const logs = document.getElementById('auditBackupsSection');
+  const health = document.getElementById('dbHealthSection');
   const tabAssets = document.getElementById('tabAssets');
   const tabUsers = document.getElementById('tabUsers');
   const tabAdhoc = document.getElementById('tabAdhoc');
   const tabQuotes = document.getElementById('tabQuotes');
   const tabLogs = document.getElementById('tabLogs');
+  const tabHealth = document.getElementById('tabHealth');
   if (!assets || !users) return;
 
   const activeCls = ['border-blue-500', 'text-slate-50', 'font-semibold'];
   const inactiveCls = ['border-transparent', 'text-slate-500', 'font-medium'];
-  const allTabs = [tabAssets, tabUsers, tabAdhoc, tabQuotes, tabLogs].filter(Boolean);
-  const allSections = [assets, users, adhoc, quotes, logs].filter(Boolean);
+  const allTabs = [tabAssets, tabUsers, tabAdhoc, tabQuotes, tabHealth, tabLogs].filter(Boolean);
+  const allSections = [assets, users, adhoc, quotes, health, logs].filter(Boolean);
 
   allSections.forEach(s => s.classList.add('hidden'));
   allTabs.forEach(t => { t.classList.add(...inactiveCls); t.classList.remove(...activeCls); });
@@ -372,6 +374,10 @@ export function switchTab(tab) {
     activeSection = quotes;
     quotes.classList.remove('hidden');
     tabQuotes.classList.add(...activeCls); tabQuotes.classList.remove(...inactiveCls);
+  } else if (tab === 'health' && health) {
+    activeSection = health;
+    health.classList.remove('hidden');
+    tabHealth.classList.add(...activeCls); tabHealth.classList.remove(...inactiveCls);
   } else if (tab === 'logs' && logs) {
     activeSection = logs;
     logs.classList.remove('hidden');
@@ -418,11 +424,11 @@ export function switchTab(tab) {
 // exist for every role), rather than a hardcoded list, so it can't ever
 // try to switch to a tab that isn't there.
 function getSwipeTabOrder() {
-  return ['assets', 'users', 'adhoc', 'quotes', 'logs'].filter(t => document.getElementById(`tab${t[0].toUpperCase()}${t.slice(1)}`));
+  return ['assets', 'users', 'adhoc', 'quotes', 'health', 'logs'].filter(t => document.getElementById(`tab${t[0].toUpperCase()}${t.slice(1)}`));
 }
 
 function getActiveSwipeTab(order) {
-  const sectionIds = { assets: 'assetInventorySection', users: 'userDirectorySection', adhoc: 'adhocDirectorySection', quotes: 'quotesSection', logs: 'auditBackupsSection' };
+  const sectionIds = { assets: 'assetInventorySection', users: 'userDirectorySection', adhoc: 'adhocDirectorySection', quotes: 'quotesSection', health: 'dbHealthSection', logs: 'auditBackupsSection' };
   return order.find(t => {
     const el = document.getElementById(sectionIds[t]);
     return el && !el.classList.contains('hidden');

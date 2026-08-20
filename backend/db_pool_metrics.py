@@ -107,6 +107,33 @@ def sqlalchemy_pool_snapshot() -> dict:
     return snapshot
 
 
+def _database_route_snapshot() -> dict:
+    """Describe the endpoint the running SQLAlchemy engine is actually using.
+
+    This is intentionally derived from the resolved runtime DATABASE_URL, not
+    merely from USE_PGBOUNCER. It lets the admin dashboard distinguish
+    "configured" from "the API is actually pointed at the pooler".
+    Passwords and query secrets are never returned.
+    """
+    try:
+        url = make_url(settings.DATABASE_URL)
+        host = url.host
+        port = url.port or (6432 if settings.USE_PGBOUNCER else 5432)
+        expected_host = settings.PGBOUNCER_HOST or make_url(settings.DIRECT_DATABASE_URL or settings.DATABASE_URL).host
+        expected_port = settings.PGBOUNCER_PORT
+        route_in_use = bool(settings.USE_PGBOUNCER and host and port == expected_port and (not settings.PGBOUNCER_HOST or host == settings.PGBOUNCER_HOST))
+        return {
+            "configured": bool(settings.USE_PGBOUNCER),
+            "in_use": route_in_use,
+            "host": host,
+            "port": port,
+            "expected_pooler_host": expected_host if settings.USE_PGBOUNCER else None,
+            "expected_pooler_port": expected_port if settings.USE_PGBOUNCER else None,
+        }
+    except Exception:
+        return {"configured": bool(settings.USE_PGBOUNCER), "in_use": False, "host": None, "port": None, "expected_pooler_host": None, "expected_pooler_port": None}
+
+
 def pgbouncer_pool_snapshot() -> dict | None:
     """Best-effort SHOW POOLS + SHOW STATS against PgBouncer's built-in
     admin console (the virtual `pgbouncer` database), authenticated as
@@ -170,6 +197,30 @@ def pgbouncer_pool_snapshot() -> dict | None:
         # running a query.
         totals["avg_wait_time_us"] = int(row.get("avg_wait_time", 0) or 0)
 
+    totals["reachable"] = True
+    totals["in_use"] = True
+    totals["pool_mode"] = None
+    totals["max_client_conn"] = None
+    totals["default_pool_size"] = None
+    totals["reserve_pool_size"] = None
+    try:
+        admin_url = make_url(settings.DATABASE_URL).set(database="pgbouncer")
+        admin_engine = create_engine(admin_url, poolclass=NullPool, connect_args={"connect_timeout": _PROBE_CONNECT_TIMEOUT_SECONDS})
+        try:
+            with admin_engine.connect() as conn:
+                conn = conn.execution_options(isolation_level="AUTOCOMMIT")
+                config_rows = conn.execute(text("SHOW CONFIG" )).mappings().all()
+        finally:
+            admin_engine.dispose()
+        config = {str(r.get("key")): r.get("value") for r in config_rows}
+        totals["pool_mode"] = config.get("pool_mode")
+        totals["max_client_conn"] = int(config["max_client_conn"]) if config.get("max_client_conn") is not None else None
+        totals["default_pool_size"] = int(config["default_pool_size"]) if config.get("default_pool_size") is not None else None
+        totals["reserve_pool_size"] = int(config["reserve_pool_size"]) if config.get("reserve_pool_size") is not None else None
+    except Exception:
+        # SHOW POOLS succeeded, so PgBouncer is definitely reachable/in use;
+        # SHOW CONFIG may simply be restricted by the admin user.
+        pass
     return totals
 
 
@@ -304,9 +355,14 @@ def snapshot_all() -> dict:
     numbers, so a single response answers both "what's configured" and
     "what's actually happening" without a second lookup.
     """
+    route = _database_route_snapshot()
+    pgb = pgbouncer_pool_snapshot()
+    if pgb is None and route["configured"]:
+        pgb = {"reachable": False, "in_use": route["in_use"], "cl_active": 0, "cl_waiting": 0, "sv_active": 0, "sv_idle": 0, "sv_used": 0}
     return {
+        "database_route": route,
         "sqlalchemy_pool": sqlalchemy_pool_snapshot(),
-        "pgbouncer_pool": pgbouncer_pool_snapshot(),
+        "pgbouncer_pool": pgb,
         "postgres_activity": postgres_activity_snapshot(),
         "configured": {
             "use_pgbouncer": settings.USE_PGBOUNCER,

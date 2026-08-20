@@ -86,6 +86,7 @@ import {
   submitDigestRecipientAddForm,
   removeDigestRecipient,
 } from './components/backups.js';
+import { loadDbHealth } from './components/db-health.js';
 import { openExtensionRequestModal, submitExtensionRequestForm, decideExtensionRequest, openDirectExtendModal, submitDirectExtendForm, dismissMyExtensionDecisionsAlert, submitDenyReasonForm } from './components/extensions.js';
 
 // -----------------------------------------------------------------------------
@@ -300,7 +301,8 @@ function cancelMfaFlow() {
 }
 
 const CLICK_ACTIONS = {
-  'switch-tab': (el) => switchTab(el.dataset.tab),
+  'switch-tab': (el) => { switchTab(el.dataset.tab); if (el.dataset.tab === 'health') loadDbHealth(); },
+  'refresh-db-health': () => loadDbHealth(),
   'switch-dash-tab': (el) => switchDashboardTab(el.dataset.tab),
   'close-modal': (el) => closeModal(el.dataset.modal),
   'toggle-theme': () => toggleTheme(),

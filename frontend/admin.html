@@ -202,6 +202,9 @@
       <button id="tabQuotes" data-action="switch-tab" data-tab="quotes" class="relative border-b-2 border-transparent px-3 py-3 text-[13px] font-medium text-slate-500 transition hover:text-slate-300 sm:px-4">
         <span class="sm:hidden">Quotes</span><span class="hidden sm:inline">Quotes</span>
       </button>
+      <button id="tabHealth" data-action="switch-tab" data-tab="health" class="relative border-b-2 border-transparent px-3 py-3 text-[13px] font-medium text-slate-500 transition hover:text-slate-300 sm:px-4">
+        <span class="sm:hidden">Health</span><span class="hidden sm:inline">DB & System Health</span>
+      </button>
       <button id="tabLogs" data-action="switch-tab" data-tab="logs" class="relative border-b-2 border-transparent px-3 py-3 text-[13px] font-medium text-slate-500 transition hover:text-slate-300 sm:px-4">
         <span class="sm:hidden">Logs</span><span class="hidden sm:inline">Audit Logs</span>
       </button>
@@ -221,6 +224,15 @@
        addition to tapping the tabs in the navbar above. Desktop is
        unaffected -- touch events simply never fire from a mouse. -->
   <div id="swipeArea">
+  <!-- ================= DATABASE & SYSTEM HEALTH ================= -->
+  <section id="dbHealthSection" class="hidden">
+    <div class="mb-5 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+      <div><h1 class="text-xl font-bold tracking-tight text-slate-50">DB & System Health</h1><p class="text-[13px] text-slate-500">Live connection routing, PgBouncer utilization, PostgreSQL capacity, and application pool pressure.</p></div>
+      <p class="text-[11px] text-slate-600">Read-only diagnostics · Super Admin only</p>
+    </div>
+    <div id="dbHealthContent"></div>
+  </section>
+
   <!-- ================= ASSET INVENTORY INTERFACE ================= -->
   <section id="assetInventorySection">
     <div class="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">

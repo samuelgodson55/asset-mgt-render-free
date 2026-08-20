@@ -55,10 +55,14 @@ class DBConcurrencyMiddleware:
 
         acquired = False
         try:
-            # Keep the wait intentionally tiny: requests should be shed
-            # rather than form a second unbounded queue in front of the DB.
+            # Allow a short, bounded queue so normal browser bursts are
+            # serialized instead of rejected. The queue is still bounded by
+            # this timeout, so only a genuinely sustained overload can recover
+            # with a controlled 503 rather than an indefinitely growing
+            # backlog. The product goal is successful requests first, while
+            # retaining a last-resort overload brake.
             try:
-                await asyncio.wait_for(self._semaphore.acquire(), timeout=0.01)
+                await asyncio.wait_for(self._semaphore.acquire(), timeout=8.0)
             except asyncio.TimeoutError:
                 # Structured cause for logs/metrics/ErrorBeacon; the body the
                 # CALLER sees stays generic (see overload_monitor.user_message)
@@ -80,7 +84,7 @@ class DBConcurrencyMiddleware:
                     "status": 503,
                     "headers": [
                         (b"content-type", b"application/json"),
-                        (b"retry-after", b"2"),
+                        (b"retry-after", b"1"),
                     ],
                 })
                 await send({"type": "http.response.body", "body": body})
