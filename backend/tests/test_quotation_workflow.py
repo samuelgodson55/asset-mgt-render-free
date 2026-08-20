@@ -741,7 +741,7 @@ def test_send_quotation_recipient_emails_gate_off_still_creates_in_app_notificat
     monkeypatch.setattr(quotation_service.settings, "NOTIFICATIONS_ENABLED", True)
     monkeypatch.setattr(quotation_service.settings, "SEND_QUOTATION_RECIPIENT_EMAILS", False)
     sent = []
-    monkeypatch.setattr(quotation_service.notification_service, "send_email", lambda *a, **kw: sent.append((a, kw)) or True)
+    monkeypatch.setattr(quotation_service.notification_service, "enqueue_email_after_commit", lambda **kw: sent.append(((), kw)) or None)
 
     admin_client, admin_headers = as_admin
     manager_client, manager_headers = as_manager
@@ -770,7 +770,7 @@ def test_send_quotation_recipient_emails_gate_on_sends_email_alongside_in_app(as
     monkeypatch.setattr(quotation_service.settings, "NOTIFICATIONS_ENABLED", True)
     monkeypatch.setattr(quotation_service.settings, "SEND_QUOTATION_RECIPIENT_EMAILS", True)
     sent = []
-    monkeypatch.setattr(quotation_service.notification_service, "send_email", lambda *a, **kw: sent.append((a, kw)) or True)
+    monkeypatch.setattr(quotation_service.notification_service, "enqueue_email_after_commit", lambda **kw: sent.append(((), kw)) or None)
 
     admin_client, admin_headers = as_admin
     manager_client, manager_headers = as_manager

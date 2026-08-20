@@ -468,7 +468,7 @@ jobs:
       # revision stuck ACTIVE at 0% traffic from a previous failed/
       # interrupted deploy holds its own DB connection pool open
       # regardless of which job is running; on a small Postgres SKU (e.g.
-      # Standard_B1ms, max_connections ~50) a handful of these is enough
+      # Standard_D2s_v3, max_connections ~50) a handful of these is enough
       # to leave nothing for alembic's own connection, which then fails
       # with a plain "Migration status: Failed" and no more specific
       # detail in this job's own log (the real Postgres-side error only

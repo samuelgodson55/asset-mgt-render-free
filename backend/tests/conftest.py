@@ -81,6 +81,7 @@ os.environ.setdefault("SUPER_ADMIN_USERNAME", "superadmin")
 os.environ.setdefault("NOTIFICATIONS_ENABLED", "false")
 os.environ.setdefault("ENABLE_AUTO_BACKUP", "false")
 os.environ.setdefault("ENABLE_API_DOCS", "false")
+os.environ.setdefault("USE_PGBOUNCER", "false")
 os.environ.setdefault("AUTO_INIT_DB", "true")
 os.environ.setdefault("AUTO_SEED_DEMO_DATA", "true")
 # config.py's default BACKUP_DIR ("/app/backups") assumes the production

@@ -114,6 +114,11 @@ celery_app.conf.update(
     # the worker finishes it, not batched -- exports are a low-volume,
     # latency-sensitive ("did my export finish yet?") workload, not a
     # high-throughput one.
+    # Do not let a worker reserve a large broker-side batch while only one
+    # background DB slot is available. One-at-a-time prefetch keeps DB-using
+    # tasks close to the distributed admission gate instead of hiding a long
+    # queue inside each worker process.
+    worker_prefetch_multiplier=1,
     task_track_started=True,
     # If a worker process dies mid-export (OOM, container restart, etc.),
     # don't silently redeliver the same job to another worker and risk it

@@ -79,6 +79,37 @@ services:
       retries: 5
 
   # ---------------------------------------------------------------------
+  # PgBouncer connection pooler -- always-on. The application automatically
+  # routes through the local `pgbouncer:6432` service when
+  # USE_PGBOUNCER=true; no DATABASE_URL edits are required.
+  # ---------------------------------------------------------------------
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.25.2-p0
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_USER: ${POSTGRES_USER:-admin}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-supersecret}
+      DB_HOST: db
+      DB_NAME: ${POSTGRES_DB:-asset_db}
+      LISTEN_PORT: 6432
+      AUTH_TYPE: scram-sha-256
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: 200
+      DEFAULT_POOL_SIZE: 5
+      RESERVE_POOL_SIZE: 2
+      RESERVE_POOL_TIMEOUT: 3
+      SERVER_RESET_QUERY: DISCARD ALL
+      IGNORE_STARTUP_PARAMETERS: extra_float_digits
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "localhost", "-p", "6432"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------
   # redis (Celery broker + result backend for async exports)
   # ---------------------------------------------------------------------
   # Two jobs: (1) the queue the `backend` container drops export jobs
@@ -125,6 +156,7 @@ services:
     environment:
       ENVIRONMENT: development
       DATABASE_URL: ${DATABASE_URL:-postgresql://admin:supersecret@db:5432/asset_db}
+      USE_PGBOUNCER: "false"
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in your .env file -- see .env.example}
       JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
       JWT_EXPIRY_HOURS: ${JWT_EXPIRY_HOURS:-12}
@@ -204,6 +236,16 @@ services:
       # "db" works because Docker Compose puts every service on the same
       # network and lets them reach each other by service name.
       DATABASE_URL: ${DATABASE_URL:-postgresql://admin:supersecret@db:5432/asset_db}
+      USE_PGBOUNCER: ${USE_PGBOUNCER:-true}
+      PGBOUNCER_HOST: ${PGBOUNCER_HOST:-pgbouncer}
+      # Must match the `pgbouncer` service's own DEFAULT_POOL_SIZE/RESERVE_POOL_SIZE
+      # above -- see backend/config.py's PGBOUNCER_DEFAULT_POOL_SIZE docstring for why
+      # (adaptive pool sizing/DBConcurrencyMiddleware use these to avoid over-admitting
+      # requests past what PgBouncer can actually service).
+      PGBOUNCER_DEFAULT_POOL_SIZE: ${PGBOUNCER_DEFAULT_POOL_SIZE:-5}
+      PGBOUNCER_RESERVE_POOL_SIZE: ${PGBOUNCER_RESERVE_POOL_SIZE:-2}
+      PGBOUNCER_SERVER_POOL_SIZE: ${PGBOUNCER_SERVER_POOL_SIZE:-7}
+      PGBOUNCER_SAFETY_MARGIN_PERCENT: ${PGBOUNCER_SAFETY_MARGIN_PERCENT:-10}
       # Tells backend/database.py's adaptive connection-pool sizing
       # (_compute_pool_sizing()) exactly how many DB-connecting processes
       # can exist AT ONCE in this stack, instead of letting it derive a
@@ -219,6 +261,11 @@ services:
       # docker-compose.vm.yml) to reflect the extra replicas -- e.g.
       # N=3 unscaled-1 extra => 4 + (N-1).
       DB_EXPECTED_PROCESSES: "4"
+      # One deployment-wide DB slot is reserved for background Celery/Beat work;
+      # database.py subtracts it from the API pool budget and db_admission.py
+      # enforces the same limit through Redis.
+      DB_BACKGROUND_CONNECTION_RESERVE: ${DB_BACKGROUND_CONNECTION_RESERVE:-1}
+      DB_BACKGROUND_CONCURRENCY_LIMIT: ${DB_BACKGROUND_CONCURRENCY_LIMIT:-1}
       # Broker + result backend for the async export job system (see
       # backend/celery_app.py) -- "redis" is the service name below,
       # resolved by Compose's internal DNS the same way "db" is for
@@ -375,6 +422,8 @@ services:
       BACKUP_GDRIVE_CREDENTIALS_JSON: ${BACKUP_GDRIVE_CREDENTIALS_JSON:-}
       BACKUP_GDRIVE_FOLDER_ID: ${BACKUP_GDRIVE_FOLDER_ID:-}
     depends_on:
+      pgbouncer:
+        condition: service_healthy
       db:
         condition: service_healthy
       redis:
@@ -459,10 +508,25 @@ services:
       APP_RELEASE: ${APP_RELEASE:-${IMAGE_TAG:-local}}
       ERRORBEACON_TIMEOUT: ${ERRORBEACON_TIMEOUT:-0.75}
       DATABASE_URL: ${DATABASE_URL:-postgresql://admin:supersecret@db:5432/asset_db}
+      USE_PGBOUNCER: ${USE_PGBOUNCER:-true}
+      PGBOUNCER_HOST: ${PGBOUNCER_HOST:-pgbouncer}
+      # Must match the `pgbouncer` service's own DEFAULT_POOL_SIZE/RESERVE_POOL_SIZE
+      # above -- see backend/config.py's PGBOUNCER_DEFAULT_POOL_SIZE docstring for why
+      # (adaptive pool sizing/DBConcurrencyMiddleware use these to avoid over-admitting
+      # requests past what PgBouncer can actually service).
+      PGBOUNCER_DEFAULT_POOL_SIZE: ${PGBOUNCER_DEFAULT_POOL_SIZE:-5}
+      PGBOUNCER_RESERVE_POOL_SIZE: ${PGBOUNCER_RESERVE_POOL_SIZE:-2}
+      PGBOUNCER_SERVER_POOL_SIZE: ${PGBOUNCER_SERVER_POOL_SIZE:-7}
+      PGBOUNCER_SAFETY_MARGIN_PERCENT: ${PGBOUNCER_SAFETY_MARGIN_PERCENT:-10}
       # See `backend`'s matching DB_EXPECTED_PROCESSES comment above for
       # the full "why 4" breakdown -- this worker's own --concurrency=2
       # (2 forked processes) is one of the three inputs.
       DB_EXPECTED_PROCESSES: "4"
+      # One deployment-wide DB slot is reserved for background Celery/Beat work;
+      # database.py subtracts it from the API pool budget and db_admission.py
+      # enforces the same limit through Redis.
+      DB_BACKGROUND_CONNECTION_RESERVE: ${DB_BACKGROUND_CONNECTION_RESERVE:-1}
+      DB_BACKGROUND_CONCURRENCY_LIMIT: ${DB_BACKGROUND_CONCURRENCY_LIMIT:-1}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       # Dedicated local worker/beat processes wait in-process for Redis instead of crash-looping.
       CELERY_BROKER_CONNECTION_MAX_RETRIES: ${CELERY_BROKER_CONNECTION_MAX_RETRIES:-none}
@@ -546,6 +610,8 @@ services:
       SEND_QUOTATION_RECIPIENT_EMAILS: ${SEND_QUOTATION_RECIPIENT_EMAILS:-true}
       SEND_INDIVIDUAL_HOLDER_REMINDERS: ${SEND_INDIVIDUAL_HOLDER_REMINDERS:-true}
     depends_on:
+      pgbouncer:
+        condition: service_healthy
       db:
         condition: service_healthy
       redis:
@@ -596,11 +662,26 @@ services:
       APP_RELEASE: ${APP_RELEASE:-${IMAGE_TAG:-local}}
       ERRORBEACON_TIMEOUT: ${ERRORBEACON_TIMEOUT:-0.75}
       DATABASE_URL: ${DATABASE_URL:-postgresql://admin:supersecret@db:5432/asset_db}
+      USE_PGBOUNCER: ${USE_PGBOUNCER:-true}
+      PGBOUNCER_HOST: ${PGBOUNCER_HOST:-pgbouncer}
+      # Must match the `pgbouncer` service's own DEFAULT_POOL_SIZE/RESERVE_POOL_SIZE
+      # above -- see backend/config.py's PGBOUNCER_DEFAULT_POOL_SIZE docstring for why
+      # (adaptive pool sizing/DBConcurrencyMiddleware use these to avoid over-admitting
+      # requests past what PgBouncer can actually service).
+      PGBOUNCER_DEFAULT_POOL_SIZE: ${PGBOUNCER_DEFAULT_POOL_SIZE:-5}
+      PGBOUNCER_RESERVE_POOL_SIZE: ${PGBOUNCER_RESERVE_POOL_SIZE:-2}
+      PGBOUNCER_SERVER_POOL_SIZE: ${PGBOUNCER_SERVER_POOL_SIZE:-7}
+      PGBOUNCER_SAFETY_MARGIN_PERCENT: ${PGBOUNCER_SAFETY_MARGIN_PERCENT:-10}
       # See `backend`'s matching DB_EXPECTED_PROCESSES comment above for
       # the full "why 4" breakdown -- beat itself is only 1 of the 4 (no
       # concurrency), but still needs the SAME total so its own pool is
       # sized to fit alongside the other three.
       DB_EXPECTED_PROCESSES: "4"
+      # One deployment-wide DB slot is reserved for background Celery/Beat work;
+      # database.py subtracts it from the API pool budget and db_admission.py
+      # enforces the same limit through Redis.
+      DB_BACKGROUND_CONNECTION_RESERVE: ${DB_BACKGROUND_CONNECTION_RESERVE:-1}
+      DB_BACKGROUND_CONCURRENCY_LIMIT: ${DB_BACKGROUND_CONCURRENCY_LIMIT:-1}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       # Dedicated local worker/beat processes wait in-process for Redis instead of crash-looping.
       CELERY_BROKER_CONNECTION_MAX_RETRIES: ${CELERY_BROKER_CONNECTION_MAX_RETRIES:-none}
@@ -659,6 +740,8 @@ services:
       SEND_QUOTATION_RECIPIENT_EMAILS: ${SEND_QUOTATION_RECIPIENT_EMAILS:-true}
       SEND_INDIVIDUAL_HOLDER_REMINDERS: ${SEND_INDIVIDUAL_HOLDER_REMINDERS:-true}
     depends_on:
+      pgbouncer:
+        condition: service_healthy
       db:
         condition: service_healthy
       redis:

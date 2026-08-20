@@ -1,21 +1,23 @@
 # Snipe-IT Lite
 
-A small, self-hosted **IT asset registry / equipment checkout system** —
-think "who currently has the MacBook Pool unit #12, and when is it due
-back?" Built with a **FastAPI + PostgreSQL** backend and two mutually exclusive
-frontend options: a legacy vanilla HTML/JS site and a **React + TypeScript +
-Vite** Ledger SPA. Both are served through the same nginx-based container
-shape and wired together with Docker Compose.
+Snipe-IT Lite is a self-hosted **IT asset registry and equipment checkout
+system** for tracking who has what, when it is due back, and how that
+equipment moves through approvals, custody, exception handling, and return
+workflows.
 
-This README is a **complete guide for a beginner developer**. It assumes
-you can read code but may not have deployed a full-stack app before. It
-covers: what the app does, how to run it (with Docker and without), what
-every file is for, how the pieces fit together, how to safely make changes
-or add features, how to test what you build, and how to move this toward a
-real production deployment.
+This document is the **operational manual and technical reference** for the
+project. It is meant for operators, developers, and maintainers who need to
+understand the system at a practical level: what it does, how it is
+structured, how to run it, how to operate it safely, and how to extend it
+without breaking the model.
 
-> **New here? Read in this order:** [Quick Start](#quick-start-docker) to get it
-> running → [Feature Tour](#feature-tour) to see what it does →
+The app is built with a **FastAPI + PostgreSQL** backend and two mutually
+exclusive frontend options: a legacy vanilla HTML/JS site and a **React +
+TypeScript + Vite** Ledger SPA. Both are served through the same
+nginx-based container shape and wired together with Docker Compose.
+
+> **Start here:** [Quick Start](#quick-start-docker) to get it running →
+> [Feature Tour](#feature-tour) to see what it does →
 > [How A Request Flows](#how-a-request-flows-through-the-app) for the
 > mental model → [Making Changes Safely](#making-changes-safely-a-guide-for-beginners)
 > when you're ready to modify something.

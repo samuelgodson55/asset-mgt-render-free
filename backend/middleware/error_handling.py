@@ -75,6 +75,7 @@ version) to whoever triggered it.
 
 import logging
 
+import sqlalchemy.exc
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -83,6 +84,43 @@ from logging_config import request_id_var
 from integrations.fastapi_errorbeacon import report_exception
 
 logger = logging.getLogger(__name__)
+
+# RESILIENCE FIX ("pool exhausted under a burst -> every request gets a
+# bare 500 for ~10s"): database.py sizes each process's connection pool
+# (`pool_size`/`max_overflow`) to the target Postgres server's real,
+# probed budget -- see database.py's _compute_pool_sizing() -- but ANY
+# finite pool can still be briefly outrun by a large enough burst of
+# truly concurrent requests (a legitimate traffic spike, a retry storm,
+# a pentest throwing 50 requests at once). `pool_timeout` (settings.
+# DB_POOL_TIMEOUT_SECONDS) makes that fail FAST with a clear
+# `sqlalchemy.exc.TimeoutError` instead of hanging forever -- but until
+# now that exception just fell through to the generic handler below,
+# which reports it as an unanticipated 500 "unexpected error occurred"
+# with a full ERROR-level traceback, indistinguishable in the logs (and
+# to the caller) from a genuine bug. That's the wrong shape on both
+# ends: the correct HTTP semantics for "the server is momentarily out of
+# a specific resource, try again shortly" is 503 (with Retry-After), not
+# 500 -- and this is an expected, self-recovering condition under load,
+# not a defect worth an ERROR-level page/alert every time a burst hits.
+#
+# Handled here, in this SAME innermost middleware (rather than a second,
+# separate `@app.exception_handler`), for the exact CORS/response-shape/
+# X-Request-ID reasons the module docstring above already lays out for
+# the generic case -- registering a second bare `@app.exception_handler`
+# would hit the identical ServerErrorMiddleware/outside-of-CORSMiddleware
+# problem this file exists to avoid.
+_POOL_TIMEOUT_RETRY_AFTER_SECONDS = 3
+
+
+def _pool_exhaustion_response(request: Request, request_id: str | None) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        headers={"Retry-After": str(_POOL_TIMEOUT_RETRY_AFTER_SECONDS)},
+        content={
+            "detail": "The server is momentarily busy handling other requests. Please retry shortly.",
+            "request_id": request_id,
+        },
+    )
 
 
 class UnhandledExceptionMiddleware:
@@ -110,6 +148,34 @@ class UnhandledExceptionMiddleware:
 
         try:
             await self.app(scope, receive, send_wrapper)
+        except sqlalchemy.exc.TimeoutError as exc:
+            # See _pool_exhaustion_response() above -- every pooled/
+            # overflow connection was already checked out for longer than
+            # settings.DB_POOL_TIMEOUT_SECONDS. Expected, self-recovering
+            # behavior under a burst, not a bug: WARNING (not ERROR), no
+            # traceback noise, and reported to errorbeacon as a degraded-
+            # dependency event rather than an application exception, same
+            # "fail_open"-style distinction test_resilience.py already
+            # exercises for a Redis outage.
+            request = Request(scope, receive=receive)
+            logger.warning(
+                "Database connection pool exhausted while handling %s %s -- returning 503",
+                request.method,
+                request.url.path,
+                extra={"http_method": request.method, "http_path": request.url.path},
+            )
+            report_exception(
+                exc, scope, status_code=503,
+                component="database", operation="pool_checkout",
+                severity="warning", category="dependency_degraded",
+                context={"request_id": request_id_var.get(), "failure_mode": "pool_exhausted"},
+            )
+
+            if response_started:
+                raise
+
+            response = _pool_exhaustion_response(request, request_id_var.get())
+            await response(scope, receive, send)
         except Exception as exc:
             request = Request(scope, receive=receive)
             logger.error(

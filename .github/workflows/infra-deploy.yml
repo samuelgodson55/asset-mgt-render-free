@@ -283,7 +283,7 @@ jobs:
       # Variables (Settings -> Secrets and variables -> Actions -> Variables
       # tab, NOT Secrets -- these aren't sensitive) so you can size the
       # Flexible Server per-environment without editing this workflow.
-      # Unset variables fall back to bicep's own defaults (Standard_B1ms /
+      # Unset variables fall back to bicep's own defaults (Standard_D2s_v3 /
       # 32 GiB) via the `|| default` bash pattern below -- this step is safe
       # to run even if you never set either variable.
       # SMTP (email notifications) and Google Drive (backup upload) now
@@ -522,7 +522,8 @@ jobs:
               backendMinReplicas=${{ steps.replicas.outputs.backend_min }} \
               frontendMinReplicas=${{ steps.replicas.outputs.frontend_min }} \
               postgresPassword="${{ secrets.POSTGRES_PASSWORD }}" \
-              postgresSkuName="${{ vars.POSTGRES_SKU_NAME || 'Standard_B1ms' }}" \
+              postgresSkuName="${{ vars.POSTGRES_SKU_NAME || 'Standard_D2s_v3' }}" \
+              postgresSkuTier="${{ vars.POSTGRES_SKU_TIER || 'GeneralPurpose' }}" \
               postgresStorageGb=${{ vars.POSTGRES_STORAGE_GB || 32 }} \
               redisPassword="${{ secrets.REDIS_PASSWORD }}" \
               jwtSecretKey="${{ secrets.JWT_SECRET_KEY }}" \
@@ -565,6 +566,7 @@ jobs:
               approvalSlaCheckIntervalMinutes=${{ vars.APPROVAL_SLA_CHECK_INTERVAL_MINUTES || 60 }} \
               approvalSlaEscalationRepeatHours=${{ vars.APPROVAL_SLA_ESCALATION_REPEAT_HOURS || 24 }} \
               sendQuotationRecipientEmails=${{ vars.SEND_QUOTATION_RECIPIENT_EMAILS != 'false' }} \
+              usePgbouncer=${{ vars.USE_PGBOUNCER != 'false' }} \
               displayTimezone="${{ vars.DISPLAY_TIMEZONE || 'Africa/Lagos' }}" \
               currencyCode="${{ vars.CURRENCY_CODE || 'NGN' }}" \
               catalogShowStockToStaffCustomer=${{ vars.CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER == 'true' }} \
@@ -676,7 +678,8 @@ jobs:
               backendMinReplicas=${{ steps.replicas.outputs.backend_min }} \
               frontendMinReplicas=${{ steps.replicas.outputs.frontend_min }} \
               postgresPassword="${{ secrets.POSTGRES_PASSWORD }}" \
-              postgresSkuName="${{ vars.POSTGRES_SKU_NAME || 'Standard_B1ms' }}" \
+              postgresSkuName="${{ vars.POSTGRES_SKU_NAME || 'Standard_D2s_v3' }}" \
+              postgresSkuTier="${{ vars.POSTGRES_SKU_TIER || 'GeneralPurpose' }}" \
               postgresStorageGb=${{ vars.POSTGRES_STORAGE_GB || 32 }} \
               redisPassword="${{ secrets.REDIS_PASSWORD }}" \
               jwtSecretKey="${{ secrets.JWT_SECRET_KEY }}" \
@@ -719,6 +722,7 @@ jobs:
               approvalSlaCheckIntervalMinutes=${{ vars.APPROVAL_SLA_CHECK_INTERVAL_MINUTES || 60 }} \
               approvalSlaEscalationRepeatHours=${{ vars.APPROVAL_SLA_ESCALATION_REPEAT_HOURS || 24 }} \
               sendQuotationRecipientEmails=${{ vars.SEND_QUOTATION_RECIPIENT_EMAILS != 'false' }} \
+              usePgbouncer=${{ vars.USE_PGBOUNCER != 'false' }} \
               displayTimezone="${{ vars.DISPLAY_TIMEZONE || 'Africa/Lagos' }}" \
               currencyCode="${{ vars.CURRENCY_CODE || 'NGN' }}" \
               catalogShowStockToStaffCustomer=${{ vars.CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER == 'true' }} \
@@ -805,7 +809,8 @@ jobs:
               backendMinReplicas=${{ steps.replicas.outputs.backend_min }} \
               frontendMinReplicas=${{ steps.replicas.outputs.frontend_min }} \
               postgresPassword="${{ secrets.POSTGRES_PASSWORD }}" \
-              postgresSkuName="${{ vars.POSTGRES_SKU_NAME || 'Standard_B1ms' }}" \
+              postgresSkuName="${{ vars.POSTGRES_SKU_NAME || 'Standard_D2s_v3' }}" \
+              postgresSkuTier="${{ vars.POSTGRES_SKU_TIER || 'GeneralPurpose' }}" \
               postgresStorageGb=${{ vars.POSTGRES_STORAGE_GB || 32 }} \
               redisPassword="${{ secrets.REDIS_PASSWORD }}" \
               jwtSecretKey="${{ secrets.JWT_SECRET_KEY }}" \
@@ -848,6 +853,7 @@ jobs:
               approvalSlaCheckIntervalMinutes=${{ vars.APPROVAL_SLA_CHECK_INTERVAL_MINUTES || 60 }} \
               approvalSlaEscalationRepeatHours=${{ vars.APPROVAL_SLA_ESCALATION_REPEAT_HOURS || 24 }} \
               sendQuotationRecipientEmails=${{ vars.SEND_QUOTATION_RECIPIENT_EMAILS != 'false' }} \
+              usePgbouncer=${{ vars.USE_PGBOUNCER != 'false' }} \
               displayTimezone="${{ vars.DISPLAY_TIMEZONE || 'Africa/Lagos' }}" \
               currencyCode="${{ vars.CURRENCY_CODE || 'NGN' }}" \
               catalogShowStockToStaffCustomer=${{ vars.CATALOG_SHOW_STOCK_TO_STAFF_CUSTOMER == 'true' }} \
@@ -859,6 +865,28 @@ jobs:
               otelExporterOtlpHeaders="${{ secrets.OTEL_EXPORTER_OTLP_HEADERS }}" \
               otelTracesSampleRatio="${{ vars.OTEL_TRACES_SAMPLE_RATIO || '1.0' }}" \
               otelAzureMonitorEnabled=${{ vars.OTEL_AZURE_MONITOR_ENABLED == 'true' }}
+
+      - name: Verify Azure managed PgBouncer configuration
+        if: ${{ github.event.inputs.action == 'apply' && vars.USE_PGBOUNCER != 'false' }}
+        run: |
+          set -euo pipefail
+          SERVER=$(az postgres flexible-server list --resource-group "$RESOURCE_GROUP" --query '[0].name' -o tsv)
+          [ -n "$SERVER" ] || { echo "::error::No PostgreSQL Flexible Server found after infrastructure deployment."; exit 1; }
+          for attempt in $(seq 1 12); do
+            VALUE=$(az postgres flexible-server parameter show \
+              --resource-group "$RESOURCE_GROUP" \
+              --server-name "$SERVER" \
+              --name pgbouncer.enabled \
+              --query value -o tsv 2>/dev/null || true)
+            if [ "$VALUE" = "on" ] || [ "$VALUE" = "true" ]; then
+              echo "Azure managed PgBouncer is enabled on $SERVER."
+              exit 0
+            fi
+            echo "PgBouncer is not yet observable as enabled (attempt $attempt/12); retrying..."
+            sleep 10
+          done
+          echo "::error::Azure managed PgBouncer did not become enabled/observable on $SERVER. The deployment was not considered ready."
+          exit 1
 
       # Bicep was given the exact pre-infra traffic topology, so there is no
       # post-deployment traffic flip. Verify the invariant instead.

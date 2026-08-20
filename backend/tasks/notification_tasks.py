@@ -44,6 +44,7 @@ import math
 import models
 from celery_app import celery_app
 from database import SessionLocal
+from db_admission import background_db_slot
 from models import utc_now
 import services.notification_service as notification_service
 from services.notification_service import get_digest_recipient_emails
@@ -109,134 +110,134 @@ def _format_line(c) -> str:
     return f"  - {asset_name} · {holder} · due {c.due_date.strftime('%Y-%m-%d')}"
 
 
-@celery_app.task(name="tasks.send_overdue_notifications", bind=True)
+@celery_app.task(name="tasks.send_overdue_notifications", bind=True, max_retries=5)
 def send_overdue_notifications(self) -> dict:
-    """
-    Sends the individual holder reminders + Manager/Admin digests described
-    in this module's docstring. Returns a small summary dict (mostly useful
-    for confirming the task ran during manual testing -- see README.md's
-    "Testing Your Changes" section).
-    """
-    db = SessionLocal()
+    """Snapshot DB state quickly, close the session, then perform email I/O."""
     sent_individual = 0
     sent_digests = 0
     try:
-        overdue = _overdue_query(db).all()
-        if not overdue:
-            logger.info("send_overdue_notifications: no overdue checkouts -- nothing to send.")
-            return {"overdue_count": 0, "individual_emails_sent": 0, "digest_emails_sent": 0}
+        with background_db_slot():
+            db = SessionLocal()
+            try:
+                overdue = _overdue_query(db).all()
+                if not overdue:
+                    logger.info("send_overdue_notifications: no overdue checkouts -- nothing to send.")
+                    return {"overdue_count": 0, "individual_emails_sent": 0, "digest_emails_sent": 0}
 
-        # --- 1. Individual reminders to each overdue item's own holder ---
-        #        Gated by SEND_INDIVIDUAL_HOLDER_REMINDERS -- see that
-        #        setting's docstring in config.py.
-        if settings.SEND_INDIVIDUAL_HOLDER_REMINDERS:
-            for c in overdue:
-                if c.user and c.user.email and c.user.is_active and not c.user.is_deleted:
-                    asset_name = c.asset.name if c.asset else "Unknown Asset"
-                    days_overdue = (utc_now() - c.due_date).days
-                    ok = notification_service.send_email(
-                        to=c.user.email,
-                        subject=f"[{settings.SITE_NAME}] Overdue: {asset_name}",
-                        body=(
-                            f"'{asset_name}' was due back on {c.due_date.strftime('%Y-%m-%d')} "
-                            f"({days_overdue} day{'s' if days_overdue != 1 else ''} overdue).\n\n"
-                            "Please return it, or request an extension from your dashboard if you need more time."
-                        ),
-                    )
-                    if ok:
-                        sent_individual += 1
+                individual_messages = []
+                if settings.SEND_INDIVIDUAL_HOLDER_REMINDERS:
+                    for c in overdue:
+                        if c.user and c.user.email and c.user.is_active and not c.user.is_deleted:
+                            asset_name = c.asset.name if c.asset else "Unknown Asset"
+                            days_overdue = (utc_now() - c.due_date).days
+                            individual_messages.append({
+                                "to": c.user.email,
+                                "subject": f"[{settings.SITE_NAME}] Overdue: {asset_name}",
+                                "body": (
+                                    f"'{asset_name}' was due back on {c.due_date.strftime('%Y-%m-%d')} "
+                                    f"({days_overdue} day{'s' if days_overdue != 1 else ''} overdue).\n\n"
+                                    "Please return it, or request an extension from your dashboard if you need more time."
+                                ),
+                            })
 
-        # --- 2. System-wide digest -- ONLY the admin-configured "Digest
-        #        Recipients" list (PUT /settings/digest-recipients) + any
-        #        extra env-configured ADMIN_NOTIFICATION_EMAILS. No longer
-        #        auto-includes every Manager/Admin account -- see this
-        #        module's docstring. ---
-        digest_emails = get_digest_recipient_emails(db)
-        digest_emails.extend(settings.admin_notification_email_list)
-        digest_emails = list(dict.fromkeys(digest_emails))
-        if digest_emails:
-            lines = "\n".join(_format_line(c) for c in overdue)
-            ok = notification_service.send_email(
-                to=digest_emails,
-                subject=f"[{settings.SITE_NAME}] {len(overdue)} overdue checkout(s) system-wide",
-                body=f"The following checkouts are overdue:\n\n{lines}",
-            )
-            if ok:
-                sent_digests += 1
+                digest_emails = get_digest_recipient_emails(db)
+                digest_emails.extend(settings.admin_notification_email_list)
+                digest_emails = list(dict.fromkeys(digest_emails))
+                lines = "\n".join(_format_line(c) for c in overdue)
+                digest = None
+                if digest_emails:
+                    digest = {
+                        "to": digest_emails,
+                        "subject": f"[{settings.SITE_NAME}] {len(overdue)} overdue checkout(s) system-wide",
+                        "body": f"The following checkouts are overdue:\n\n{lines}",
+                    }
+                overdue_count = len(overdue)
+            finally:
+                db.close()
+    except RuntimeError as exc:
+        logger.info("send_overdue_notifications: background DB capacity busy; retrying")
+        raise self.retry(exc=exc, countdown=2)
 
-        logger.info(
-            "send_overdue_notifications: done", extra={
-                "overdue_count": len(overdue), "individual_emails_sent": sent_individual, "digest_emails_sent": sent_digests,
-            },
-        )
-        return {"overdue_count": len(overdue), "individual_emails_sent": sent_individual, "digest_emails_sent": sent_digests}
-    finally:
-        db.close()
+    for message in individual_messages:
+        if notification_service.send_email(**message):
+            sent_individual += 1
+    if digest and notification_service.send_email(**digest):
+        sent_digests = 1
+
+    logger.info("send_overdue_notifications: done", extra={
+        "overdue_count": overdue_count,
+        "individual_emails_sent": sent_individual,
+        "digest_emails_sent": sent_digests,
+    })
+    return {
+        "overdue_count": overdue_count,
+        "individual_emails_sent": sent_individual,
+        "digest_emails_sent": sent_digests,
+    }
 
 
-@celery_app.task(name="tasks.send_due_soon_reminders", bind=True)
+@celery_app.task(name="tasks.send_due_soon_reminders", bind=True, max_retries=5)
 def send_due_soon_reminders(self) -> dict:
-    """
-    "A reminder before something goes overdue" -- the proactive
-    counterpart to send_overdue_notifications() above. Sends the same
-    shape of individual holder reminders + Manager/Admin digest, just for
-    checkouts that are still on time but coming up within
-    settings.DUE_SOON_REMINDER_DAYS, instead of ones that have already
-    passed their due date. Returns a small summary dict (mostly useful for
-    confirming the task ran during manual testing -- see README.md's
-    "Testing Your Changes" section).
-    """
-    db = SessionLocal()
+    """Snapshot DB state quickly, close the session, then perform email I/O."""
     sent_individual = 0
     sent_digests = 0
     try:
-        due_soon = _due_soon_query(db).all()
-        if not due_soon:
-            logger.info("send_due_soon_reminders: nothing due soon -- nothing to send.")
-            return {"due_soon_count": 0, "individual_emails_sent": 0, "digest_emails_sent": 0}
+        with background_db_slot():
+            db = SessionLocal()
+            try:
+                due_soon = _due_soon_query(db).all()
+                if not due_soon:
+                    logger.info("send_due_soon_reminders: nothing due soon -- nothing to send.")
+                    return {"due_soon_count": 0, "individual_emails_sent": 0, "digest_emails_sent": 0}
 
-        # --- 1. Individual reminders to each due-soon item's own holder ---
-        #        Gated by SEND_INDIVIDUAL_HOLDER_REMINDERS -- see that
-        #        setting's docstring in config.py.
-        if settings.SEND_INDIVIDUAL_HOLDER_REMINDERS:
-            for c in due_soon:
-                if c.user and c.user.email and c.user.is_active and not c.user.is_deleted:
-                    asset_name = c.asset.name if c.asset else "Unknown Asset"
-                    days_until_due = max(1, math.ceil((c.due_date - utc_now()).total_seconds() / 86400))
-                    ok = notification_service.send_email(
-                        to=c.user.email,
-                        subject=f"[{settings.SITE_NAME}] Due soon: {asset_name}",
-                        body=(
-                            f"'{asset_name}' is due back on {c.due_date.strftime('%Y-%m-%d')} "
-                            f"(in {days_until_due} day{'s' if days_until_due != 1 else ''}).\n\n"
-                            "Please return it on time, or request an extension from your dashboard if you need more time."
-                        ),
-                    )
-                    if ok:
-                        sent_individual += 1
+                individual_messages = []
+                if settings.SEND_INDIVIDUAL_HOLDER_REMINDERS:
+                    for c in due_soon:
+                        if c.user and c.user.email and c.user.is_active and not c.user.is_deleted:
+                            asset_name = c.asset.name if c.asset else "Unknown Asset"
+                            days_until_due = max(1, math.ceil((c.due_date - utc_now()).total_seconds() / 86400))
+                            individual_messages.append({
+                                "to": c.user.email,
+                                "subject": f"[{settings.SITE_NAME}] Due soon: {asset_name}",
+                                "body": (
+                                    f"'{asset_name}' is due back on {c.due_date.strftime('%Y-%m-%d')} "
+                                    f"(in {days_until_due} day{'s' if days_until_due != 1 else ''}).\n\n"
+                                    "Please return it on time, or request an extension from your dashboard if you need more time."
+                                ),
+                            })
 
-        # --- 2. System-wide digest -- identical audience rule as
-        #        send_overdue_notifications() above: ONLY the admin-
-        #        configured "Digest Recipients" list + any extra env-
-        #        configured ADMIN_NOTIFICATION_EMAILS. ---
-        digest_emails = get_digest_recipient_emails(db)
-        digest_emails.extend(settings.admin_notification_email_list)
-        digest_emails = list(dict.fromkeys(digest_emails))
-        if digest_emails:
-            lines = "\n".join(_format_line(c) for c in due_soon)
-            ok = notification_service.send_email(
-                to=digest_emails,
-                subject=f"[{settings.SITE_NAME}] {len(due_soon)} checkout(s) due soon system-wide",
-                body=f"The following checkouts are due within {settings.DUE_SOON_REMINDER_DAYS} day(s):\n\n{lines}",
-            )
-            if ok:
-                sent_digests += 1
+                digest_emails = get_digest_recipient_emails(db)
+                digest_emails.extend(settings.admin_notification_email_list)
+                digest_emails = list(dict.fromkeys(digest_emails))
+                lines = "\n".join(_format_line(c) for c in due_soon)
+                digest = None
+                if digest_emails:
+                    digest = {
+                        "to": digest_emails,
+                        "subject": f"[{settings.SITE_NAME}] {len(due_soon)} checkout(s) due soon system-wide",
+                        "body": f"The following checkouts are due within {settings.DUE_SOON_REMINDER_DAYS} day(s):\n\n{lines}",
+                    }
+                due_soon_count = len(due_soon)
+            finally:
+                db.close()
+    except RuntimeError as exc:
+        logger.info("send_due_soon_reminders: background DB capacity busy; retrying")
+        raise self.retry(exc=exc, countdown=2)
 
-        logger.info(
-            "send_due_soon_reminders: done", extra={
-                "due_soon_count": len(due_soon), "individual_emails_sent": sent_individual, "digest_emails_sent": sent_digests,
-            },
-        )
-        return {"due_soon_count": len(due_soon), "individual_emails_sent": sent_individual, "digest_emails_sent": sent_digests}
-    finally:
-        db.close()
+    for message in individual_messages:
+        if notification_service.send_email(**message):
+            sent_individual += 1
+    if digest and notification_service.send_email(**digest):
+        sent_digests = 1
+
+    logger.info("send_due_soon_reminders: done", extra={
+        "due_soon_count": due_soon_count,
+        "individual_emails_sent": sent_individual,
+        "digest_emails_sent": sent_digests,
+    })
+    return {
+        "due_soon_count": due_soon_count,
+        "individual_emails_sent": sent_individual,
+        "digest_emails_sent": sent_digests,
+    }
+

@@ -106,7 +106,7 @@ def _save_index(entries: list[dict]) -> None:
 
 def _db_connection_kwargs() -> dict:
     """
-    Parses settings.DATABASE_URL (a standard postgresql:// URL) into the
+    Parses settings.DIRECT_DATABASE_URL (falling back to settings.DATABASE_URL) (a standard postgresql:// URL) into the
     discrete pieces pg_dump/psql want on the command line, and returns them
     alongside a PGPASSWORD-carrying env dict -- passing the password via
     argv (e.g. `-p<password>`) would leak it into `ps aux` output on the
@@ -176,7 +176,7 @@ def _db_connection_kwargs() -> dict:
     """
     from sqlalchemy.engine import make_url
 
-    url = make_url(settings.DATABASE_URL)
+    url = make_url((settings.DIRECT_DATABASE_URL or settings.DATABASE_URL))
     sslmode = url.query.get("sslmode", "prefer")
     env = os.environ.copy()
     if url.password:
@@ -290,7 +290,7 @@ def _release_backup_lock(token: str) -> None:
 
 def create_backup(triggered_by: str = "manual", _held_lock_token: Optional[str] = None) -> dict:
     """
-    Runs `pg_dump` against settings.DATABASE_URL, gzip-compresses the
+    Runs `pg_dump` against the direct PostgreSQL URL, gzip-compresses the
     output, writes it to settings.BACKUP_DIR, records it in index.json,
     uploads it to Google Drive if enabled, then enforces local retention.
     Returns the new backup's index entry (including any upload error, so

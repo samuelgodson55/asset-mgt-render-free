@@ -37,6 +37,7 @@ HOW VARIABLES FLOW (beginner-friendly walkthrough)
 from typing import Optional
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
 
 # Placeholder/default secrets that ship in this repo (config.py's own
 # fallback, plus the one committed in .env.example). If ANY of these are
@@ -118,6 +119,32 @@ class Settings(BaseSettings):
             data["LOG_LEVEL"] = "WARNING" if is_production else "INFO"
         return data
 
+    @model_validator(mode="after")
+    def route_database_through_pgbouncer(self):
+        """Keep the direct URL authoritative and derive the pooler endpoint safely.
+
+        The operator-facing switch is only USE_PGBOUNCER.  Deployments that
+        run a local pooler (Compose/VM) inject PGBOUNCER_HOST automatically;
+        Azure ACA leaves it unset so the managed Azure PgBouncer endpoint uses
+        the same PostgreSQL hostname on port 6432.  TLS is never disabled by
+        this routing layer.
+        """
+        if self.DIRECT_DATABASE_URL is None:
+            self.DIRECT_DATABASE_URL = self.DATABASE_URL
+        direct_url = make_url(self.DIRECT_DATABASE_URL)
+        if self.USE_PGBOUNCER:
+            pooler_host = self.PGBOUNCER_HOST or direct_url.host
+            # Preserve all connection options (especially sslmode=require).
+            # Only the endpoint changes; credentials/database/query semantics
+            # remain authoritative in DIRECT_DATABASE_URL.
+            self.DATABASE_URL = direct_url.set(
+                host=pooler_host,
+                port=self.PGBOUNCER_PORT,
+            ).render_as_string(hide_password=False)
+        else:
+            self.DATABASE_URL = self.DIRECT_DATABASE_URL
+        return self
+
     # --- Environment ----------------------------------------------------
     # "local", "development" (default, safe for local docker compose), or
     # "production". As far as THIS backend process is concerned, only
@@ -138,6 +165,50 @@ class Settings(BaseSettings):
     # hostname because Compose puts every service on the same network and
     # lets them reach each other by service name.
     DATABASE_URL: str = "postgresql://admin:supersecret@db:5432/asset_db"
+    # The original/direct PostgreSQL URL. DATABASE_URL is rewritten below to
+    # the configured pooler endpoint when USE_PGBOUNCER=true, while backup/migration
+    # paths use this direct URL because pg_dump/DDL are not transaction-pooler
+    # workloads. Operators never need to edit DATABASE_URL to switch routing.
+    DIRECT_DATABASE_URL: str | None = None
+    # One operator-facing switch controls application routing. Deployment files
+    # provision/enable the appropriate pooler automatically; true is the safe
+    # default. Set false only for a deliberate direct-Postgres break-glass path.
+    USE_PGBOUNCER: bool = True
+    # Internal deployment detail, not a user-facing switch. Local Docker/VM
+    # deployments set this automatically to their pgbouncer service name.
+    # Azure managed PgBouncer leaves it unset and reuses the database hostname.
+    PGBOUNCER_HOST: str | None = None
+    PGBOUNCER_PORT: int = 6432
+    # BUG FIX (PgBouncer review: "hung requests" / "server closed the
+    # connection unexpectedly" under the same burst that previously got a
+    # clean 503 direct to Postgres): database.py's adaptive pool sizing
+    # (_compute_pool_sizing()) used to derive pool_size/max_overflow -- and
+    # therefore DBConcurrencyMiddleware's admission limit, which is sized
+    # directly from them -- purely from raw Postgres's own max_connections.
+    # When USE_PGBOUNCER=true that's the wrong ceiling: PgBouncer (in
+    # transaction pool mode) hands the WHOLE fleet a much smaller, fixed
+    # pool of real server-side Postgres connections -- these two settings,
+    # not max_connections -- and silently QUEUES anything beyond that
+    # (up to its own query_wait_timeout) instead of failing fast. Without
+    # accounting for that, the app happily admitted more concurrent
+    # DB-touching requests than PgBouncer could actually service, so they
+    # piled up *inside* PgBouncer as a slow hang instead of getting a fast,
+    # clean 503 from the concurrency guard.
+    #
+    # Self-hosted PgBouncer (local/VM) exposes a default pool plus a reserve
+    # pool, so the effective server-side ceiling is their sum. Azure Managed
+    # PgBouncer does NOT expose the same reserve-pool abstraction.
+    PGBOUNCER_DEFAULT_POOL_SIZE: int = 5
+    PGBOUNCER_RESERVE_POOL_SIZE: int = 2
+    # Optional authoritative total server-side PgBouncer budget. Set this for
+    # managed poolers whose configuration model differs from self-hosted
+    # PgBouncer. Azure ACA sets this explicitly to the managed
+    # `pgbouncer.default_pool_size` value. When unset, local/VM deployments
+    # use DEFAULT_POOL_SIZE + RESERVE_POOL_SIZE.
+    PGBOUNCER_SERVER_POOL_SIZE: int | None = None
+    # Leave 10% of the managed PgBouncer server pool unused as operational
+    # breathing room. This is separate from the background-task reservation.
+    PGBOUNCER_SAFETY_MARGIN_PERCENT: int = 10
 
     # BUG FIX ("Audit Logs page fails on repeated refresh, but recovers if
     # you stop hammering it for a bit" -- `psycopg2.OperationalError: ...
@@ -217,6 +288,26 @@ class Settings(BaseSettings):
     # hanging indefinitely when every pooled/overflow connection above is
     # already checked out.
     DB_POOL_TIMEOUT_SECONDS: int = 10
+    # Per-process API concurrency gate in front of DB-backed routes. When 0,
+    # middleware is disabled. When unset/None in code, database.py's current
+    # pool_size + max_overflow is used; a positive value overrides that.
+    # Keeping this aligned with the pool prevents a burst of requests from
+    # turning into a larger queue of sessions waiting on the same DB budget.
+    DB_REQUEST_CONCURRENCY_LIMIT: int | None = None
+    # Reserve a small, explicit slice of the PgBouncer server budget for
+    # Celery/Beat database work.  API pool sizing subtracts this reserve,
+    # while background tasks use the same number as a distributed admission
+    # limit.  This prevents the HTTP gate and background workers from each
+    # independently assuming they own the entire PgBouncer pool.
+    DB_BACKGROUND_CONNECTION_RESERVE: int = 1
+    # Maximum number of DB-using Celery/Beat tasks allowed to be admitted
+    # across the whole deployment at once.  This is intentionally equal to
+    # the reserved connection count by default.
+    DB_BACKGROUND_CONCURRENCY_LIMIT: int = 1
+    # Background DB tasks shed/retry quickly rather than waiting behind an
+    # unbounded Redis/worker queue while another task owns the reserved DB
+    # slot.
+    DB_BACKGROUND_ADMISSION_TIMEOUT_SECONDS: float = 0.1
 
     # --- Async export workers (Celery + Redis) -----------------------------
     # CSV/PDF ledger exports used to be generated synchronously, inline in

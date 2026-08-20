@@ -434,7 +434,7 @@ cmd_reap() {
   # job got killed/cancelled mid-rollout before cleanup ever ran. Those
   # revisions cost nothing in traffic (0% weight, nothing routes to them)
   # but they ARE still live replicas each holding open their own DB
-  # connection pool -- on a small Postgres SKU (e.g. Standard_B1ms,
+  # connection pool -- on a small Postgres SKU (e.g. Standard_D2s_v3,
   # max_connections ~50) a handful of these accumulating over even a few
   # days is enough to exhaust the server's entire non-superuser connection
   # budget, which is what actually happened here (see the FATAL:

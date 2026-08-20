@@ -119,6 +119,11 @@ services:
         fromDatabase:
           name: snipeit-lite-db
           property: connectionString
+      # Render Free does not provide a private service type for the PgBouncer
+      # hop without changing the deployment tier. Keep this path direct rather
+      # than silently pointing the app at a nonexistent localhost pooler.
+      - key: USE_PGBOUNCER
+        value: false
       # Broker + result backend for the embedded Celery worker/beat process
       # started by render-start.sh (see RUN_EMBEDDED_WORKER below) --
       # backend/celery_app.py.

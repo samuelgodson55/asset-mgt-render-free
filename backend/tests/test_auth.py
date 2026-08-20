@@ -97,6 +97,86 @@ def test_update_own_password_requires_current_password(as_staff, db_session):
     assert relogged.status_code == 200
 
 
+def test_password_change_revokes_previously_issued_session(as_staff, client):
+    """
+    SECURITY REGRESSION TEST -- pentest finding: changing a password used
+    to only block NEW logins with the old password; a session/cookie
+    already issued before the change kept working against every
+    protected route (e.g. GET /auth/me) until it naturally expired.
+    """
+    su_client, headers = as_staff
+    me = su_client.get("/api/auth/me", headers=headers).json()
+
+    # The old, still-issued session must work BEFORE the password change.
+    assert su_client.get("/api/auth/me", headers=headers).status_code == 200
+
+    changed = su_client.post(
+        "/api/auth/update-password",
+        headers=headers,
+        json={"user_id": me["id"], "new_password": "BrandNewPass123!", "current_password": "Staff123!"},
+    )
+    assert changed.status_code == 200
+
+    # The OLD session (same cookie/bearer token used above) must now be
+    # rejected, even though it hasn't naturally expired.
+    revoked = su_client.get("/api/auth/me", headers=headers)
+    assert revoked.status_code == 401
+
+    # A brand-new login with the NEW password must still work fine.
+    relogged = client.post(
+        "/api/auth/login", json={"identifier": DEMO_USERS["staff"]["identifier"], "password": "BrandNewPass123!"}
+    )
+    assert relogged.status_code == 200
+
+
+def test_admin_password_reset_revokes_target_users_session(as_admin, as_staff, client):
+    """Same session-revocation guarantee, but for the Admin/Super-Admin
+    'reset someone else's password' recovery path (POST /users/{id}/reset-password)."""
+    admin_client, admin_headers = as_admin
+    staff_client, staff_headers = as_staff
+
+    staff_me = staff_client.get("/api/auth/me", headers=staff_headers).json()
+    assert staff_client.get("/api/auth/me", headers=staff_headers).status_code == 200
+
+    reset = admin_client.post(
+        f"/api/users/{staff_me['id']}/reset-password",
+        headers=admin_headers,
+        json={"new_password": "AdminResetPass123!", "admin_password": "Admin123!"},
+    )
+    assert reset.status_code == 200
+
+    # The staff member's OLD session must be revoked immediately.
+    revoked = staff_client.get("/api/auth/me", headers=staff_headers)
+    assert revoked.status_code == 401
+
+
+def test_forgot_password_reset_revokes_previous_session(as_staff, client, monkeypatch):
+    """Same guarantee via the email-based 'forgot password' self-recovery
+    flow (POST /auth/forgot-password + POST /auth/reset-password)."""
+    su_client, headers = as_staff
+    assert su_client.get("/api/auth/me", headers=headers).status_code == 200
+
+    captured = {}
+
+    def _fake_send_email(to, subject, body):
+        captured["body"] = body
+        return True
+
+    import services.auth_service as auth_service
+    monkeypatch.setattr(auth_service.notification_service, "enqueue_email_after_commit", lambda **kw: _fake_send_email(kw["to"], kw["subject"], kw["body"]))
+
+    forgot = client.post("/api/auth/forgot-password", json={"identifier": DEMO_USERS["staff"]["identifier"]})
+    assert forgot.status_code == 200
+
+    reset_token = captured["body"].split("reset_token=")[1].split("\n")[0].strip()
+    reset = client.post("/api/auth/reset-password", json={"token": reset_token, "new_password": "ForgotFlow123!"})
+    assert reset.status_code == 200
+
+    # The session that was live before the reset must now be rejected.
+    revoked = su_client.get("/api/auth/me", headers=headers)
+    assert revoked.status_code == 401
+
+
 def test_update_password_rejects_weak_new_password(as_staff):
     client, headers = as_staff
     me = client.get("/api/auth/me", headers=headers).json()

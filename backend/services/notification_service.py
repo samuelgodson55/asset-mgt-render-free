@@ -54,6 +54,7 @@ case someone flipped the switch and forgot the rest of the settings).
 
 import logging
 import smtplib
+from concurrent.futures import ThreadPoolExecutor
 import socket
 import threading
 from contextlib import contextmanager
@@ -68,6 +69,20 @@ from config import settings
 from schemas.notifications_schema import DigestRecipientsUpdateRequest
 
 logger = logging.getLogger(__name__)
+
+# Celery broker publishing must never execute on the request/transaction
+# thread. A small bounded dispatcher keeps a Redis outage from blocking
+# Session.commit(), while preventing an unbounded thread storm when the
+# broker is unavailable. Failed publishes are logged; the transaction has
+# already committed, so the DB is never held open for broker I/O.
+_EMAIL_DISPATCH_WORKERS = 2
+_EMAIL_DISPATCH_MAX_PENDING = 100
+_EMAIL_DISPATCH_EXECUTOR = ThreadPoolExecutor(
+    max_workers=_EMAIL_DISPATCH_WORKERS,
+    thread_name_prefix="email-dispatch",
+)
+_EMAIL_DISPATCH_SLOTS = threading.BoundedSemaphore(_EMAIL_DISPATCH_MAX_PENDING)
+
 
 # Same generic key/value store used by services/quotation_service.py's
 # VAT setting (models.AppSetting) -- runtime-editable by a Super
@@ -331,3 +346,84 @@ def set_digest_recipient_emails(db: Session, payload: DigestRecipientsUpdateRequ
     ))
     db.commit()
     return {"emails": payload.emails}
+
+# ---------------------------------------------------------------------------
+# ASYNCHRONOUS DELIVERY BOUNDARY
+# ---------------------------------------------------------------------------
+def _dispatch_pending_email_notifications(session: Session) -> None:
+    items = session.info.pop("pending_email_notifications", [])
+    session.info.pop("email_after_commit_listener_installed", None)
+    _dispatch_pending_email_notifications_payloads(items)
+
+
+def _clear_pending_email_notifications(session: Session) -> None:
+    session.info.pop("pending_email_notifications", None)
+
+
+def enqueue_email_after_commit(db: Session, to: Iterable[str] | str, subject: str, body: str) -> None:
+    """Queue an email after the current transaction commits.
+
+    If the caller has already committed (for example, an identity update),
+    delivery is dispatched immediately because there is no active DB
+    transaction to hold. Otherwise the payload is attached to the session and
+    sent only by the ``after_commit`` hook. Rollbacks discard it.
+    """
+    payload = {
+        "to": list(to) if not isinstance(to, str) else to,
+        "subject": subject,
+        "body": body,
+    }
+    if not db.in_transaction():
+        _dispatch_pending_email_notifications_payloads([payload])
+        return
+    pending = db.info.setdefault("pending_email_notifications", [])
+    pending.append(payload)
+
+
+def _publish_email_task(item: dict) -> None:
+    try:
+        from tasks.notification_tasks import send_email_task
+        # Explicitly disable Celery producer retries. This runs in a bounded
+        # dispatcher thread, but a dead Redis broker still must not spend 20+
+        # seconds retrying a publish. The broker/socket timeouts in
+        # celery_app.py bound the single connection attempt as well.
+        send_email_task.apply_async(kwargs=item, retry=False)
+    except Exception as exc:
+        from integrations.fastapi_errorbeacon import report_exception
+        report_exception(
+            exc, None, 500, component="notification_service",
+            operation="enqueue_email_after_commit", severity="warning",
+        )
+        logger.warning(
+            "Failed to enqueue notification email %r after commit; broker may be unavailable",
+            item["subject"], exc_info=True,
+        )
+    finally:
+        _EMAIL_DISPATCH_SLOTS.release()
+
+
+def _dispatch_pending_email_notifications_payloads(items: list[dict]) -> None:
+    for item in items:
+        if not _EMAIL_DISPATCH_SLOTS.acquire(blocking=False):
+            logger.warning(
+                "Email dispatch queue is full; dropping notification after DB commit: %r",
+                item["subject"],
+            )
+            continue
+        try:
+            # Never publish to Redis/Celery inline. In particular, SQLAlchemy's
+            # after_commit event executes synchronously inside Session.commit().
+            # Scheduling the broker publish onto this bounded executor ensures
+            # commit latency is independent of broker availability.
+            _EMAIL_DISPATCH_EXECUTOR.submit(_publish_email_task, item)
+        except Exception:
+            _EMAIL_DISPATCH_SLOTS.release()
+            logger.exception("Failed to schedule notification email %r", item["subject"])
+
+
+# Installed once for every SQLAlchemy Session.  We only touch sessions that
+# have pending email payloads, keeping this hook effectively free elsewhere.
+from sqlalchemy import event
+
+event.listen(Session, "after_commit", _dispatch_pending_email_notifications)
+event.listen(Session, "after_rollback", _clear_pending_email_notifications)

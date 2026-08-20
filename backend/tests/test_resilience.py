@@ -60,3 +60,81 @@ def test_rate_limit_redis_failure_reports_degradation_without_http_503():
     assert 'report_exception(' in source
     assert 'category="dependency_degraded"' in source
     assert '"failure_mode": "fail_open"' in source
+
+
+def test_db_pool_exhaustion_returns_503_not_bare_500():
+    """
+    Pentest finding: a burst of concurrent requests exhausting the
+    SQLAlchemy connection pool (settings.DB_POOL_TIMEOUT_SECONDS reached)
+    used to fall through to the generic unhandled-exception handler and
+    come back as an opaque 500 for the whole ~10s the burst lasted. This
+    is an expected, self-recovering "server is momentarily out of a
+    specific resource" condition, not a bug -- it belongs in HTTP's 503
+    (with Retry-After), not 500.
+    """
+    import asyncio
+    import sqlalchemy.exc
+    from middleware.error_handling import UnhandledExceptionMiddleware
+
+    async def _failing_app(scope, receive, send):
+        raise sqlalchemy.exc.TimeoutError(
+            "QueuePool limit of size 5 overflow 5 reached, connection timed out, timeout 10"
+        )
+
+    middleware = UnhandledExceptionMiddleware(_failing_app)
+
+    sent_messages = []
+
+    async def _send(message):
+        sent_messages.append(message)
+
+    async def _receive():
+        return {"type": "http.request"}
+
+    scope = {
+        "type": "http", "method": "GET", "path": "/api/assets",
+        "headers": [], "client": ("127.0.0.1", 1), "query_string": b"",
+    }
+    asyncio.run(middleware(scope, _receive, _send))
+
+    start_message = next(m for m in sent_messages if m["type"] == "http.response.start")
+    assert start_message["status"] == 503
+    header_dict = {k.decode(): v.decode() for k, v in start_message["headers"]}
+    assert header_dict.get("retry-after") is not None
+
+    body_message = next(m for m in sent_messages if m["type"] == "http.response.body")
+    import json
+    body = json.loads(body_message["body"])
+    assert "detail" in body
+    assert "request_id" in body
+
+
+def test_db_pool_exhaustion_still_raises_a_genuine_500_for_other_db_errors():
+    """Sanity check that this new handling is scoped to pool-checkout
+    timeouts specifically, not every SQLAlchemy exception -- a genuine
+    query/programming error must still surface as a 500, not be silently
+    reclassified as a transient 503."""
+    import asyncio
+    import sqlalchemy.exc
+    from middleware.error_handling import UnhandledExceptionMiddleware
+
+    async def _failing_app(scope, receive, send):
+        raise sqlalchemy.exc.IntegrityError("statement", {}, Exception("unique violation"))
+
+    middleware = UnhandledExceptionMiddleware(_failing_app)
+    sent_messages = []
+
+    async def _send(message):
+        sent_messages.append(message)
+
+    async def _receive():
+        return {"type": "http.request"}
+
+    scope = {
+        "type": "http", "method": "GET", "path": "/api/assets",
+        "headers": [], "client": ("127.0.0.1", 1), "query_string": b"",
+    }
+    asyncio.run(middleware(scope, _receive, _send))
+
+    start_message = next(m for m in sent_messages if m["type"] == "http.response.start")
+    assert start_message["status"] == 500

@@ -411,6 +411,34 @@ class User(Base):
     failed_login_attempts = Column(Integer, default=0, nullable=False)
     locked_until = Column(DateTime(timezone=True), nullable=True)
 
+    # --- Per-account session revocation on credential change (SECURITY) ---
+    # SECURITY FIX: a JWT session is stateless and, until now, stayed
+    # valid until its own natural `exp` (up to JWT_EXPIRY_HOURS later) no
+    # matter what happened to the account meanwhile. That meant changing
+    # (or resetting) a password didn't actually revoke any session already
+    # issued before the change: an attacker holding a stolen-but-still-
+    # valid cookie/token could keep hitting authenticated routes with the
+    # OLD session right through a "security" password change that was
+    # supposed to lock them out -- the change only ever blocked NEW
+    # logins with the old password, never the session that was already
+    # live.
+    #
+    # This column is the per-USER counterpart to security.py's
+    # AUTH_EPOCH_SETTING_KEY (a single, app-wide timestamp set after a
+    # full database restore) -- same mechanism, narrowed to one account:
+    # stamped with `utc_now()` any time this row's `password_hash`
+    # changes (self-service update, "forgot password" email reset, or an
+    # Admin/Super Admin resetting it for someone else -- see
+    # services/auth_service.py's update_password()/confirm_password_reset()
+    # and services/user_service.py's reset_user_password()), and checked
+    # by deps.py's resolve_user_from_token() on every request: a JWT whose
+    # `iat` (issued-at) predates this timestamp is rejected exactly like
+    # an expired one, forcing a fresh login. Nullable/no backfill needed --
+    # every pre-existing row simply has no revocation point yet, which is
+    # correct (nothing about their currently-live sessions should change
+    # retroactively just because this column was added).
+    credentials_changed_at = Column(DateTime(timezone=True), nullable=True)
+
     # --- Two-factor authentication (TOTP) -- SECURITY -----------------------
     # Currently enforced ONLY for role == SUPER_ADMIN_ROLE (see
     # services/auth_service.py's login()) -- the single highest-privilege,

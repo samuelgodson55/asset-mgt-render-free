@@ -53,6 +53,7 @@ import logging
 import models
 from celery_app import celery_app
 from database import SessionLocal
+from db_admission import background_db_slot
 from models import utc_now
 import services.notification_service as notification_service
 from services.notification_service import get_digest_recipient_emails
@@ -120,127 +121,149 @@ def _hours_pending(pending_since: datetime.datetime) -> int:
     return max(0, int((utc_now() - _as_aware_utc(pending_since)).total_seconds() // 3600))
 
 
-@celery_app.task(name="tasks.escalate_pending_extension_requests", bind=True)
+@celery_app.task(name="tasks.escalate_pending_extension_requests", bind=True, max_retries=5)
 def escalate_pending_extension_requests(self) -> dict:
-    """
-    Escalates every still-`pending` ExtensionRequest that's crossed
-    `settings.EXTENSION_REQUEST_SLA_HOURS` with no Manager/Admin/Super
-    Admin decision yet -- see this module's docstring for the full
-    "why"/audience/repeat-cooldown rules. Returns a small summary dict,
-    mirroring tasks/notification_tasks.py's own tasks (mostly useful for
-    confirming the task ran during manual testing).
-    """
-    db = SessionLocal()
+    """Snapshot pending rows, release DB resources, then send the digest."""
     try:
-        candidates = (
-            db.query(models.ExtensionRequest)
-            .filter(models.ExtensionRequest.status == "pending")
-            .order_by(models.ExtensionRequest.created_at.asc())
-            .all()
-        )
-        due = [r for r in candidates if _due_for_escalation(r.created_at, r.sla_last_reminded_at, settings.EXTENSION_REQUEST_SLA_HOURS)]
-        if not due:
-            logger.info("escalate_pending_extension_requests: nothing past SLA -- nothing to send.")
-            return {"escalated_count": 0, "digest_emails_sent": 0}
-
-        recipients = _notification_recipients(db)
-        digest_sent = 0
-        if recipients:
-            lines = []
-            for r in due:
-                checkout = r.checkout
-                asset_name = models.checkout_display_name(checkout) if checkout else "Unknown Asset"
-                lines.append(
-                    f"  - {asset_name} · requested by {r.requested_by_label} · "
-                    f"pending {_hours_pending(r.created_at)}h · "
-                    f"requested new due date {r.requested_new_due_date.strftime('%Y-%m-%d')}"
+        with background_db_slot():
+            db = SessionLocal()
+            try:
+                candidates = (
+                    db.query(models.ExtensionRequest)
+                    .filter(models.ExtensionRequest.status == "pending")
+                    .order_by(models.ExtensionRequest.created_at.asc())
+                    .all()
                 )
-            ok = notification_service.send_email(
-                to=recipients,
-                subject=f"[{settings.SITE_NAME}] {len(due)} extension request(s) awaiting decision",
-                body=(
-                    f"The following extension requests have been pending for over "
-                    f"{settings.EXTENSION_REQUEST_SLA_HOURS:g} hour(s) with no decision:\n\n"
-                    + "\n".join(lines)
-                    + "\n\nDecide them from the Extension Requests panel."
-                ),
-            )
-            if ok:
-                digest_sent = 1
+                due = [r for r in candidates if _due_for_escalation(
+                    r.created_at, r.sla_last_reminded_at, settings.EXTENSION_REQUEST_SLA_HOURS
+                )]
+                if not due:
+                    logger.info("escalate_pending_extension_requests: nothing past SLA -- nothing to send.")
+                    return {"escalated_count": 0, "digest_emails_sent": 0}
 
-        now = utc_now()
-        for r in due:
-            r.sla_last_reminded_at = now
-        db.commit()
+                recipients = _notification_recipients(db)
+                lines = []
+                for r in due:
+                    checkout = r.checkout
+                    asset_name = models.checkout_display_name(checkout) if checkout else "Unknown Asset"
+                    lines.append(
+                        f"  - {asset_name} · requested by {r.requested_by_label} · "
+                        f"pending {_hours_pending(r.created_at)}h · "
+                        f"requested new due date {r.requested_new_due_date.strftime('%Y-%m-%d')}"
+                    )
+                digest = None
+                if recipients:
+                    digest = {
+                        "to": recipients,
+                        "subject": f"[{settings.SITE_NAME}] {len(due)} extension request(s) awaiting decision",
+                        "body": (
+                            f"The following extension requests have been pending for over "
+                            f"{settings.EXTENSION_REQUEST_SLA_HOURS:g} hour(s) with no decision:\n\n"
+                            + "\n".join(lines)
+                            + "\n\nDecide them from the Extension Requests panel."
+                        ),
+                    }
+                due_ids = [r.id for r in due]
+            finally:
+                db.close()
+    except RuntimeError as exc:
+        logger.info("escalate_pending_extension_requests: background DB capacity busy; retrying")
+        raise self.retry(exc=exc, countdown=2)
 
-        logger.info(
-            "escalate_pending_extension_requests: done",
-            extra={"escalated_count": len(due), "digest_emails_sent": digest_sent},
-        )
-        return {"escalated_count": len(due), "digest_emails_sent": digest_sent}
-    finally:
-        db.close()
+    digest_sent = 1 if digest and notification_service.send_email(**digest) else 0
+
+    # Stamp only after the external email I/O has completed. This second,
+    # short DB lease is deliberately separate so SMTP latency never occupies
+    # the database connection or the background DB admission slot.
+    try:
+        with background_db_slot():
+            db = SessionLocal()
+            try:
+                now = utc_now()
+                rows = db.query(models.ExtensionRequest).filter(models.ExtensionRequest.id.in_(due_ids)).all()
+                for row in rows:
+                    row.sla_last_reminded_at = now
+                db.commit()
+            finally:
+                db.close()
+    except RuntimeError as exc:
+        logger.info("escalate_pending_extension_requests: DB stamp capacity busy; retrying")
+        raise self.retry(exc=exc, countdown=2)
+
+    logger.info("escalate_pending_extension_requests: done", extra={
+        "escalated_count": len(due_ids), "digest_emails_sent": digest_sent,
+    })
+    return {"escalated_count": len(due_ids), "digest_emails_sent": digest_sent}
 
 
-@celery_app.task(name="tasks.escalate_pending_quotations", bind=True)
+@celery_app.task(name="tasks.escalate_pending_quotations", bind=True, max_retries=5)
 def escalate_pending_quotations(self) -> dict:
-    """
-    Escalates every still-`submitted` Quotation that's crossed
-    `settings.QUOTATION_SLA_HOURS` with no Admin/Manager decision
-    (approve_quotation()) yet -- same shape/audience/repeat-cooldown
-    rules as escalate_pending_extension_requests() above, just for the
-    Quote-to-Checkout workflow instead of the due-date extension one.
-    Returns a small summary dict for manual-testing confirmation.
-    """
-    db = SessionLocal()
+    """Snapshot pending rows, release DB resources, then send the digest."""
     try:
-        candidates = (
-            db.query(models.Quotation)
-            .filter(models.Quotation.status == "submitted")
-            .order_by(models.Quotation.submitted_at.asc())
-            .all()
-        )
-        due = [
-            q for q in candidates
-            if q.submitted_at is not None
-            and _due_for_escalation(q.submitted_at, q.sla_last_reminded_at, settings.QUOTATION_SLA_HOURS)
-        ]
-        if not due:
-            logger.info("escalate_pending_quotations: nothing past SLA -- nothing to send.")
-            return {"escalated_count": 0, "digest_emails_sent": 0}
-
-        recipients = _notification_recipients(db)
-        digest_sent = 0
-        if recipients:
-            lines = []
-            for q in due:
-                requester = q.user.name if q.user else "Unknown requester"
-                lines.append(
-                    f"  - {q.reference_number} · requested by {requester} · "
-                    f"pending {_hours_pending(q.submitted_at)}h"
+        with background_db_slot():
+            db = SessionLocal()
+            try:
+                candidates = (
+                    db.query(models.Quotation)
+                    .filter(models.Quotation.status == "submitted")
+                    .order_by(models.Quotation.submitted_at.asc())
+                    .all()
                 )
-            ok = notification_service.send_email(
-                to=recipients,
-                subject=f"[{settings.SITE_NAME}] {len(due)} quotation(s) awaiting decision",
-                body=(
-                    f"The following quotations have been awaiting review/approval for over "
-                    f"{settings.QUOTATION_SLA_HOURS:g} hour(s):\n\n"
-                    + "\n".join(lines)
-                    + "\n\nReview them from the Quotes tab."
-                ),
-            )
-            if ok:
-                digest_sent = 1
+                due = [
+                    q for q in candidates
+                    if q.submitted_at is not None
+                    and _due_for_escalation(q.submitted_at, q.sla_last_reminded_at, settings.QUOTATION_SLA_HOURS)
+                ]
+                if not due:
+                    logger.info("escalate_pending_quotations: nothing past SLA -- nothing to send.")
+                    return {"escalated_count": 0, "digest_emails_sent": 0}
 
-        now = utc_now()
-        for q in due:
-            q.sla_last_reminded_at = now
-        db.commit()
+                recipients = _notification_recipients(db)
+                lines = []
+                for q in due:
+                    requester = q.user.name if q.user else "Unknown requester"
+                    lines.append(
+                        f"  - {q.reference_number} · requested by {requester} · "
+                        f"pending {_hours_pending(q.submitted_at)}h"
+                    )
+                digest = None
+                if recipients:
+                    digest = {
+                        "to": recipients,
+                        "subject": f"[{settings.SITE_NAME}] {len(due)} quotation(s) awaiting decision",
+                        "body": (
+                            f"The following quotations have been awaiting review/approval for over "
+                            f"{settings.QUOTATION_SLA_HOURS:g} hour(s):\n\n"
+                            + "\n".join(lines)
+                            + "\n\nReview them from the Quotes tab."
+                        ),
+                    }
+                due_ids = [q.id for q in due]
+            finally:
+                db.close()
+    except RuntimeError as exc:
+        logger.info("escalate_pending_quotations: background DB capacity busy; retrying")
+        raise self.retry(exc=exc, countdown=2)
 
-        logger.info(
-            "escalate_pending_quotations: done",
-            extra={"escalated_count": len(due), "digest_emails_sent": digest_sent},
-        )
-        return {"escalated_count": len(due), "digest_emails_sent": digest_sent}
-    finally:
-        db.close()
+    digest_sent = 1 if digest and notification_service.send_email(**digest) else 0
+
+    try:
+        with background_db_slot():
+            db = SessionLocal()
+            try:
+                now = utc_now()
+                rows = db.query(models.Quotation).filter(models.Quotation.id.in_(due_ids)).all()
+                for row in rows:
+                    row.sla_last_reminded_at = now
+                db.commit()
+            finally:
+                db.close()
+    except RuntimeError as exc:
+        logger.info("escalate_pending_quotations: DB stamp capacity busy; retrying")
+        raise self.retry(exc=exc, countdown=2)
+
+    logger.info("escalate_pending_quotations: done", extra={
+        "escalated_count": len(due_ids), "digest_emails_sent": digest_sent,
+    })
+    return {"escalated_count": len(due_ids), "digest_emails_sent": digest_sent}
+

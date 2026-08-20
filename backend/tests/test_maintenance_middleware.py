@@ -131,3 +131,69 @@ def test_maintenance_disabled_does_not_block(client, db_session):
     response = client.get("/api/assets", headers=headers)
 
     assert response.status_code != 503
+
+
+def test_maintenance_db_check_is_inside_db_concurrency_gate(monkeypatch):
+    """A burst must be admitted through the DB gate before maintenance I/O."""
+    import asyncio
+    import time
+
+    from middleware.db_concurrency import DBConcurrencyMiddleware
+    from middleware.maintenance_mode import MaintenanceModeMiddleware
+
+    active = 0
+    peak = 0
+
+    def slow_status():
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        time.sleep(0.02)
+        active -= 1
+        return {"enabled": False, "message": "", "updated_at": None, "updated_by": None}
+
+    monkeypatch.setattr(maintenance_service, "get_cached_status", slow_status)
+
+    async def endpoint(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    app = DBConcurrencyMiddleware(MaintenanceModeMiddleware(endpoint), limit=2)
+
+    async def request():
+        scope = {"type": "http", "path": "/api/assets", "headers": []}
+        messages = []
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+        async def send(message):
+            messages.append(message)
+        await app(scope, receive, send)
+        return messages
+
+    async def run_all():
+        return await asyncio.gather(*[request() for _ in range(20)])
+
+    asyncio.run(run_all())
+    assert peak <= 2
+
+
+def test_main_registers_db_gate_after_maintenance_for_outer_execution_order():
+    import inspect
+    import main
+
+    source = inspect.getsource(main)
+    maintenance_pos = source.index("app.add_middleware(MaintenanceModeMiddleware)")
+    db_gate_pos = source.index("app.add_middleware(DBConcurrencyMiddleware)", maintenance_pos)
+    assert db_gate_pos > maintenance_pos
+
+
+def test_maintenance_cache_is_invalidated_after_control_update(db_session):
+    maintenance_service.invalidate_status_cache()
+    maintenance_service.update_status(db_session, True, "Release in progress", {"email": "superadmin"})
+    cached = maintenance_service.get_cached_status()
+    assert cached["enabled"] is True
+    assert cached["message"] == "Release in progress"
+
+    maintenance_service.update_status(db_session, False, "", {"email": "superadmin"})
+    cached = maintenance_service.get_cached_status()
+    assert cached["enabled"] is False

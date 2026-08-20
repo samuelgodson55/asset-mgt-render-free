@@ -165,6 +165,7 @@ jobs:
       TF_VAR_deploy_status_user: ${{ vars.DEPLOY_STATUS_USER || 'admin' }}
       TF_VAR_deploy_status_password_hash: ${{ secrets.DEPLOY_STATUS_PASSWORD_HASH }}
       TF_VAR_notifications_enabled: ${{ vars.NOTIFICATIONS_ENABLED || 'true' }}
+      TF_VAR_use_pgbouncer: ${{ vars.USE_PGBOUNCER != 'false' }}
       TF_VAR_smtp_host: ${{ secrets.SMTP_HOST }}
       TF_VAR_smtp_username: ${{ secrets.SMTP_USERNAME }}
       TF_VAR_smtp_password: ${{ secrets.SMTP_PASSWORD }}

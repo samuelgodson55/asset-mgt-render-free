@@ -166,20 +166,11 @@ variable "postgres_db" {
   default     = "asset_db"
 }
 
-variable "errorbeacon_ingest_api_key" {
-  description = "API key used by application producers to submit events to ErrorBeacon."
+variable "errorbeacon_api_key" {
+  description = "Shared API key used by the application to authenticate to ErrorBeacon. Generate with: python -c \"import secrets; print(secrets.token_urlsafe(32))\""
   type        = string
   sensitive   = true
-  default     = ""
 }
-
-variable "errorbeacon_admin_api_key" {
-  description = "API key used by operators and management endpoints to read/control ErrorBeacon."
-  type        = string
-  sensitive   = true
-  default     = ""
-}
-
 
 variable "errorbeacon_telegram_bot_token" {
   description = "Telegram Bot API token used by ErrorBeacon."
@@ -204,24 +195,6 @@ variable "errorbeacon_gemini_api_key" {
   type        = string
   sensitive   = true
   default     = ""
-}
-variable "errorbeacon_groq_api_key" {
-  type      = string
-  sensitive = true
-  default   = ""
-}
-variable "errorbeacon_groq_model" {
-  type    = string
-  default = "llama-3.1-8b-instant"
-}
-variable "errorbeacon_openrouter_api_key" {
-  type      = string
-  sensitive = true
-  default   = ""
-}
-variable "errorbeacon_openrouter_model" {
-  type    = string
-  default = "openrouter/free"
 }
 
 variable "errorbeacon_image" {
@@ -275,10 +248,16 @@ variable "enable_api_docs" {
   default     = false
 }
 
+variable "use_pgbouncer" {
+  description = "Route application DB traffic through the VM-local PgBouncer service. Defaults true; set false only as a deliberate break-glass fallback."
+  type        = bool
+  default     = true
+}
+
 variable "notifications_enabled" {
   description = "Turn on SMTP email notifications (extension requests, overdue/due-soon digests)."
   type        = bool
-  default     = true
+  default     = false
 }
 
 variable "smtp_host" {

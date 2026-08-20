@@ -30,10 +30,10 @@
       "value": "REPLACE_ME_OR_PASS_VIA_CLI"
     },
     "postgresSkuName": {
-      "value": "Standard_B1ms"
+      "value": "Standard_D2s_v3"
     },
     "postgresSkuTier": {
-      "value": "Burstable"
+      "value": "GeneralPurpose"
     },
     "postgresStorageGb": {
       "value": 32
@@ -70,6 +70,9 @@
     },
     "backendMaxReplicas": {
       "value": 3
+    },
+    "usePgbouncer": {
+      "value": true
     },
     "frontendMinReplicas": {
       "value": 0

@@ -84,6 +84,7 @@ from middleware.security_headers import SecurityHeadersMiddleware
 from middleware.clean_urls import CleanUrlsMiddleware
 from middleware.spa_fallback import SpaFallbackMiddleware
 from middleware.maintenance_mode import MaintenanceModeMiddleware
+from middleware.db_concurrency import DBConcurrencyMiddleware
 
 from api.auth_api import router as auth_router
 from api.assets_api import router as assets_router
@@ -350,6 +351,12 @@ app.add_middleware(
 # Maintenance is added before RequestContext because middleware executes in reverse registration order:
 # RequestContext must remain outside it so planned 503 responses still receive X-Request-ID.
 app.add_middleware(MaintenanceModeMiddleware)
+# DBConcurrencyMiddleware MUST be registered after MaintenanceModeMiddleware
+# so Starlette's reverse registration order makes it the outer DB admission
+# gate. MaintenanceModeMiddleware performs a synchronous DB-backed check
+# (dispatched to a worker thread), and that check must consume the same
+# per-process DB budget as the route it protects.
+app.add_middleware(DBConcurrencyMiddleware)
 app.add_middleware(RequestContextMiddleware)
 
 # Frontend is served by an nginx container on port 8080 in docker-compose.

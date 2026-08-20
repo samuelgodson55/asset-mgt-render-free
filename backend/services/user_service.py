@@ -957,6 +957,13 @@ def reset_user_password(db: Session, user_id: int, new_password: str, admin_pass
     target.is_verified = True
     target.failed_login_attempts = 0
     target.locked_until = None
+    # SECURITY: revoke any session already live for the target account --
+    # same reasoning as services/auth_service.py's update_password()/
+    # confirm_password_reset() (see models.py's User.credentials_changed_at
+    # docstring). An Admin-initiated reset is often triggered BECAUSE an
+    # account is believed compromised, so the old session must not be
+    # allowed to keep working after this.
+    target.credentials_changed_at = utc_now()
 
     db.add(models.AuditLog(
         operator=admin_user["email"], action="PASSWORD_RESET_BY_ADMIN", target_type="User", target_id=user_id,

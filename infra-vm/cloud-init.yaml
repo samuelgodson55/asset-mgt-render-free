@@ -134,21 +134,16 @@ write_files:
       # host/port is expected) if substituted in unescaped. See
       # docker-compose.vm.yml's DATABASE_URL comment for the full story.
       DATABASE_URL=postgresql://${postgres_user_urlencoded}:${postgres_password_urlencoded}@db:5432/${postgres_db}
+      USE_PGBOUNCER=${use_pgbouncer}
 
       JWT_SECRET_KEY=${jwt_secret_key}
-      ERRORBEACON_INGEST_API_KEY=${errorbeacon_ingest_api_key}
-      ERRORBEACON_ADMIN_API_KEY=${errorbeacon_admin_api_key}
+      ERRORBEACON_API_KEY=${errorbeacon_api_key}
       ERRORBEACON_IMAGE=${errorbeacon_image}
       ERRORBEACON_IMAGE_TAG=${initial_image_tag}
       TELEGRAM_BOT_TOKEN=${errorbeacon_telegram_bot_token}
       TELEGRAM_CHAT_ID=${errorbeacon_telegram_chat_id}
       TELEGRAM_THREAD_ID=${errorbeacon_telegram_thread_id}
       GEMINI_API_KEY=${errorbeacon_gemini_api_key}
-      GROQ_API_KEY=${errorbeacon_groq_api_key}
-      GROQ_MODEL=${errorbeacon_groq_model}
-      OPENROUTER_API_KEY=${errorbeacon_openrouter_api_key}
-      OPENROUTER_MODEL=${errorbeacon_openrouter_model}
-      OPENROUTER_SITE_URL=https://${domain}
       ERRORBEACON_APP=${errorbeacon_app}
       JWT_ALGORITHM=HS256
       JWT_EXPIRY_HOURS=12

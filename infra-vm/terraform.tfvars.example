@@ -58,7 +58,7 @@ root_admin_bootstrap_password = "" # leave blank to auto-generate; see backend l
 site_name                     = "Snipe-IT Lite"
 enable_api_docs               = false
 
-notifications_enabled     = true
+notifications_enabled     = false
 smtp_host                  = ""
 smtp_port                  = 587
 smtp_username              = ""
@@ -112,3 +112,6 @@ snapshot_retention_days    = 7
 tags = {
   project = "snipeit-lite"
 }
+
+# Route application DB traffic through the VM-local PgBouncer.
+use_pgbouncer = true

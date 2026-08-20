@@ -127,6 +127,18 @@ ALLOWED_ONLY_IN_COMPOSE = {
         # typical personal-Drive use case)". Only Mode 1 (OAuth,
         # BACKUP_GDRIVE_OAUTH_*) is wired through on the ACA path.
         "BACKUP_GDRIVE_CREDENTIALS_JSON",
+        # Local/VM-only pooler service hostname -- main.bicep's backendApp
+        # deliberately leaves this unset (see config.py's PGBOUNCER_HOST
+        # comment: Azure-managed PgBouncer reuses the Postgres hostname
+        # itself, there's no separate `pgbouncer` service to name on ACA).
+        "PGBOUNCER_HOST",
+        # Self-hosted PgBouncer's split pool settings remain Compose-only.
+        # Azure Managed PgBouncer uses the shared PGBOUNCER_SERVER_POOL_SIZE
+        # key instead, because it does not expose the same reserve-pool
+        # abstraction.
+        "PGBOUNCER_DEFAULT_POOL_SIZE",
+        "PGBOUNCER_RESERVE_POOL_SIZE",
+        "PGBOUNCER_SERVER_POOL_SIZE",
     },
     "frontend": {
         # nginx/docker-entrypoint.d/15-detect-resolver-ip.sh reads its own

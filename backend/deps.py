@@ -108,6 +108,41 @@ def resolve_user_from_token(token: str, db: Session) -> dict:
     if not db_user or db_user.is_deleted or not db_user.is_active:
         raise HTTPException(status_code=401, detail="This account is no longer active. Please log in again.")
 
+    # SECURITY: per-user counterpart to the AUTH_EPOCH check above -- a
+    # password change (self-service, "forgot password" email reset, or an
+    # Admin/Super Admin resetting someone else's password -- see
+    # models.py's User.credentials_changed_at docstring for the full list
+    # of call sites that stamp this) must immediately revoke any session
+    # issued BEFORE that change, not just block new logins with the old
+    # password. Without this, a still-valid stolen JWT/cookie would keep
+    # working against every protected route right through a password
+    # change that was supposed to shut it out, until the token happened
+    # to naturally expire up to JWT_EXPIRY_HOURS later. Same integer-
+    # truncation floor as the AUTH_EPOCH comparison above, for the same
+    # reason: `iat` is whole-seconds, so a same-second change must not be
+    # wrongly treated as "before" the token it's meant to invalidate.
+    if db_user.credentials_changed_at is not None:
+        changed_at_floor = int(db_user.credentials_changed_at.timestamp())
+        # NOTE: "<=", not "<" -- unlike the AUTH_EPOCH comparison above
+        # (which prefers NOT rejecting a token minted in the same second
+        # as the epoch, since that epoch only ever moves after an
+        # infrequent restore), this check would rather over-invalidate a
+        # same-second token than under-invalidate one: `iat` is an
+        # integer Unix timestamp (whole seconds), so a token issued a
+        # few hundred milliseconds before this exact password change can
+        # legitimately floor to the SAME second as `changed_at_floor`.
+        # Using "<" would let that token silently survive the very
+        # change meant to revoke it -- exactly the gap this whole check
+        # exists to close. The cost of "<=" is a vanishingly rare, purely
+        # cosmetic edge case (a brand new login completing in that same
+        # wall-clock second would also need to log in again), which is
+        # the correct side to err on for a security control.
+        if payload["iat"] <= changed_at_floor:
+            raise HTTPException(
+                status_code=401,
+                detail="Your password was recently changed. Please log in again.",
+            )
+
     # Same principle as the deactivation check above, applied to role
     # changes: the JWT's "role"/"department" claims are baked in at login
     # time and would otherwise stay stale -- keep working at the OLD

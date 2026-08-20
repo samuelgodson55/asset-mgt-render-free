@@ -11,7 +11,7 @@
 //     managed service, not a Container App, because Azure Files (the volume
 //     type Container Apps uses for persistent storage) doesn't support the
 //     POSIX permissions Postgres's `initdb` requires on its data directory.
-//     Smallest Burstable SKU by default (see `postgresSkuName`).
+//     Small General Purpose SKU by default so Azure-managed PgBouncer is available (see `postgresSkuName`).
 //   - 4 Container Apps, all in ONE environment (multiple environments hit a
 //     per-subscription quota on Free Trial/starter subscriptions):
 //       `redis`    -- redis:7-alpine, internal-only, 1 replica, no persistence
@@ -159,12 +159,12 @@ param postgresPassword string
 @description('Administrator username for the Flexible Server. Avoid reserved/disallowed names (azure_superuser, azuresu, admin, administrator, root, guest, public, or anything starting with pg_).')
 param postgresUsername string = 'snipeit'
 
-@description('Flexible Server compute SKU. Standard_B1ms (1 vCore/2GiB, Burstable) is the smallest generally-available tier and the default here for cost. Standard_B2s (2 vCore/4GiB) is the next step up if B1ms\'s burst credits get exhausted under sustained load (see DEPLOYMENT.md\'s Cost section).')
-param postgresSkuName string = 'Standard_B1ms'
+@description('Flexible Server compute SKU. Standard_D2s_v3 (2 vCores/8GiB, General Purpose) is the default because Azure managed PgBouncer is supported on General Purpose and Memory Optimized tiers, not Burstable. Change this deliberately through the GitHub POSTGRES_SKU_NAME variable if your environment requires another supported SKU.')
+param postgresSkuName string = 'Standard_D2s_v3'
 
-@description('Flexible Server compute tier matching `postgresSkuName`. Keep this "Burstable" if you change the SKU to another B-series size; only change to "GeneralPurpose"/"MemoryOptimized" if you also change the SKU to a matching D/E-series name.')
+@description('Flexible Server compute tier matching `postgresSkuName`. PgBouncer requires GeneralPurpose or MemoryOptimized when USE_PGBOUNCER=true.')
 @allowed(['Burstable', 'GeneralPurpose', 'MemoryOptimized'])
-param postgresSkuTier string = 'Burstable'
+param postgresSkuTier string = 'GeneralPurpose'
 
 @description('Flexible Server storage size in GiB. 32 is the smallest size Azure currently offers for this SKU family. Storage can only be INCREASED later, never decreased, so don\'t over-provision "just in case" -- start at the minimum and grow if you actually need to.')
 @minValue(32)
@@ -201,6 +201,44 @@ param backendMinReplicas int = environmentName == 'prod' ? 1 : 0
 
 @description('Maximum `backend` replicas under load. NOTE: `backend` embeds Celery worker+beat in-process (see RUN_EMBEDDED_WORKER below) since there is no separate worker/beat Container App in this cost-optimized layout. That is safe at any replica count: celery_app.py configures RedBeat as the Beat scheduler, which keeps a distributed lock in Redis so only one replica is ever the active scheduler at a time (automatic failover if that replica dies) -- no per-replica configuration needed here.')
 param backendMaxReplicas int = 3
+@description('Route application DB traffic through the supported pooler for this deployment. For ACA with Azure Flexible Server this enables Azure managed PgBouncer on port 6432; for local/VM Compose the service-level pooler is used. The default is true; set false only as a deliberate break-glass fallback.')
+param usePgbouncer bool = true
+
+@description('Optional Azure Managed PgBouncer server-side pool size per user/database pair. Set to 0 to auto-derive a conservative value from the Azure PostgreSQL compute SKU (4x vCores, within Azure's recommended 2-5x-vCore starting range). The application also applies a separate safety margin and live max_connections cap. Set an explicit value only when deliberately tuning PgBouncer.')
+@minValue(0)
+param pgbouncerServerPoolSize int = 0
+
+// Azure's own guidance recommends starting PgBouncer conservatively at roughly
+// 2-5x vCores and then tuning from real workload metrics. Keep the default at
+// 4x vCores, rather than assuming Azure's generic default_pool_size=50. This
+// mapping covers the supported SKUs used by this deployment; an unknown SKU
+// deliberately falls back to 2 vCores so a new/renamed SKU cannot silently
+// create an oversized pool.
+var postgresSkuVcores = {
+  Standard_B1ms: 1
+  Standard_B2s: 2
+  Standard_B2ms: 2
+  Standard_B4ms: 4
+  Standard_B8ms: 8
+  Standard_D2s_v3: 2
+  Standard_D4s_v3: 4
+  Standard_D8s_v3: 8
+  Standard_D16s_v3: 16
+  Standard_D32s_v3: 32
+  Standard_D48s_v3: 48
+  Standard_D64s_v3: 64
+  Standard_E2s_v3: 2
+  Standard_E4s_v3: 4
+  Standard_E8s_v3: 8
+  Standard_E16s_v3: 16
+  Standard_E20s_v3: 20
+  Standard_E32s_v3: 32
+  Standard_E48s_v3: 48
+  Standard_E64s_v3: 64
+}
+var detectedPostgresVcores = contains(postgresSkuVcores, postgresSkuName) ? int(postgresSkuVcores[postgresSkuName]) : 2
+var autoPgbouncerServerPoolSize = max(1, detectedPostgresVcores * 4)
+var effectivePgbouncerServerPoolSize = pgbouncerServerPoolSize > 0 ? pgbouncerServerPoolSize : autoPgbouncerServerPoolSize
 
 @description('Minimum `frontend` replicas. 0 = scale-to-zero (cold start on first request after idle -- static-file + proxy responses are fast, so it\'s much shorter than `backend`\'s, but not zero). 1 = always warm, no cold start, small extra cost. `infra-deploy.yml` passes 1 here for production and 0 for staging -- see that workflow\'s "Resolve replica floors" step -- so this parameter\'s own default only applies to a manual/direct bicep deploy that skips the pipeline.')
 param frontendMinReplicas int = environmentName == 'prod' ? 1 : 0
@@ -860,6 +898,44 @@ resource postgresServer 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' =
   }
 }
 
+// Azure-managed PgBouncer. It runs with the Flexible Server and exposes the
+// same hostname on port 6432; there is intentionally no ACA PgBouncer sidecar.
+// The resource is only created when the application switch is enabled.
+resource postgresPgBouncerEnabled 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2022-12-01' = if (usePgbouncer) {
+  name: 'pgbouncer.enabled'
+  parent: postgresServer
+  properties: {
+    source: 'user-override'
+    value: 'true'
+  }
+}
+
+// Keep psycopg2 startup behavior compatible with Azure PgBouncer's transaction
+// pooling. PostgreSQL clients commonly send extra_float_digits in their startup
+// packet; Azure supports explicitly allowing PgBouncer to ignore it.
+// Make the managed PgBouncer budget explicit rather than pretending Azure has
+// the self-hosted reserve-pool model used by docker-compose. The backend receives
+// the same value through PGBOUNCER_SERVER_POOL_SIZE.
+resource postgresPgBouncerDefaultPoolSize 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2022-12-01' = if (usePgbouncer) {
+  name: 'pgbouncer.default_pool_size'
+  parent: postgresServer
+  dependsOn: [ postgresPgBouncerEnabled ]
+  properties: {
+    source: 'user-override'
+    value: string(effectivePgbouncerServerPoolSize)
+  }
+}
+
+resource postgresPgBouncerIgnoreStartup 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2022-12-01' = if (usePgbouncer) {
+  name: 'pgbouncer.ignore_startup_parameters'
+  parent: postgresServer
+  dependsOn: [ postgresPgBouncerEnabled ]
+  properties: {
+    source: 'user-override'
+    value: 'extra_float_digits'
+  }
+}
+
 // "Allow public access from Azure services" -- the well-known 0.0.0.0/0.0.0.0
 // magic range Azure recognizes specifically for this purpose (it does NOT
 // open the server to the public internet at large; only to Azure's own
@@ -1028,6 +1104,9 @@ var sharedEnv = [
   { name: 'ERRORBEACON_TRUST_PROXY_HEADERS', value: 'false' }
   // Embedded Celery worker/beat uses this to avoid broker connection retry loops.
   { name: 'CELERY_BROKER_CONNECTION_MAX_RETRIES', value: 'none' }
+  // Reserve one deployment-wide PgBouncer connection for background Celery/Beat DB work.
+  { name: 'DB_BACKGROUND_CONNECTION_RESERVE', value: '1' }
+  { name: 'DB_BACKGROUND_CONCURRENCY_LIMIT', value: '1' }
   { name: 'JWT_ALGORITHM', value: 'HS256' }
   { name: 'JWT_EXPIRY_HOURS', value: '12' }
   { name: 'SITE_NAME', value: siteName }
@@ -1182,6 +1261,16 @@ resource backendApp 'Microsoft.App/containerApps@2024-03-01' = {
             // celery_app.py's RedBeat config, which keeps this safe even
             // as `backend` scales to more than one replica).
             { name: 'RUN_EMBEDDED_WORKER', value: 'true' }
+            { name: 'USE_PGBOUNCER', value: string(usePgbouncer) }
+            { name: 'PGBOUNCER_SERVER_POOL_SIZE', value: string(effectivePgbouncerServerPoolSize) }
+            { name: 'PGBOUNCER_SAFETY_MARGIN_PERCENT', value: '10' }
+            // Azure Managed PgBouncer does not expose the self-hosted
+            // reserve-pool abstraction. The explicit server-pool value above
+            // is the single source of truth for DB pool/admission sizing.
+            // The managed pool's authoritative server-side budget is
+            // passed explicitly above. The self-hosted default/reserve
+            // settings remain unused on ACA because Azure does not expose
+            // the same reserve-pool abstraction.
             // No SERVE_FRONTEND -- `frontend` serves the static build,
             // `backend` is API-only. CORS_ORIGINS kept as defense in depth.
             { name: 'CORS_ORIGINS', value: publicOrigin }
@@ -1238,6 +1327,8 @@ resource backendApp 'Microsoft.App/containerApps@2024-03-01' = {
     redisApp
     backupStorage
     exportStorage
+    postgresPgBouncerEnabled
+    postgresPgBouncerIgnoreStartup
   ]
 }
 
@@ -1548,7 +1639,7 @@ resource migrateJob 'Microsoft.App/jobs@2024-03-01' = {
           image: backendImage
           command: ['alembic', 'upgrade', 'head']
           resources: { cpu: json('0.5'), memory: '1Gi' }
-          env: concat(sharedEnv, sharedSecretEnvRefs)
+          env: concat(sharedEnv, sharedSecretEnvRefs, [ { name: 'USE_PGBOUNCER', value: 'false' } ])
         }
       ]
     }

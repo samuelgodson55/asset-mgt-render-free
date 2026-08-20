@@ -166,7 +166,12 @@ def _notify_quotation_recipient(db: Session, quotation: "models.Quotation", acto
     # a still-draft quote assigned before Submit -- see `_display_reference()`'s
     # own docstring.
     if settings.SEND_QUOTATION_RECIPIENT_EMAILS:
-        notification_service.send_email(recipient.email, f"Quotation {_display_reference(quotation)}", message)
+        notification_service.enqueue_email_after_commit(
+            db=db,
+            to=recipient.email,
+            subject=f"Quotation {_display_reference(quotation)}",
+            body=message,
+        )
 
 
 def _money(value: Decimal) -> float:

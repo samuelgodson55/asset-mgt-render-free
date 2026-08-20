@@ -553,6 +553,12 @@ def update_password(db: Session, req: PasswordUpdateRequest, current_user: dict)
     # lockout state here too, same as a successful login does.
     target.failed_login_attempts = 0
     target.locked_until = None
+    # SECURITY: revoke every session already issued for this account --
+    # see models.py's User.credentials_changed_at docstring and deps.py's
+    # resolve_user_from_token() for how this is enforced. Without this, a
+    # still-valid stolen cookie/token would keep working right through
+    # this password change until it happened to naturally expire.
+    target.credentials_changed_at = utc_now()
     db.commit()
     logger.info("Password updated", extra={"target_user_id": target.id, "changed_by": current_user["email"]})
     return {"message": "Password updated successfully."}
@@ -629,7 +635,8 @@ def request_password_reset(db: Session, req: ForgotPasswordRequest, frontend_bas
     db.commit()
 
     reset_link = f"{frontend_base_url.rstrip('/')}/?reset_token={plaintext_token}"
-    sent = notification_service.send_email(
+    notification_service.enqueue_email_after_commit(
+        db=db,
         to=user.email,
         subject=f"Reset your {settings.SITE_NAME} password",
         body=(
@@ -640,6 +647,9 @@ def request_password_reset(db: Session, req: ForgotPasswordRequest, frontend_bas
             "If you didn't request this, you can safely ignore this email -- your password will not be changed.\n"
         ),
     )
+    # Delivery is now queued after the commit; a broker/email outage cannot
+    # hold this request's PostgreSQL connection open.
+    sent = None
     # send_email() is fail-soft by design (see notification_service.py's
     # module docstring) -- a misconfigured/unreachable SMTP server here
     # must not turn into a 500, and must not reveal anything different to
@@ -688,6 +698,11 @@ def confirm_password_reset(db: Session, req: ResetPasswordRequest) -> dict:
     # locked-out account -- same reasoning as update_password() above.
     user.failed_login_attempts = 0
     user.locked_until = None
+    # SECURITY: same session-revocation reasoning as update_password()
+    # above -- a "forgot password" reset must invalidate whatever session
+    # was live before it, e.g. one belonging to whoever locked the real
+    # owner out in the first place.
+    user.credentials_changed_at = now
     matched.used_at = now
     db.commit()
     logger.info("Password reset completed", extra={"user_id": user.id})
@@ -824,11 +839,10 @@ def update_identity(db: Session, req: IdentityUpdateRequest, current_user: dict)
         details="Updated own account details.",
     ))
     db.commit()
-    db.refresh(target)
     logger.info("Identity updated", extra={"user_id": target.id})
 
     if changes:
-        _notify_identity_change(target, previous_email, changes)
+        _notify_identity_change(target, previous_email, changes, db=db)
 
     return {
         "message": "Profile updated successfully.",
@@ -837,7 +851,7 @@ def update_identity(db: Session, req: IdentityUpdateRequest, current_user: dict)
     }
 
 
-def _notify_identity_change(user: "models.User", previous_email: str, changes: list[str]) -> None:
+def _notify_identity_change(user: "models.User", previous_email: str, changes: list[str], db: Session | None = None) -> None:
     """
     Fires after update_identity() commits a real change to name/username/
     email -- a plain security notification, same fail-soft pattern as
@@ -862,7 +876,14 @@ def _notify_identity_change(user: "models.User", previous_email: str, changes: l
         "login page and contact your administrator.\n"
     )
     recipients = {previous_email, user.email}
-    sent = notification_service.send_email(
-        to=list(recipients), subject=f"Your {settings.SITE_NAME} account details were updated", body=body,
-    )
-    logger.info("Identity change notification sent", extra={"user_id": user.id, "email_sent": sent})
+    if db is not None:
+        notification_service.enqueue_email_after_commit(
+            db=db, to=list(recipients),
+            subject=f"Your {settings.SITE_NAME} account details were updated", body=body,
+        )
+        sent = None
+    else:
+        sent = notification_service.send_email(
+            to=list(recipients), subject=f"Your {settings.SITE_NAME} account details were updated", body=body,
+        )
+    logger.info("Identity change notification queued", extra={"user_id": user.id, "email_sent": sent})
