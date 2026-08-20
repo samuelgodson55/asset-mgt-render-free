@@ -607,6 +607,14 @@ export interface ReportsDashboard {
 
 
 export interface DbPoolDiagnostics {
+  database_route?: {
+    configured: boolean;
+    in_use: boolean;
+    host: string | null;
+    port: number | null;
+    expected_pooler_host?: string | null;
+    expected_pooler_port?: number | null;
+  };
   sqlalchemy_pool: {
     pool_size?: number;
     checked_out?: number;
@@ -614,6 +622,8 @@ export interface DbPoolDiagnostics {
     overflow?: number;
   } | null;
   pgbouncer_pool: {
+    reachable?: boolean;
+    in_use?: boolean;
     cl_active?: number;
     cl_waiting?: number;
     sv_active?: number;
@@ -622,6 +632,10 @@ export interface DbPoolDiagnostics {
     maxwait_seconds?: number;
     avg_query_time_us?: number;
     avg_wait_time_us?: number;
+    pool_mode?: string | null;
+    max_client_conn?: number | null;
+    default_pool_size?: number | null;
+    reserve_pool_size?: number | null;
   } | null;
   postgres_activity: {
     max_connections?: number;
