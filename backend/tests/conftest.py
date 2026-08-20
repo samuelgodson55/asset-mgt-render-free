@@ -160,6 +160,42 @@ def db_engine(tmp_path, monkeypatch):
     test_engine.dispose()
 
 
+@pytest.fixture(autouse=True)
+def _reset_maintenance_status_cache():
+    """
+    services/maintenance_service.py's get_cached_status() deliberately
+    keeps a short-TTL (1s), PROCESS-GLOBAL cache -- see that module's own
+    docstring: it's there so ordinary API traffic in production doesn't
+    hit the database on every single request, and it's shared across
+    requests/threads on purpose.
+
+    That's exactly the kind of state `db_engine` above does NOT reset
+    between tests -- it swaps `database.engine`/`SessionLocal` for a
+    brand-new SQLite file per test, but this cache lives in
+    maintenance_service's own module globals, untouched by that swap. A
+    test that enables maintenance mode (e.g.
+    test_maintenance_middleware.py's
+    test_deactivated_super_admin_token_does_not_bypass_gate) populates
+    this cache from ITS database; if the very next test happens to run
+    within that 1-second TTL (routine on a fast CI runner -- 300+ tests
+    in ~2 minutes averages well under a second each), it can inherit that
+    stale "enabled: True" reading from a SQLite file that no longer even
+    exists by the time it's read, and fail for a reason that has nothing
+    to do with what it's actually testing (see
+    test_maintenance_disabled_does_not_block, which flaked exactly this
+    way in CI once the suite got fast/dense enough to trigger it).
+
+    Invalidating this cache before AND after every test keeps it scoped
+    to one test's data, the same guarantee `db_engine` already gives
+    every other piece of state.
+    """
+    import services.maintenance_service as maintenance_service
+
+    maintenance_service.invalidate_status_cache()
+    yield
+    maintenance_service.invalidate_status_cache()
+
+
 @pytest.fixture()
 def db_session(db_engine):
     """A single direct DB session for a test to set up fixtures or assert
