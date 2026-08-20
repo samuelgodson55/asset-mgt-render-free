@@ -27,7 +27,9 @@ app with no Django-style "installed apps" list to scan.
 """
 
 import datetime
+import time
 
+import redis
 from celery import Celery
 from celery.schedules import crontab
 from celery.signals import beat_init, worker_process_init, task_failure
@@ -42,6 +44,62 @@ from logging_config import configure_logging
 # producer): `configure_logging()` clears/replaces handlers rather than
 # stacking them, so it never causes duplicate log lines either way.
 configure_logging(settings)
+
+
+# ---------------------------------------------------------------------------
+# SHARED REDIS SOCKET TIMEOUTS
+# ---------------------------------------------------------------------------
+# `broker_transport_options`, `result_backend_transport_options`, and
+# `redbeat_redis_options` below each configure a SEPARATE Redis client
+# (broker connection, result-backend connection, RedBeat's own connection)
+# but all exist for the exact same reason: bound how long any one of them
+# can spend retrying an unreachable/slow Redis before giving up, instead of
+# Celery/RedBeat's own much longer defaults silently burning CPU or hanging
+# a request (see the "BUG FIX (Render free-tier cold start)" comment below
+# for the original incident this fixed). Naming that ONE tuple of values
+# here, instead of hand-rolling the same `{"socket_connect_timeout": 2,
+# "socket_timeout": 2}` dict three separate times, means a future timeout
+# tuning pass only has one spot to touch instead of three that can quietly
+# drift out of sync. `check_redis_health()` below (GET /health/dependencies
+# in main.py) reuses it too, for the same reason.
+_REDIS_SOCKET_TIMEOUTS = {
+    "socket_connect_timeout": 2,
+    "socket_timeout": 2,
+}
+
+
+def check_redis_health() -> dict:
+    """
+    Best-effort, bounded-timeout PING against settings.REDIS_URL -- powers
+    GET /health/dependencies (main.py). The rest of this app already
+    tolerates a down/slow Redis gracefully wherever it's optional (the
+    rate limiter and db_admission fail OPEN; the export endpoints in
+    api/audit_api.py now fail with a clean 503 instead of a bare 500) --
+    but until now, the ONLY way to actually learn Redis was struggling was
+    to wait for one of those degradations to happen on a real request.
+    This gives infra/monitoring (and, if the frontend chooses to poll it,
+    the "Export" button) a proactive, cheap signal instead.
+
+    Opens its own short-lived client rather than reusing Celery's broker
+    connection pool -- a dependency health check should never risk being
+    starved by, or interfering with, whatever the app's actual Celery
+    traffic is doing. Uses the SAME bounded `_REDIS_SOCKET_TIMEOUTS` as
+    every other Redis client in this app, so a single unresponsive
+    dependency check can never itself hang this endpoint any longer than
+    a normal request already tolerates.
+    """
+    client = redis.Redis.from_url(settings.REDIS_URL, **_REDIS_SOCKET_TIMEOUTS)
+    started = time.monotonic()
+    try:
+        client.ping()
+        return {"ok": True, "latency_ms": round((time.monotonic() - started) * 1000, 1), "error": None}
+    except redis.RedisError as exc:
+        return {"ok": False, "latency_ms": None, "error": str(exc)}
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
 
 
 
@@ -86,16 +144,32 @@ celery_app.conf.update(
     # `broker_connection_retry_on_startup`/`broker_connection_max_retries`
     # bound the total number of attempts so this settles (successfully
     # or not) in seconds rather than competing for CPU for minutes.
-    broker_transport_options={
-        "socket_connect_timeout": 2,
-        "socket_timeout": 2,
-    },
+    broker_transport_options=dict(_REDIS_SOCKET_TIMEOUTS),
     broker_connection_retry_on_startup=True,
     broker_connection_retry=True,
     broker_connection_max_retries=(
         None if __import__('os').environ.get('CELERY_BROKER_CONNECTION_MAX_RETRIES', '5').strip().lower() in {'none', 'infinite', 'inf'}
         else int(__import__('os').environ.get('CELERY_BROKER_CONNECTION_MAX_RETRIES', '5'))
     ),
+    # Same bounded-retry rationale as broker_transport_options above, but for
+    # the Redis RESULT backend (task state/return-value storage), which is a
+    # separate client with its own defaults -- celery/backends/redis.py's
+    # pubsub reconnect otherwise retries up to 20 times with growing backoff
+    # against an unreachable Redis before giving up, which can hang whoever
+    # is waiting on a task's result (or a background dispatch thread that
+    # merely triggered result tracking as a side effect of apply_async) for
+    # 20+ seconds. Bounding socket timeouts and the retry policy here keeps
+    # that failure fast instead of silent-and-slow.
+    result_backend_transport_options={
+        **_REDIS_SOCKET_TIMEOUTS,
+        "retry_policy": {
+            "timeout": 5.0,
+            "max_retries": 3,
+            "interval_start": 0,
+            "interval_step": 0.5,
+            "interval_max": 1,
+        },
+    },
     # Store each task's return value (or exception) for
     # EXPORT_RESULT_TTL_SECONDS after it finishes, then let Redis expire it
     # automatically -- we don't want finished export files (which can
@@ -141,10 +215,7 @@ celery_app.conf.update(
     # future RedBeat release. Keeping the same bounded Redis timeouts here
     # preserves the existing startup/retry behavior without relying on the
     # deprecated fallback path.
-    redbeat_redis_options={
-        "socket_connect_timeout": 2,
-        "socket_timeout": 2,
-    },
+    redbeat_redis_options=dict(_REDIS_SOCKET_TIMEOUTS),
     beat_scheduler="redbeat.RedBeatScheduler",
     # How long the leader's lock is held before it must renew -- longer
     # than beat's own tick interval so a healthy leader always renews in

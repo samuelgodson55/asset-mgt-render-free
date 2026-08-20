@@ -65,6 +65,7 @@ from fastapi.openapi.utils import get_openapi
 from starlette.concurrency import run_in_threadpool
 
 from database import init_db, seed_db, get_schema_status, engine as db_engine
+from celery_app import check_redis_health
 from config import settings
 from logging_config import configure_logging
 from telemetry import (
@@ -467,6 +468,47 @@ def readiness_check(response: Response):
     status = get_schema_status()
     response.status_code = 200 if status["ready"] else 503
     return status
+
+
+@app.get("/health/dependencies")
+def dependency_health_check(response: Response):
+    """
+    Proactive health check for this app's optional-but-important external
+    dependencies -- currently just Redis, which backs the Celery
+    broker/result backend (see celery_app.py), the login/telemetry rate
+    limiters (middleware/rate_limit.py, utils/rate_limiter.py), and
+    background-task DB admission (db_admission.py).
+
+    WHY THIS EXISTS
+    ----------------
+    Before this endpoint, the only way to learn Redis was struggling was
+    to actually hit one of its symptoms on a real request: a slow login,
+    a fail-open rate limiter, or (see api/audit_api.py) a 503 on
+    starting/polling/downloading an audit export. That's reactive --
+    users see the degradation before anyone/anything monitoring this
+    service does. Polling this endpoint (from infra/monitoring, or
+    optionally the frontend itself) surfaces the same "Redis is
+    unreachable" condition BEFORE it turns into a user-facing failure --
+    e.g. the frontend could use a non-ok `redis` here to proactively grey
+    out the "Export" button rather than let someone click it into a 503.
+
+    Deliberately a SEPARATE endpoint from /healthz and /readyz, not folded
+    into either: /healthz must stay a pure "is the process up" check with
+    zero dependencies (see health_check()'s own docstring), and /readyz's
+    contract is specifically about schema readiness, gating whether
+    traffic gets routed to this replica at all -- a struggling Redis is a
+    real but PARTIAL degradation (exports/rate-limiting/background admission
+    only), not a reason to pull an otherwise-healthy replica out of
+    rotation entirely.
+
+    Returns 200 when every checked dependency is healthy, 503 otherwise --
+    same "503, not 500" convention as /readyz, since this is an expected,
+    self-recovering "a dependency is currently degraded" condition, not an
+    application bug worth alerting on as a crash.
+    """
+    redis_status = check_redis_health()
+    response.status_code = 200 if redis_status["ok"] else 503
+    return {"ready": redis_status["ok"], "dependencies": {"redis": redis_status}}
 
 
 # ---------------------------------------------------------------------------

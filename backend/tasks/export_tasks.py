@@ -47,10 +47,71 @@ from database import SessionLocal
 
 logger = logging.getLogger(__name__)
 
+# Shared by generate_audit_export() below (to pick the Content-Type of the
+# file it just wrote) and find_export_on_disk() (to recover that same
+# Content-Type from nothing but a task_id, once Redis -- the only other
+# place this mapping lived, as part of the Celery result -- is out of the
+# picture). One dict instead of two independent fmt->content_type
+# if/else chains that could quietly drift apart.
+_EXPORT_CONTENT_TYPES = {"csv": "text/csv", "pdf": "application/pdf"}
+
 
 def _ensure_export_dir() -> str:
     os.makedirs(settings.EXPORT_RESULT_DIR, exist_ok=True)
     return settings.EXPORT_RESULT_DIR
+
+
+def find_export_on_disk(task_id: str) -> dict | None:
+    """
+    Best-effort recovery of a finished export's file straight off disk,
+    keyed by nothing but its task_id -- no Redis involved.
+
+    WHY THIS EXISTS (the export "false negative" edge case)
+    ---------------------------------------------------------
+    generate_audit_export() below writes the finished file to disk FIRST,
+    then returns its small descriptor dict, which Celery then stores in
+    Redis (the result backend) as the task's result. If Redis goes away
+    (or times out) in the gap between those two steps -- the file write
+    already succeeded, but the result never made it to Redis -- Celery
+    has no choice but to report that task as FAILURE (or, if Redis stays
+    unreachable, api/audit_api.py can't even ask Celery for the task's
+    state at all). Either way, the export actually succeeded and the file
+    is sitting right there on disk; trusting Celery's state as the sole
+    source of truth would incorrectly tell the person their export failed
+    and make them start over for no reason.
+
+    Since disk_filename in generate_audit_export() is always exactly
+    f"{task_id}.{fmt}", the task_id alone is enough to find the file again
+    and recover its format (and therefore its Content-Type) with zero help
+    from Redis. Returns None if no matching file exists (a genuinely
+    unknown/not-yet-finished/already-expired-and-swept task_id), in which
+    case the caller falls back to whatever Celery itself reported.
+    """
+    export_dir = settings.EXPORT_RESULT_DIR
+    if not task_id or not os.path.isdir(export_dir):
+        return None
+    # task_id always comes from Celery as a plain UUID string, never
+    # user-supplied for the /export/{task_id}/... path segments Celery
+    # itself generates -- but this still runs against a caller-controlled
+    # URL path parameter, so refuse anything that isn't a bare filename
+    # component before it ever touches the filesystem.
+    if task_id != os.path.basename(task_id) or ".." in task_id:
+        return None
+    for fmt, content_type in _EXPORT_CONTENT_TYPES.items():
+        disk_path = os.path.join(export_dir, f"{task_id}.{fmt}")
+        if os.path.isfile(disk_path):
+            # Best-effort filename for the download -- generate_audit_export()
+            # normally stamps this with the day the export was GENERATED,
+            # which this fallback path has no other record of once Redis's
+            # copy is gone, so the file's own mtime is the closest available
+            # substitute.
+            export_date = datetime.date.fromtimestamp(os.path.getmtime(disk_path)).isoformat()
+            return {
+                "filename": f"audit_export_{export_date}.{fmt}",
+                "content_type": content_type,
+                "disk_path": disk_path,
+            }
+    return None
 
 
 def _sweep_expired_exports() -> None:
@@ -120,11 +181,10 @@ def generate_audit_export(
     try:
         if fmt == "pdf":
             file_bytes = audit_service.export_audit_logs_pdf(db, user, start_date, end_date)
-            content_type = "application/pdf"
         else:
             csv_chunks = audit_service.export_audit_logs_csv(db, user, start_date, end_date)
             file_bytes = "".join(csv_chunks).encode("utf-8")
-            content_type = "text/csv"
+        content_type = _EXPORT_CONTENT_TYPES[fmt]
     finally:
         db.close()
 

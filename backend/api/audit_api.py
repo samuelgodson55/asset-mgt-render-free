@@ -18,11 +18,32 @@ out-of-band on a separate `worker` container running Celery (see
 celery_app.py and tasks/export_tasks.py) -- this router's job is just to
 enqueue that work and let the frontend poll for it, never to build the
 file itself.
+
+RESILIENCE: REDIS IS ON THE CRITICAL PATH FOR ALL THREE ENDPOINTS
+-------------------------------------------------------------------
+Unlike most of this app's Redis usage (the rate limiter, db_admission),
+which is optional and fails OPEN, every endpoint below genuinely needs
+Redis -- it's both the Celery broker (POST /export enqueues into it) and
+the result backend (the status/download endpoints read a job's
+state/result back out of it). All three endpoints therefore fail CLOSED
+with a clean 503 (see `_EXPORT_UNAVAILABLE_DETAIL`) instead of a bare 500
+when Redis is unreachable, same principle already applied to the email
+path (services/extension_service.py's _notify()) just adapted for an
+endpoint where there's no safe "log and move on" fallback.
+
+Separately, the status/download endpoints never trust Celery's reported
+state as the sole source of truth: if the worker finishes writing the
+export file to disk but loses its connection to Redis before it can
+store the result, Celery reports FAILURE (or nothing at all) even though
+the file exists. Both endpoints fall back to checking
+`settings.EXPORT_RESULT_DIR` directly by task_id in that case -- see
+tasks/export_tasks.py's `find_export_on_disk()`.
 """
 
 from telemetry import trace_operation
 
 import datetime
+import logging
 import os
 from typing import Optional
 
@@ -34,10 +55,53 @@ from sqlalchemy.orm import Session
 from celery_app import celery_app
 from database import get_db
 from deps import require_privileged_role
-from tasks.export_tasks import generate_audit_export
+from tasks.export_tasks import generate_audit_export, find_export_on_disk
 import services.audit_service as audit_service
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/audit-logs", tags=["audit"])
+
+# Same message/status the export endpoints below all fail-soft to when
+# Redis (Celery's broker AND result backend, see celery_app.py's module
+# docstring) is unreachable -- one 503 the frontend can key off of
+# regardless of which of the three export endpoints it hit.
+_EXPORT_UNAVAILABLE_DETAIL = "Export service temporarily unavailable, try again shortly"
+
+
+def _report_export_dependency_failure(exc: Exception, operation: str) -> None:
+    """
+    Shared best-effort ErrorBeacon report for all three export endpoints'
+    Redis fail-soft paths below -- same "dependency_degraded" shape
+    utils/rate_limiter.py already reports fail-OPEN Redis errors with, just
+    fail-CLOSED (503) here instead, since -- unlike the rate limiter --
+    there's no safe default to fall back to for "start/poll/download an
+    export job" if the broker/result backend that job actually lives in
+    is unreachable.
+    """
+    try:
+        from integrations.fastapi_errorbeacon import report_exception
+        report_exception(
+            exc,
+            None,
+            503,
+            component="audit_api",
+            operation=operation,
+            severity="warning",
+            category="dependency_degraded",
+            context={"failure_mode": "fail_closed_503", "dependency": "redis"},
+        )
+    except Exception:
+        pass
+    logger.warning("audit_api.%s: Redis/Celery unavailable.", operation, exc_info=True)
+
+
+def _file_response_from_disk(fallback: dict) -> FileResponse:
+    return FileResponse(
+        path=fallback["disk_path"],
+        media_type=fallback["content_type"],
+        filename=fallback["filename"],
+    )
 
 
 @router.get("")
@@ -72,13 +136,26 @@ def start_audit_export(
     if fmt not in ("csv", "pdf"):
         raise HTTPException(status_code=400, detail="format must be 'csv' or 'pdf'.")
 
-    task = generate_audit_export.delay(
-        requested_by_email=user["email"],
-        requested_by_role=user["role"],
-        fmt=fmt,
-        start_date_iso=start_date.isoformat() if start_date else None,
-        end_date_iso=end_date.isoformat() if end_date else None,
-    )
+    # `.delay()` itself talks to Redis (the broker) to actually enqueue the
+    # job -- if Redis is down/unreachable, that raises straight out of this
+    # call. Same fail-soft principle already applied to the email path
+    # (services/extension_service.py's _notify()): don't let a broker
+    # outage surface as an opaque, generic 500. Unlike that fire-and-forget
+    # email path, though, there's no "the important part already
+    # succeeded, just log and move on" available here -- starting an
+    # export IS the request -- so this fails CLOSED with an explicit,
+    # actionable 503 instead of failing open.
+    try:
+        task = generate_audit_export.delay(
+            requested_by_email=user["email"],
+            requested_by_role=user["role"],
+            fmt=fmt,
+            start_date_iso=start_date.isoformat() if start_date else None,
+            end_date_iso=end_date.isoformat() if end_date else None,
+        )
+    except Exception as exc:
+        _report_export_dependency_failure(exc, "start_export")
+        raise HTTPException(status_code=503, detail=_EXPORT_UNAVAILABLE_DETAIL)
     return {"task_id": task.id, "status": "queued"}
 
 
@@ -92,19 +169,45 @@ def get_audit_export_status(task_id: str, user: dict = Depends(require_privilege
     hold a valid privileged-role session anyway, same trust boundary as
     the rest of this router.
     """
-    result = AsyncResult(task_id, app=celery_app)
-    if result.state == "PENDING":
+    # Reading `.state` is what actually round-trips to Redis (the result
+    # backend) -- AsyncResult(...) itself is just a local object. Same
+    # fail-closed 503 as start_audit_export above if that round-trip
+    # can't complete at all.
+    try:
+        result = AsyncResult(task_id, app=celery_app)
+        state = result.state
+    except Exception as exc:
+        _report_export_dependency_failure(exc, "poll_status")
+        # BUG FIX (export "false negative"): even with Redis completely
+        # unreachable, the file itself may already be sitting on disk --
+        # see tasks/export_tasks.py's find_export_on_disk() docstring for
+        # the exact race this covers. Only THEN fall through to the 503.
+        fallback = find_export_on_disk(task_id)
+        if fallback:
+            return {"state": "SUCCESS", "ready": True}
+        raise HTTPException(status_code=503, detail=_EXPORT_UNAVAILABLE_DETAIL)
+
+    if state == "PENDING":
         # Celery reports state as PENDING both for "still queued/running"
         # AND for "no such task_id has ever existed" -- it never persists
         # a distinct "unknown" state. That ambiguity is fine here: either
         # way, the correct response to the frontend is "not ready yet".
         return {"state": "PENDING", "ready": False}
-    if result.state == "FAILURE":
+    if state == "FAILURE":
+        # Same "false negative" case as above, just reached via a clean
+        # FAILURE state instead of an exception -- the worker finished
+        # writing the file, then lost its connection to Redis before it
+        # could store the SUCCESS result. Trust disk over Celery's state
+        # here rather than telling the person their export failed when it
+        # didn't.
+        fallback = find_export_on_disk(task_id)
+        if fallback:
+            return {"state": "SUCCESS", "ready": True}
         return {"state": "FAILURE", "ready": True, "error": str(result.result)}
-    if result.state == "SUCCESS":
+    if state == "SUCCESS":
         return {"state": "SUCCESS", "ready": True}
     # STARTED / RETRY / any other in-progress Celery state.
-    return {"state": result.state, "ready": False}
+    return {"state": state, "ready": False}
 
 
 @router.get("/export/{task_id}/download")
@@ -124,18 +227,45 @@ def download_audit_export(task_id: str, user: dict = Depends(require_privileged_
     to settings.EXPORT_RESULT_DIR instead of embedding the bytes in the
     job result.
     """
-    result = AsyncResult(task_id, app=celery_app)
-    if result.state == "FAILURE":
+    try:
+        result = AsyncResult(task_id, app=celery_app)
+        state = result.state
+    except Exception as exc:
+        _report_export_dependency_failure(exc, "download")
+        fallback = find_export_on_disk(task_id)
+        if fallback:
+            return _file_response_from_disk(fallback)
+        raise HTTPException(status_code=503, detail=_EXPORT_UNAVAILABLE_DETAIL)
+
+    if state == "FAILURE":
+        # Export "false negative": the file may already be on disk even
+        # though Celery reports FAILURE -- see tasks/export_tasks.py's
+        # find_export_on_disk() docstring and the /status endpoint above
+        # for the exact race this covers.
+        fallback = find_export_on_disk(task_id)
+        if fallback:
+            return _file_response_from_disk(fallback)
         raise HTTPException(status_code=500, detail=f"Export failed: {result.result}")
-    if result.state != "SUCCESS":
+    if state != "SUCCESS":
         raise HTTPException(status_code=409, detail="Export is not ready yet.")
 
-    payload = result.result
-    if not payload:
-        raise HTTPException(status_code=404, detail="Export result not found -- it may have expired. Please start a new export.")
+    try:
+        payload = result.result
+    except Exception as exc:
+        _report_export_dependency_failure(exc, "download")
+        fallback = find_export_on_disk(task_id)
+        if fallback:
+            return _file_response_from_disk(fallback)
+        raise HTTPException(status_code=503, detail=_EXPORT_UNAVAILABLE_DETAIL)
 
-    disk_path = payload.get("disk_path")
+    disk_path = payload.get("disk_path") if payload else None
     if not disk_path or not os.path.isfile(disk_path):
+        # Same disk fallback as above -- covers a SUCCESS result whose
+        # disk_path Redis returned stale/empty, not just an outright
+        # FAILURE/unreachable Redis.
+        fallback = find_export_on_disk(task_id)
+        if fallback:
+            return _file_response_from_disk(fallback)
         raise HTTPException(status_code=404, detail="Export file not found -- it may have expired. Please start a new export.")
 
     return FileResponse(

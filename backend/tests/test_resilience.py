@@ -109,6 +109,58 @@ def test_db_pool_exhaustion_returns_503_not_bare_500():
     assert "request_id" in body
 
 
+def test_start_audit_export_returns_503_not_500_when_redis_is_down(as_admin):
+    """
+    Pentest/reliability finding: conftest.py deliberately points REDIS_URL
+    at an unreachable host for the whole test session (see its own
+    docstring) -- generate_audit_export.delay() used to let that raise
+    straight through POST /audit-logs/export as a bare, unhandled 500.
+    Exports are the one Redis dependency in this app that ISN'T allowed
+    to fail open (unlike the rate limiter above) -- there's no safe
+    default result for "start a background job" -- so the contract here
+    is a clean, actionable 503, not a crash.
+    """
+    client, headers = as_admin
+    response = client.post("/api/audit-logs/export?format=csv", headers=headers)
+    assert response.status_code == 503
+    assert "detail" in response.json()
+
+
+def test_audit_export_status_poll_returns_503_not_500_when_redis_is_down(as_admin):
+    """Same contract as the start-export test above, for the status-poll
+    endpoint the frontend calls every second or two after starting an
+    export (see js/components/audit.js) -- AsyncResult(...).state is what
+    actually round-trips to Redis, and used to let that same unreachable-
+    Redis error surface as a bare 500 on every single poll."""
+    client, headers = as_admin
+    response = client.get("/api/audit-logs/export/some-nonexistent-task-id/status", headers=headers)
+    assert response.status_code == 503
+    assert "detail" in response.json()
+
+
+def test_audit_export_status_falls_back_to_disk_when_redis_is_down(as_admin, tmp_path, monkeypatch):
+    """
+    The export "false negative" case: if Redis dies between the worker
+    finishing the file write and storing the result pointer, Celery's
+    state alone would incorrectly say the export failed/is unknown even
+    though the finished file is sitting right there on disk. The status
+    endpoint must recover it via tasks.export_tasks.find_export_on_disk()
+    rather than trusting Celery's state (or lack of one, with Redis fully
+    unreachable) as the sole source of truth.
+    """
+    from config import settings
+
+    monkeypatch.setattr(settings, "EXPORT_RESULT_DIR", str(tmp_path))
+    task_id = "already-finished-task-id"
+    with open(tmp_path / f"{task_id}.csv", "wb") as f:
+        f.write(b"id,action\n1,test\n")
+
+    client, headers = as_admin
+    response = client.get(f"/api/audit-logs/export/{task_id}/status", headers=headers)
+    assert response.status_code == 200
+    assert response.json() == {"state": "SUCCESS", "ready": True}
+
+
 def test_db_pool_exhaustion_still_raises_a_genuine_500_for_other_db_errors():
     """Sanity check that this new handling is scoped to pool-checkout
     timeouts specifically, not every SQLAlchemy exception -- a genuine

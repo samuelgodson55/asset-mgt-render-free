@@ -70,7 +70,7 @@ logger = logging.getLogger(__name__)
 # a moment later, out-of-band, in the `worker` container -- exactly the
 # same "producer here, consumer there" split celery_app.py already uses
 # for tasks.generate_audit_export.
-@celery_app.task(name="tasks.send_email_task", bind=True)
+@celery_app.task(name="tasks.send_email_task", bind=True, ignore_result=True)
 def send_email_task(self, to, subject: str, body: str) -> dict:
     """Thin wrapper around notification_service.send_email() so it can run
     on the Celery worker instead of inline in an API request. `to` is
