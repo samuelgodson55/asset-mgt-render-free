@@ -11,7 +11,9 @@
 //     managed service, not a Container App, because Azure Files (the volume
 //     type Container Apps uses for persistent storage) doesn't support the
 //     POSIX permissions Postgres's `initdb` requires on its data directory.
-//     Small General Purpose SKU by default so Azure-managed PgBouncer is available (see `postgresSkuName`).
+//     Small Burstable SKU by default to keep cost down; pooling stays available
+//     regardless of tier via the self-hosted `pgbouncer` Container App below,
+//     not Azure's own managed PgBouncer server parameters (see `postgresSkuName`).
 //   - 4 Container Apps, all in ONE environment (multiple environments hit a
 //     per-subscription quota on Free Trial/starter subscriptions):
 //       `redis`    -- redis:7-alpine, internal-only, 1 replica, no persistence
@@ -162,12 +164,12 @@ param postgresPassword string
 @description('Administrator username for the Flexible Server. Avoid reserved/disallowed names (azure_superuser, azuresu, admin, administrator, root, guest, public, or anything starting with pg_).')
 param postgresUsername string = 'snipeit'
 
-@description('Flexible Server compute SKU. Standard_D2s_v3 (2 vCores/8GiB, General Purpose) is the default because Azure managed PgBouncer is supported on General Purpose and Memory Optimized tiers, not Burstable. Change this deliberately through the GitHub POSTGRES_SKU_NAME variable if your environment requires another supported SKU.')
-param postgresSkuName string = 'Standard_D2s_v3'
+@description('Flexible Server compute SKU. Standard_B2s (2 vCores/4GiB, Burstable) is the default to keep this cost-optimized layout cheap. PgBouncer support does NOT require General Purpose/Memory Optimized here: `usePgbouncer` runs a self-hosted `edoburu/pgbouncer` Container App (see `pgbouncerApp` below), not Azure\'s managed PgBouncer server parameters, so it works on any tier including Burstable. Change this deliberately through the GitHub POSTGRES_SKU_NAME variable if you need more headroom.')
+param postgresSkuName string = 'Standard_B2s'
 
-@description('Flexible Server compute tier matching `postgresSkuName`. PgBouncer requires GeneralPurpose or MemoryOptimized when USE_PGBOUNCER=true.')
+@description('Flexible Server compute tier matching `postgresSkuName`. Burstable is the cost-optimized default and works fine with this deployment\'s self-hosted PgBouncer Container App. Only switch to GeneralPurpose/MemoryOptimized if you outgrow Burstable\'s sustained-CPU limits (see docs/DEPLOYMENT.md) or specifically want Azure\'s own managed PgBouncer server parameters instead of the self-hosted one.')
 @allowed(['Burstable', 'GeneralPurpose', 'MemoryOptimized'])
-param postgresSkuTier string = 'GeneralPurpose'
+param postgresSkuTier string = 'Burstable'
 
 @description('Flexible Server storage size in GiB. 32 is the smallest size Azure currently offers for this SKU family. Storage can only be INCREASED later, never decreased, so don\'t over-provision "just in case" -- start at the minimum and grow if you actually need to.')
 @minValue(32)
@@ -204,10 +206,10 @@ param backendMinReplicas int = environmentName == 'prod' ? 1 : 0
 
 @description('Maximum `backend` replicas under load. NOTE: `backend` embeds Celery worker+beat in-process (see RUN_EMBEDDED_WORKER below) since there is no separate worker/beat Container App in this cost-optimized layout. That is safe at any replica count: celery_app.py configures RedBeat as the Beat scheduler, which keeps a distributed lock in Redis so only one replica is ever the active scheduler at a time (automatic failover if that replica dies) -- no per-replica configuration needed here.')
 param backendMaxReplicas int = 3
-@description('Route application DB traffic through the supported pooler for this deployment. For ACA with Azure Flexible Server this enables Azure managed PgBouncer on port 6432; for local/VM Compose the service-level pooler is used. The default is true; set false only as a deliberate break-glass fallback.')
+@description('Route application DB traffic through the supported pooler for this deployment. For ACA this provisions and routes through the self-hosted `pgbouncer` Container App (see `pgbouncerApp` below), NOT Azure Flexible Server\'s managed PgBouncer server parameters; for local/VM Compose the service-level pooler is used. The default is true; set false only as a deliberate break-glass fallback.')
 param usePgbouncer bool = true
 
-@description('Optional Azure Managed PgBouncer server-side pool size per user/database pair. Set to 0 to auto-derive a conservative value from the Azure PostgreSQL compute SKU (4x vCores, within Azure\'s recommended 2-5x-vCore starting range). The application also applies a separate safety margin and live max_connections cap. Set an explicit value only when deliberately tuning PgBouncer.')
+@description('Optional server-side pool size (`DEFAULT_POOL_SIZE` + `RESERVE_POOL_SIZE`) for the self-hosted `pgbouncer` Container App, per user/database pair. Set to 0 to auto-derive a conservative value from the Azure PostgreSQL compute SKU (4x vCores, within Azure\'s recommended 2-5x-vCore starting range). The application also applies a separate safety margin and live max_connections cap. Set an explicit value only when deliberately tuning PgBouncer.')
 @minValue(0)
 param pgbouncerServerPoolSize int = 0
 
@@ -901,43 +903,20 @@ resource postgresServer 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' =
   }
 }
 
-// Azure-managed PgBouncer. It runs with the Flexible Server and exposes the
-// same hostname on port 6432; there is intentionally no ACA PgBouncer sidecar.
-// The resource is only created when the application switch is enabled.
-resource postgresPgBouncerEnabled 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2022-12-01' = if (usePgbouncer) {
-  name: 'pgbouncer.enabled'
-  parent: postgresServer
-  properties: {
-    source: 'user-override'
-    value: 'true'
-  }
-}
-
-// Keep psycopg2 startup behavior compatible with Azure PgBouncer's transaction
-// pooling. PostgreSQL clients commonly send extra_float_digits in their startup
-// packet; Azure supports explicitly allowing PgBouncer to ignore it.
-// Make the managed PgBouncer budget explicit rather than pretending Azure has
-// the self-hosted reserve-pool model used by docker-compose. The backend receives
-// the same value through PGBOUNCER_SERVER_POOL_SIZE.
-resource postgresPgBouncerDefaultPoolSize 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2022-12-01' = if (usePgbouncer) {
-  name: 'pgbouncer.default_pool_size'
-  parent: postgresServer
-  dependsOn: [ postgresPgBouncerEnabled ]
-  properties: {
-    source: 'user-override'
-    value: string(effectivePgbouncerServerPoolSize)
-  }
-}
-
-resource postgresPgBouncerIgnoreStartup 'Microsoft.DBforPostgreSQL/flexibleServers/configurations@2022-12-01' = if (usePgbouncer) {
-  name: 'pgbouncer.ignore_startup_parameters'
-  parent: postgresServer
-  dependsOn: [ postgresPgBouncerEnabled ]
-  properties: {
-    source: 'user-override'
-    value: 'extra_float_digits'
-  }
-}
+// PgBouncer on ACA is a SELF-HOSTED Container App (see `pgbouncerApp`
+// below, defined after `postgresServer`/`databaseUrl` are in scope), NOT
+// Azure's managed PgBouncer server parameters. Azure managed PgBouncer
+// only supports the GeneralPurpose/MemoryOptimized compute tiers -- this
+// deployment's cost-optimized default is Burstable (see
+// `postgresSkuTier`'s own description and docs/DEPLOYMENT.md), so setting
+// `pgbouncer.enabled`/`pgbouncer.default_pool_size`/
+// `pgbouncer.ignore_startup_parameters` server parameters here would fail
+// with ServerConfigurationNotAllowed on that tier. Running the exact same
+// `edoburu/pgbouncer` image already used by docker-compose.vm.yml as an
+// ACA Container App instead keeps pooling available on Burstable, reuses
+// a config this project already runs in production on the VM path, and
+// avoids a ~10x DB compute-tier cost jump purely to satisfy a managed
+// add-on's packaging requirement.
 
 // "Allow public access from Azure services" -- the well-known 0.0.0.0/0.0.0.0
 // magic range Azure recognizes specifically for this purpose (it does NOT
@@ -1033,6 +1012,172 @@ resource redisApp 'Microsoft.App/containerApps@2024-03-01' = {
       scale: {
         minReplicas: 1
         maxReplicas: 1 // NEVER raise this -- Celery beat schedule assumes one broker instance, and there's no clustering/persistence here anyway
+      }
+    }
+  }
+}
+
+// `pgbouncer` now runs at a fixed 2 replicas for redundancy (see
+// `pgbouncerApp.scale` below) -- pinned, not autoscaling, for the same
+// "math stays deterministic" reason `redis` is pinned at 1. Because each
+// replica opens its own independent budget of real Postgres connections,
+// the per-replica DEFAULT_POOL_SIZE/RESERVE_POOL_SIZE below are the
+// TOTAL budget divided by this count, so the combined ceiling against
+// Postgres across both replicas still equals the same
+// `effectivePgbouncerServerPoolSize` it always did -- redundancy without
+// silently multiplying the server-side connection ceiling. Everything
+// downstream of that total (`PGBOUNCER_SERVER_POOL_SIZE` on `backend`,
+// etc.) is unaffected -- it's still sized off the undivided total.
+var pgbouncerReplicaCount = 2
+
+// Split the same authoritative `effectivePgbouncerServerPoolSize` budget
+// (see its own comment near `pgbouncerServerPoolSize` above) into
+// PgBouncer's DEFAULT_POOL_SIZE + RESERVE_POOL_SIZE, matching the ~73:27
+// ratio docker-compose.vm.yml already uses (DEFAULT_POOL_SIZE=8,
+// RESERVE_POOL_SIZE=3 -- see that file). Kept as a ratio of the SAME
+// computed total, rather than a second independent default, so ACA and
+// VM/Compose stay proportionally consistent as the Postgres SKU changes.
+// Then divided again by `pgbouncerReplicaCount` (see that var's own
+// comment above) so each replica only claims its share of the total --
+// the two divisions compose to `total * ratio / replicaCount` per
+// replica, `replicaCount` of which sum back to `total * ratio`.
+var pgbouncerReservePoolSizeTotal = max(1, effectivePgbouncerServerPoolSize / 4)
+var pgbouncerDefaultPoolSizeTotal = max(1, effectivePgbouncerServerPoolSize - pgbouncerReservePoolSizeTotal)
+var pgbouncerReservePoolSize = max(1, pgbouncerReservePoolSizeTotal / pgbouncerReplicaCount)
+var pgbouncerDefaultPoolSize = max(1, pgbouncerDefaultPoolSizeTotal / pgbouncerReplicaCount)
+
+// ---------------------------------------------------------------------------
+// `pgbouncer` -- self-hosted connection pooler, only created when
+// usePgbouncer=true. Same `edoburu/pgbouncer` image, POOL_MODE, and
+// IGNORE_STARTUP_PARAMETERS/SERVER_RESET_QUERY behavior as
+// docker-compose.vm.yml's `pgbouncer` service (see that file's own
+// comment) -- kept deliberately identical so the pooling behavior an
+// operator sees on the VM path and the ACA path is the same, not two
+// independently-tuned configurations that can silently drift apart.
+//
+// INTERNAL-ONLY ingress (`external: false`, tcp transport on 6432) --
+// same pattern as `redisApp` above: never internet-reachable, only
+// reachable at the short in-environment DNS name `pgbouncer` from other
+// Container Apps in the same `env`. `minReplicas: 2`/`maxReplicas: 2`
+// (pinned, not autoscaling -- same "math stays deterministic" reasoning
+// as `redis`'s own pinned count): this is a shared connection pool for
+// the whole `backend` fleet, split across a fixed number of replicas
+// rather than a single instance. Each replica opens its own independent
+// budget of real Postgres connections, so `pgbouncerDefaultPoolSize`/
+// `pgbouncerReservePoolSize` above are already divided by
+// `pgbouncerReplicaCount` -- the combined ceiling against Postgres across
+// both replicas is still exactly `effectivePgbouncerServerPoolSize`, not
+// a multiple of it. ACA's internal TCP ingress load-balances across same-
+// app replicas transparently at the same `pgbouncer:6432` DNS name
+// `backend` already uses, so this needed no application-side change.
+//
+// Net effect of the redundancy: a crashed/restarting replica now costs
+// ~50% of pooled capacity for the ~15s the Liveness probe below takes to
+// notice and restart it, not 100% -- see the Readiness probe's own
+// comment for the other half of this (routing traffic away from that
+// replica immediately, rather than waiting on the restart).
+//
+// SERVER_TLS_SSLMODE=require because Flexible Server enforces SSL on its
+// public FQDN regardless (see `databaseUrl`'s own comment below) --
+// PgBouncer needs to be told to negotiate TLS on that upstream leg the
+// same way the direct `sslmode=require` connections elsewhere in this
+// file already do.
+resource pgbouncerApp 'Microsoft.App/containerApps@2024-03-01' = if (usePgbouncer) {
+  name: 'pgbouncer'
+  location: location
+  dependsOn: [ postgresDatabase ]
+  properties: {
+    managedEnvironmentId: env.id
+    configuration: {
+      activeRevisionsMode: 'Single'
+      secrets: [
+        { name: 'db-password', value: postgresPassword }
+      ]
+      ingress: {
+        external: false
+        transport: 'tcp'
+        targetPort: 6432
+        exposedPort: 6432
+      }
+    }
+    template: {
+      containers: [
+        {
+          name: 'pgbouncer'
+          image: 'edoburu/pgbouncer:v1.25.2-p0'
+          resources: { cpu: json('0.25'), memory: '0.5Gi' }
+          env: [
+            { name: 'DB_USER', value: postgresUsername }
+            { name: 'DB_PASSWORD', secretRef: 'db-password' }
+            { name: 'DB_HOST', value: postgresServer.properties.fullyQualifiedDomainName }
+            { name: 'DB_NAME', value: 'asset_db' }
+            { name: 'LISTEN_PORT', value: '6432' }
+            { name: 'AUTH_TYPE', value: 'scram-sha-256' }
+            { name: 'SERVER_TLS_SSLMODE', value: 'require' }
+            { name: 'POOL_MODE', value: 'transaction' }
+            { name: 'MAX_CLIENT_CONN', value: '400' }
+            { name: 'DEFAULT_POOL_SIZE', value: string(pgbouncerDefaultPoolSize) }
+            { name: 'RESERVE_POOL_SIZE', value: string(pgbouncerReservePoolSize) }
+            { name: 'RESERVE_POOL_TIMEOUT', value: '3' }
+            { name: 'SERVER_RESET_QUERY', value: 'DISCARD ALL' }
+            { name: 'IGNORE_STARTUP_PARAMETERS', value: 'extra_float_digits' }
+            // Lets backend/db_pool_metrics.py run SHOW POOLS/SHOW STATS
+            // against PgBouncer's built-in `pgbouncer` admin virtual
+            // database, reusing the SAME app DB user/password already
+            // above -- no separate monitoring credential to provision,
+            // secret-wire, or rotate. Same addition as
+            // docker-compose.yml/docker-compose.vm.yml's `pgbouncer`
+            // service, kept in sync for the reasons check-bicep-compose-
+            // drift.py enforces.
+            { name: 'ADMIN_USERS', value: postgresUsername }
+            { name: 'STATS_USERS', value: postgresUsername }
+          ]
+          probes: [
+            {
+              // A crashed/unresponsive `pgbouncer` replica now costs the
+              // fleet ~50% of pooled capacity, not 100% (see this
+              // resource's own top comment) -- restarting it is still the
+              // fix, just no longer the ONLY lever, since Readiness below
+              // routes traffic off it in the meantime. The previous
+              // periodSeconds: 30 with ACA's default failureThreshold (3)
+              // meant up to ~90s+ before a restart even started; tightened
+              // here so a real failure is caught in roughly 15s instead,
+              // while periodSeconds: 5 + timeoutSeconds: 2 stays well clear
+              // of false-positive territory for a plain TCP accept check.
+              type: 'Liveness'
+              tcpSocket: { port: 6432 }
+              initialDelaySeconds: 5
+              periodSeconds: 5
+              timeoutSeconds: 2
+              failureThreshold: 3
+            }
+            {
+              // With only 1 replica this had no purpose -- ACA had nowhere
+              // else to route traffic regardless of readiness. With 2, this
+              // is what actually delivers the redundancy: it's checked far
+              // more aggressively than Liveness (failureThreshold: 1 instead
+              // of 3) because pulling a replica out of rotation early is
+              // cheap -- the other replica just takes 100% of traffic
+              // briefly -- while a slow-to-react Readiness probe would leave
+              // clients hitting a dead replica for the same ~15s Liveness
+              // takes to notice and restart it, defeating the point of
+              // having two. Same plain TCP accept check as Liveness (a
+              // real query-level check would need pgbouncer's own admin
+              // console credentials wired into the probe, which isn't worth
+              // the added complexity here).
+              type: 'Readiness'
+              tcpSocket: { port: 6432 }
+              initialDelaySeconds: 2
+              periodSeconds: 3
+              timeoutSeconds: 2
+              failureThreshold: 1
+            }
+          ]
+        }
+      ]
+      scale: {
+        minReplicas: pgbouncerReplicaCount
+        maxReplicas: pgbouncerReplicaCount // Pinned (not autoscaling) so the per-replica pool math above stays deterministic -- same reasoning as `redis` above. Raise only together with re-deriving `pgbouncerDefaultPoolSize`/`pgbouncerReservePoolSize`'s divisor.
       }
     }
   }
@@ -1282,15 +1427,21 @@ resource backendApp 'Microsoft.App/containerApps@2024-03-01' = {
             // as `backend` scales to more than one replica).
             { name: 'RUN_EMBEDDED_WORKER', value: 'true' }
             { name: 'USE_PGBOUNCER', value: string(usePgbouncer) }
+            // Self-hosted PgBouncer (see `pgbouncerApp` above) reachable at
+            // the short in-environment DNS name `pgbouncer`, same pattern
+            // as `redis`/`redisUrl` below -- only set when usePgbouncer is
+            // actually true, matching PGBOUNCER_HOST's own "unset means
+            // direct-to-Postgres break-glass" contract in
+            // backend/config.py's route_database_through_pgbouncer().
+            { name: 'PGBOUNCER_HOST', value: usePgbouncer ? 'pgbouncer' : '' }
             { name: 'PGBOUNCER_SERVER_POOL_SIZE', value: string(effectivePgbouncerServerPoolSize) }
             { name: 'PGBOUNCER_SAFETY_MARGIN_PERCENT', value: '10' }
-            // Azure Managed PgBouncer does not expose the self-hosted
-            // reserve-pool abstraction. The explicit server-pool value above
-            // is the single source of truth for DB pool/admission sizing.
-            // The managed pool's authoritative server-side budget is
-            // passed explicitly above. The self-hosted default/reserve
-            // settings remain unused on ACA because Azure does not expose
-            // the same reserve-pool abstraction.
+            // The self-hosted PgBouncer's DEFAULT_POOL_SIZE/RESERVE_POOL_SIZE
+            // (see `pgbouncerApp` above) are DERIVED from this same
+            // PGBOUNCER_SERVER_POOL_SIZE value, so backend's own pool/
+            // admission-control sizing and PgBouncer's actual server-side
+            // budget can never silently drift apart -- one authoritative
+            // number, not two independently-tuned ones.
             // No SERVE_FRONTEND -- `frontend` serves the static build,
             // `backend` is API-only. CORS_ORIGINS kept as defense in depth.
             { name: 'CORS_ORIGINS', value: publicOrigin }
@@ -1332,23 +1483,24 @@ resource backendApp 'Microsoft.App/containerApps@2024-03-01' = {
       }
     }
   }
-  // `postgresDatabase`/`redisApp` because `backend` needs them reachable
-  // at boot (Bicep already infers a dependency on `postgresServer` itself
-  // through `sharedSecrets`' symbolic reference to it inside `databaseUrl`,
-  // but `postgresDatabase` -- the `asset_db` database specifically -- is a
-  // separate child resource with no symbolic reference anywhere in
-  // `backend`'s own properties, so it needs to be listed explicitly here
-  // too). The volumes above have a similar missing-implicit-dependency
-  // issue -- `backupStorage`/`exportStorage` are referenced by plain
-  // string, so Bicep won't otherwise wait for them before creating
-  // `backend`.
+  // `postgresDatabase`/`redisApp`/`pgbouncerApp` because `backend` needs
+  // them reachable at boot (Bicep already infers a dependency on
+  // `postgresServer` itself through `sharedSecrets`' symbolic reference to
+  // it inside `databaseUrl`, but `postgresDatabase` -- the `asset_db`
+  // database specifically -- is a separate child resource with no
+  // symbolic reference anywhere in `backend`'s own properties, so it
+  // needs to be listed explicitly here too; `pgbouncerApp` is referenced
+  // by plain string ('pgbouncer') in its PGBOUNCER_HOST env var above, not
+  // a symbolic reference, so it has the same missing-implicit-dependency
+  // issue). The volumes above have a similar issue -- `backupStorage`/
+  // `exportStorage` are referenced by plain string, so Bicep won't
+  // otherwise wait for them before creating `backend`.
   dependsOn: [
     postgresDatabase
     redisApp
     backupStorage
     exportStorage
-    postgresPgBouncerEnabled
-    postgresPgBouncerIgnoreStartup
+    pgbouncerApp
   ]
 }
 

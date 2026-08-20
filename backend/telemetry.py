@@ -103,6 +103,14 @@ logger = logging.getLogger(__name__)
 # differently-configured one.
 _tracing_configured = False
 
+# Same "exactly once per process, no-op until configured" contract as
+# _tracing_configured above, but for OpenTelemetry Metrics rather than
+# Traces. Kept as a second, independent flag/provider rather than folded
+# into the tracing one because a caller (see overload_monitor.py) needs to
+# know whether a REAL counter is available without importing anything
+# trace-specific.
+_metrics_configured = False
+
 
 def _parse_otlp_headers(raw: str) -> dict:
     """
@@ -369,7 +377,107 @@ def setup_tracing(settings, service_name: Optional[str] = None) -> bool:
     )
 
     _tracing_configured = True
+
+    _setup_metrics(settings, resource)
+
     return True
+
+
+def _setup_metrics(settings, resource) -> None:
+    """Builds and installs the process-wide OpenTelemetry MeterProvider,
+    reusing the exact same enabled-exporter flags as the tracing setup
+    above (OTEL_CONSOLE_EXPORTER / OTEL_EXPORTER_OTLP_ENDPOINT /
+    APPLICATIONINSIGHTS_CONNECTION_STRING) so an operator configures
+    "where telemetry goes" ONCE, not once per signal type.
+
+    Only called from setup_tracing() (i.e. still gated on OTEL_ENABLED) --
+    there is no standalone metrics-only opt-in. overload_monitor.py calls
+    opentelemetry.metrics.get_meter(...).create_counter(...) unconditionally;
+    when this function hasn't run (OTEL_ENABLED=False, or the SDK isn't
+    installed), that call is served by the OTel API's built-in no-op
+    MeterProvider -- counting still happens in-process (log line +
+    in-memory snapshot), it's just never exported anywhere. That mirrors
+    trace_operation()'s own no-op-when-unconfigured behavior above.
+    """
+    global _metrics_configured
+
+    if _metrics_configured:
+        return
+
+    try:
+        from opentelemetry import metrics
+        from opentelemetry.sdk.metrics import MeterProvider
+        from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+    except ImportError:
+        return
+
+    readers = []
+
+    if settings.OTEL_CONSOLE_EXPORTER:
+        from opentelemetry.sdk.metrics.export import ConsoleMetricExporter
+        readers.append(PeriodicExportingMetricReader(ConsoleMetricExporter()))
+
+    if settings.OTEL_EXPORTER_OTLP_ENDPOINT:
+        if settings.OTEL_EXPORTER_OTLP_PROTOCOL.lower() == "grpc":
+            try:
+                from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import (
+                    OTLPMetricExporter,
+                )
+            except ImportError:
+                from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
+                    OTLPMetricExporter,
+                )
+                otlp_metrics_endpoint = f"{settings.OTEL_EXPORTER_OTLP_ENDPOINT.rstrip('/')}/v1/metrics"
+            else:
+                otlp_metrics_endpoint = settings.OTEL_EXPORTER_OTLP_ENDPOINT
+        else:
+            from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
+                OTLPMetricExporter,
+            )
+            # Same "endpoint= is passed explicitly, so the exporter's own
+            # /v1/metrics auto-append never runs" reasoning as the trace
+            # exporter above.
+            otlp_metrics_endpoint = f"{settings.OTEL_EXPORTER_OTLP_ENDPOINT.rstrip('/')}/v1/metrics"
+
+        headers = _parse_otlp_headers(settings.OTEL_EXPORTER_OTLP_HEADERS) or None
+        otlp_metric_exporter = OTLPMetricExporter(endpoint=otlp_metrics_endpoint, headers=headers)
+        readers.append(PeriodicExportingMetricReader(otlp_metric_exporter))
+        logger.info(
+            "OpenTelemetry: OTLP metric exporter configured (endpoint=%s).",
+            otlp_metrics_endpoint,
+        )
+
+    if settings.APPLICATIONINSIGHTS_CONNECTION_STRING:
+        try:
+            from azure.monitor.opentelemetry.exporter import AzureMonitorMetricExporter
+        except ImportError:
+            logger.warning(
+                "APPLICATIONINSIGHTS_CONNECTION_STRING is set but "
+                "azure-monitor-opentelemetry-exporter isn't installed -- "
+                "Application Insights metric export skipped."
+            )
+        else:
+            azure_metric_exporter = AzureMonitorMetricExporter.from_connection_string(
+                settings.APPLICATIONINSIGHTS_CONNECTION_STRING
+            )
+            readers.append(PeriodicExportingMetricReader(azure_metric_exporter))
+            logger.info(
+                "OpenTelemetry: Azure Monitor (Application Insights) metric "
+                "exporter configured."
+            )
+
+    if not readers:
+        # Matches the trace-side "no exporter configured" warning -- a
+        # MeterProvider with zero readers still lets counters be created
+        # and incremented (cheap, in-process), it just never ships
+        # anywhere, so overload_monitor.py's log line + snapshot() remain
+        # the only visible signal.
+        _metrics_configured = True
+        return
+
+    provider = MeterProvider(resource=resource, metric_readers=readers)
+    metrics.set_meter_provider(provider)
+    _metrics_configured = True
 
 
 def shutdown_tracing() -> None:
@@ -422,6 +530,16 @@ def shutdown_tracing() -> None:
     shutdown_fn = getattr(provider, "shutdown", None)
     if callable(shutdown_fn):
         shutdown_fn()
+
+    if _metrics_configured:
+        try:
+            from opentelemetry import metrics
+        except ImportError:
+            return
+        meter_provider = metrics.get_meter_provider()
+        meter_shutdown_fn = getattr(meter_provider, "shutdown", None)
+        if callable(meter_shutdown_fn):
+            meter_shutdown_fn()
 
 
 class _HttpErrorTagMiddleware:

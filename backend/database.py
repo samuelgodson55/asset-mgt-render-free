@@ -13,7 +13,7 @@ import logging
 from functools import lru_cache
 from integrations.fastapi_errorbeacon import report_background_exception
 import os
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
@@ -162,6 +162,42 @@ def _apply_explicit_pool_override(
     return requested_pool, requested_overflow
 
 
+def pgbouncer_effective_budget() -> int:
+    """The live-probed, safety-margin-adjusted PgBouncer server-pool budget
+    -- the SAME total `_compute_pool_sizing()` derives below before it
+    carves out `background_reserve` for Celery/Beat. Only meaningful when
+    `settings.USE_PGBOUNCER` is true; callers are responsible for that
+    check (this function doesn't itself branch on it, so it stays a plain,
+    context-free derivation like `_pgbouncer_server_pool_budget()` above).
+
+    BUG FIX: this used to be inlined directly inside `_compute_pool_sizing()`
+    below, with no way for anything outside this module to see the result.
+    db_admission.py's `background_db_slot()` independently recomputed its
+    own "how big is the PgBouncer server pool" number from the same raw
+    settings (PGBOUNCER_SERVER_POOL_SIZE / DEFAULT_POOL_SIZE+RESERVE_POOL_SIZE)
+    but WITHOUT the live Postgres probe or the safety-margin percentage
+    applied here -- so if the live server turned out smaller than
+    configured (a resized SKU, a misconfigured env var), THIS module would
+    correctly shrink the API pool's share and `background_reserve` to
+    match, while db_admission.py's Celery-side admission ceiling kept
+    admitting against the old, larger, un-probed number. That let the API
+    pool and background workers independently believe they each owned
+    capacity that, combined, could exceed what PgBouncer/Postgres could
+    actually grant -- exactly the invariant this whole feature exists to
+    protect. Exposing this as a public function (called once, cached in
+    `PGBOUNCER_EFFECTIVE_BUDGET` below, right alongside `POOL_SIZE`/
+    `MAX_OVERFLOW`) lets db_admission.py read the EXACT SAME number this
+    module used for its own reserve, instead of quietly maintaining a
+    second, driftable copy of the same computation.
+    """
+    pgbouncer_budget = _pgbouncer_server_pool_budget()
+    safety_percent = min(max(int(settings.PGBOUNCER_SAFETY_MARGIN_PERCENT), 0), 50)
+    # Keep an explicit percentage of the pool unused for operational
+    # breathing room, then reserve a separate slot for background work.
+    # The percentage is applied before the background reservation.
+    return max(int(pgbouncer_budget * (100 - safety_percent) / 100), 1)
+
+
 def _compute_pool_sizing(database_url: str) -> "tuple[int, int]":
     """Compute a bounded SQLAlchemy pool for this process.
 
@@ -181,15 +217,7 @@ def _compute_pool_sizing(database_url: str) -> "tuple[int, int]":
         total_processes = max(settings.BACKEND_MAX_REPLICAS, 1) * processes_per_replica
 
     if settings.USE_PGBOUNCER:
-        pgbouncer_budget = _pgbouncer_server_pool_budget()
-        safety_percent = min(max(int(settings.PGBOUNCER_SAFETY_MARGIN_PERCENT), 0), 50)
-        # Keep an explicit percentage of the pool unused for operational
-        # breathing room, then reserve a separate slot for background work.
-        # The percentage is applied before the background reservation.
-        pgbouncer_budget = max(
-            int(pgbouncer_budget * (100 - safety_percent) / 100),
-            1,
-        )
+        pgbouncer_budget = pgbouncer_effective_budget()
         # Keep one small, explicit slice of the shared PgBouncer budget for
         # Celery/Beat DB tasks.  The background tasks acquire a distributed
         # semaphore before opening a session, so the API pool must not be
@@ -320,6 +348,15 @@ _DB_POOL_SIZE, _DB_MAX_OVERFLOW = _compute_pool_sizing(DIRECT_DATABASE_URL)
 # Public read-only values used by the request-level DB concurrency guard.
 POOL_SIZE = _DB_POOL_SIZE
 MAX_OVERFLOW = _DB_MAX_OVERFLOW
+# Public read-only value used by db_admission.py's background-task admission
+# ceiling (see pgbouncer_effective_budget()'s own docstring for the bug this
+# fixes). Computed once here, at the same startup moment as POOL_SIZE/
+# MAX_OVERFLOW above, rather than re-probed on every background task
+# admission -- the live probe is a real network round trip (up to a few
+# seconds on failure) and is meant to be a one-off startup cost, not a
+# per-task one. None when PgBouncer isn't in use, since the concept doesn't
+# apply to the direct-Postgres path.
+PGBOUNCER_EFFECTIVE_BUDGET = pgbouncer_effective_budget() if settings.USE_PGBOUNCER else None
 
 engine = create_engine(
     DATABASE_URL,
@@ -330,6 +367,35 @@ engine = create_engine(
     pool_timeout=settings.DB_POOL_TIMEOUT_SECONDS,
     connect_args={"connect_timeout": 10},
 )
+
+# -----------------------------------------------------------------------
+# Per-transaction statement_timeout (see DB_STATEMENT_TIMEOUT_MS's own
+# config.py comment for the full "why `begin`, why SET LOCAL, why not the
+# readiness engine's connect-time approach" reasoning -- short version:
+# PgBouncer's transaction pooling DISCARDs ALL session state, including any
+# statement_timeout, when a transaction's backend connection is returned to
+# the pool, so a value set once at connection-open time would not reliably
+# apply to later transactions on this same pooled SQLAlchemy connection.
+# `SET LOCAL` inside the "begin" event is re-issued on every single
+# transaction and is automatically scoped to just that transaction, so it
+# is correct whether USE_PGBOUNCER is true or false.
+#
+# Registered on this module-level `engine` object only. Tests never see
+# this: tests/conftest.py's db_engine fixture builds and swaps in its OWN
+# separate SQLite engine for `database.engine`/`database.SessionLocal`
+# rather than reusing this one (see that fixture's module docstring for
+# why -- connect_args={"connect_timeout": 10} above is Postgres/psycopg2-
+# only and SQLite's DBAPI rejects it), so this listener is simply never
+# attached to whatever engine tests actually run queries against. The
+# dialect check below is a second, independent layer of safety in case
+# this module is ever pointed at a non-Postgres DATABASE_URL directly.
+# -----------------------------------------------------------------------
+if settings.DB_STATEMENT_TIMEOUT_MS > 0 and engine.url.get_backend_name().startswith("postgresql"):
+
+    @event.listens_for(engine, "begin")
+    def _set_transaction_statement_timeout(conn):
+        conn.exec_driver_sql(f"SET LOCAL statement_timeout = {int(settings.DB_STATEMENT_TIMEOUT_MS)}")
+
 
 # Create a session factory for generating isolated database transactions
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

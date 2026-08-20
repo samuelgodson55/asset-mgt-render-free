@@ -293,12 +293,24 @@ jobs:
         with:
           python-version: '3.11'
           cache: 'pip'
-          cache-dependency-path: backend/requirements.txt
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
 
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install -r backend/requirements.txt
+          # BUG FIX: this used to install the bare `httpx` package
+          # alongside backend/requirements.txt. starlette==1.6.0 (pinned in
+          # requirements.txt) moved TestClient's HTTP transport to a
+          # separate `httpx2` package, so `httpx` alone no longer satisfies
+          # `fastapi.testclient.TestClient` (backend/tests/conftest.py) --
+          # every CI run was failing at test *collection*, before a single
+          # test executed. requirements-dev.txt now pins the actual
+          # dependency (see that file's own comment) and is the single
+          # source of truth for test-only deps, reused here instead of
+          # duplicating (and re-drifting) the list inline.
+          pip install -r backend/requirements-dev.txt
           # ruff is pinned -- an unpinned install silently picks up whatever
           # is newest on the day CI runs, and ruff has broadened its own
           # *default* rule selection between releases before (adding entire
@@ -310,7 +322,7 @@ jobs:
           # of silently failing the next `git push`. Bump this deliberately
           # (and re-run `ruff check backend/` locally first) when you want a
           # newer ruff.
-          pip install ruff==0.15.22 pytest pytest-asyncio httpx pip-audit
+          pip install ruff==0.15.22
 
       - name: Ruff lint
         run: ruff check backend/

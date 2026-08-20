@@ -7,6 +7,16 @@ background work. Redis is already a hard dependency of Celery. Redis is used onl
 best-effort distributed admission layer: if it is unreachable, tasks fail
 open and rely on the bounded local SQLAlchemy pool rather than turning a
 Redis outage into a background-job outage.
+
+The size of that reserved budget (`server_budget` in `background_db_slot()`
+below) is read from `database.PGBOUNCER_EFFECTIVE_BUDGET` when PgBouncer is
+in use -- the exact same live-probed, safety-margin-adjusted number
+database.py itself used to carve `background_reserve` out of the API pool's
+share (see database.py's `pgbouncer_effective_budget()` docstring). Reading
+the same cached value here, instead of independently recomputing it from
+raw settings, is what keeps the API pool and the background-task admission
+ceiling from being able to drift apart and jointly over-admit past what
+PgBouncer/Postgres can actually grant.
 """
 
 import time
@@ -15,6 +25,7 @@ from contextlib import contextmanager
 
 import redis
 
+import database
 from config import settings
 
 _RELEASE_SCRIPT = """
@@ -50,7 +61,25 @@ def background_db_slot():
     # Never let the configurable task limit exceed the DB capacity that
     # database.py actually removed from the API budget.  If operators set
     # the two values inconsistently, the smaller value wins safely.
-    if settings.PGBOUNCER_SERVER_POOL_SIZE is not None:
+    #
+    # BUG FIX: this used to recompute its own "how big is the PgBouncer
+    # server pool" number straight from the static
+    # PGBOUNCER_SERVER_POOL_SIZE / DEFAULT_POOL_SIZE+RESERVE_POOL_SIZE
+    # settings -- unlike database.py's own reserve calculation, it never
+    # accounted for the live Postgres probe or the PGBOUNCER_SAFETY_MARGIN_PERCENT
+    # reduction those settings go through in database.py. If the live
+    # server turned out smaller than configured, database.py correctly
+    # shrunk the API pool's share (and its own background reserve) to
+    # match, while this function kept admitting Celery/Beat DB work
+    # against the old, larger, un-probed number -- so the two sides could
+    # together exceed what PgBouncer/Postgres could actually grant. Read
+    # database.PGBOUNCER_EFFECTIVE_BUDGET (see that module's
+    # pgbouncer_effective_budget() docstring) instead: it's the exact same
+    # number database.py itself capped `background_reserve` against,
+    # computed once at process startup rather than duplicated here.
+    if settings.USE_PGBOUNCER and database.PGBOUNCER_EFFECTIVE_BUDGET is not None:
+        server_budget = database.PGBOUNCER_EFFECTIVE_BUDGET
+    elif settings.PGBOUNCER_SERVER_POOL_SIZE is not None:
         server_budget = max(int(settings.PGBOUNCER_SERVER_POOL_SIZE), 1)
     else:
         server_budget = max(

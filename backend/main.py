@@ -65,6 +65,7 @@ from fastapi.openapi.utils import get_openapi
 from starlette.concurrency import run_in_threadpool
 
 from database import init_db, seed_db, get_schema_status, engine as db_engine
+import db_pool_metrics
 from celery_app import check_redis_health
 from config import settings
 from logging_config import configure_logging
@@ -99,6 +100,7 @@ from api.notifications_api import router as notifications_router
 from api.reports_api import router as reports_router
 from api.telemetry_api import router as telemetry_router
 from api.maintenance_api import router as maintenance_router
+from api.diagnostics_api import router as diagnostics_router
 
 # ---------------------------------------------------------------------------
 # STRUCTURED LOGGING -- configure this FIRST, before anything else in the
@@ -133,6 +135,14 @@ setup_tracing(settings)
 instrument_sqlalchemy_engine(db_engine, settings)
 instrument_redis(settings)
 instrument_celery(settings)
+
+# Real PgBouncer/Postgres/SQLAlchemy connection-pool numbers, exported as
+# OTel gauges when OTEL_ENABLED -- see db_pool_metrics.py's module
+# docstring. Deliberately placed AFTER setup_tracing() above: an
+# ObservableGauge's callback is wired up once at registration, so
+# metrics.get_meter() needs to already resolve to the real configured
+# MeterProvider at this point, not the API's no-op default.
+db_pool_metrics.register_gauges()
 
 
 @asynccontextmanager
@@ -541,6 +551,7 @@ app.include_router(notifications_router, prefix="/api")
 app.include_router(reports_router, prefix="/api")
 app.include_router(telemetry_router, prefix="/api")
 app.include_router(maintenance_router, prefix="/api")
+app.include_router(diagnostics_router, prefix="/api")
 
 # ---------------------------------------------------------------------------
 # STATIC FRONTEND (free-tier single-service deployment only)

@@ -80,6 +80,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+import overload_monitor
 from logging_config import request_id_var
 from integrations.fastapi_errorbeacon import report_exception
 
@@ -109,15 +110,25 @@ logger = logging.getLogger(__name__)
 # the generic case -- registering a second bare `@app.exception_handler`
 # would hit the identical ServerErrorMiddleware/outside-of-CORSMiddleware
 # problem this file exists to avoid.
+#
+# Metrics/logging/ErrorBeacon for this failure mode go through
+# overload_monitor.record_503() (see that module's docstring) rather than
+# calling report_exception() directly here on every occurrence -- a burst
+# that clears in under a second is exactly what DB_POOL_TIMEOUT_SECONDS is
+# FOR, not something worth an ErrorBeacon event each time. Only a
+# SUSTAINED rejection rate crosses into "the database itself needs
+# attention" and gets reported, with a cooldown.
 _POOL_TIMEOUT_RETRY_AFTER_SECONDS = 3
 
 
 def _pool_exhaustion_response(request: Request, request_id: str | None) -> JSONResponse:
+    reason = overload_monitor.OverloadReason.POOL_TIMEOUT
     return JSONResponse(
         status_code=503,
         headers={"Retry-After": str(_POOL_TIMEOUT_RETRY_AFTER_SECONDS)},
         content={
-            "detail": "The server is momentarily busy handling other requests. Please retry shortly.",
+            "detail": overload_monitor.user_message(reason),
+            "reason": reason,
             "request_id": request_id,
         },
     )
@@ -153,28 +164,30 @@ class UnhandledExceptionMiddleware:
             # overflow connection was already checked out for longer than
             # settings.DB_POOL_TIMEOUT_SECONDS. Expected, self-recovering
             # behavior under a burst, not a bug: WARNING (not ERROR), no
-            # traceback noise, and reported to errorbeacon as a degraded-
-            # dependency event rather than an application exception, same
-            # "fail_open"-style distinction test_resilience.py already
-            # exercises for a Redis outage.
+            # traceback noise. overload_monitor.record_503() below handles
+            # the metrics/log-line bookkeeping unconditionally and only
+            # escalates to ErrorBeacon when the rejection rate is
+            # SUSTAINED (not on every occurrence) -- same "fail_open"-style
+            # distinction test_resilience.py already exercises for a Redis
+            # outage, now shared with the admission-control shedding path
+            # in middleware/db_concurrency.py.
             request = Request(scope, receive=receive)
+            request_id = request_id_var.get()
+            reason = overload_monitor.OverloadReason.POOL_TIMEOUT
             logger.warning(
                 "Database connection pool exhausted while handling %s %s -- returning 503",
                 request.method,
                 request.url.path,
                 extra={"http_method": request.method, "http_path": request.url.path},
             )
-            report_exception(
-                exc, scope, status_code=503,
-                component="database", operation="pool_checkout",
-                severity="warning", category="dependency_degraded",
-                context={"request_id": request_id_var.get(), "failure_mode": "pool_exhausted"},
+            overload_monitor.record_503(
+                route=request.url.path, reason=reason, scope=scope, request_id=request_id,
             )
 
             if response_started:
                 raise
 
-            response = _pool_exhaustion_response(request, request_id_var.get())
+            response = _pool_exhaustion_response(request, request_id)
             await response(scope, receive, send)
         except Exception as exc:
             request = Request(scope, receive=receive)

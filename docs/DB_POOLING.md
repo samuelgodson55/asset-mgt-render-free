@@ -10,11 +10,13 @@ The application now provisions PgBouncer as part of every deployment path that c
 
 ## Deployment paths
 
-### Azure Container Apps + managed PostgreSQL
+### Azure Container Apps + PostgreSQL Flexible Server
 
-Azure ACA uses Azure Database for PostgreSQL Flexible Server's managed PgBouncer. The backend keeps the managed PostgreSQL URL as its authoritative/direct URL and automatically changes only the port to `6432` when `USE_PGBOUNCER=true`; TLS remains enabled. There is no PgBouncer sidecar. The migration Job is direct-to-Postgres on `5432`.
+Azure ACA runs PgBouncer as its own internal-only Container App (`pgbouncer`, `infra/main.bicep`), using the same `edoburu/pgbouncer` image and configuration as the VM/local Compose paths below -- not Azure Database for PostgreSQL Flexible Server's managed PgBouncer server parameters. Azure's managed PgBouncer only supports the GeneralPurpose/MemoryOptimized compute tiers, not the Burstable tier this deployment defaults to for cost (see `postgresSkuTier`'s own description); enabling it against a Burstable server fails deployment with `ServerConfigurationNotAllowed` on the `pgbouncer.*` server parameters. Running PgBouncer as an ordinary Container App instead keeps pooling available regardless of compute tier, at no DB compute-tier cost increase.
 
-The GitHub Environment/Repository Variable `USE_PGBOUNCER` controls the Bicep parameter. It defaults to enabled. For ACA, Bicep enables Azure-managed PgBouncer; for VM/local Compose the pooler service is already present and the application automatically targets `pgbouncer:6432`.
+`pgbouncer` has `external: false` ingress (never internet-reachable) and is only resolvable at its short in-environment DNS name, `pgbouncer`, from other Container Apps in the same environment -- the same reachability model `redis` already uses. `backendApp` is given `PGBOUNCER_HOST=pgbouncer` (config.py's `route_database_through_pgbouncer()` reads this) when `usePgbouncer=true`; the migration Job stays direct-to-Postgres on `5432`, same as every other path.
+
+The GitHub Environment/Repository Variable `USE_PGBOUNCER` controls the Bicep `usePgbouncer` parameter (defaults to enabled) and is passed straight through as `USE_PGBOUNCER` for every path below.
 
 ### Azure VM
 
@@ -69,3 +71,90 @@ API SQLAlchemy pool capacity
 If operators set the background concurrency and reserve values inconsistently,
 the implementation uses the smaller safe value for actual background admission
 and reserves the larger value when sizing the API pool.
+
+## 503 shedding: what the caller sees vs. what the operator sees
+
+Two independent mechanisms turn "more concurrent DB load than this process
+will push at the database" into an HTTP 503 rather than a pile-up of slow
+requests:
+
+- `middleware/db_concurrency.py` sheds a request **before** it ever tries to
+  check out a DB connection, once the in-process admission queue is full
+  (reason code `db_admission_queue_full`).
+- `middleware/error_handling.py` catches `sqlalchemy.exc.TimeoutError` when a
+  request **was** admitted but the SQLAlchemy pool had no free/overflow
+  connection within `DB_POOL_TIMEOUT_SECONDS` (reason code
+  `db_pool_exhausted`).
+
+The caller always gets a generic, safe message (`{"detail": "...", "reason":
+"<code>", "request_id": "..."}`) -- never pool sizes, queue depth, or internal
+reasoning. The `reason` code and full context go to structured logs, an
+OpenTelemetry counter (`http.server.rejections_503`, labeled by `route` and
+`reason`, exported wherever traces already go when `OTEL_ENABLED=true`), and
+-- only when rejections are **sustained**, not merely present -- a single
+ErrorBeacon "degraded dependency" event. See `backend/overload_monitor.py`'s
+own module docstring for the full design; the two knobs that decide what
+counts as "sustained" are:
+
+- `OVERLOAD_ALERT_WINDOW_SECONDS` (default 30) -- the rolling window a
+  rejection count is measured over.
+- `OVERLOAD_ALERT_THRESHOLD_COUNT` (default 10) -- how many rejections for the
+  *same reason* within that window counts as sustained.
+- `OVERLOAD_ALERT_COOLDOWN_SECONDS` (default 300) -- minimum gap between two
+  ErrorBeacon alerts for the same reason, once triggered, so one long overload
+  episode produces one alert per cooldown period, not one per rejected
+  request.
+
+A burst that clears in under a window is exactly what admission control and
+the pool timeout are *for* -- it should show up in the per-route/per-reason
+counters, not page anyone.
+
+## Real connection numbers: tuning the safety margin and background reserve
+
+`PGBOUNCER_SAFETY_MARGIN_PERCENT` and `DB_BACKGROUND_CONNECTION_RESERVE`
+(above) were previously sized once from intuition and left alone, with no
+easy way to tell whether they were too generous (wasted PgBouncer capacity)
+or too thin (clients queueing, Postgres connections maxed out) under real
+traffic. `backend/db_pool_metrics.py` closes that gap with three independent,
+best-effort snapshots:
+
+1. **This process's own SQLAlchemy pool** (`pool_size` / `checked_out` /
+   `checked_in` / `overflow`) -- free, in-memory, no network call. Shows
+   whether this process's *share* of the PgBouncer budget
+   (`api_budget / total_processes`, see `backend/database.py`) is actually
+   being saturated.
+2. **PgBouncer's own `SHOW POOLS` / `SHOW STATS`** -- client connections
+   waiting (`cl_waiting`), server connections active/idle, and average time a
+   client spends waiting for a free server connection (`avg_wait_time_us`).
+   `cl_waiting > 0` and a rising `avg_wait_time_us` are the clearest "the
+   server pool itself is undersized" signal -- direct evidence for whether
+   the safety margin can be tightened. Requires `USE_PGBOUNCER=true`.
+3. **Postgres's own `pg_stat_activity`**, independent of PgBouncer's
+   accounting -- catches anything eating into the server's connection budget
+   that PgBouncer doesn't know about (the `migrate` job, a stray `psql`
+   session, a direct-connection break-glass), and is the real denominator
+   `DB_CONNECTION_SAFETY_MARGIN` needs to be sized against.
+
+Every deployment path's PgBouncer service (ACA's `pgbouncer` Container App,
+`docker-compose.yml`, `docker-compose.vm.yml`) sets `ADMIN_USERS`/
+`STATS_USERS` to the same DB user the application already authenticates
+with, so `SHOW POOLS`/`SHOW STATS` work with no separate monitoring
+credential to provision or rotate.
+
+Two ways to actually see the numbers:
+
+- **On demand, no APM required:** `GET /api/diagnostics/db-pool`
+  (`require_true_super_admin`-gated) returns all three snapshots plus the
+  currently-configured tuning knobs in one response -- the fastest way to
+  check "what's happening right now" before changing a setting.
+- **As a trend, when `OTEL_ENABLED=true`:** the same three snapshots are
+  exported as OpenTelemetry gauges (`db.pool.sqlalchemy`, `db.pool.pgbouncer`,
+  `db.pool.postgres`), sampled on the same interval `telemetry.py`'s exporter
+  is already configured with, wherever traces already go. Useful for seeing
+  how the numbers move under real, sustained load rather than a single
+  point-in-time read.
+
+None of the probing above ever holds a connection open outside the sampling
+window itself -- each uses a short-lived, unpooled connection with a tight
+connect timeout, the same pattern `_probe_postgres_connection_budget()`
+already uses for pool sizing at startup.

@@ -1253,8 +1253,8 @@ preference:
   there's no clustering here, and the Celery beat schedule assumes a
   single broker instance; this is the explicit trade for the cost savings.
 - **`postgresServer`**: not a Container App, so replica counts don't apply.
-  Vertical scaling instead — bump `postgresSkuName` (e.g. `Standard_D2s_v3`
-  → `Standard_B2s`) and/or `postgresStorageGb` in `infra/main.bicep` (or
+  Vertical scaling instead — bump `postgresSkuName` (e.g. `Standard_B2s`
+  → `Standard_B4ms`) and/or `postgresStorageGb` in `infra/main.bicep` (or
   via the `POSTGRES_SKU_NAME`/`POSTGRES_STORAGE_GB` GitHub Variables,
   see the one-time setup section above), then re-run `infra-deploy.yml`.
   Storage can only be **increased**, never decreased, so don't over-size

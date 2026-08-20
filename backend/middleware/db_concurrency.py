@@ -18,7 +18,9 @@ import logging
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 import database
+import overload_monitor
 from config import settings
+from logging_config import request_id_var
 
 logger = logging.getLogger(__name__)
 
@@ -58,8 +60,20 @@ class DBConcurrencyMiddleware:
             try:
                 await asyncio.wait_for(self._semaphore.acquire(), timeout=0.01)
             except asyncio.TimeoutError:
+                # Structured cause for logs/metrics/ErrorBeacon; the body the
+                # CALLER sees stays generic (see overload_monitor.user_message)
+                # -- see overload_monitor.py's module docstring for the full
+                # split between "what the client is told" and "what
+                # operators can actually see".
+                reason = overload_monitor.OverloadReason.ADMISSION_QUEUE_FULL
+                path = scope.get("path", "")
+                request_id = request_id_var.get()
+                overload_monitor.record_503(route=path, reason=reason, scope=scope, request_id=request_id)
+
                 body = json.dumps({
-                    "detail": "The service is busy processing database-backed requests. Please retry shortly."
+                    "detail": overload_monitor.user_message(reason),
+                    "reason": reason,
+                    "request_id": request_id,
                 }).encode("utf-8")
                 await send({
                     "type": "http.response.start",

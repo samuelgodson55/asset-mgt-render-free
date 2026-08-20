@@ -1,0 +1,17 @@
+# Test-only dependencies. Not installed in the production image (see
+# Dockerfile / requirements.txt) -- only needed to run `pytest backend/tests`.
+-r requirements.txt
+pytest
+pytest-asyncio
+# BUG FIX: starlette==1.6.0 (requirements.txt) split TestClient's HTTP
+# transport out of `httpx` into a separate `httpx2` package -- importing
+# `fastapi.testclient.TestClient` (backend/tests/conftest.py) now raises
+# `RuntimeError: The starlette.testclient module requires the httpx2
+# package to be installed` if only the old `httpx` is present. CI
+# (.github/workflows/ci.yml) and the README's `docker compose exec backend
+# pytest backend/tests` instructions previously installed/assumed `httpx`,
+# which no longer satisfies this -- every test run failed at collection
+# time with no test actually executing. Pin the package TestClient itself
+# now requires, not the differently-named one that used to work.
+httpx2
+pip-audit

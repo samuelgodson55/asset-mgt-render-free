@@ -305,8 +305,8 @@ jobs:
       # Variables (Settings -> Secrets and variables -> Actions -> Variables
       # tab, NOT Secrets -- these aren't sensitive) so you can size the
       # Flexible Server per-environment without editing this workflow.
-      # Unset variables fall back to bicep's own defaults (Standard_D2s_v3 /
-      # 32 GiB) via the `|| default` bash pattern below -- this step is safe
+      # Unset variables fall back to bicep's own defaults (Standard_B2s /
+      # Burstable / 32 GiB) via the `|| default` bash pattern below -- this step is safe
       # to run even if you never set either variable.
       # SMTP (email notifications) and Google Drive (backup upload) now
       # follow the SAME Secrets-vs-Variables split, and the SAME names,
@@ -545,8 +545,8 @@ jobs:
               backendMinReplicas=${{ steps.replicas.outputs.backend_min }} \
               frontendMinReplicas=${{ steps.replicas.outputs.frontend_min }} \
               postgresPassword="${{ secrets.POSTGRES_PASSWORD }}" \
-              postgresSkuName="${{ vars.POSTGRES_SKU_NAME || 'Standard_D2s_v3' }}" \
-              postgresSkuTier="${{ vars.POSTGRES_SKU_TIER || 'GeneralPurpose' }}" \
+              postgresSkuName="${{ vars.POSTGRES_SKU_NAME || 'Standard_B2s' }}" \
+              postgresSkuTier="${{ vars.POSTGRES_SKU_TIER || 'Burstable' }}" \
               postgresStorageGb=${{ vars.POSTGRES_STORAGE_GB || 32 }} \
               redisPassword="${{ secrets.REDIS_PASSWORD }}" \
               jwtSecretKey="${{ secrets.JWT_SECRET_KEY }}" \
@@ -702,8 +702,8 @@ jobs:
               backendMinReplicas=${{ steps.replicas.outputs.backend_min }} \
               frontendMinReplicas=${{ steps.replicas.outputs.frontend_min }} \
               postgresPassword="${{ secrets.POSTGRES_PASSWORD }}" \
-              postgresSkuName="${{ vars.POSTGRES_SKU_NAME || 'Standard_D2s_v3' }}" \
-              postgresSkuTier="${{ vars.POSTGRES_SKU_TIER || 'GeneralPurpose' }}" \
+              postgresSkuName="${{ vars.POSTGRES_SKU_NAME || 'Standard_B2s' }}" \
+              postgresSkuTier="${{ vars.POSTGRES_SKU_TIER || 'Burstable' }}" \
               postgresStorageGb=${{ vars.POSTGRES_STORAGE_GB || 32 }} \
               redisPassword="${{ secrets.REDIS_PASSWORD }}" \
               jwtSecretKey="${{ secrets.JWT_SECRET_KEY }}" \
@@ -834,8 +834,8 @@ jobs:
               backendMinReplicas=${{ steps.replicas.outputs.backend_min }} \
               frontendMinReplicas=${{ steps.replicas.outputs.frontend_min }} \
               postgresPassword="${{ secrets.POSTGRES_PASSWORD }}" \
-              postgresSkuName="${{ vars.POSTGRES_SKU_NAME || 'Standard_D2s_v3' }}" \
-              postgresSkuTier="${{ vars.POSTGRES_SKU_TIER || 'GeneralPurpose' }}" \
+              postgresSkuName="${{ vars.POSTGRES_SKU_NAME || 'Standard_B2s' }}" \
+              postgresSkuTier="${{ vars.POSTGRES_SKU_TIER || 'Burstable' }}" \
               postgresStorageGb=${{ vars.POSTGRES_STORAGE_GB || 32 }} \
               redisPassword="${{ secrets.REDIS_PASSWORD }}" \
               jwtSecretKey="${{ secrets.JWT_SECRET_KEY }}" \

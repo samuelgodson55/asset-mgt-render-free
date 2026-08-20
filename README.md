@@ -183,8 +183,24 @@ vX.Y.Z` push via `release.yml`) — no manual `docker push` or SSH required.
 
 ## Testing
 
+The `backend` image only installs `backend/requirements.txt` (production
+dependencies) -- pytest itself, and starlette's TestClient dependency
+(`httpx2`), live in `backend/requirements-dev.txt` instead, so they're
+never shipped in the deployed image. Install those into the container
+once per environment, then run the suite:
+
 ```bash
+docker compose exec backend pip install -r backend/requirements-dev.txt
 docker compose exec backend pytest backend/tests
+```
+
+Or, for a local (non-Docker) virtualenv against a Postgres/Redis you're
+running yourself:
+
+```bash
+cd backend
+pip install -r requirements-dev.txt
+pytest tests
 ```
 
 Runs against real Postgres/Redis service containers, not mocks. CI

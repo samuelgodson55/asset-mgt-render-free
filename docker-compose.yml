@@ -103,6 +103,13 @@ services:
       RESERVE_POOL_TIMEOUT: 3
       SERVER_RESET_QUERY: DISCARD ALL
       IGNORE_STARTUP_PARAMETERS: extra_float_digits
+      # Lets backend/db_pool_metrics.py run SHOW POOLS/SHOW STATS against
+      # PgBouncer's built-in `pgbouncer` admin virtual database, reusing
+      # the SAME app DB user/password already above -- no separate
+      # monitoring credential to provision or rotate. See that module's
+      # docstring for what it does with the numbers.
+      ADMIN_USERS: ${POSTGRES_USER:-admin}
+      STATS_USERS: ${POSTGRES_USER:-admin}
     healthcheck:
       test: ["CMD", "pg_isready", "-h", "localhost", "-p", "6432"]
       interval: 5s

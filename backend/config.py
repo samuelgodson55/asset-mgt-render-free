@@ -288,12 +288,42 @@ class Settings(BaseSettings):
     # hanging indefinitely when every pooled/overflow connection above is
     # already checked out.
     DB_POOL_TIMEOUT_SECONDS: int = 10
+    # Bounds how long a single query may hold a checked-out connection once a
+    # transaction actually starts running against Postgres. DB_POOL_TIMEOUT_SECONDS
+    # above only protects the WAIT to get a connection in the first place; without
+    # this, a genuinely slow/stuck query (lock wait, missing index, runaway report)
+    # that already has a connection can hold it indefinitely, which is exactly the
+    # "slow I/O hogging up the DB pool" failure mode the admission control and
+    # shedding middleware are meant to prevent -- they only stop NEW requests from
+    # piling up, they don't bound an already-admitted one. Applied via a per-
+    # transaction `SET LOCAL statement_timeout` (see database.py's `engine` "begin"
+    # listener), not a connect-time `SET` or a startup-packet option, because
+    # PgBouncer's transaction pooling runs SERVER_RESET_QUERY (DISCARD ALL) on the
+    # underlying Postgres backend after every transaction -- a value set once at
+    # connection-open time would not survive to the next transaction, which may be
+    # handed a different backend connection entirely. SET LOCAL is scoped to
+    # exactly one transaction and is reapplied by the listener every time, so it
+    # works identically whether USE_PGBOUNCER is true or false. 0 disables it.
+    DB_STATEMENT_TIMEOUT_MS: int = 30000
     # Per-process API concurrency gate in front of DB-backed routes. When 0,
     # middleware is disabled. When unset/None in code, database.py's current
     # pool_size + max_overflow is used; a positive value overrides that.
     # Keeping this aligned with the pool prevents a burst of requests from
     # turning into a larger queue of sessions waiting on the same DB budget.
     DB_REQUEST_CONCURRENCY_LIMIT: int | None = None
+    # overload_monitor.py: how many DB-overload 503s (admission-queue-full
+    # OR pool-timeout, tracked independently per reason) within this many
+    # seconds counts as "sustained" rather than "one burst the shedding/
+    # timeout mechanisms already handled correctly" -- crossing this is
+    # what triggers a single ErrorBeacon degraded-dependency signal, not
+    # every individual 503.
+    OVERLOAD_ALERT_WINDOW_SECONDS: int = 30
+    OVERLOAD_ALERT_THRESHOLD_COUNT: int = 10
+    # Minimum seconds between two ErrorBeacon alerts for the SAME reason,
+    # once the threshold above has been crossed. Bounds alert volume from
+    # one process during a long overload episode to at most one every
+    # this-many-seconds, rather than one per qualifying request.
+    OVERLOAD_ALERT_COOLDOWN_SECONDS: int = 300
     # Reserve a small, explicit slice of the PgBouncer server budget for
     # Celery/Beat database work.  API pool sizing subtracts this reserve,
     # while background tasks use the same number as a distributed admission
