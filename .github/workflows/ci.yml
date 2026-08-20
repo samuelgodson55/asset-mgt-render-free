@@ -418,6 +418,11 @@ jobs:
           # deterministic way to point gitleaks-action at a config file
           # regardless of what naming convention its auto-detection expects.
           GITLEAKS_CONFIG: .gitleaks.toml
+          # The scan itself remains enabled; suppress the action's
+          # automatically uploaded gitleaks-results.sarif workflow artifact.
+          # The SARIF artifact is not consumed by this pipeline and only adds
+          # noise/storage to otherwise successful CI runs.
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: false
           # OVERRIDE: Tells Gitleaks to run in directory-scan mode instead of
           # scanning git commit history. This enforces scanning the live repo state
           # on disk where your `.gitleaks.toml` allowlist applies deterministically,
