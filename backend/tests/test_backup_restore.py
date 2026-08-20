@@ -589,7 +589,7 @@ def test_detect_schema_revision_against_partially_migrated_database(database_url
     try:
         with test_engine.connect() as conn:
             detected_full = backup_service._detect_schema_revision(conn)
-        assert detected_full == "0016_quotation_paid_status"
+        assert detected_full == "0018_credentials_changed_at"
     finally:
         test_engine.dispose()
 
