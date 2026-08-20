@@ -274,7 +274,8 @@ locals {
     postgres_password_urlencoded          = urlencode(var.postgres_password)
     postgres_db                           = var.postgres_db
     jwt_secret_key                        = var.jwt_secret_key
-    errorbeacon_api_key                   = var.errorbeacon_api_key
+    errorbeacon_ingest_api_key            = var.errorbeacon_ingest_api_key
+    errorbeacon_admin_api_key             = var.errorbeacon_admin_api_key
     errorbeacon_telegram_bot_token        = var.errorbeacon_telegram_bot_token
     errorbeacon_telegram_chat_id          = var.errorbeacon_telegram_chat_id
     errorbeacon_telegram_thread_id        = var.errorbeacon_telegram_thread_id

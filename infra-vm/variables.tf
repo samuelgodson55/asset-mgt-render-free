@@ -166,8 +166,14 @@ variable "postgres_db" {
   default     = "asset_db"
 }
 
-variable "errorbeacon_api_key" {
-  description = "Shared API key used by the application to authenticate to ErrorBeacon. Generate with: python -c \"import secrets; print(secrets.token_urlsafe(32))\""
+variable "errorbeacon_ingest_api_key" {
+  description = "API key ErrorBeacon requires on the ingest endpoint (event submission). Generate with: python -c \"import secrets; print(secrets.token_urlsafe(32))\". Replaces the deprecated single errorbeacon_api_key."
+  type        = string
+  sensitive   = true
+}
+
+variable "errorbeacon_admin_api_key" {
+  description = "API key ErrorBeacon requires on admin-only endpoints (health/diagnostics/incident management). Generate with: python -c \"import secrets; print(secrets.token_urlsafe(32))\". Replaces the deprecated single errorbeacon_api_key."
   type        = string
   sensitive   = true
 }

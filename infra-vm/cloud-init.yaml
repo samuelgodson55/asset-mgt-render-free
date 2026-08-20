@@ -137,7 +137,8 @@ write_files:
       USE_PGBOUNCER=${use_pgbouncer}
 
       JWT_SECRET_KEY=${jwt_secret_key}
-      ERRORBEACON_API_KEY=${errorbeacon_api_key}
+      ERRORBEACON_INGEST_API_KEY=${errorbeacon_ingest_api_key}
+      ERRORBEACON_ADMIN_API_KEY=${errorbeacon_admin_api_key}
       ERRORBEACON_IMAGE=${errorbeacon_image}
       ERRORBEACON_IMAGE_TAG=${initial_image_tag}
       TELEGRAM_BOT_TOKEN=${errorbeacon_telegram_bot_token}
