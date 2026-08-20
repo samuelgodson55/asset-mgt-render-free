@@ -195,6 +195,18 @@ def backup_env(tmp_path, monkeypatch, database_url, redis_client):
 
     monkeypatch.setattr(config.settings, "DATABASE_URL", database_url)
     monkeypatch.setenv("DATABASE_URL", database_url)
+    # _db_connection_kwargs() (used by pg_dump/psql in backup_service.py)
+    # prefers settings.DIRECT_DATABASE_URL over settings.DATABASE_URL. That
+    # attribute is set once at settings-construction time (route_database_
+    # through_pgbouncer(), config.py) from the *original* DATABASE_URL
+    # default -- postgresql://admin:supersecret@db:5432/asset_db, the
+    # docker-compose service hostname "db" -- and patching DATABASE_URL
+    # alone above does not touch it. Left unpatched, pg_dump/psql keep
+    # trying to resolve "db", which doesn't exist outside a compose
+    # network (CI/local pytest), and fail with "Temporary failure in name
+    # resolution" regardless of how many times the test is re-run.
+    monkeypatch.setattr(config.settings, "DIRECT_DATABASE_URL", database_url)
+    monkeypatch.setenv("DIRECT_DATABASE_URL", database_url)
     monkeypatch.setattr(config.settings, "BACKUP_DIR", str(tmp_path))
     monkeypatch.setattr(config.settings, "REDIS_URL", TEST_REDIS_URL)
     monkeypatch.setattr(config.settings, "BACKUP_GDRIVE_ENABLED", False)
