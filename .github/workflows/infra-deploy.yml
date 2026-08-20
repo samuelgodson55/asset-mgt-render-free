@@ -891,27 +891,51 @@ jobs:
               otelTracesSampleRatio="${{ vars.OTEL_TRACES_SAMPLE_RATIO || '1.0' }}" \
               otelAzureMonitorEnabled=${{ vars.OTEL_AZURE_MONITOR_ENABLED == 'true' }}
 
-      - name: Verify Azure managed PgBouncer configuration
+      - name: Verify PgBouncer configuration
         if: ${{ github.event.inputs.action == 'apply' && vars.USE_PGBOUNCER != 'false' }}
         run: |
           set -euo pipefail
-          SERVER=$(az postgres flexible-server list --resource-group "$RESOURCE_GROUP" --query '[0].name' -o tsv)
-          [ -n "$SERVER" ] || { echo "::error::No PostgreSQL Flexible Server found after infrastructure deployment."; exit 1; }
+
+          # ACA uses the project's self-hosted PgBouncer Container App.
+          # Do not query Azure Flexible Server's managed `pgbouncer.enabled`
+          # parameter here: infra/main.bicep deliberately uses the
+          # self-hosted edoburu/pgbouncer Container App so the default
+          # Burstable PostgreSQL SKU remains supported.
+          if ! az containerapp show --name pgbouncer --resource-group "$RESOURCE_GROUP" --query "name" -o tsv >/dev/null 2>&1; then
+            echo "::error::Self-hosted PgBouncer Container App was not found after infrastructure deployment."
+            exit 1
+          fi
+
+          READY="false"
           for attempt in $(seq 1 12); do
-            VALUE=$(az postgres flexible-server parameter show \
-              --resource-group "$RESOURCE_GROUP" \
-              --server-name "$SERVER" \
-              --name pgbouncer.enabled \
-              --query value -o tsv 2>/dev/null || true)
-            if [ "$VALUE" = "on" ] || [ "$VALUE" = "true" ]; then
-              echo "Azure managed PgBouncer is enabled on $SERVER."
-              exit 0
+            STATE=$(az containerapp show --name pgbouncer --resource-group "$RESOURCE_GROUP" --query "properties.runningStatus" -o tsv 2>/dev/null || true)
+
+            if [ "$STATE" = "Running" ]; then
+              READY="true"
+              echo "Self-hosted PgBouncer Container App is running on pgbouncer:6432."
+              break
             fi
-            echo "PgBouncer is not yet observable as enabled (attempt $attempt/12); retrying..."
+
+            echo "PgBouncer Container App is not yet running (state: ${STATE:-unknown}, attempt $attempt/12); retrying..."
             sleep 10
           done
-          echo "::error::Azure managed PgBouncer did not become enabled/observable on $SERVER. The deployment was not considered ready."
-          exit 1
+
+          if [ "$READY" != "true" ]; then
+            echo "::error::Self-hosted PgBouncer Container App did not become ready after infrastructure deployment."
+            az containerapp show --name pgbouncer --resource-group "$RESOURCE_GROUP" --query '{name:name,runningStatus:properties.runningStatus,provisioningState:properties.provisioningState}' -o json || true
+            exit 1
+          fi
+
+          # Verify the deployed container is actually configured to listen
+          # on the expected internal PgBouncer port.
+          PORT=$(az containerapp show --name pgbouncer --resource-group "$RESOURCE_GROUP" --query "properties.configuration.ingress.exposedPort" -o tsv 2>/dev/null || true)
+
+          [ "$PORT" = "6432" ] || {
+            echo "::error::PgBouncer Container App is not exposing the expected internal TCP port 6432 (observed: ${PORT:-unknown})."
+            exit 1
+          }
+
+          echo "PgBouncer infrastructure verification passed."
 
       # Bicep was given the exact pre-infra traffic topology, so there is no
       # post-deployment traffic flip. Verify the invariant instead.
