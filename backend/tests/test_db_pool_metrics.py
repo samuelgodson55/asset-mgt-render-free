@@ -9,6 +9,8 @@ admin-only diagnostics endpoint is gated correctly and returns the
 expected shape.
 """
 
+import inspect
+
 import db_pool_metrics
 
 
