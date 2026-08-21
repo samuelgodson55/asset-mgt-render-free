@@ -1,4 +1,4 @@
-# Track-IT Lite
+# Snipe-IT Lite
 
 **A production-grade asset lifecycle platform** — equipment inventory,
 custody, approvals, and fulfillment — built to demonstrate real

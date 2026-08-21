@@ -150,31 +150,40 @@ services:
       # with the web service, doesn't scale past one instance).
       - key: RUN_EMBEDDED_WORKER
         value: true
-      # Long-lived application signing secret. Render must preserve the
-      # Dashboard value across Blueprint syncs/redeploys; rotating this
-      # would invalidate every existing JWT. Set it once in Render.
+      # Long-lived application signing secret. generateValue: true has
+      # Render generate a random, base64-encoded 256-bit value the first
+      # time this key doesn't exist, and leaves it untouched on every
+      # later Blueprint sync (this is already Render's default behavior
+      # for generateValue keys -- no sync: false needed alongside it,
+      # they're two different sourcing mechanisms for the same slot, not
+      # a combinable pair). Rotating this would invalidate every existing
+      # JWT, which is exactly why "generate once, then leave alone" is
+      # the goal here.
       - key: JWT_SECRET_KEY
-        sync: false
-      # Sets the root admin's initial password yourself, up front, instead
-      # of letting 0002_bootstrap_root_admin.py generate a random one and
-      # print it to stderr exactly once. That "print once" design assumes
-      # someone is watching a live terminal when the migration runs (see
-      # docs/README.md's "Viewing the one-time-generated root admin
+        generateValue: true
+      # Sets the root admin's initial password automatically, via
+      # generateValue: true, instead of letting
+      # 0002_bootstrap_root_admin.py generate its own random one and
+      # print it to stderr exactly once. That migration's "print once"
+      # design assumes someone is watching a live terminal when it runs
+      # (see docs/README.md's "Viewing the one-time-generated root admin
       # password" section) -- Render's free plan only exposes a Logs tab
       # here (no Shell/Job), and log aggregators sometimes truncate lines
       # that look like secrets, so catching it reliably isn't guaranteed.
-      # Setting this ahead of time in the Render Dashboard sidesteps that
-      # entirely -- pick your own password before the first deploy that
-      # runs this migration. Only ever read ONCE, by that migration, on
-      # its very first successful run against an empty `users` table; it
-      # is never read again afterward by any other part of the app (not
-      # even by this same migration on a later redeploy -- see its
-      # `already_bootstrapped` guard), so leaving it set here after that
-      # first run is harmless but you should still rotate the password via
-      # the in-app Change Password flow once you've logged in, same as
-      # you would with a generated one.
+      # generateValue sidesteps that entirely: Render generates the value
+      # BEFORE the first deploy ever runs, and it stays visible in this
+      # service's Environment tab in the Render Dashboard afterward --
+      # readable any time, no log-watching or Shell access required. Only
+      # ever read ONCE, by that migration, on its very first successful
+      # run against an empty `users` table; it is never read again
+      # afterward by any other part of the app (not even by this same
+      # migration on a later redeploy -- see its `already_bootstrapped`
+      # guard), so leaving it set here after that first run is harmless,
+      # but you should still rotate the password via the in-app Change
+      # Password flow once you've logged in, same as you would with a
+      # migration-generated one.
       - key: ROOT_ADMIN_BOOTSTRAP_PASSWORD
-        sync: false
+        generateValue: true
       - key: JWT_ALGORITHM
         value: HS256
       - key: JWT_EXPIRY_HOURS
