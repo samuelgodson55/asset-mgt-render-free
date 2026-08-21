@@ -585,14 +585,36 @@ runcmd:
   # -----------------------------------------------------------------------
   - |
     cd /opt/snipeit
-    ERRORBEACON_ID_OUTPUT="$(docker run --rm --entrypoint id ${errorbeacon_image}:${initial_image_tag} 2>&1)" || true
-    ERRORBEACON_UID="$(echo "$ERRORBEACON_ID_OUTPUT" | grep -oP '(?<=^uid=)[0-9]+' || true)"
-    ERRORBEACON_GID="$(echo "$ERRORBEACON_ID_OUTPUT" | grep -oP '(?<=gid=)[0-9]+' || true)"
+    # BUG FIX: this used to be a single `docker run --entrypoint id` attempt
+    # with a silent root:root fallback on any failure. That single attempt
+    # can fail transiently right after step 5's own `docker compose pull`
+    # -- e.g. a Docker Hub pull-rate-limit on the anonymous `docker run`
+    # here, or the just-built image tag not yet fully propagated -- and per
+    # this step's own long-standing comment above, that exact fallback
+    # ("this exact failure mode has bitten this deployment target once
+    # already") is what actually happened on a real deploy: errorbeacon
+    # crash-looped with `PermissionError: [Errno 13] Permission denied:
+    # '/data/errorbeacon.init.lock'` forever, since nothing ever re-ran this
+    # step afterward. Retrying a few times with a short backoff before
+    # falling back closes that race without changing the parsing logic
+    # itself (still the image's own `id` output, not a hardcoded guess).
+    ERRORBEACON_UID=""
+    ERRORBEACON_GID=""
+    for attempt in 1 2 3 4 5; do
+      ERRORBEACON_ID_OUTPUT="$(docker run --rm --entrypoint id ${errorbeacon_image}:${initial_image_tag} 2>&1)" || true
+      ERRORBEACON_UID="$(echo "$ERRORBEACON_ID_OUTPUT" | grep -oP '(?<=^uid=)[0-9]+' || true)"
+      ERRORBEACON_GID="$(echo "$ERRORBEACON_ID_OUTPUT" | grep -oP '(?<=gid=)[0-9]+' || true)"
+      if [[ -n "$ERRORBEACON_UID" && -n "$ERRORBEACON_GID" ]]; then
+        break
+      fi
+      echo "Attempt $attempt/5 to read errorbeacon image's UID/GID failed (output: '$ERRORBEACON_ID_OUTPUT') -- retrying in 5s..."
+      sleep 5
+    done
     if [[ -n "$ERRORBEACON_UID" && -n "$ERRORBEACON_GID" ]]; then
       chown -R "$ERRORBEACON_UID:$ERRORBEACON_GID" /mnt/docker-data/volumes/errorbeacon_data
       echo "errorbeacon_data chowned to $ERRORBEACON_UID:$ERRORBEACON_GID (from image's own \`id\`)"
     else
-      echo "WARNING: could not determine errorbeacon image's UID/GID from '$ERRORBEACON_ID_OUTPUT' -- leaving /mnt/docker-data/volumes/errorbeacon_data as root:root. errorbeacon will likely crash-loop with a Permission denied error on /data until this is fixed by hand (chown -R <uid>:<gid> /mnt/docker-data/volumes/errorbeacon_data, then docker compose -f docker-compose.vm.yml up -d --no-deps errorbeacon) -- see docs/DEPLOYMENT_VM.md's Quick Recovery Runbook, item C."
+      echo "WARNING: could not determine errorbeacon image's UID/GID after 5 attempts (last output: '$ERRORBEACON_ID_OUTPUT') -- leaving /mnt/docker-data/volumes/errorbeacon_data as root:root. errorbeacon will likely crash-loop with a Permission denied error on /data until this is fixed by hand (chown -R <uid>:<gid> /mnt/docker-data/volumes/errorbeacon_data, then docker compose -f docker-compose.vm.yml up -d --no-deps errorbeacon) -- see docs/DEPLOYMENT_VM.md's Quick Recovery Runbook, item C."
     fi
 
   # -----------------------------------------------------------------------

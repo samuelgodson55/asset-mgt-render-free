@@ -692,6 +692,10 @@ Add these to each Environment (Secrets unless marked **Variable**):
 | `VM_SIZE` (**Variable**, not secret) | Optional — overrides `variables.tf`'s `Standard_B2s` default. E.g. `Standard_D2s_v3` if `Standard_B2s` isn't available in your region (see Troubleshooting) | `infra-deploy-vm.yml` |
 | `AZURE_LOCATION` (**Variable**, not secret) | Optional — overrides `variables.tf`'s `eastus` default region. E.g. `southafricanorth` for South Africa North (region *names* like "South Africa North" shown in the Portal map to lowercase, no-space *slugs* like this for `az`/Terraform — `az account list-locations -o table` shows every region's slug). Named to match the Container Apps path's own `AZURE_LOCATION` Variable (see `DEPLOYMENT.md`) -- one name, one meaning, on both deploy paths. | `infra-deploy-vm.yml` |
 | `VM_HOST` | Filled in AFTER step 8 (see step 9) — this is the VM's **Cloudflare Tunnel SSH hostname** (`ssh-<label>.<CLOUDFLARE_ZONE_NAME>`, e.g. `ssh-assets.example.com` for `CUSTOM_DOMAIN=assets.example.com`; `ssh.<CLOUDFLARE_ZONE_NAME>` if `CUSTOM_DOMAIN` is the zone apex), not its public IP; nothing listens on port 22 at the public IP by default | `deploy-azure-vm.yml`, `sync-secrets-vm.yml` |
+| `ERRORBEACON_INGEST_API_KEY` | REQUIRED — API key ErrorBeacon requires on the ingest endpoint. Generate with `python -c "import secrets; print(secrets.token_urlsafe(32))"` | `deploy-azure-vm.yml`, `sync-secrets-vm.yml` |
+| `ERRORBEACON_ADMIN_API_KEY` | REQUIRED — API key ErrorBeacon requires on admin-only endpoints (health/diagnostics/incident management). Generate the same way as above | `deploy-azure-vm.yml`, `sync-secrets-vm.yml` |
+| `ERRORBEACON_TELEGRAM_BOT_TOKEN` | REQUIRED — the BotFather token from [Create the Telegram bot](../errorbeacon/errorbeacon-telegram-setup.md#3-create-the-telegram-bot). Both workflows fail their "Validate required secrets" step without this — it is NOT optional on the VM path, unlike Docker Compose locally | `deploy-azure-vm.yml`, `sync-secrets-vm.yml` |
+| `ERRORBEACON_TELEGRAM_CHAT_ID` | REQUIRED — see [Get the Telegram chat ID](../errorbeacon/errorbeacon-telegram-setup.md#4-get-the-telegram-chat-id). Also NOT optional on the VM path | `deploy-azure-vm.yml`, `sync-secrets-vm.yml` |
 
 Optional (leave unset if you don't use them yet):
 `NOTIFICATIONS_ENABLED` (**Variable**), `SMTP_HOST`, `SMTP_USERNAME`,
@@ -701,7 +705,9 @@ Optional (leave unset if you don't use them yet):
 `BACKUP_GDRIVE_FOLDER_ID` — see [Google Drive backup uploads](#google-drive-backup-uploads)
 below for where these five come from.
 
-Also optional, for ErrorBeacon: `ERRORBEACON_GROQ_API_KEY`, `ERRORBEACON_TELEGRAM_CHAT_ID` (**secret**)
+Also optional, for ErrorBeacon (see the REQUIRED `ERRORBEACON_TELEGRAM_BOT_TOKEN`/
+`ERRORBEACON_TELEGRAM_CHAT_ID` rows above — those two are not in this list):
+`ERRORBEACON_GROQ_API_KEY`,
 `ERRORBEACON_GROQ_MODEL` (**Variable**), `ERRORBEACON_GEMINI_MODEL`
 (**Variable**), `ERRORBEACON_GEMINI_FALLBACK_MODEL` (**Variable**),
 `ERRORBEACON_OPENROUTER_API_KEY`, `ERRORBEACON_OPENROUTER_MODEL`

@@ -155,7 +155,13 @@ async function rawFetchInternal<T = unknown>(path: string, init?: RequestInit, p
         // body wasn't JSON -- keep the status text
       }
       if (res.status >= 500) reportClientError(new Error(message), { source: "api.http", endpoint: path, status: res.status });
-      if (res.status === 401 && !path.startsWith("/auth/login") && !path.startsWith("/auth/mfa") && typeof window !== "undefined") {
+      // A 401 in demo mode is expected on every request -- there's no backend
+      // session at all, and tryLoad's fallback to bundled mock data is the
+      // intended handling for it. Dispatching auth-expired here anyway is
+      // what causes "Continue with demo data" to bounce straight back to
+      // Login: the very first authenticated call any page makes 401s, the
+      // event fires, and auth.tsx's handleAuthExpired clears demo mode.
+      if (res.status === 401 && !isDemoMode() && !path.startsWith("/auth/login") && !path.startsWith("/auth/mfa") && typeof window !== "undefined") {
         window.dispatchEvent(new Event("asset-app:auth-expired"));
       }
       throw new ApiError(res.status, message);
@@ -286,7 +292,7 @@ async function rawFetchMultipartInternal<T = unknown>(path: string, formData: Fo
     } catch {
       // body wasn't JSON -- keep the status text
     }
-    if (res.status === 401 && !path.startsWith("/auth/login") && !path.startsWith("/auth/mfa") && typeof window !== "undefined") {
+    if (res.status === 401 && !isDemoMode() && !path.startsWith("/auth/login") && !path.startsWith("/auth/mfa") && typeof window !== "undefined") {
       window.dispatchEvent(new Event("asset-app:auth-expired"));
     }
     throw new ApiError(res.status, message);
