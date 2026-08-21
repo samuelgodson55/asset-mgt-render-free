@@ -594,13 +594,13 @@ jobs:
               docker-compose.vm.yml Caddyfile \
               "$VM_SSH_USER@$VM_HOST:/opt/snipeit/"
           scp -i ~/.ssh/deploy_key \
-              scripts/health-check.sh scripts/blue-green-deploy.sh scripts/telemetry.sh \
+              scripts/health-check.sh scripts/blue-green-deploy.sh scripts/telemetry.sh scripts/ensure-caddy-weights.sh \
               "$VM_SSH_USER@$VM_HOST:/opt/snipeit/scripts/"
           scp -i ~/.ssh/deploy_key \
               scripts/deploy-status/index.html \
               "$VM_SSH_USER@$VM_HOST:/mnt/docker-data/volumes/deploy_status/index.html"
           ssh -i ~/.ssh/deploy_key "$VM_SSH_USER@$VM_HOST" \
-            "chmod +x /opt/snipeit/scripts/health-check.sh /opt/snipeit/scripts/blue-green-deploy.sh /opt/snipeit/scripts/telemetry.sh"
+            "chmod +x /opt/snipeit/scripts/health-check.sh /opt/snipeit/scripts/blue-green-deploy.sh /opt/snipeit/scripts/telemetry.sh /opt/snipeit/scripts/ensure-caddy-weights.sh"
 
       - name: Update IMAGE_TAG + ENVIRONMENT on the VM and pull new images
         env:

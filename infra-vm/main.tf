@@ -257,6 +257,7 @@ locals {
     caddy_weights_conf                    = file("${path.module}/../caddy/weights.conf")
     deploy_status_index_html              = file("${path.module}/../scripts/deploy-status/index.html")
     deploy_status_seed_json               = file("${path.module}/../scripts/deploy-status/status.json")
+    ensure_caddy_weights_sh               = file("${path.module}/../scripts/ensure-caddy-weights.sh")
     admin_username                        = var.admin_username
     domain                                = local.effective_domain
     cloudflare_tunnel_token               = cloudflare_zero_trust_tunnel_cloudflared.this.tunnel_token

@@ -23,8 +23,19 @@ with no Azure resources yet.
 
 ---
 
+## 🚨 Production is down? Start here
+
+**[Quick Recovery Runbook](#quick-recovery-runbook-production-is-down)** — a
+5-minute, copy-paste checklist for the "site is unreachable and I can't SSH
+in" incident, using Azure's out-of-band Run Command channel (works even when
+the Cloudflare Tunnel itself is the thing that's down). Everyone should read
+this once *before* an incident, not during one.
+
+---
+
 ## Table of Contents
 
+- [🚨 Quick Recovery Runbook (production is down)](#quick-recovery-runbook-production-is-down)
 - [0. Prerequisites](#0-prerequisites)
 - [1. One-time Azure setup](#1-one-time-azure-setup)
 - [2. Set up Cloudflare Tunnel (no open ports, no Bastion)](#2-set-up-cloudflare-tunnel-no-open-ports-no-bastion)
@@ -1974,6 +1985,128 @@ recommended.
 - **Automatic OS patching**: `patch_mode = "AutomaticByPlatform"` — Azure applies security patches on its own schedule.
 - **Secrets**: never committed. `infra-vm/.gitignore` excludes `terraform.tfvars`/`*.tfvars`/SSH keys; every real secret is a GitHub encrypted secret, injected as `TF_VAR_*` at workflow run time. CI's own Cloudflare Access session is likewise never persisted — `deploy-azure-vm.yml`/`sync-secrets-vm.yml` authenticate the service token fresh on every run via `cloudflared access ssh`'s `--service-token-id`/`--service-token-secret` flags, nothing lingers between deploys.
 - **Origin CA cert, not a shared wildcard secret**: `cloudflare_origin_cert_key` only ever protects the hop between `cloudflared` and Caddy, both on the same VM, over a network nothing external can reach — its blast radius if leaked is strictly smaller than a cert that also had to be trusted by real browsers.
+
+---
+
+## Quick Recovery Runbook (production is down)
+
+**Read this in an incident, not before it.** Goal: get from "site is
+unreachable, I can't SSH in" to a diagnosis in under 5 minutes, using a
+channel that works *regardless* of whether the Cloudflare Tunnel itself is
+the thing that's broken.
+
+### Step 0 — the one channel that always works: Azure Run Command
+
+Normal SSH goes over the Cloudflare Tunnel (see [Security](#security)),
+which means if the Tunnel is down, SSH is down too — you can't "just SSH in
+and check." **Azure's Run Command feature bypasses this entirely**: it
+executes over the Azure VM Agent/extension control-plane, which has nothing
+to do with the Tunnel, the NSG, or any Docker networking at all.
+
+Azure Portal → your VM → **Support + troubleshooting → Run command →
+RunShellScript** → paste a script → Run. (Same thing `az vm run-command
+invoke` does from a CLI/CI context — see
+[`repair-tunnel-token-vm.yml`](../.github/workflows/repair-tunnel-token-vm.yml)
+and `scripts/emergency-tunnel-repair-run-command.sh` for scripted examples.)
+The **Serial Console** (same VM blade) is an equivalent, even lower-level
+fallback — a root shell with literally no network path at all.
+
+### Step 1 — one command tells you almost everything
+
+```bash
+docker ps -a --format 'table {{.Names}}\t{{.Status}}'
+```
+
+Read the `STATUS` column like this:
+
+| Status shown | What it means | Where to go |
+|---|---|---|
+| `Up ... (healthy)` | Container is fine | Not this one — keep scanning the list |
+| `Up ...` (no `(healthy)`, and it should have a healthcheck) | Running but failing its healthcheck | `docker logs --tail 50 <name>` |
+| `Restarting` | Crash-looping | `docker logs --tail 50 <name>` — usually a config/env error |
+| `Exited (N) ...` | Started, then died | `docker logs --tail 50 <name>` — N is the exit code |
+| **`Created`** (never `Up`, never `Exited`) | **Container was created but literally never started** — this is the one most easily missed, because a superficial glance ("it's in the list, right?") reads as fine | See "Stuck in `Created`" below |
+
+If **`caddy`, `cloudflared`, and/or `errorbeacon`** specifically are the ones
+missing/not-`Up` — that combination means the site AND ssh are both down at
+once, since both ride through `cloudflared` → `caddy`. This is by far the
+most common full-outage shape on this deployment target. Continue below.
+
+### Step 2 — most likely causes, fastest fix first
+
+**A. Containers stuck in `Created` (never started)** — usually means a
+prior `docker compose up -d` was interrupted, or a script targeted specific
+services with `--no-deps` and skipped others. Fix: start them explicitly, in
+dependency order (`cloudflared` depends on `caddy` being started —
+`docker-compose.vm.yml`'s `depends_on: caddy: condition: service_started`):
+
+```bash
+cd /opt/snipeit
+docker compose -f docker-compose.vm.yml up -d --no-deps caddy
+sleep 3
+docker compose -f docker-compose.vm.yml up -d --no-deps cloudflared errorbeacon
+sleep 5
+docker ps -a --format 'table {{.Names}}\t{{.Status}}'
+docker logs --tail 30 snipeit_lite_cloudflared
+```
+A healthy result shows `INF Registered tunnel connection` lines in the
+`cloudflared` log (ideally 4 of them, one per Cloudflare edge location) —
+confirm the same in the Cloudflare Zero Trust dashboard, **Networks →
+Tunnels**: `Status` should read `Healthy`.
+
+**B. Tunnel token stale** (dashboard shows the tunnel `Down`/`Inactive` with
+zero connectors, `cloudflared` logs show a token/auth error rather than
+registering) — see
+["Tunnel shows as inactive/down"](#tunnel-shows-as-inactivedown-in-the-cloudflare-zero-trust-dashboard)
+below. Run **`repair-tunnel-token-vm.yml`** (or
+`scripts/emergency-tunnel-repair-run-command.sh` if CI access isn't handy) —
+both push the current token via the same Run Command channel as Step 0, so
+they work even with the Tunnel fully down.
+
+**C. `errorbeacon` specifically crash-looping with `PermissionError:
+[Errno 13] Permission denied: '/data/...'`** — the host directory backing
+its `/data` volume (`/mnt/docker-data/volumes/errorbeacon_data`) is owned by
+a user/group the container's own non-root user can't write to. This doesn't
+affect the main app (errorbeacon is deliberately outside backend
+blue/green — see `docker-compose.vm.yml`'s comment on that service) but it
+does mean you're flying without error monitoring/alerting until it's fixed.
+Diagnose and fix:
+```bash
+# What UID/GID does the image actually run as?
+docker run --rm --entrypoint id "$(grep '^ERRORBEACON_IMAGE=' /opt/snipeit/.env | cut -d= -f2):$(grep '^ERRORBEACON_IMAGE_TAG=' /opt/snipeit/.env | cut -d= -f2)"
+# -> e.g. uid=1000(app) gid=1000(app)
+
+# Compare against current ownership on the host:
+ls -ld /mnt/docker-data/volumes/errorbeacon_data
+
+# Fix (substitute the UID:GID the `id` command above actually printed):
+chown -R 1000:1000 /mnt/docker-data/volumes/errorbeacon_data
+
+cd /opt/snipeit && docker compose -f docker-compose.vm.yml up -d --no-deps errorbeacon
+docker logs --tail 30 snipeit_lite_errorbeacon
+```
+
+**D. None of the above / caddy itself won't start** — check its logs
+directly (`docker logs --tail 50 snipeit_lite_caddy`); common causes are a
+`caddy/weights.conf` bind-mount problem (self-healed automatically by
+`scripts/blue-green-deploy.sh` on its next run, or see that script's own
+comment on the directory-vs-file race) or a Caddyfile syntax error introduced
+by a hand-edit.
+
+### Step 3 — confirm end-to-end before walking away
+
+1. Cloudflare Zero Trust dashboard → **Networks → Tunnels** → `Status:
+   Healthy`, `Replicas: 1` (or however many connections you expect).
+2. Load the actual app URL in a browser (not just `curl` on the VM — that
+   would skip the Tunnel entirely and give a false-positive).
+3. `docker ps -a` one more time — every service should read `Up
+   (healthy)` except one-shot/no-healthcheck services like `beat`.
+4. If a deploy workflow failed *because of* this outage (rather than
+   causing it), it's almost always safe to just re-run it now that the VM
+   is reachable again — blue-green-deploy.sh's own failure trap already
+   guarantees green was left serving the old-but-working image throughout
+   (see [Zero-Downtime Blue-Green Deployments](#zero-downtime-blue-green-deployments)),
+   so nothing was at risk while you were diagnosing this.
 
 ---
 

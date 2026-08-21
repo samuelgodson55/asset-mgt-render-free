@@ -406,7 +406,27 @@ write_files:
                /mnt/docker-data/volumes/export_data \
                /mnt/docker-data/volumes/caddy_data \
                /mnt/docker-data/volumes/caddy_config \
-               /mnt/docker-data/volumes/deploy_status
+               /mnt/docker-data/volumes/deploy_status \
+               /mnt/docker-data/volumes/errorbeacon_data
+      # errorbeacon_data ownership is fixed up separately, in runcmd step 5a
+      # below, AFTER the errorbeacon image has been pulled -- we need to ask
+      # the image itself which UID/GID it runs as (see that step's comment
+      # for why hardcoding a guessed UID here would be fragile). Until that
+      # step runs, this directory is root:root like every other dir mkdir -p
+      # creates -- fine, since nothing tries to write to it before then.
+
+  # ---------------------------------------------------------------------
+  # Written here too (not just scp'd by deploy-azure-vm.yml on the first
+  # real deploy) so it exists from the VERY FIRST BOOT -- the systemd
+  # unit's ExecStartPre (below) calls it on every start of
+  # snipeit.service, including the first one, before any deploy has ever
+  # run. deploy-azure-vm.yml re-syncs this same file on every future
+  # deploy too, so the two copies never drift.
+  # ---------------------------------------------------------------------
+  - path: /opt/snipeit/scripts/ensure-caddy-weights.sh
+    permissions: "0755"
+    content: |
+      ${indent(6, ensure_caddy_weights_sh)}
 
   - path: /opt/snipeit/scripts/install-docker.sh
     permissions: "0755"
@@ -445,6 +465,20 @@ write_files:
       Type=oneshot
       RemainAfterExit=true
       WorkingDirectory=/opt/snipeit
+      # Self-heals caddy/weights.conf BEFORE `up -d` ever touches caddy, on
+      # EVERY start of this unit -- i.e. every reboot, not just every
+      # deploy. Without this, a boot-time race that leaves weights.conf
+      # missing/corrupted (see scripts/ensure-caddy-weights.sh's own
+      # comment) makes caddy fail to start with no self-heal at all,
+      # cascading into cloudflared (depends_on caddy) and anything after it
+      # in this same `up -d` being left stuck in `Created` -- never even
+      # attempted -- taking the app AND SSH down at once (SSH rides the
+      # same Tunnel). `-` prefix: don't fail this unit's start if the
+      # script itself errors (e.g. docker not up yet on a very first run,
+      # before install-docker.sh has ever completed) -- `up -d` right after
+      # it will still surface a real, actionable error in that case rather
+      # than this unit refusing to even attempt starting the stack.
+      ExecStartPre=-/opt/snipeit/scripts/ensure-caddy-weights.sh /opt/snipeit
       ExecStart=/usr/bin/docker compose -f docker-compose.vm.yml up -d
       ExecStop=/usr/bin/docker compose -f docker-compose.vm.yml down
       TimeoutStartSec=300
@@ -530,7 +564,36 @@ runcmd:
   # -----------------------------------------------------------------------
   - |
     cd /opt/snipeit
-    docker compose -f docker-compose.vm.yml pull backend-green frontend-green
+    docker compose -f docker-compose.vm.yml pull backend-green frontend-green errorbeacon
+
+  # -----------------------------------------------------------------------
+  # 5a. Fix ownership of errorbeacon_data's bind-mount source to match the
+  #    UID/GID the errorbeacon image actually runs as (it's a non-root user
+  #    inside the container -- see its own Dockerfile, not part of this
+  #    repo). setup-disk.sh (step 1) only `mkdir -p`'s this directory, which
+  #    leaves it root:root; without this step, errorbeacon's own first-write
+  #    (an init lock file under /data) fails with `PermissionError: [Errno
+  #    13] Permission denied`, and the container crash-loops forever -- this
+  #    exact failure mode has bitten this deployment target once already.
+  #    `docker run --entrypoint id` asks the image directly rather than
+  #    hardcoding a guessed UID (fragile the moment the image's base image
+  #    changes) -- parsed from `uid=1000(app) gid=1000(app) ...` formatted
+  #    output. Falls back to leaving root:root (with a loud warning, not a
+  #    silent no-op) if the image's `id` output doesn't parse, since a wrong
+  #    guess here would be worse than the original, at-least-diagnosable
+  #    permission error.
+  # -----------------------------------------------------------------------
+  - |
+    cd /opt/snipeit
+    ERRORBEACON_ID_OUTPUT="$(docker run --rm --entrypoint id ${errorbeacon_image}:${initial_image_tag} 2>&1)" || true
+    ERRORBEACON_UID="$(echo "$ERRORBEACON_ID_OUTPUT" | grep -oP '(?<=^uid=)[0-9]+' || true)"
+    ERRORBEACON_GID="$(echo "$ERRORBEACON_ID_OUTPUT" | grep -oP '(?<=gid=)[0-9]+' || true)"
+    if [[ -n "$ERRORBEACON_UID" && -n "$ERRORBEACON_GID" ]]; then
+      chown -R "$ERRORBEACON_UID:$ERRORBEACON_GID" /mnt/docker-data/volumes/errorbeacon_data
+      echo "errorbeacon_data chowned to $ERRORBEACON_UID:$ERRORBEACON_GID (from image's own \`id\`)"
+    else
+      echo "WARNING: could not determine errorbeacon image's UID/GID from '$ERRORBEACON_ID_OUTPUT' -- leaving /mnt/docker-data/volumes/errorbeacon_data as root:root. errorbeacon will likely crash-loop with a Permission denied error on /data until this is fixed by hand (chown -R <uid>:<gid> /mnt/docker-data/volumes/errorbeacon_data, then docker compose -f docker-compose.vm.yml up -d --no-deps errorbeacon) -- see docs/DEPLOYMENT_VM.md's Quick Recovery Runbook, item C."
+    fi
 
   # -----------------------------------------------------------------------
   # 6. Bring the stack up for the first time via the systemd unit (written
@@ -542,44 +605,6 @@ runcmd:
   - systemctl daemon-reload
   - systemctl enable snipeit.service
   - systemctl start snipeit.service
-
-  # -----------------------------------------------------------------------
-  # 6b. Verify the base/foundation services actually came up from step 6,
-  #     and retry if not. `systemctl start snipeit.service` is a oneshot
-  #     unit -- systemd reports success as soon as its `docker compose up
-  #     -d` command exits 0, which it can do even when an individual
-  #     service failed to actually get created for a transient reason
-  #     (Docker Hub rate limit mid-pull, a brief network blip, `docker
-  #     login` above not finishing before this ran, etc). `db`, `redis`,
-  #     `pgbouncer`, `cloudflared`, and `errorbeacon` sit outside the
-  #     backend/frontend blue-green slots (see docker-compose.vm.yml's own
-  #     "ErrorBeacon is deliberately outside the backend blue/green slots"
-  #     comment) and are never touched again by any later deploy --
-  #     scripts/blue-green-deploy.sh's own base-service preflight step only
-  #     runs on a *deploy*, not on a VM that has never had one yet. Without
-  #     this retry loop, a service that silently failed to get created
-  #     right here, on this one first boot, could stay missing indefinitely
-  #     on a VM that's otherwise healthy and never sees a deploy for a
-  #     while. Safe to re-run: `docker compose up -d` is idempotent -- a
-  #     service that's already running and unchanged is left completely
-  #     alone.
-  # -----------------------------------------------------------------------
-  - |
-    cd /opt/snipeit
-    for i in $(seq 1 20); do
-      MISSING=""
-      for svc in db redis pgbouncer cloudflared errorbeacon; do
-        state=$(docker compose -f docker-compose.vm.yml ps -q "$svc")
-        [ -z "$state" ] && MISSING="$MISSING $svc"
-      done
-      if [ -z "$MISSING" ]; then
-        echo "All base services present after attempt $i."
-        break
-      fi
-      echo "Base services missing on attempt $i:$MISSING -- retrying in 10s..."
-      docker compose -f docker-compose.vm.yml up -d db redis pgbouncer cloudflared errorbeacon
-      sleep 10
-    done
 
   # -----------------------------------------------------------------------
   # 7. Run the initial DB schema migration + seed the root admin account,

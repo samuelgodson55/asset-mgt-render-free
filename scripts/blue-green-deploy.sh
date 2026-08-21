@@ -135,38 +135,6 @@ unset _env_key _env_value
 STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 : > "$STATUS_LOG"
 
-# --- ensure base/foundation services are up -----------------------------------
-# db, redis, pgbouncer, cloudflared, and errorbeacon are NOT part of the
-# blue-green rollout below (they're outside the backend/frontend blue-green
-# slots entirely -- see docker-compose.vm.yml's own "ErrorBeacon is
-# deliberately outside the backend blue/green slots" comment). The only
-# place that has ever brought these up from cold was infra-vm/cloud-init.yaml's
-# ONE-TIME snipeit.service systemd unit on the VM's very first boot
-# (`docker compose up -d` with no service list). If that first boot ran
-# before all required secrets/variables existed (e.g. a Terraform var that
-# used to be required -- see git history around errorbeacon_ingest_api_key/
-# errorbeacon_admin_api_key -- was blank or unset at the time), or failed
-# for any other transient reason (image not yet pushed, a network blip,
-# `docker login` failing), one or more of these services would simply never
-# get created -- and nothing downstream of that first boot ever notices or
-# retries, since every later deploy only ever touches backend/frontend/
-# worker/beat/caddy with --no-deps. That leaves a service silently missing
-# forever, discoverable only by someone manually SSHing in and running
-# `docker compose ps -a`.
-#
-# Running a plain `up -d <service>` here on EVERY deploy is deliberately
-# always-on, not conditional on any detected failure state -- it's a normal
-# idempotent Compose operation: a service that's already running and
-# unchanged is left completely alone (no restart, no traffic impact), and a
-# service that's missing (this failure mode) or was intentionally stopped
-# gets (re)created. This mirrors the self-heal pattern already used below
-# for a missing $WEIGHTS_FILE, just applied to the base services themselves
-# rather than one config file. No --no-deps here: these services have no
-# depends_on chain back into backend/frontend/worker/beat, so this can never
-# accidentally pull the blue-green slots into an unwanted restart.
-echo "== [0/6] Ensuring base services (db, redis, pgbouncer, cloudflared, errorbeacon) are up =="
-docker compose -f "$COMPOSE_FILE" up -d db redis pgbouncer cloudflared errorbeacon
-
 # infra-vm/cloud-init.yaml seeds $WEIGHTS_FILE ONCE, on a brand-new VM's
 # first boot, at "0 100" (100% green -- see that file's own comment). It
 # is deliberately NOT re-applied on later deploys (so an in-progress
@@ -176,39 +144,17 @@ docker compose -f "$COMPOSE_FILE" up -d db redis pgbouncer cloudflared errorbeac
 # file/directory was later lost some other way, is left with nothing to
 # ever create it -- every rollout hits `caddy/weights.conf: No such file
 # or directory` at the very first set_weights call and fails before doing
-# anything. Reproduce that same one-time seed here instead, gated on the
-# file not already existing, so this is a no-op on every VM that already
-# has it (the normal case) and a one-time self-heal on one that doesn't.
-# Unlike the old alternating scheme, this is no longer conditional on
-# whatever .env claims is "active" -- green is ALWAYS the fixed active
-# role, so the seed value is always "0 100" (0% blue / 100% green).
-if [[ ! -f "$WEIGHTS_FILE" ]]; then
-  echo "$WEIGHTS_FILE missing or not a regular file -- seeding 100% traffic to green (the fixed active slot) before starting rollout"
-  mkdir -p "$(dirname "$WEIGHTS_FILE")"
-  # Docker's default behavior for a bind-mount source that doesn't exist
-  # on the host at container-start time is to auto-create it AS A
-  # DIRECTORY (it can't know it was meant to be a file) -- which is
-  # exactly what caddy's own "File to import not found" error means:
-  # /etc/caddy/snippets/weights.conf inside the container is that same
-  # empty directory, not a file Caddy's `import` can read. `[[ ! -f ]]`
-  # above is already false for a directory too, so this branch catches
-  # that case as well as truly-missing; rmdir only removes it if it's
-  # actually empty (the normal case for something Docker auto-created
-  # and nothing has written to since) -- anything else here is
-  # unexpected and left alone rather than force-deleted.
-  [[ -d "$WEIGHTS_FILE" ]] && { rmdir "$WEIGHTS_FILE" 2>/dev/null || true; }
-  echo "lb_policy weighted_round_robin 0 100" > "$WEIGHTS_FILE"
-  # A directory-to-file swap underneath an already-established bind
-  # mount isn't reliably picked up by a container that's already
-  # running -- `caddy reload` alone (what set_weights normally does)
-  # re-reads Caddy's config from within the SAME stale mount, not a
-  # fresh one. Recreating (not just restarting) `caddy` here forces
-  # Docker to re-resolve the mount against the real file that now
-  # exists. A brief blip on this one self-heal is a one-time cost;
-  # every deploy after this one lands on a VM that already has a real
-  # $WEIGHTS_FILE and never takes this branch again.
-  docker compose -f "$COMPOSE_FILE" up -d --force-recreate --no-deps caddy
-fi
+# anything. scripts/ensure-caddy-weights.sh reproduces that same one-time
+# seed, gated on the file not already existing, so this is a no-op on
+# every VM that already has it (the normal case) and a one-time self-heal
+# on one that doesn't. This same script also runs as an ExecStartPre on
+# every boot (see cloud-init.yaml's snipeit.service unit) -- it used to
+# live only here, inline, which meant a boot-time race (data disk
+# mounting a beat after Docker starts, e.g.) had no self-heal at all and
+# could take caddy, and everything depending on it, down until the next
+# deploy happened to run this script. See that script's own comment for
+# the full incident this closes.
+./scripts/ensure-caddy-weights.sh "$(pwd)"
 
 write_status() {
   # write_status <phase> [extra_json_fields_without_braces]
