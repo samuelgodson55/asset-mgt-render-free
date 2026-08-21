@@ -135,6 +135,38 @@ unset _env_key _env_value
 STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 : > "$STATUS_LOG"
 
+# --- ensure base/foundation services are up -----------------------------------
+# db, redis, pgbouncer, cloudflared, and errorbeacon are NOT part of the
+# blue-green rollout below (they're outside the backend/frontend blue-green
+# slots entirely -- see docker-compose.vm.yml's own "ErrorBeacon is
+# deliberately outside the backend blue/green slots" comment). The only
+# place that has ever brought these up from cold was infra-vm/cloud-init.yaml's
+# ONE-TIME snipeit.service systemd unit on the VM's very first boot
+# (`docker compose up -d` with no service list). If that first boot ran
+# before all required secrets/variables existed (e.g. a Terraform var that
+# used to be required -- see git history around errorbeacon_ingest_api_key/
+# errorbeacon_admin_api_key -- was blank or unset at the time), or failed
+# for any other transient reason (image not yet pushed, a network blip,
+# `docker login` failing), one or more of these services would simply never
+# get created -- and nothing downstream of that first boot ever notices or
+# retries, since every later deploy only ever touches backend/frontend/
+# worker/beat/caddy with --no-deps. That leaves a service silently missing
+# forever, discoverable only by someone manually SSHing in and running
+# `docker compose ps -a`.
+#
+# Running a plain `up -d <service>` here on EVERY deploy is deliberately
+# always-on, not conditional on any detected failure state -- it's a normal
+# idempotent Compose operation: a service that's already running and
+# unchanged is left completely alone (no restart, no traffic impact), and a
+# service that's missing (this failure mode) or was intentionally stopped
+# gets (re)created. This mirrors the self-heal pattern already used below
+# for a missing $WEIGHTS_FILE, just applied to the base services themselves
+# rather than one config file. No --no-deps here: these services have no
+# depends_on chain back into backend/frontend/worker/beat, so this can never
+# accidentally pull the blue-green slots into an unwanted restart.
+echo "== [0/6] Ensuring base services (db, redis, pgbouncer, cloudflared, errorbeacon) are up =="
+docker compose -f "$COMPOSE_FILE" up -d db redis pgbouncer cloudflared errorbeacon
+
 # infra-vm/cloud-init.yaml seeds $WEIGHTS_FILE ONCE, on a brand-new VM's
 # first boot, at "0 100" (100% green -- see that file's own comment). It
 # is deliberately NOT re-applied on later deploys (so an in-progress

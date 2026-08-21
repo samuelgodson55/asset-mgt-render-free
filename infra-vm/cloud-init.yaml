@@ -544,6 +544,44 @@ runcmd:
   - systemctl start snipeit.service
 
   # -----------------------------------------------------------------------
+  # 6b. Verify the base/foundation services actually came up from step 6,
+  #     and retry if not. `systemctl start snipeit.service` is a oneshot
+  #     unit -- systemd reports success as soon as its `docker compose up
+  #     -d` command exits 0, which it can do even when an individual
+  #     service failed to actually get created for a transient reason
+  #     (Docker Hub rate limit mid-pull, a brief network blip, `docker
+  #     login` above not finishing before this ran, etc). `db`, `redis`,
+  #     `pgbouncer`, `cloudflared`, and `errorbeacon` sit outside the
+  #     backend/frontend blue-green slots (see docker-compose.vm.yml's own
+  #     "ErrorBeacon is deliberately outside the backend blue/green slots"
+  #     comment) and are never touched again by any later deploy --
+  #     scripts/blue-green-deploy.sh's own base-service preflight step only
+  #     runs on a *deploy*, not on a VM that has never had one yet. Without
+  #     this retry loop, a service that silently failed to get created
+  #     right here, on this one first boot, could stay missing indefinitely
+  #     on a VM that's otherwise healthy and never sees a deploy for a
+  #     while. Safe to re-run: `docker compose up -d` is idempotent -- a
+  #     service that's already running and unchanged is left completely
+  #     alone.
+  # -----------------------------------------------------------------------
+  - |
+    cd /opt/snipeit
+    for i in $(seq 1 20); do
+      MISSING=""
+      for svc in db redis pgbouncer cloudflared errorbeacon; do
+        state=$(docker compose -f docker-compose.vm.yml ps -q "$svc")
+        [ -z "$state" ] && MISSING="$MISSING $svc"
+      done
+      if [ -z "$MISSING" ]; then
+        echo "All base services present after attempt $i."
+        break
+      fi
+      echo "Base services missing on attempt $i:$MISSING -- retrying in 10s..."
+      docker compose -f docker-compose.vm.yml up -d db redis pgbouncer cloudflared errorbeacon
+      sleep 10
+    done
+
+  # -----------------------------------------------------------------------
   # 7. Run the initial DB schema migration + seed the root admin account,
   #    against `backend-green` -- ACTIVE_SLOT=green/COMPOSE_PROFILES=green
   #    above make green this VM's active slot from first boot onward (the
