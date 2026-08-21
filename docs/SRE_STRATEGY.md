@@ -222,7 +222,7 @@ put it in a recurring calendar block or a lightweight ticket template.
 
 ## 4. Dependency-update gap — closed
 
-**Done:** [`.github/dependabot.yml`](.github/dependabot.yml) now exists in
+**Done:** [`.github/dependabot.yml`](../.github/dependabot.yml) now exists in
 the repo, covering every package manifest — `backend/requirements.txt`,
 all three `package.json`s (`build-frontend`, `build-tailwind`,
 `frontend/tests`), both Dockerfiles' base images, and the GitHub Actions

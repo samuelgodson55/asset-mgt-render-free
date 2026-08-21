@@ -777,7 +777,7 @@ ongoing-sync chain as the SLA-nudge settings above
 
 Also optional — distributed tracing (OpenTelemetry, off by default). See
 [`README.md`'s Distributed Tracing section](README.md#distributed-tracing-opentelemetry)
-and [`docs/TELEMETRY.md`](docs/TELEMETRY.md) for the deployment-specific
+and [`docs/TELEMETRY.md`](TELEMETRY.md) for the deployment-specific
 walkthrough.
 
 For this Terraform VM path:
@@ -2062,9 +2062,9 @@ Tunnels**: `Status` should read `Healthy`.
 
 **B. Tunnel token stale** (dashboard shows the tunnel `Down`/`Inactive` with
 zero connectors, `cloudflared` logs show a token/auth error rather than
-registering) — see
-["Tunnel shows as inactive/down"](#tunnel-shows-as-inactivedown-in-the-cloudflare-zero-trust-dashboard)
-below. Run **`repair-tunnel-token-vm.yml`** (or
+registering) — see "Tunnel shows as inactive/down in the Cloudflare Zero
+Trust dashboard" in the [Troubleshooting](#troubleshooting) section below.
+Run **`repair-tunnel-token-vm.yml`** (or
 `scripts/emergency-tunnel-repair-run-command.sh` if CI access isn't handy) —
 both push the current token via the same Run Command channel as Step 0, so
 they work even with the Tunnel fully down.

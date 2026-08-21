@@ -1184,7 +1184,7 @@ one replica and one worker). Checklist:
    in the `errorbeacon` container's env array **and** `mountOptions: 'nobrl'`
    on the `errorbeacon-data` volume. If either is missing, that's the fix.
 2. Clear any stale `errorbeacon.db` / `errorbeacon.init.lock` left behind by
-   earlier crashes — see [12.2](#123-stale-sqlite-files-left-behind-by-a-crashed-container).
+   earlier crashes — see [12.2](#122-stale-sqlite-files-left-behind-by-a-crashed-container).
 
 ### ACA: `az containerapp exec` fails with `ClusterExecFailure` / `websocket: close 1011`
 
@@ -1196,10 +1196,9 @@ PowerShell or `cmd.exe` instead. See the Azure Container Apps subsection of
 
 ### ACA: redeployed but the container still shows the same revision / same crash
 
-Work through the checklist in
-[12.2](#122-if-a-redeploy-doesnt-seem-to-change-anything) — in order, the
-usual causes are: `action=plan` instead of `apply`, the workflow running
-against the wrong branch, or the image not actually being rebuilt.
+Work through the usual causes, in order: `action=plan` instead of `apply`,
+the workflow running against the wrong branch, or the image not actually
+being rebuilt.
 
 ### ErrorBeacon appears healthy but backend incidents are missing
 

@@ -69,5 +69,24 @@ else
     echo "render-start.sh: RUN_EMBEDDED_WORKER is not 'true' -- skipping the embedded Celery worker"
 fi
 
+echo "render-start.sh: running 'alembic upgrade head'"
+# AUTOMATIC MIGRATIONS (Render free-tier workaround): Free instances have no
+# Shell tab persistence/Job service to run this by hand on every deploy, so
+# it's run here instead, on every container start, before uvicorn opens the
+# port. Safe to run unconditionally -- alembic upgrade head is a no-op if
+# the DB is already at head (e.g. two redeploys in a row with no new
+# migration). This only ever runs against ONE instance at a time on Free
+# (no horizontal scaling -- see render.yaml's top-of-file comment), so
+# there's no risk of two containers racing the same migration.
+#
+# set -e is deliberately used for JUST this command: if the DB is behind a
+# migration that doesn't apply cleanly, the container should fail to boot
+# rather than silently serve traffic against a schema main.py doesn't
+# actually match.
+if ! alembic upgrade head; then
+    echo "render-start.sh: ERROR: 'alembic upgrade head' failed -- refusing to start uvicorn against a possibly-mismatched schema." >&2
+    exit 1
+fi
+
 echo "render-start.sh: starting uvicorn on port ${PORT:-8000}"
 exec uvicorn main:app --host 0.0.0.0 --port "${PORT:-8000}"

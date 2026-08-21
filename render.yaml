@@ -155,6 +155,26 @@ services:
       # would invalidate every existing JWT. Set it once in Render.
       - key: JWT_SECRET_KEY
         sync: false
+      # Sets the root admin's initial password yourself, up front, instead
+      # of letting 0002_bootstrap_root_admin.py generate a random one and
+      # print it to stderr exactly once. That "print once" design assumes
+      # someone is watching a live terminal when the migration runs (see
+      # docs/README.md's "Viewing the one-time-generated root admin
+      # password" section) -- Render's free plan only exposes a Logs tab
+      # here (no Shell/Job), and log aggregators sometimes truncate lines
+      # that look like secrets, so catching it reliably isn't guaranteed.
+      # Setting this ahead of time in the Render Dashboard sidesteps that
+      # entirely -- pick your own password before the first deploy that
+      # runs this migration. Only ever read ONCE, by that migration, on
+      # its very first successful run against an empty `users` table; it
+      # is never read again afterward by any other part of the app (not
+      # even by this same migration on a later redeploy -- see its
+      # `already_bootstrapped` guard), so leaving it set here after that
+      # first run is harmless but you should still rotate the password via
+      # the in-app Change Password flow once you've logged in, same as
+      # you would with a generated one.
+      - key: ROOT_ADMIN_BOOTSTRAP_PASSWORD
+        sync: false
       - key: JWT_ALGORITHM
         value: HS256
       - key: JWT_EXPIRY_HOURS
@@ -176,12 +196,20 @@ services:
       # (see backend/config.py's SITE_NAME docstring).
       - key: SITE_NAME
         value: Snipe-IT Lite
-      # Demo/staging-friendly defaults. Flip both to "false" for a real
-      # production deployment with real data -- see README.md's "Database
-      # Migrations" section for running `alembic upgrade head` as an
-      # explicit deploy step instead.
+      # AUTO_INIT_DB is OFF here on purpose: render-start.sh now runs
+      # `alembic upgrade head` automatically on every container boot (the
+      # Free-plan workaround for not having a Shell/Job to run it by hand
+      # -- see render-start.sh's own comment), so Alembic is the sole
+      # source of schema truth. Leaving AUTO_INIT_DB=true alongside that
+      # would be redundant at best; at worst, on a fresh empty DB,
+      # create_all() could create a brand-new table (including any not
+      # yet covered by a migration) BEFORE alembic upgrade head runs,
+      # since main.py's own AUTO_INIT_DB call happens after this script's
+      # migration step but not in a way that's guaranteed to match what
+      # that table's own eventual migration expects. AUTO_SEED_DEMO_DATA
+      # stays true -- unrelated to schema, just demo login rows.
       - key: AUTO_INIT_DB
-        value: true
+        value: false
       - key: AUTO_SEED_DEMO_DATA
         value: true
       - key: LOG_LEVEL

@@ -1,25 +1,52 @@
-# Snipe-IT Lite
+# Track-IT Lite
 
-**A production-grade asset lifecycle platform** for tracking equipment
-inventory, custody, approvals, and fulfillment — built to demonstrate
-real operational engineering, not just CRUD.
+**A production-grade asset lifecycle platform** — equipment inventory,
+custody, approvals, and fulfillment — built to demonstrate real
+operational engineering, not just CRUD.
 
 From asset pools and checkouts to quote-to-checkout workflows and
-audit-grade traceability, it gives organizations a single system of
-record for what they own, who's using it, and how requests become
+audit-grade traceability, it gives an organization a single system of
+record for what it owns, who's using it, and how requests become
 approved, accountable handoffs.
 
 **Stack:** FastAPI · PostgreSQL · SQLAlchemy · Celery · React/TypeScript
-**Infra:** Docker Compose · Azure Container Apps or single-VM Terraform, both with zero-downtime blue-green deploys
+**Infra:** Docker Compose (local) · Azure Container Apps or single-VM
+Terraform (production) · Render free tier (zero-cost demo), all with
+zero-downtime blue-green deploys
+
+**🔗 Live demo:** [snipeit-lite-web.onrender.com](https://snipeit-lite-web.onrender.com)
+— runs on Render's free tier, so the first request after 15 minutes of
+inactivity takes ~1 minute to spin back up. Demo login credentials are in
+the [Quick Start](#quick-start) section below.
 
 ---
+
+## Why this project
+
+Most portfolio CRUD apps stop at "it works." This one is built the way a
+small team would actually run it in production:
+
+- **Deploys three different ways** from the same codebase — Azure
+  Container Apps, a Terraform-managed VM, and a single-container Render
+  free-tier build — with one CI/CD pipeline behind all three.
+- **Zero-downtime releases**, not just "docker restart": a blue-green
+  canary rollout (10→25→50→75→100%) with automatic health-gated rollback.
+- **Real observability**: OpenTelemetry tracing plus ErrorBeacon, a
+  purpose-built exception-aggregation service (its own repo-within-a-repo)
+  with Telegram/email alerting and AI-assisted triage.
+- **Schema discipline**: 18 additive-only Alembic migrations, tested with
+  a real `upgrade`/`downgrade` chain in CI — not just `create_all()` and
+  hope.
+- **Security and audit as first-class**, not bolted on: Argon2id hashing,
+  JWT sessions, per-IP and per-account rate limiting, server-side RBAC,
+  and an append-only audit log for every mutating action.
 
 ## At a Glance
 
 | | |
 |---|---|
 | ⚡ **Zero-downtime releases** | Blue-green canary rollout (10→25→50→75→100%) with automatic health-gated rollback |
-| ☁️ **Two production targets** | Azure Container Apps (Bicep) or a single VM (Terraform) — same images, one deploy story |
+| ☁️ **Three deploy targets** | Azure Container Apps (Bicep), a single VM (Terraform), or Render's free tier — same codebase, one CI/CD pipeline |
 | 🔍 **Built-in observability** | OpenTelemetry tracing + ErrorBeacon, a purpose-built exception-aggregation service with Telegram/email alerting and AI-assisted triage |
 | 🔒 **Security by default** | Argon2id hashing, JWT sessions, rate limiting, server-side RBAC, CSP/security headers on every response |
 | 🧪 **CI discipline** | Lint, real-service test suite, secret scanning (Gitleaks), and image scanning (Trivy) on every push |
@@ -76,16 +103,19 @@ Demo accounts (seeded automatically on a fresh database):
        │                            └──────┬───────┘      └──────────┘
        │                                   │ telemetry / error reporting
        │                                   ▼
-       │                           ┌─────────────────────┐
-       └──────────────────────────►│ ErrorBeacon         │
-                                   │ exception monitor    │
-                                   │ + Telegram/email     │
-                                   └─────────────────────┘
+       │                           ┌───────────────────┐
+       └──────────────────────────►│ ErrorBeacon       │
+                                   │ exception monitor │
+                                   │ + Telegram/email  │
+                                   └───────────────────┘
 ```
 
 nginx is the only publicly-exposed service — it serves the frontend and
 reverse-proxies `/api/*` to the backend, so the same image runs
-unmodified in every environment.
+unmodified in every environment. (The Render free-tier build collapses
+this into a single container instead, since Render's free plan has no
+private-service or background-worker type — see `render.yaml`'s
+top-of-file comment for the full reasoning.)
 
 ## Tech Stack
 
@@ -97,7 +127,7 @@ unmodified in every environment.
 | Background jobs | Celery + Redis |
 | Monitoring | ErrorBeacon (custom) + OpenTelemetry |
 | Reverse proxy | nginx |
-| Cloud infra | Azure Container Apps (Bicep) or single VM (Terraform) |
+| Cloud infra | Azure Container Apps (Bicep), single VM (Terraform), or Render free tier |
 | CI/CD | GitHub Actions — lint, test, security scan, build, blue-green deploy |
 
 ## Project Structure
@@ -115,12 +145,15 @@ unmodified in every environment.
 
 ## Deployment
 
-Two production targets, one deploy story — both driven from GitHub
-Actions (`workflow_dispatch`, or a `git tag vX.Y.Z` push), no manual
-`docker push` or SSH required:
+Three production-shaped targets, one deploy story — all driven from
+GitHub Actions (`workflow_dispatch`, or a `git tag vX.Y.Z` push), no
+manual `docker push` or SSH required:
 
 - **Azure Container Apps** — `infra/main.bicep`
 - **Single VM** — `infra-vm/` (Terraform)
+- **Render (free tier)** — `render.yaml` + `Dockerfile.render`, a single
+  combined image built specifically to fit Render's free-plan
+  constraints (no Background Worker or Private Service type available)
 
 ## Testing
 

@@ -1029,7 +1029,7 @@ side by side, with traffic between them a weight the deploy pipeline
 controls explicitly. **Roles are fixed, not swapped from one deploy to
 the next:** green is always the active/production revision, blue is
 always the incoming candidate being validated — see
-[`.github/scripts/aca-blue-green.sh`](.github/scripts/aca-blue-green.sh)'s
+[`.github/scripts/aca-blue-green.sh`](../.github/scripts/aca-blue-green.sh)'s
 own top-of-file comment for the full rationale. Once a rollout finalizes,
 the revision that was blue simply *is* green (the active role) from that
 point on — there's no permanent "blue container" the way the VM path has
@@ -1551,7 +1551,7 @@ The Bicep preview uses `az deployment group what-if`, while actual lifecycle man
 
 ## ErrorBeacon monitoring
 
-The production application now includes ErrorBeacon as a separate service. See [`ERRORBEACON_COVERAGE.md`](ERRORBEACON_COVERAGE.md) for the system-wide error-handling map and [`errorbeacon/DEPLOYMENT.md`](errorbeacon/DEPLOYMENT.md) for monitor deployment.
+The production application now includes ErrorBeacon as a separate service. See [`ERRORBEACON_COVERAGE.md`](ERRORBEACON_COVERAGE.md) for the system-wide error-handling map and [`errorbeacon/DEPLOYMENT.md`](../errorbeacon/DEPLOYMENT.md) for monitor deployment.
 
 ### ACA
 

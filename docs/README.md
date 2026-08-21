@@ -595,10 +595,10 @@ Click your name in the navbar on any dashboard to:
   under `frontend/` is vanilla HTML/JS with Tailwind CSS compiled ahead of time
   into `frontend/css/tailwind.css`; the newer Ledger SPA under `frontend-app/`
   is React + TypeScript + Vite with Tailwind CSS v4 and Recharts. Both are
-  packaged by [`frontend/Dockerfile`](frontend/Dockerfile), but a final image
+  packaged by [`frontend/Dockerfile`](../frontend/Dockerfile), but a final image
   contains exactly one frontend target: `frontend-react-only` or
-  `frontend-legacy-only`. See [`frontend-app/README.md`](frontend-app/README.md)
-  and [`build-tailwind/README.md`](build-tailwind/README.md).
+  `frontend-legacy-only`. See [`frontend-app/README.md`](../frontend-app/README.md)
+  and [`build-tailwind/README.md`](../build-tailwind/README.md).
 - **Infra:** Docker Compose, 6 services: `db` (Postgres), `redis`
   (Celery broker/result backend, and the shared counter store for the
   Redis-backed login rate limiter — see [Security
@@ -1232,7 +1232,7 @@ This app is designed to run, **unmodified**, across three tiers: your local
 Docker Compose setup, a Render staging environment, and a real cloud
 environment (AWS/GCP/Azure/etc.). The piece that makes that possible is the
 `frontend` service — it's no longer a bare static-file server, it's an
-**nginx reverse proxy** built from [`frontend/Dockerfile`](frontend/Dockerfile).
+**nginx reverse proxy** built from [`frontend/Dockerfile`](../frontend/Dockerfile).
 
 **The core idea:** the browser never talks to the FastAPI backend directly
 and never needs to know its hostname. `frontend/js/api.js` calls a single
@@ -1242,7 +1242,7 @@ front of both the static site and the backend, quietly forwards
 lives in that environment, **unchanged** — `backend/main.py` mounts every
 API router under an `/api` prefix itself (e.g. `/api/auth`, `/api/assets`),
 so there's no path-rewriting for nginx to do anymore. See
-[`nginx/default.conf.template`](nginx/default.conf.template) for the
+[`nginx/default.conf.template`](../nginx/default.conf.template) for the
 fully-commented config that does this.
 
 ```
@@ -1259,13 +1259,13 @@ image works in all three tiers — only these environment variables change:
 | `PORT` | Port nginx listens on inside its container | `80` | Whatever port that platform injects |
 | `BACKEND_HOST` | Hostname nginx proxies `/api/*` to | `backend` (the Compose service name) | Your backend service's real hostname on that platform |
 | `BACKEND_PORT` | Port on that host | `8000` | Whatever port your backend actually listens on there |
-| `RESOLVER_IP` | Internal DNS server nginx uses to re-resolve `BACKEND_HOST` on every request (so a backend redeploy never leaves nginx pointed at a stale IP) | `127.0.0.11` (Docker's built-in DNS) | Auto-detected at boot from `/etc/resolv.conf` if left unset — see [`nginx/docker-entrypoint.d/15-detect-resolver-ip.envsh`](nginx/docker-entrypoint.d/15-detect-resolver-ip.envsh) |
+| `RESOLVER_IP` | Internal DNS server nginx uses to re-resolve `BACKEND_HOST` on every request (so a backend redeploy never leaves nginx pointed at a stale IP) | `127.0.0.11` (Docker's built-in DNS) | Auto-detected at boot from `/etc/resolv.conf` if left unset — see [`nginx/docker-entrypoint.d/15-detect-resolver-ip.envsh`](../nginx/docker-entrypoint.d/15-detect-resolver-ip.envsh) |
 
 `PORT`, `BACKEND_HOST`, and `BACKEND_PORT` all have sensible defaults baked
 into `frontend/Dockerfile`. `RESOLVER_IP` deliberately does **not** — instead of
 hardcoding a guess that could go stale on some future platform, it's
 auto-detected at container boot (see the table above and
-[`nginx/docker-entrypoint.d/15-detect-resolver-ip.envsh`](nginx/docker-entrypoint.d/15-detect-resolver-ip.envsh)
+[`nginx/docker-entrypoint.d/15-detect-resolver-ip.envsh`](../nginx/docker-entrypoint.d/15-detect-resolver-ip.envsh)
 for why). All four are already wired up as `environment:` overrides on the
 `frontend` service in `docker-compose.yml`, sourced from `.env` (see
 `.env.example`) — Compose explicitly pins `RESOLVER_IP=127.0.0.11` there, so
@@ -1279,16 +1279,16 @@ in the same compose file.
 ### Render
 
 **This project is configured to run entirely on Render's free plan** — no
-credit card, no paid services. See [`render.yaml`](render.yaml)'s
+credit card, no paid services. See [`render.yaml`](../render.yaml)'s
 top-of-file comment for the full reasoning; the short version is: Render's
 Free instance type only exists for Web Services, Postgres, and Key Value
 (Redis) — Private Services and Background Workers aren't available on the
 Free plan at any price, which ruled out the original private-backend +
-private-worker + public-frontend split. Instead, [`Dockerfile.render`](Dockerfile.render)
+private-worker + public-frontend split. Instead, [`Dockerfile.render`](../Dockerfile.render)
 builds ONE image containing the FastAPI backend, the static frontend
 (served directly by FastAPI — see `backend/main.py`'s `SERVE_FRONTEND`
 flag), and an **embedded** Celery worker/beat process (see
-[`render-start.sh`](render-start.sh) and `RUN_EMBEDDED_WORKER`), so the
+[`render-start.sh`](../render-start.sh) and `RUN_EMBEDDED_WORKER`), so the
 whole app fits on a single free Web Service.
 
 - [ ] Push this repo (including `render.yaml` and `Dockerfile.render` at
@@ -1406,11 +1406,11 @@ a Kubernetes Service DNS name like `backend.default.svc.cluster.local`, or
 an internal ALB/NLB hostname). Leave `RESOLVER_IP` unset unless you've
 confirmed a specific value your platform needs — it's auto-detected from
 `/etc/resolv.conf` at boot otherwise (see
-[`nginx/docker-entrypoint.d/15-detect-resolver-ip.envsh`](nginx/docker-entrypoint.d/15-detect-resolver-ip.envsh)).
+[`nginx/docker-entrypoint.d/15-detect-resolver-ip.envsh`](../nginx/docker-entrypoint.d/15-detect-resolver-ip.envsh)).
 
 **Deploying to Azure specifically?** This project ships a complete,
 fully-automated, cost-optimized version of this pattern already —
-[`infra/main.bicep`](infra/main.bicep) (three Azure Container Apps —
+[`infra/main.bicep`](../infra/main.bicep) (three Azure Container Apps —
 `frontend`, `backend`, `redis` — plus a managed Azure Database for
 PostgreSQL Flexible Server and one Container Apps `migrate` Job;
 `frontend`/`backend` scale independently, Redis remains internal-only and
@@ -1586,7 +1586,7 @@ with a tool like `curl` or Postman, bypassing the UI entirely.
 ### Extension-request permissions
 
 A short summary of who can do what — see
-[services/extension_service.py](backend/services/extension_service.py)
+[services/extension_service.py](../backend/services/extension_service.py)
 for the full rule and its docstrings:
 
 | Action | Who |
@@ -2184,7 +2184,7 @@ When finished, stop only the tracing infrastructure:
 ```
 
 The helper never shuts down the application stack. See
-[`docs/TELEMETRY.md`](docs/TELEMETRY.md) for the process-start behavior of
+[`docs/TELEMETRY.md`](TELEMETRY.md) for the process-start behavior of
 `OTEL_ENABLED` and the VM/ACA/external-collector workflows.
 
 ### Running it in Azure (Application Insights)
@@ -3497,7 +3497,7 @@ A checklist before you deploy this anywhere real:
 ## Safely Updating An Existing Production Deployment (CI/CD)
 
 **This repo ships seven GitHub Actions workflows** in `.github/workflows/`:
-[`ci.yml`](.github/workflows/ci.yml) (ruff lint, the real
+[`ci.yml`](../.github/workflows/ci.yml) (ruff lint, the real
 `pytest backend/tests` suite against real Postgres/Redis service
 containers — including the actual `alembic upgrade head`/`downgrade` chain
 and the RedBeat distributed-lock test, see [Automated test
@@ -3511,29 +3511,29 @@ manually from **Actions → CI → Run workflow**, and is also invoked as a
 reusable `workflow_call` by every deploy workflow below; coverage isn't
 100% of the app yet, see [Suggested Future
 Features](#suggested-future-features) for what's still missing),
-[`deploy-azure-aca.yml`](.github/workflows/deploy-azure-aca.yml)
+[`deploy-azure-aca.yml`](../.github/workflows/deploy-azure-aca.yml)
 (manual `workflow_dispatch` ONLY -- pick `staging` or `production` -- no
 push trigger and no `workflow_call` entry point, so nothing but a human
 running this workflow ever deploys here; a push to `develop`, and a `git
 tag` push, both never auto-deploy),
-[`release.yml`](.github/workflows/release.yml) (triggered by pushing a
+[`release.yml`](../.github/workflows/release.yml) (triggered by pushing a
 `git tag v1.x.x` — builds and pushes both images tagged with that VERSION,
 not just a commit SHA, opens a pull request against `main` with a new
-[`CHANGELOG.md`](CHANGELOG.md) section (never a direct commit — this
+[`CHANGELOG.md`](../CHANGELOG.md) section (never a direct commit — this
 repo's `main` only changes via reviewed PR) and cuts a GitHub Release. It
 does NOT deploy anywhere -- run `deploy-azure-aca.yml`/`deploy-azure-vm.yml`
 by hand, whenever you choose, with the version tag pasted into `image_tag`,
 to actually ship a release)
 — plus
-[`infra-deploy.yml`](.github/workflows/infra-deploy.yml), run separately and
+[`infra-deploy.yml`](../.github/workflows/infra-deploy.yml), run separately and
 occasionally, for provisioning/updating `infra/main.bicep` itself. All of
 these target the **Azure Container Apps** path.
 
 The **Azure VM** path (see below) has its own three, self-contained
-workflows instead: [`infra-deploy-vm.yml`](.github/workflows/infra-deploy-vm.yml)
+workflows instead: [`infra-deploy-vm.yml`](../.github/workflows/infra-deploy-vm.yml)
 (provisions the VM itself via `infra-vm/`'s Terraform — the VM-path
 equivalent of `infra-deploy.yml` above),
-[`deploy-azure-vm.yml`](.github/workflows/deploy-azure-vm.yml) (build both
+[`deploy-azure-vm.yml`](../.github/workflows/deploy-azure-vm.yml) (build both
 images → Trivy scan → SSH over the Cloudflare Tunnel → sync
 `docker-compose.vm.yml`/`Caddyfile` → `docker compose up -d` → migrate →
 smoke test — same manual-`workflow_dispatch`-only shape as
@@ -3541,7 +3541,7 @@ smoke test — same manual-`workflow_dispatch`-only shape as
 point); a `git tag v1.x.x` push builds and publishes the release images via
 `release.yml` but never deploys them here on its own, just without a
 Container Apps control plane in the middle), and
-[`sync-secrets-vm.yml`](.github/workflows/sync-secrets-vm.yml) (pushes
+[`sync-secrets-vm.yml`](../.github/workflows/sync-secrets-vm.yml) (pushes
 updated `.env` values out to the running VM without a full redeploy). The
 two paths are independent — use one, the other, or both side by side —
 and never share GitHub Environment secrets (see
@@ -3661,7 +3661,7 @@ your platform doesn't have a closer native equivalent.
 
 ### Automated Dependency Updates (Dependabot)
 
-[`.github/dependabot.yml`](.github/dependabot.yml) opens a PR once a week
+[`.github/dependabot.yml`](../.github/dependabot.yml) opens a PR once a week
 for every package manifest in this repo — `backend/requirements.txt`,
 all three `package.json`s (`build-frontend`, `build-tailwind`,
 `frontend/tests`), both Dockerfiles' base images (`backend`, `frontend`),
@@ -3818,5 +3818,5 @@ The application now has an isolated ErrorBeacon service for fast exception detec
 See:
 
 - [`ERRORBEACON_COVERAGE.md`](ERRORBEACON_COVERAGE.md) for the system-wide error-handling scan and capture points.
-- [`errorbeacon/README.md`](errorbeacon/README.md) for the monitor itself.
-- [`errorbeacon/DEPLOYMENT.md`](errorbeacon/DEPLOYMENT.md) for local Docker, Render Free, ACA, VM and other deployment paths.
+- [`errorbeacon/README.md`](../errorbeacon/README.md) for the monitor itself.
+- [`errorbeacon/DEPLOYMENT.md`](../errorbeacon/DEPLOYMENT.md) for local Docker, Render Free, ACA, VM and other deployment paths.
