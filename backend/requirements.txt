@@ -56,7 +56,7 @@ chardet<6
 # operator to manually keep Beat to a single instance.
 celery-redbeat==2.4.2
 google-api-python-client==2.198.0
-google-auth==2.34.0
+google-auth==2.56.3
 
 # --- Distributed tracing (OpenTelemetry -- see backend/telemetry.py) -------
 # Keep the core API/SDK/exporter versions aligned. OpenTelemetry's Python
