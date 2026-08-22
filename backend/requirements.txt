@@ -14,7 +14,7 @@ fastapi==0.141.1
 # (multipart-upload DoS blocking the event loop), PYSEC-2026-248/249/2280/2281
 # (further request-smuggling/parsing issues) -- all unfixed as of 0.37.2.
 starlette==1.6.0
-uvicorn==0.30.1
+uvicorn==0.52.4
 psycopg2-binary==2.9.9
 sqlalchemy==2.0.51
 pwdlib[argon2]==0.2.1
