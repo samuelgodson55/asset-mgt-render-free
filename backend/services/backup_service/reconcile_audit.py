@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import logging
 
+from config import settings
+
 logger = logging.getLogger(__name__)
 
 

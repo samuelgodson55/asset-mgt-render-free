@@ -21,7 +21,6 @@ from config import settings
 import services.export_service as export_service
 
 from . import (
-    BackupInProgressError,
     _acquire_backup_lock,
     _release_backup_lock,
 )

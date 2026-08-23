@@ -348,4 +348,16 @@ __all__ = [
     "restore_from_upload",
     "upload_to_gdrive",
     "start_backup_scheduler",
+    # Not part of the public API, but re-exported so
+    # `services.backup_service._name(...)` keeps working exactly like the
+    # old single-file module -- used directly by tests/test_backup_restore.py.
+    "_detect_schema_revision",
+    "_reconcile_post_restore_credentials",
+    "_reconcile_post_restore_outsiders",
+    "_reconcile_post_restore_asset_activity",
+    "_create_restore_snapshot_engine",
+    "_snapshot_audit_logs",
+    "_reconcile_post_restore_audit_logs",
+    "_restore_backup_impl",
+    "_build_gdrive_credentials",
 ]

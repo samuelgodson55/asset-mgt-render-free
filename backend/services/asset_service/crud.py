@@ -8,8 +8,6 @@ and the distinct-categories helper for the filter dropdown.
 
 from __future__ import annotations
 
-import datetime
-from decimal import Decimal
 from typing import Optional
 
 from fastapi import HTTPException
@@ -17,7 +15,6 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 import models
-from config import settings
 from models import utc_now
 from schemas.assets_schema import (
     AssetTypeCreate, CategoryUpdateRequest, DepartmentUpdateRequest,

@@ -8,6 +8,8 @@ auth modes -- see config.py's BACKUP_GDRIVE_* docstring for why both exist.
 
 from __future__ import annotations
 
+import json
+
 from config import settings
 
 

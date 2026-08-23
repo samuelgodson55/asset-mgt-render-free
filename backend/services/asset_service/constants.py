@@ -5,8 +5,6 @@ Role-visibility gates and pagination/upload-size limits shared across the
 asset package.
 """
 
-from config import settings
-
 # --- Stock/custody visibility gates -----------------------------------
 # Mirrors services/quotation_service.py's list_catalog() / lib/roles.ts's
 # canSeeStock()/isPrivileged(): a Manager/Admin/Super Admin always sees

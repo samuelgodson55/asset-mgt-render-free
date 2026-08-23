@@ -27,7 +27,7 @@ from schemas.quotations_schema import (
 
 from .helpers import _money
 
-from .constants import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT
+from .constants import DEFAULT_LIST_LIMIT
 from .helpers import _display_reference, _reference_number
 from .notifications import _notify_quotation_recipient
 from .serialize import _serialize_quotation

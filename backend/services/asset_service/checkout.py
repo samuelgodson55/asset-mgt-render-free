@@ -15,7 +15,6 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 import models
-from models import utc_now
 from schemas.assets_schema import AdvancedCheckoutRequest
 from services.stock import recalculate_asset_stock
 

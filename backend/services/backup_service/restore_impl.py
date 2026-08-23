@@ -23,10 +23,9 @@ import datetime
 import gzip
 import logging
 import os
+import re
 import subprocess
 import uuid
-
-from config import settings
 
 from . import (
     _acquire_backup_lock,

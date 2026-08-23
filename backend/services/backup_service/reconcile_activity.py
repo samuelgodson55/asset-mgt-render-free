@@ -12,8 +12,6 @@ from __future__ import annotations
 
 import logging
 
-from .reconcile_credentials import _reconcile_post_restore_credentials
-
 logger = logging.getLogger(__name__)
 
 
