@@ -752,8 +752,3 @@ failure mode for an app this size:
   Postgres/Redis migration, not a scaling knob.
 
 ---
-
-**Next concrete step, if you want it:** I can add the `dependabot.yml`
-file above directly, or draft the `main.bicep` additions for the three
-alert rules in §2. Either is a small, self-contained change against what's
-already here.

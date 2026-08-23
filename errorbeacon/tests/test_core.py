@@ -9,6 +9,30 @@ os.environ['ERRORBEACON_ADMIN_API_KEY']='test-admin-key'
 os.environ['DATA_DIR']='/tmp/errorbeacon-test'
 from app import main
 from app.main import ErrorEvent, fingerprint, redact, clean, telegram_message, RequestContextMiddleware, request_id_var
+# Fetch submodules straight out of sys.modules (not `import app.main.db as db` --
+# that still resolves via attribute lookup on the `app.main` package object,
+# which app/main/__init__.py's own re-exports shadow: it rebinds the `db`
+# and `auth` attributes to the connection-helper function and the auth
+# dependency respectively, same names as their defining submodules).
+import sys
+db = sys.modules['app.main.db']
+auth = sys.modules['app.main.auth']
+ai = sys.modules['app.main.ai']
+email_notify = sys.modules['app.main.email_notify']
+telegram = sys.modules['app.main.telegram']
+alerting = sys.modules['app.main.alerting']
+
+# NOTE ON monkeypatch TARGETS: this app is a package (app/main/*.py, not a
+# single flat module) -- see app/main/__init__.py's docstring for the layout.
+# A patch only takes effect on the module that actually LOOKS UP that name
+# at call time, which is the module a function is *defined* in, not
+# whichever module happens to call it. So e.g. patching config constants
+# used inside db.persist() must target `db`, not `main`, even when the test
+# drives it via `main.persist(...)` (a re-exported reference to the exact
+# same function object). Where a name is genuinely shared mutable state
+# (the _rate/_test_rate lists, _admin_failures dict, _db_lock), `main.X`
+# still works because those are the same object everywhere, just imported
+# under multiple names.
 
 def test_fingerprint_is_stable():
     e = ErrorEvent(message='boom', error_type='ValueError', path='/x')
@@ -172,8 +196,8 @@ def test_detailed_health_is_available_separately():
 
 
 def test_incident_schema_has_durable_ai_state(tmp_path, monkeypatch):
-    monkeypatch.setattr(main, 'DATA_DIR', tmp_path)
-    monkeypatch.setattr(main, 'DB_PATH', tmp_path / 'errorbeacon.db')
+    monkeypatch.setattr(db, 'DATA_DIR', tmp_path)
+    monkeypatch.setattr(db, 'DB_PATH', tmp_path / 'errorbeacon.db')
     main.init_db()
     c = main.db()
     cols = {r['name'] for r in c.execute('PRAGMA table_info(incidents)').fetchall()}
@@ -182,9 +206,9 @@ def test_incident_schema_has_durable_ai_state(tmp_path, monkeypatch):
 
 
 def test_duplicate_events_increment_occurrences(tmp_path, monkeypatch):
-    monkeypatch.setattr(main, 'DATA_DIR', tmp_path)
-    monkeypatch.setattr(main, 'DB_PATH', tmp_path / 'errorbeacon.db')
-    monkeypatch.setattr(main, 'DEDUP', 300)
+    monkeypatch.setattr(db, 'DATA_DIR', tmp_path)
+    monkeypatch.setattr(db, 'DB_PATH', tmp_path / 'errorbeacon.db')
+    monkeypatch.setattr(db, 'DEDUP', 300)
     main.init_db()
     e = ErrorEvent(app='test', environment='development', message='database unavailable', error_type='OperationalError', path='/readyz', status_code=500)
     first = main.persist(e)
@@ -194,14 +218,14 @@ def test_duplicate_events_increment_occurrences(tmp_path, monkeypatch):
 
 
 def test_chaos_test_is_alertable_when_enabled(monkeypatch):
-    monkeypatch.setattr(main, 'CHAOS_TEST_ALERTS', True)
+    monkeypatch.setattr(db, 'CHAOS_TEST_ALERTS', True)
     e = main.ErrorEvent(message="controlled", severity="error", category="chaos_test")
     assert main.should_notify(e) is True
 
 
 def test_alert_sends_immediate_telegram_and_enqueues_ai(tmp_path, monkeypatch):
-    monkeypatch.setattr(main, 'DATA_DIR', tmp_path)
-    monkeypatch.setattr(main, 'DB_PATH', tmp_path / 'errorbeacon.db')
+    monkeypatch.setattr(db, 'DATA_DIR', tmp_path)
+    monkeypatch.setattr(db, 'DB_PATH', tmp_path / 'errorbeacon.db')
     main.init_db()
     e = main.ErrorEvent(
         app='test', environment='development', message='boom',
@@ -209,8 +233,8 @@ def test_alert_sends_immediate_telegram_and_enqueues_ai(tmp_path, monkeypatch):
     )
     incident, *_ = main.persist(e)
     sent = []
-    monkeypatch.setattr(main, 'tg_delivery', lambda *a, **k: main.TelegramDelivery('sent', {'ok': True}))
-    monkeypatch.setattr(main, 'enqueue_ai', lambda *a, **k: sent.append(True))
+    monkeypatch.setattr(telegram, 'tg_delivery', lambda *a, **k: main.TelegramDelivery('sent', {'ok': True}))
+    monkeypatch.setattr(alerting, 'enqueue_ai', lambda *a, **k: sent.append(True))
     assert main.alert(e, incident, 1, False, False) is True
     assert sent == [True]
     c = main.db()
@@ -220,12 +244,12 @@ def test_alert_sends_immediate_telegram_and_enqueues_ai(tmp_path, monkeypatch):
 
 
 def test_alert_failure_is_persisted_for_retry(tmp_path, monkeypatch):
-    monkeypatch.setattr(main, 'DATA_DIR', tmp_path)
-    monkeypatch.setattr(main, 'DB_PATH', tmp_path / 'errorbeacon.db')
+    monkeypatch.setattr(db, 'DATA_DIR', tmp_path)
+    monkeypatch.setattr(db, 'DB_PATH', tmp_path / 'errorbeacon.db')
     main.init_db()
     e = main.ErrorEvent(app='test', environment='development', message='boom', error_type='ValueError', path='/x', status_code=500)
     incident, *_ = main.persist(e)
-    monkeypatch.setattr(main, 'tg_delivery', lambda *a, **k: main.TelegramDelivery('failed', error='TelegramAPIRejected'))
+    monkeypatch.setattr(telegram, 'tg_delivery', lambda *a, **k: main.TelegramDelivery('failed', error='TelegramAPIRejected'))
     assert main.alert(e, incident, 1, False, False) is False
     c = main.db()
     row = c.execute('SELECT telegram_status,telegram_attempts FROM incidents WHERE id=?',(incident,)).fetchone()
@@ -234,10 +258,10 @@ def test_alert_failure_is_persisted_for_retry(tmp_path, monkeypatch):
 
 
 def test_ai_with_retry_retries_and_returns_normalized_analysis(monkeypatch):
-    monkeypatch.setattr(main, 'AI_ENABLED', True)
-    monkeypatch.setattr(main, 'GEMINI_KEY', 'test-key')
-    monkeypatch.setattr(main, 'AI_RETRIES', 3)
-    monkeypatch.setattr(main, 'AI_RETRY_BASE', 0)
+    monkeypatch.setattr(ai, 'AI_ENABLED', True)
+    monkeypatch.setattr(ai, 'GEMINI_KEY', 'test-key')
+    monkeypatch.setattr(ai, 'AI_RETRIES', 3)
+    monkeypatch.setattr(ai, 'AI_RETRY_BASE', 0)
     e = main.ErrorEvent(app='test', environment='development', message='database down', error_type='OperationalError')
     attempts = {'n': 0}
 
@@ -247,7 +271,7 @@ def test_ai_with_retry_retries_and_returns_normalized_analysis(monkeypatch):
             raise RuntimeError('temporary provider failure')
         return 'gemini', 'ROOT CAUSE:\nDatabase unavailable\n\nIMPACT:\nRequests depending on the database fail.\n\nNEXT STEPS:\nRestore database connectivity.\n\nCONFIDENCE:\nHIGH'
 
-    monkeypatch.setattr(main, 'ai', fake_ai)
+    monkeypatch.setattr(ai, 'ai', fake_ai)
     result = main.ai_with_retry(e)
     assert attempts['n'] == 2
     assert result is not None
@@ -261,15 +285,15 @@ def test_ai_returns_provider_name_alongside_analysis(monkeypatch):
     the analysis, not just the analysis text -- this is what lets
     ai_provider_used get persisted per-incident instead of only appearing in
     logs at the moment the call happened."""
-    monkeypatch.setattr(main, 'AI_ENABLED', True)
-    monkeypatch.setattr(main, 'GROQ_KEY', 'test-key')
-    monkeypatch.setattr(main, 'GEMINI_KEY', '')
-    monkeypatch.setattr(main, 'OPENROUTER_KEY', '')
+    monkeypatch.setattr(ai, 'AI_ENABLED', True)
+    monkeypatch.setattr(ai, 'GROQ_KEY', 'test-key')
+    monkeypatch.setattr(ai, 'GEMINI_KEY', '')
+    monkeypatch.setattr(ai, 'OPENROUTER_KEY', '')
 
     def fake_call(provider, url, key, model, prompt, extra_headers=None):
         return 'ROOT CAUSE:\nX\n\nIMPACT:\nY\n\nNEXT STEPS:\nZ\n\nCONFIDENCE:\nHIGH'
 
-    monkeypatch.setattr(main, '_call_openai_compatible', fake_call)
+    monkeypatch.setattr(ai, '_call_openai_compatible', fake_call)
     e = main.ErrorEvent(app='test', environment='development', message='boom', error_type='ValueError')
     result = main.ai(e)
     assert result is not None
@@ -279,13 +303,13 @@ def test_ai_returns_provider_name_alongside_analysis(monkeypatch):
 
 
 def test_save_ai_and_notify_persists_provider_used(tmp_path, monkeypatch):
-    monkeypatch.setattr(main, 'DATA_DIR', tmp_path)
-    monkeypatch.setattr(main, 'DB_PATH', tmp_path / 'errorbeacon.db')
+    monkeypatch.setattr(db, 'DATA_DIR', tmp_path)
+    monkeypatch.setattr(db, 'DB_PATH', tmp_path / 'errorbeacon.db')
     main.init_db()
     e = main.ErrorEvent(app='test', environment='development', message='boom', error_type='ValueError', path='/x', status_code=500)
     incident, *_ = main.persist(e)
 
-    monkeypatch.setattr(main, 'tg_delivery', lambda *a, **k: main.TelegramDelivery('sent'))
+    monkeypatch.setattr(ai, 'tg_delivery', lambda *a, **k: main.TelegramDelivery('sent'))
     assert main._save_ai_and_notify(
         e, incident, 1, False, False,
         'ROOT CAUSE:\nCause\n\nIMPACT:\nImpact\n\nNEXT STEPS:\nFix\n\nCONFIDENCE:\nHIGH',
@@ -303,8 +327,8 @@ def test_save_ai_and_notify_persists_provider_used(tmp_path, monkeypatch):
 
 
 def test_telegram_timeout_is_unknown_and_not_automatically_retried(tmp_path, monkeypatch):
-    monkeypatch.setattr(main, 'DATA_DIR', tmp_path)
-    monkeypatch.setattr(main, 'DB_PATH', tmp_path / 'errorbeacon.db')
+    monkeypatch.setattr(db, 'DATA_DIR', tmp_path)
+    monkeypatch.setattr(db, 'DB_PATH', tmp_path / 'errorbeacon.db')
     main.init_db()
     e = ErrorEvent(
         app='test', environment='development', message='boom',
@@ -317,7 +341,7 @@ def test_telegram_timeout_is_unknown_and_not_automatically_retried(tmp_path, mon
         calls['n'] += 1
         return main.TelegramDelivery('unknown', error='ConnectTimeout')
 
-    monkeypatch.setattr(main, 'tg_delivery', fake_send)
+    monkeypatch.setattr(telegram, 'tg_delivery', fake_send)
     assert main.alert(e, incident, 1, False, False) is False
 
     c = main.db()
@@ -335,8 +359,8 @@ def test_telegram_timeout_is_unknown_and_not_automatically_retried(tmp_path, mon
 
 
 def test_telegram_explicit_rejection_remains_retryable(tmp_path, monkeypatch):
-    monkeypatch.setattr(main, 'DATA_DIR', tmp_path)
-    monkeypatch.setattr(main, 'DB_PATH', tmp_path / 'errorbeacon.db')
+    monkeypatch.setattr(db, 'DATA_DIR', tmp_path)
+    monkeypatch.setattr(db, 'DB_PATH', tmp_path / 'errorbeacon.db')
     main.init_db()
     e = ErrorEvent(
         app='test', environment='development', message='boom',
@@ -345,7 +369,7 @@ def test_telegram_explicit_rejection_remains_retryable(tmp_path, monkeypatch):
     incident, *_ = main.persist(e)
 
     monkeypatch.setattr(
-        main, 'tg_delivery',
+        telegram, 'tg_delivery',
         lambda *a, **k: main.TelegramDelivery('failed', error='TelegramAPIRejected'),
     )
     assert main.alert(e, incident, 1, False, False) is False
@@ -361,8 +385,8 @@ def test_telegram_explicit_rejection_remains_retryable(tmp_path, monkeypatch):
 
 
 def test_ai_telegram_timeout_is_not_replayed(tmp_path, monkeypatch):
-    monkeypatch.setattr(main, 'DATA_DIR', tmp_path)
-    monkeypatch.setattr(main, 'DB_PATH', tmp_path / 'errorbeacon.db')
+    monkeypatch.setattr(db, 'DATA_DIR', tmp_path)
+    monkeypatch.setattr(db, 'DB_PATH', tmp_path / 'errorbeacon.db')
     main.init_db()
     e = ErrorEvent(
         app='test', environment='development', message='boom',
@@ -371,7 +395,7 @@ def test_ai_telegram_timeout_is_not_replayed(tmp_path, monkeypatch):
     incident, *_ = main.persist(e)
 
     monkeypatch.setattr(
-        main, 'tg_delivery',
+        ai, 'tg_delivery',
         lambda *a, **k: main.TelegramDelivery('unknown', error='ConnectTimeout'),
     )
     assert main._save_ai_and_notify(
@@ -390,28 +414,28 @@ def test_ai_telegram_timeout_is_not_replayed(tmp_path, monkeypatch):
 
 
 def test_telegram_5xx_is_unknown_not_retryable(monkeypatch):
-    monkeypatch.setattr(main, 'TG_TOKEN', 'test-token')
-    monkeypatch.setattr(main, 'TG_CHAT', '123')
+    monkeypatch.setattr(telegram, 'TG_TOKEN', 'test-token')
+    monkeypatch.setattr(telegram, 'TG_CHAT', '123')
     class Response:
         status_code = 502
         def json(self):
             return {'ok': False, 'description': 'gateway error'}
 
-    monkeypatch.setattr(main.requests, 'post', lambda *a, **k: Response())
+    monkeypatch.setattr(telegram.requests, 'post', lambda *a, **k: Response())
     result = main.tg_delivery('sendMessage', 'test', {})
     assert result.status == 'unknown'
     assert result.error == 'TelegramHTTP502'
 
 
 def test_telegram_4xx_is_definitely_failed_and_retryable(monkeypatch):
-    monkeypatch.setattr(main, 'TG_TOKEN', 'test-token')
-    monkeypatch.setattr(main, 'TG_CHAT', '123')
+    monkeypatch.setattr(telegram, 'TG_TOKEN', 'test-token')
+    monkeypatch.setattr(telegram, 'TG_CHAT', '123')
     class Response:
         status_code = 400
         def json(self):
             return {'ok': False, 'description': 'bad request'}
 
-    monkeypatch.setattr(main.requests, 'post', lambda *a, **k: Response())
+    monkeypatch.setattr(telegram.requests, 'post', lambda *a, **k: Response())
     result = main.tg_delivery('sendMessage', 'test', {})
     assert result.status == 'failed'
     assert result.retryable is True
@@ -419,22 +443,22 @@ def test_telegram_4xx_is_definitely_failed_and_retryable(monkeypatch):
 
 
 def test_test_rate_limit_is_independent_and_tighter(monkeypatch):
-    main._test_rate.clear(); monkeypatch.setattr(main, 'TEST_ALERTS_PER_MINUTE', 2)
+    main._test_rate.clear(); monkeypatch.setattr(auth, 'TEST_ALERTS_PER_MINUTE', 2)
     assert main.limited_test() is True; assert main.limited_test() is True; assert main.limited_test() is False; main._test_rate.clear()
 
 def test_email_fallback_uses_existing_application_recipients_and_transport(tmp_path, monkeypatch):
-    monkeypatch.setattr(main,'DATA_DIR',tmp_path); monkeypatch.setattr(main,'DB_PATH',tmp_path/'errorbeacon.db'); monkeypatch.setattr(main,'EMAIL_FALLBACK_ENABLED',True); monkeypatch.setattr(main,'NOTIFICATIONS_ENABLED',True); monkeypatch.setattr(main,'ADMIN_NOTIFICATION_EMAILS','ops@example.com, oncall@example.com'); monkeypatch.setattr(main,'EMAIL_PROVIDER','smtp'); monkeypatch.setattr(main,'SMTP_HOST','smtp.example.com'); monkeypatch.setattr(main,'SMTP_FROM_EMAIL','alerts@example.com'); monkeypatch.setattr(main,'EMAIL_FALLBACK_AFTER_ATTEMPTS',3)
+    monkeypatch.setattr(db,'DATA_DIR',tmp_path); monkeypatch.setattr(db,'DB_PATH',tmp_path/'errorbeacon.db'); monkeypatch.setattr(email_notify,'EMAIL_FALLBACK_ENABLED',True); monkeypatch.setattr(email_notify,'NOTIFICATIONS_ENABLED',True); monkeypatch.setattr(email_notify,'ADMIN_NOTIFICATION_EMAILS','ops@example.com, oncall@example.com'); monkeypatch.setattr(email_notify,'EMAIL_PROVIDER','smtp'); monkeypatch.setattr(email_notify,'SMTP_HOST','smtp.example.com'); monkeypatch.setattr(email_notify,'SMTP_FROM_EMAIL','alerts@example.com'); monkeypatch.setattr(email_notify,'EMAIL_FALLBACK_AFTER_ATTEMPTS',3)
     main.init_db(); e=main.ErrorEvent(message='boom',error_type='ValueError',path='/x',status_code=500); i,*_=main.persist(e)
     with main._db_lock:
         c=main.db(); c.execute("UPDATE incidents SET telegram_status='pending',telegram_attempts=3 WHERE id=?",(i,)); c.commit(); row=c.execute('SELECT * FROM incidents WHERE id=?',(i,)).fetchone(); c.close()
-    calls=[]; monkeypatch.setattr(main,'send_email',lambda to,subject,body:calls.append((to,subject,body)) or True)
+    calls=[]; monkeypatch.setattr(email_notify,'send_email',lambda to,subject,body:calls.append((to,subject,body)) or True)
     assert main._send_email_fallback(row) is True; assert calls[0][0]==['ops@example.com','oncall@example.com']; assert 'boom' in calls[0][2]
 
 def test_email_fallback_requires_existing_app_notification_configuration(monkeypatch):
-    monkeypatch.setattr(main,'EMAIL_FALLBACK_ENABLED',True); monkeypatch.setattr(main,'NOTIFICATIONS_ENABLED',False); monkeypatch.setattr(main,'ADMIN_NOTIFICATION_EMAILS','ops@example.com'); assert main.email_configured() is False
+    monkeypatch.setattr(email_notify,'EMAIL_FALLBACK_ENABLED',True); monkeypatch.setattr(email_notify,'NOTIFICATIONS_ENABLED',False); monkeypatch.setattr(email_notify,'ADMIN_NOTIFICATION_EMAILS','ops@example.com'); assert main.email_configured() is False
 
 def test_retention_purges_only_old_resolved_incidents(tmp_path, monkeypatch):
-    monkeypatch.setattr(main,'DATA_DIR',tmp_path); monkeypatch.setattr(main,'DB_PATH',tmp_path/'errorbeacon.db'); monkeypatch.setattr(main,'RETENTION_DAYS',90); main.init_db(); old=(datetime.now(timezone.utc)-timedelta(days=120)).isoformat(); fresh=(datetime.now(timezone.utc)-timedelta(days=10)).isoformat()
+    monkeypatch.setattr(db,'DATA_DIR',tmp_path); monkeypatch.setattr(db,'DB_PATH',tmp_path/'errorbeacon.db'); monkeypatch.setattr(db,'RETENTION_DAYS',90); main.init_db(); old=(datetime.now(timezone.utc)-timedelta(days=120)).isoformat(); fresh=(datetime.now(timezone.utc)-timedelta(days=10)).isoformat()
     with main._db_lock:
         c=main.db(); c.execute("INSERT INTO incidents(id,created_at,app,environment,severity,message,fingerprint,last_seen_at,resolved) VALUES('old',?,'test','prod','error','old','fp-old',?,1)",(old,old)); c.execute("INSERT INTO incident_events(incident_id,fingerprint,occurred_at,app,environment) VALUES('old','fp-old',?,'test','prod')",(old,)); c.execute("INSERT INTO incidents(id,created_at,app,environment,severity,message,fingerprint,last_seen_at,resolved) VALUES('fresh',?,'test','prod','error','fresh','fp-fresh',?,1)",(fresh,fresh)); c.commit(); c.close()
     assert main.purge_resolved_incidents()==2
@@ -442,7 +466,7 @@ def test_retention_purges_only_old_resolved_incidents(tmp_path, monkeypatch):
         c=main.db(); assert c.execute("SELECT COUNT(*) FROM incident_events WHERE incident_id='old'").fetchone()[0] == 0; c.close()
 
 def test_keyboard_exposes_state_appropriate_actions(tmp_path, monkeypatch):
-    monkeypatch.setattr(main,'DATA_DIR',tmp_path); monkeypatch.setattr(main,'DB_PATH',tmp_path/'errorbeacon.db'); main.init_db(); i,*_=main.persist(main.ErrorEvent(message='boom')); texts=[b['text'] for row in main.keyboard(i)['inline_keyboard'] for b in row]; assert all(x in ' '.join(texts) for x in ('1h','4h','24h'))
+    monkeypatch.setattr(db,'DATA_DIR',tmp_path); monkeypatch.setattr(db,'DB_PATH',tmp_path/'errorbeacon.db'); main.init_db(); i,*_=main.persist(main.ErrorEvent(message='boom')); texts=[b['text'] for row in main.keyboard(i)['inline_keyboard'] for b in row]; assert all(x in ' '.join(texts) for x in ('1h','4h','24h'))
     with main._db_lock:
         c=main.db(); c.execute('UPDATE incidents SET resolved=1 WHERE id=?',(i,)); c.commit(); c.close()
     texts=[b['text'] for row in main.keyboard(i)['inline_keyboard'] for b in row]; assert '↩️ Reopen' in texts
@@ -452,13 +476,13 @@ def test_silence_duration_parser_supports_human_units():
     with pytest.raises(ValueError): main._silence_seconds('tomorrow')
 
 def test_telegram_command_dispatches_controls(monkeypatch):
-    calls=[]; monkeypatch.setattr(main,'_incident_update',lambda *args: calls.append(args) or True); assert 'resolved' in main.handle_telegram_command('/resolve abc123'); assert 'silenced' in main.handle_telegram_command('/silence abc123 4h'); assert 'reopened' in main.handle_telegram_command('/reopen abc123'); assert 'unsilenced' in main.handle_telegram_command('/unsilence abc123')
+    calls=[]; monkeypatch.setattr(telegram,'_incident_update',lambda *args: calls.append(args) or True); assert 'resolved' in main.handle_telegram_command('/resolve abc123'); assert 'silenced' in main.handle_telegram_command('/silence abc123 4h'); assert 'reopened' in main.handle_telegram_command('/reopen abc123'); assert 'unsilenced' in main.handle_telegram_command('/unsilence abc123')
 
 
 def test_http_incident_lifecycle_endpoints(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
-    monkeypatch.setattr(main, 'DATA_DIR', tmp_path)
-    monkeypatch.setattr(main, 'DB_PATH', tmp_path / 'errorbeacon.db')
+    monkeypatch.setattr(db, 'DATA_DIR', tmp_path)
+    monkeypatch.setattr(db, 'DB_PATH', tmp_path / 'errorbeacon.db')
     main.init_db()
     incident, *_ = main.persist(main.ErrorEvent(message='endpoint boom', error_type='RuntimeError'))
     with TestClient(main.app) as client:
@@ -474,9 +498,9 @@ def test_http_incident_lifecycle_endpoints(tmp_path, monkeypatch):
 
 def test_http_test_endpoint_has_own_rate_limit(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
-    monkeypatch.setattr(main, 'DATA_DIR', tmp_path)
-    monkeypatch.setattr(main, 'DB_PATH', tmp_path / 'errorbeacon.db')
-    monkeypatch.setattr(main, 'TEST_ALERTS_PER_MINUTE', 1)
+    monkeypatch.setattr(db, 'DATA_DIR', tmp_path)
+    monkeypatch.setattr(db, 'DB_PATH', tmp_path / 'errorbeacon.db')
+    monkeypatch.setattr(auth, 'TEST_ALERTS_PER_MINUTE', 1)
     main._test_rate.clear()
     main.init_db()
     with TestClient(main.app) as client:
@@ -488,7 +512,7 @@ def test_http_test_endpoint_has_own_rate_limit(tmp_path, monkeypatch):
 
 def test_base_ingest_rate_limiter_enforces_configured_limit(monkeypatch):
     main._rate.clear()
-    monkeypatch.setattr(main, 'MAX_ALERTS', 2)
+    monkeypatch.setattr(auth, 'MAX_ALERTS', 2)
     assert main.limited() is True
     assert main.limited() is True
     assert main.limited() is False
@@ -496,11 +520,11 @@ def test_base_ingest_rate_limiter_enforces_configured_limit(monkeypatch):
 
 
 def test_spike_detection_crosses_threshold(tmp_path, monkeypatch):
-    monkeypatch.setattr(main, 'DATA_DIR', tmp_path)
-    monkeypatch.setattr(main, 'DB_PATH', tmp_path / 'errorbeacon.db')
-    monkeypatch.setattr(main, 'SPIKE_THRESHOLD', 3)
-    monkeypatch.setattr(main, 'SPIKE_WINDOW', 300)
-    monkeypatch.setattr(main, 'DEDUP', 60)
+    monkeypatch.setattr(db, 'DATA_DIR', tmp_path)
+    monkeypatch.setattr(db, 'DB_PATH', tmp_path / 'errorbeacon.db')
+    monkeypatch.setattr(db, 'SPIKE_THRESHOLD', 3)
+    monkeypatch.setattr(db, 'SPIKE_WINDOW', 300)
+    monkeypatch.setattr(db, 'DEDUP', 60)
     main.init_db()
     event = main.ErrorEvent(
         app='spike-test', environment='test',
@@ -516,8 +540,8 @@ def test_spike_detection_crosses_threshold(tmp_path, monkeypatch):
 
 
 def test_deployment_regression_detected_after_release_changes(tmp_path, monkeypatch):
-    monkeypatch.setattr(main, 'DATA_DIR', tmp_path)
-    monkeypatch.setattr(main, 'DB_PATH', tmp_path / 'errorbeacon.db')
+    monkeypatch.setattr(db, 'DATA_DIR', tmp_path)
+    monkeypatch.setattr(db, 'DB_PATH', tmp_path / 'errorbeacon.db')
     main.init_db()
     first = main.ErrorEvent(
         app='regression-test', environment='production',
@@ -549,19 +573,19 @@ def test_deployment_regression_detected_after_release_changes(tmp_path, monkeypa
 
 
 def test_clean_enforces_depth_limit(monkeypatch):
-    monkeypatch.setattr(main, 'CLEAN_MAX_DEPTH', 2)
+    monkeypatch.setattr(db, 'CLEAN_MAX_DEPTH', 2)
     nested = {'a': {'b': {'c': 'secret'}}}
     out = main.clean(nested)
     assert out['a']['b'] == '[TRUNCATED_DEPTH]'
 
 
 def test_email_diagnostics_identifies_missing_fallback_configuration(monkeypatch):
-    monkeypatch.setattr(main, 'EMAIL_FALLBACK_ENABLED', True)
-    monkeypatch.setattr(main, 'NOTIFICATIONS_ENABLED', True)
-    monkeypatch.setattr(main, 'ADMIN_NOTIFICATION_EMAILS', '')
-    monkeypatch.setattr(main, 'EMAIL_PROVIDER', 'smtp')
-    monkeypatch.setattr(main, 'SMTP_HOST', '')
-    monkeypatch.setattr(main, 'SMTP_FROM_EMAIL', '')
+    monkeypatch.setattr(email_notify, 'EMAIL_FALLBACK_ENABLED', True)
+    monkeypatch.setattr(email_notify, 'NOTIFICATIONS_ENABLED', True)
+    monkeypatch.setattr(email_notify, 'ADMIN_NOTIFICATION_EMAILS', '')
+    monkeypatch.setattr(email_notify, 'EMAIL_PROVIDER', 'smtp')
+    monkeypatch.setattr(email_notify, 'SMTP_HOST', '')
+    monkeypatch.setattr(email_notify, 'SMTP_FROM_EMAIL', '')
     d = main._email_diagnostics()
     assert d['configured'] is False
     assert 'ADMIN_NOTIFICATION_EMAILS' in d['missing']
@@ -571,8 +595,8 @@ def test_email_diagnostics_identifies_missing_fallback_configuration(monkeypatch
 
 def test_http_incident_detail_and_stats(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
-    monkeypatch.setattr(main, 'DATA_DIR', tmp_path)
-    monkeypatch.setattr(main, 'DB_PATH', tmp_path / 'errorbeacon.db')
+    monkeypatch.setattr(db, 'DATA_DIR', tmp_path)
+    monkeypatch.setattr(db, 'DB_PATH', tmp_path / 'errorbeacon.db')
     main.init_db()
     e = main.ErrorEvent(app='stats-app', environment='production', severity='error', message='detailed boom', traceback='Traceback\nboom', user_id='user-1', host='host-1', context={'safe':'ok'})
     incident, *_ = main.persist(e)
@@ -605,13 +629,13 @@ def test_unknown_telegram_command_points_to_help():
 
 
 def test_apphealth_reports_all_checks_passing(monkeypatch):
-    monkeypatch.setattr(main, 'BACKEND_URL', 'http://backend:8000')
+    monkeypatch.setattr(telegram, 'BACKEND_URL', 'http://backend:8000')
 
     class _Resp:
         status_code = 200
         def json(self): return {'status': 'healthy'}
 
-    monkeypatch.setattr(main.requests, 'get', lambda url, timeout: _Resp())
+    monkeypatch.setattr(telegram.requests, 'get', lambda url, timeout: _Resp())
     text = main.handle_telegram_command('/apphealth')
     assert 'Liveness' in text and 'Readiness' in text and 'Dependencies' in text
     assert '✅ healthy' in text
@@ -619,7 +643,7 @@ def test_apphealth_reports_all_checks_passing(monkeypatch):
 
 
 def test_apphealth_reports_individual_failures_without_crashing(monkeypatch):
-    monkeypatch.setattr(main, 'BACKEND_URL', 'http://backend:8000')
+    monkeypatch.setattr(telegram, 'BACKEND_URL', 'http://backend:8000')
 
     class _Resp:
         status_code = 503
@@ -627,10 +651,10 @@ def test_apphealth_reports_individual_failures_without_crashing(monkeypatch):
 
     def fake_get(url, timeout):
         if url.endswith('/healthz'):
-            raise main.requests.exceptions.Timeout()
+            raise telegram.requests.exceptions.Timeout()
         return _Resp()
 
-    monkeypatch.setattr(main.requests, 'get', fake_get)
+    monkeypatch.setattr(telegram.requests, 'get', fake_get)
     text = main.handle_telegram_command('/apphealth')
     assert 'timed out' in text
     assert 'schema mismatch' in text
@@ -638,15 +662,15 @@ def test_apphealth_reports_individual_failures_without_crashing(monkeypatch):
 
 
 def test_apphealth_reports_when_backend_url_unset(monkeypatch):
-    monkeypatch.setattr(main, 'BACKEND_URL', '')
+    monkeypatch.setattr(telegram, 'BACKEND_URL', '')
     assert 'not configured' in main.handle_telegram_command('/apphealth')
 
 
 def test_admin_auth_does_not_trust_spoofed_proxy_ip_by_default(monkeypatch):
     from fastapi import HTTPException
     main._admin_failures.clear()
-    monkeypatch.setattr(main, 'TRUST_PROXY_HEADERS', False)
-    monkeypatch.setattr(main, 'ADMIN_AUTH_FAILURES_PER_MINUTE', 2)
+    monkeypatch.setattr(auth, 'TRUST_PROXY_HEADERS', False)
+    monkeypatch.setattr(auth, 'ADMIN_AUTH_FAILURES_PER_MINUTE', 2)
 
     class Req:
         def __init__(self, forwarded):
@@ -664,7 +688,7 @@ def test_admin_auth_does_not_trust_spoofed_proxy_ip_by_default(monkeypatch):
 def test_admin_auth_prefers_leftmost_forwarded_ip_when_proxy_is_trusted(monkeypatch):
     from fastapi import HTTPException
     main._admin_failures.clear()
-    monkeypatch.setattr(main, 'TRUST_PROXY_HEADERS', True)
+    monkeypatch.setattr(auth, 'TRUST_PROXY_HEADERS', True)
     class Req:
         headers = {'x-forwarded-for': '198.51.100.8, 10.0.0.4', 'x-real-ip': '192.0.2.8'}
         client = type('Client', (), {'host': '203.0.113.10'})()
@@ -679,8 +703,8 @@ def test_admin_auth_prefers_leftmost_forwarded_ip_when_proxy_is_trusted(monkeypa
 def test_admin_auth_uses_proxy_ip_when_explicitly_trusted(monkeypatch):
     from fastapi import HTTPException
     main._admin_failures.clear()
-    monkeypatch.setattr(main, 'TRUST_PROXY_HEADERS', True)
-    monkeypatch.setattr(main, 'ADMIN_AUTH_FAILURES_PER_MINUTE', 1)
+    monkeypatch.setattr(auth, 'TRUST_PROXY_HEADERS', True)
+    monkeypatch.setattr(auth, 'ADMIN_AUTH_FAILURES_PER_MINUTE', 1)
 
     class Req:
         headers = {'x-real-ip': '198.51.100.7'}
@@ -697,7 +721,7 @@ def test_admin_auth_uses_proxy_ip_when_explicitly_trusted(monkeypatch):
 def test_admin_auth_rate_limits_failed_attempts(monkeypatch):
     from fastapi import HTTPException
     main._admin_failures.clear()
-    monkeypatch.setattr(main, 'ADMIN_AUTH_FAILURES_PER_MINUTE', 2)
+    monkeypatch.setattr(auth, 'ADMIN_AUTH_FAILURES_PER_MINUTE', 2)
     class Req:
         headers = {}
         client = type('Client', (), {'host':'203.0.113.10'})()

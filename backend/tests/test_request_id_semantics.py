@@ -1,7 +1,11 @@
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-EB = (ROOT / "errorbeacon/app/main.py").read_text()
+# errorbeacon/app/main.py was split into a package (see
+# errorbeacon/app/main/__init__.py's docstring for the module layout) --
+# concatenate every submodule so these source-level assertions still see
+# the whole thing, regardless of which file a given snippet now lives in.
+EB = "\n".join(p.read_text() for p in sorted((ROOT / "errorbeacon/app/main").glob("*.py")))
 CLIENT = (ROOT / "backend/integrations/fastapi_errorbeacon.py").read_text()
 
 
