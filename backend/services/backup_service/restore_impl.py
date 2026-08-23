@@ -367,15 +367,18 @@ def _restore_backup_impl(filepath: str, take_safety_backup: bool = True) -> dict
         # snapshot) -- reused here as-is.
 
         # BUG (caught before shipping): this file lives at
-        # backend/services/backup_service.py, so it needs to go up TWO
-        # directories to reach backend/ (where alembic.ini and the alembic/
-        # script location actually are) -- database.py's own
-        # get_schema_status() only needs ONE `os.path.dirname()` because
-        # database.py itself already lives directly in backend/. Copy-pasting
-        # that single-dirname call here would silently point alembic_cfg at
-        # backend/services/ instead, and AlembicConfig("backend/services/"
+        # backend/services/backup_service/restore_impl.py (the backup/restore
+        # package -- see backend/services/backup_service/__init__.py's
+        # docstring for why this is a package rather than a single file), so
+        # it needs to go up THREE directories to reach backend/ (where
+        # alembic.ini and the alembic/ script location actually are) --
+        # database.py's own get_schema_status() only needs ONE
+        # `os.path.dirname()` because database.py itself already lives
+        # directly in backend/. Copy-pasting that single-dirname call here
+        # would silently point alembic_cfg at backend/services/backup_service/
+        # instead, and AlembicConfig("backend/services/backup_service/"
         # + "alembic.ini") would fail to find alembic.ini at all.
-        backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         alembic_cfg = AlembicConfig(os.path.join(backend_dir, "alembic.ini"))
         alembic_cfg.set_main_option("script_location", os.path.join(backend_dir, "alembic"))
 
