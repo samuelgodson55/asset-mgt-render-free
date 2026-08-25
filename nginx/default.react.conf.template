@@ -161,6 +161,19 @@ server {
     # one, but worth it over 'unsafe-inline' if it ever comes to that).
     add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'" always;
 
+    # ---- Strict-Transport-Security -----------------------------------------
+    # SECURITY GAP FIX (docs/SECURITY_GAPS.md, P1 "HSTS is missing on the
+    # primary production deploy paths") -- see nginx/default.conf.template's
+    # identical comment on this same header for the full rationale: sent
+    # UNCONDITIONALLY (not gated on `$scheme = https`) because this
+    # container never terminates TLS itself -- Render/ACA do that at their
+    # edge and forward plain HTTP here, so nginx's own $scheme is always
+    # "http" and a scheme gate would just silently never fire in
+    # production. RFC 6797 6.1 makes this safe: browsers only ever honor
+    # this header when it arrives over an actual HTTPS connection, so
+    # sending it unconditionally can't downgrade a plain-HTTP request.
+    add_header Strict-Transport-Security "max-age=15552000; includeSubDomains" always;
+
     # ---- compression for static assets ------------------------------------
     gzip on;
     gzip_vary on;
@@ -423,6 +436,7 @@ server {
         # too would just duplicate them a second time on top of backend's
         # copy.
         add_header Content-Security-Policy "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'; style-src 'self' https://cdn.jsdelivr.net https://fonts.googleapis.com 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: https://cdn.jsdelivr.net https://fastapi.tiangolo.com; connect-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'" always;
+        add_header Strict-Transport-Security "max-age=15552000; includeSubDomains" always;
 
         set $backend_upstream ${BACKEND_HOST}:${BACKEND_PORT};
         proxy_pass http://$backend_upstream$request_uri;
@@ -545,6 +559,7 @@ server {
         add_header X-Frame-Options "DENY" always;
         add_header Referrer-Policy "strict-origin-when-cross-origin" always;
         add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'; object-src 'none'" always;
+        add_header Strict-Transport-Security "max-age=15552000; includeSubDomains" always;
         add_header Cache-Control "no-store" always;
     }
 
@@ -570,6 +585,7 @@ server {
         add_header X-Frame-Options "DENY" always;
         add_header Referrer-Policy "strict-origin-when-cross-origin" always;
         add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'; object-src 'none'" always;
+        add_header Strict-Transport-Security "max-age=15552000; includeSubDomains" always;
 
         # Rollout state changes by the minute during a deploy -- never let
         # a browser or intermediate cache serve a stale status.json. This
@@ -644,6 +660,7 @@ server {
         add_header X-Content-Type-Options "nosniff" always;
         add_header X-Frame-Options "DENY" always;
         add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Strict-Transport-Security "max-age=15552000; includeSubDomains" always;
     }
 
     # ---- the SPA itself -------------------------------------------------------
@@ -695,6 +712,7 @@ server {
         add_header X-Content-Type-Options "nosniff" always;
         add_header X-Frame-Options "DENY" always;
         add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Strict-Transport-Security "max-age=15552000; includeSubDomains" always;
     }
 
     # Long-lived, effectively-forever caching for Vite's build output under
@@ -724,6 +742,7 @@ server {
         add_header X-Frame-Options "DENY" always;
         add_header Referrer-Policy "strict-origin-when-cross-origin" always;
         add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'" always;
+        add_header Strict-Transport-Security "max-age=15552000; includeSubDomains" always;
     }
 
     # Never serve dotfiles (.env, .git, etc.) even if one somehow ends up in

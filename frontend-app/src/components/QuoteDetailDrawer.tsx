@@ -2,15 +2,15 @@ import { useEffect, useState } from "react";
 import { useRequestGuard } from "../lib/useRequestGuard";
 import { motion, AnimatePresence } from "framer-motion";
 import { X, Loader2, Trash2, Plus, Search, UserPlus, CheckCircle2, CreditCard } from "lucide-react";
-import { quotationsApi, usersApi, outsidersApi, formatPrice, formatDate, ApiError } from "../lib/api";
+import { quotationsApi, usersApi, outsidersApi, formatPrice, formatDate } from "../lib/api";
 import type { QuotationCartOrDetail, CatalogAsset, UserRow, OutsiderRow } from "../lib/types";
 import { StatusPill } from "./StatusPill";
 import { ExportButtons } from "./ExportButtons";
+import { ErrorState } from "./ui/ErrorBanner";
+import { friendlyError, type FriendlyError } from "../lib/errors";
 
-function errMsg(err: unknown, fallback: string): string {
-  if (err instanceof ApiError) return err.message;
-  if (err instanceof Error && err.message) return err.message;
-  return fallback;
+function localError(title: string): FriendlyError {
+  return { title, message: "", requestId: null, retryable: false };
 }
 
 // Real quote lifecycle wording -- submitted -> approved -> fulfilled --
@@ -60,7 +60,7 @@ export function QuoteDetailDrawer({
 }) {
   const [data, setData] = useState<QuotationCartOrDetail | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<FriendlyError | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [notes, setNotes] = useState("");
   const [discount, setDiscount] = useState("0");
@@ -118,7 +118,7 @@ export function QuoteDetailDrawer({
       setPaymentReference(detail.payment_reference ?? "");
       setPaymentConfirmed(false);
     } catch (err) {
-      if (isCurrent()) setError(errMsg(err, "Couldn't load this quotation."));
+      if (isCurrent()) setError(friendlyError(err, "Couldn't load this quotation."));
     } finally {
       if (isCurrent()) setLoading(false);
     }
@@ -176,7 +176,7 @@ export function QuoteDetailDrawer({
       await fn();
       onChanged?.();
     } catch (err) {
-      setError(errMsg(err, "That didn't work."));
+      setError(friendlyError(err, "That didn't work."));
     } finally {
       setBusyKey(null);
     }
@@ -203,10 +203,10 @@ export function QuoteDetailDrawer({
   };
 
   const addLine = () => {
-    if (!quotationId || !selectedAssetId) { setError("Search for and select an asset to add."); return; }
+    if (!quotationId || !selectedAssetId) { setError(localError("Search for and select an asset to add.")); return; }
     const quantity = parseInt(addQty, 10);
-    if (!quantity || quantity < 1) { setError("Enter a quantity of at least 1."); return; }
-    if (!addStart || !addDue || addDue < addStart) { setError("Pick a valid start/due date range."); return; }
+    if (!quantity || quantity < 1) { setError(localError("Enter a quantity of at least 1.")); return; }
+    if (!addStart || !addDue || addDue < addStart) { setError(localError("Pick a valid start/due date range.")); return; }
     withBusy("add-line", async () => {
       const updated = mode === "self"
         ? await quotationsApi.addMyQuoteItem(quotationId, selectedAssetId, quantity, addStart, addDue)
@@ -223,10 +223,10 @@ export function QuoteDetailDrawer({
     const name = outName.trim();
     const price = Number(outPrice);
     const quantity = parseInt(outQty, 10);
-    if (!name) { setError("Enter a name for the outsourced item."); return; }
-    if (Number.isNaN(price) || price < 0) { setError("Enter a valid price per day."); return; }
-    if (!quantity || quantity < 1) { setError("Enter a quantity of at least 1."); return; }
-    if (!outStart || !outDue || outDue < outStart) { setError("Pick a valid start/due date range."); return; }
+    if (!name) { setError(localError("Enter a name for the outsourced item.")); return; }
+    if (Number.isNaN(price) || price < 0) { setError(localError("Enter a valid price per day.")); return; }
+    if (!quantity || quantity < 1) { setError(localError("Enter a quantity of at least 1.")); return; }
+    if (!outStart || !outDue || outDue < outStart) { setError(localError("Pick a valid start/due date range.")); return; }
     withBusy("add-outsourced", async () => {
       const updated = await quotationsApi.addOutsourcedItem(quotationId, {
         name,
@@ -274,7 +274,7 @@ export function QuoteDetailDrawer({
       const name = adhocName.trim();
       const email = adhocEmail.trim();
       const phone = adhocPhone.trim();
-      if (!name || (!email && !phone)) { setError("Name and at least one of email/phone are required for an Ad-Hoc individual."); return; }
+      if (!name || (!email && !phone)) { setError(localError("Name and at least one of email/phone are required for an Ad-Hoc individual.")); return; }
       payload.outsider_name = name;
       payload.outsider_email = email || null;
       payload.outsider_phone = phone || null;
@@ -297,7 +297,7 @@ export function QuoteDetailDrawer({
   const saveDiscount = () => {
     if (!quotationId) return;
     const pct = Number(discount);
-    if (Number.isNaN(pct) || pct < 0 || pct > 100) { setError("Discount must be a number between 0 and 100."); return; }
+    if (Number.isNaN(pct) || pct < 0 || pct > 100) { setError(localError("Discount must be a number between 0 and 100.")); return; }
     withBusy("discount", async () => setData(await quotationsApi.saveDiscount(quotationId, pct)));
   };
 
@@ -308,8 +308,8 @@ export function QuoteDetailDrawer({
 
   const markPaid = () => {
     if (!quotationId || data?.status !== "fulfilled") return;
-    if (!paymentConfirmed) { setError("Confirm that payment has been received before marking this quotation as paid."); return; }
-    if (!paymentMethod) { setError("Select a payment method."); return; }
+    if (!paymentConfirmed) { setError(localError("Confirm that payment has been received before marking this quotation as paid.")); return; }
+    if (!paymentMethod) { setError(localError("Select a payment method.")); return; }
     withBusy("paid", async () => {
       setData(await quotationsApi.markPaid(quotationId, paymentMethod, paymentReference.trim() || null));
       setPaymentConfirmed(false);
@@ -359,7 +359,7 @@ export function QuoteDetailDrawer({
         </div>
 
         {loading && <p className="text-[12px] text-text-faint text-center py-10">Loading…</p>}
-        {error && <div className="bg-rust/10 border border-rust/30 text-rust-soft text-[12px] rounded-[3px] px-3 py-2.5 my-3">{error}</div>}
+        {error && <div className="my-3"><ErrorState error={error} onDismiss={() => setError(null)} /></div>}
 
         {data && !loading && (
           <>

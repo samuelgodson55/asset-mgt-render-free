@@ -3,14 +3,9 @@ import { AnimatePresence, motion } from "framer-motion";
 import { Link } from "react-router-dom";
 import { X, Tag, DollarSign, Layers, Pencil, Check, Loader2, Trash2, PackageCheck, Wrench, ShieldAlert, ShoppingCart } from "lucide-react";
 import type { AssetDetails, AssetActiveAssignment, AssetExceptionItem } from "../lib/types";
-import { assetsApi, checkoutsApi, quotationsApi, formatPrice, ApiError } from "../lib/api";
+import { assetsApi, checkoutsApi, quotationsApi, formatPrice } from "../lib/api";
 import { useRequestGuard } from "../lib/useRequestGuard";
-
-function errMsg(err: unknown, fallback: string): string {
-  if (err instanceof ApiError) return err.message;
-  if (err instanceof Error && err.message) return err.message;
-  return fallback;
-}
+import { friendlyError, formatFriendlyErrorLine } from "../lib/errors";
 
 const today = () => new Date().toISOString().slice(0, 10);
 
@@ -45,7 +40,7 @@ function InlineField({
       await onSave();
       setEditing(false);
     } catch (err) {
-      setError(errMsg(err, "Couldn't save that change."));
+      setError(formatFriendlyErrorLine(friendlyError(err, "Couldn't save that change.")));
     } finally {
       setSaving(false);
     }
@@ -91,7 +86,7 @@ function AssignmentRow({ item, onReturned }: { item: AssetActiveAssignment; onRe
       await checkoutsApi.returnItem(item.checkout_id, qty);
       onReturned();
     } catch (err) {
-      setError(errMsg(err, "Return failed."));
+      setError(formatFriendlyErrorLine(friendlyError(err, "Return failed.")));
     } finally {
       setProcessing(false);
     }
@@ -135,7 +130,7 @@ function IsolatedRow({ assetId, item, onRecalled }: { assetId: number; item: Ass
       await assetsApi.recallException(assetId, item.exception_id);
       onRecalled();
     } catch (err) {
-      setError(errMsg(err, "Recall failed."));
+      setError(formatFriendlyErrorLine(friendlyError(err, "Recall failed.")));
     } finally {
       setRecalling(false);
     }
@@ -177,7 +172,7 @@ function ExceptionForm({ assetId, onLogged }: { assetId: number; onLogged: () =>
       setNotes("");
       onLogged();
     } catch (err) {
-      setError(errMsg(err, "Couldn't log that exception."));
+      setError(formatFriendlyErrorLine(friendlyError(err, "Couldn't log that exception.")));
     } finally {
       setSubmitting(false);
     }
@@ -314,7 +309,7 @@ function CapacityField({ assetId, total, available, onSaved }: { assetId: number
       setEditing(false);
       onSaved();
     } catch (err) {
-      setError(errMsg(err, "Couldn't update capacity."));
+      setError(formatFriendlyErrorLine(friendlyError(err, "Couldn't update capacity.")));
     } finally {
       setSaving(false);
     }
@@ -380,7 +375,7 @@ function AddToQuoteField({ assetId, price }: { assetId: number; price: number | 
       await quotationsApi.addToCart(assetId, qty, start, due);
       setAdded(true);
     } catch (err) {
-      setError(errMsg(err, "Couldn't add that to your quote."));
+      setError(formatFriendlyErrorLine(friendlyError(err, "Couldn't add that to your quote.")));
     } finally {
       setAdding(false);
     }
@@ -484,7 +479,7 @@ export function AssetDrawer({
     setError(null);
     assetsApi.details(asset.id)
       .then((d) => { if (isCurrent()) setDetails(d); })
-      .catch((err) => { if (isCurrent()) setError(errMsg(err, "Couldn't load pool details.")); })
+      .catch((err) => { if (isCurrent()) setError(formatFriendlyErrorLine(friendlyError(err, "Couldn't load pool details."))); })
       .finally(() => { if (isCurrent()) setLoading(false); });
   };
 
@@ -511,7 +506,7 @@ export function AssetDrawer({
       onChanged();
       onClose();
     } catch (err) {
-      setError(errMsg(err, "Couldn't delete this pool."));
+      setError(formatFriendlyErrorLine(friendlyError(err, "Couldn't delete this pool.")));
     } finally {
       setDeleting(false);
     }

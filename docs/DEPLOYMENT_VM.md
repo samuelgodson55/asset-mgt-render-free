@@ -18,6 +18,13 @@ Apps guide** (`infra/main.bicep` + `deploy-azure-aca.yml`). Pick one:
 | Ops | You own OS patching (mostly automated), backups, container health | Azure owns almost all of it |
 | Good for | Predictable low/steady traffic, tightest possible fixed budget, wanting a single box you can SSH into | Bursty/unknown traffic, least ops burden |
 
+**Legacy frontend note:** the `frontend`/`legacy` build target referenced
+throughout this guide (`frontend-legacy-only`, `FRONTEND_BUILD_TARGET=legacy`)
+is the old vanilla-JS site under `frontend/`. It's frozen and going out of
+phase — see `docs/README.md`'s notice and `frontend/README.md`. `react` is
+the default target and the one to provision for new VMs; the legacy-target
+instructions below exist for VMs that already run it.
+
 Everything below assumes you're starting from a fresh clone of this repo
 with no Azure resources yet.
 

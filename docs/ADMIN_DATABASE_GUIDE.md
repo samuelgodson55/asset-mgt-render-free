@@ -10,6 +10,7 @@ This page is read-only operational telemetry. It does not change pool sizes or d
 - A low percentage is healthy.
 - Sustained high usage is a capacity warning.
 - This number includes connections that may come from migrations, background workers, direct maintenance sessions, and PgBouncer's server side.
+- This total is always accurate regardless of the database role's privileges (see the note under **Idle in transaction** below) — only the active/idle/idle-in-transaction breakdown depends on privilege.
 
 ### PgBouncer waiting
 The number of application clients waiting for a real PostgreSQL server connection.
@@ -31,12 +32,33 @@ PostgreSQL sessions that started a transaction but are currently idle instead of
 - A brief value of `1` can be caused by a normal API request and should be watched, not panicked over.
 - A value that stays high or grows can indicate code holding transactions open too long.
 
+**"Limited visibility" caveat:** PostgreSQL only reports the real `state` of *other* sessions (which this breakdown depends on) to a role that is a superuser or a member of the built-in `pg_read_all_stats` role. The application's own database role is deliberately **not** a superuser on any deployment target this app supports (Render, Azure Database for PostgreSQL, and self-hosted alike), so unless you've explicitly granted `pg_read_all_stats`, this panel will show a **"Limited visibility"** pill and the Active / Idle / Idle-in-transaction numbers will read as `—` (not `0`) — a `0` here without that pill means confirmed-zero, a `—` means "not visible," and the two must not be read the same way. The connection budget total above is unaffected and stays trustworthy either way.
+
+To get the real breakdown, connect as an administrator and grant the built-in role once per database user:
+
+```sql
+GRANT pg_read_all_stats TO <app_role>;
+```
+
+This does not grant write access or the ability to see query *text* for other users' sessions beyond `pg_read_all_stats`'s normal scope — only per-session `state` and related monitoring columns. Superuser is not required and not recommended for the application's own role.
+
 ### Application route
 Shows whether the running API is actually using PgBouncer and which endpoint it is pointed at.
 
 `PgBouncer in use` is the important routing signal.
 
 The **PgBouncer admin probe** is separate telemetry. If it says `No live probe` while the application route says `PgBouncer in use` and the site is working, the application route is not automatically broken. It means the PgBouncer management/SHOW interface could not be queried.
+
+### The health badge, and when it says "Stale"
+The badge in the top-right (Healthy / Attention / Critical) is computed from
+the most recently *successfully* fetched snapshot. If a refresh fails after
+an earlier one already succeeded, the badge switches to **"Stale"** (and the
+small snapshot indicator switches from "Live snapshot" to "Stale snapshot")
+instead of silently continuing to show the old verdict. This matters because
+the one case where a failed refresh is most likely — the database itself
+being unreachable — is exactly the case where trusting an old "Healthy"
+would be actively misleading. A "Stale" badge means *treat the numbers on
+screen as historical, not current* until the next successful refresh.
 
 ### SQLAlchemy pool
 - **Pool size:** normal reusable connections allocated to this process.

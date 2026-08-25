@@ -198,6 +198,79 @@ use 429 concurrent database sessions. PostgreSQL's CPU, memory, query workload,
 PgBouncer's server pool, and the application's concurrency guard are separate
 capacity layers.
 
+## Raising concurrency capacity (e.g., for ~200 concurrent users)
+
+The default sizing above is deliberately conservative for a `Standard_B2s`
+(2 vCore) Postgres SKU. Simulating the app's own sizing math
+(`_compute_pool_sizing()` in `database.py`) against the actual shipped
+defaults gives:
+
+- **ACA, default params** (`Standard_B2s`, `pgbouncerServerPoolSize=0` i.e.
+  auto 5×vCores=10): the entire backend fleet -- 1 replica or scaled out to
+  `backendMaxReplicas`'s default of 3 -- shares **6-8 total API-side
+  connections**, not 6-8 per replica. Adding replicas slices that same
+  fixed budget thinner; it doesn't add DB throughput.
+- **VM, default params** (`PGBOUNCER_SERVER_POOL_SIZE=11`,
+  `DB_EXPECTED_PROCESSES=7` -- deliberately worst-cased to survive a
+  blue/green rollover where both colors briefly run at once): **pool_size=1
+  per uvicorn worker process**. With `UVICORN_WORKERS=2` per color, that's
+  only **~2 concurrent DB-bound requests actively in flight** at a time in
+  normal steady state.
+
+Both are internally self-consistent with their respective infra defaults --
+this isn't a bug, it's early cost-optimized sizing that hasn't been raised
+for higher concurrency yet. If a deployment genuinely needs to serve ~200
+concurrent, DB-touching requests with fast responses, raising the server
+pool size *alone*, without more Postgres compute, is the wrong fix: PgBouncer's
+whole value is that a modest number of real Postgres connections, reused via
+transaction pooling, services far more app-level concurrent requests than
+its own size suggests, because most of a request's time isn't spent inside
+an active query. Setting the server pool to literally match "200 concurrent
+users" just makes a small-CPU Postgres try to *execute* 200 queries at once
+-- a CPU contention problem, not a connection-count problem.
+
+### ACA
+
+| Change | Current | Recommended |
+|---|---|---|
+| `postgresSkuName` (`infra/main.bicep`, or the `POSTGRES_SKU_NAME` GitHub repo variable already read by `.github/workflows/infra-deploy.yml`) | `Standard_B2s` (2 vCores) | `Standard_D4s_v3` or `Standard_D8s_v3` (4-8 vCores, General Purpose) for sustained ~200-concurrent throughput |
+| `pgbouncerServerPoolSize` (`infra/main.bicep` param; `0` = auto 5×vCores) | auto -> **10** at 2 vCores | explicit **30-40** at 4 vCores, or **50-60** at 8 vCores |
+
+`pgbouncerServerPoolSize` is a bicep param but is **not currently wired to a
+GitHub repo variable** the way `postgresSkuName`/`postgresSkuTier`/
+`postgresStorageGb` are (see `.github/workflows/infra-deploy.yml`'s three
+`postgresSkuName=...` call sites, ~lines 548/705/837). Either pass it
+directly on a manual `az deployment group create --parameters
+pgbouncerServerPoolSize=40 postgresSkuName=Standard_D4s_v3 ...` run, or add
+a `PGBOUNCER_SERVER_POOL_SIZE` repo variable and thread it through those
+same three call sites. `backendMaxReplicas` (default 3) is worth raising
+too for HTTP-layer headroom, but it does not add DB throughput on its
+own -- the pool size above is shared across however many replicas run.
+
+### VM
+
+| Change | Current | Recommended |
+|---|---|---|
+| `PGBOUNCER_SERVER_POOL_SIZE` | `11` | **32-40** |
+| `PGBOUNCER_DEFAULT_POOL_SIZE` / `PGBOUNCER_RESERVE_POOL_SIZE` | `8` / `3` | **26** / **8** (keep roughly the same ~3:1 ratio) |
+| Postgres container's own compute (`DB_MEM_LIMIT`, VM's own vCPU) | `DB_MEM_LIMIT` defaults to `768m`; stock `postgres:16` image, no `max_connections` override visible | raise `DB_MEM_LIMIT` and the VM's own vCPU allocation -- a stock image's default `max_connections` (~100) can be approached faster than expected once the pool above is raised |
+
+All of these are read via `${VAR:-default}` in `docker-compose.vm.yml`, so
+set them once in the VM's **`.env`** file -- the same value automatically
+applies to `pgbouncer`, `backend-blue`, `backend-green`, `worker`, and
+`beat`, since those five must stay in sync or the app's pool math and the
+pooler's actual config drift apart (see this file's own comments on each of
+those services). `DB_EXPECTED_PROCESSES` (`"7"`, hardcoded per-service, not
+`.env`-driven) can stay as-is unless the number of backend/worker processes
+that can run at once actually changes.
+
+**Caveat:** the `max_connections` figures behind the SKU recommendations
+above weren't independently confirmed for `D4s_v3`/`D8s_v3` specifically
+(only `B2s`'s 414 was verified against Azure's own docs). Run `SHOW
+max_connections;` against the actual provisioned server before finalizing a
+pool number, so it stays safely under that ceiling with room left for
+Alembic/maintenance sessions.
+
 ## Per-operation statement-timeout escape hatch
 
 The normal database transaction timeout is `DB_STATEMENT_TIMEOUT_MS=30000` (30s).

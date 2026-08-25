@@ -3,7 +3,7 @@
 // plain .ts file (no JSX) separate from shared.tsx's AlertDots component, so
 // Vite's Fast Refresh can tell components and utilities apart.
 // =============================================================================
-import { ApiError } from "../../lib/api";
+import { formatFriendlyErrorLine, friendlyError } from "../../lib/errors";
 
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -21,10 +21,16 @@ export function formatWhen(iso: string): string {
   return new Date(iso).toLocaleString();
 }
 
+// Every Admin/Manager panel renders its errors as a single-line status
+// message (there wasn't room in this file's scope to redesign every panel
+// around the full <ErrorState> card -- see components/ui/ErrorBanner.tsx --
+// used elsewhere in the app). This keeps that compact rendering but routes
+// the actual message through the same friendlyError() classification
+// everything else uses, so a raw "HTTP 500" never surfaces here either, and
+// the correlation ID a failed request returns is appended for support
+// instead of being silently dropped.
 export function errMsg(err: unknown, fallback: string): string {
-  if (err instanceof ApiError) return err.message;
-  if (err instanceof Error && err.message) return err.message;
-  return fallback;
+  return formatFriendlyErrorLine(friendlyError(err, fallback));
 }
 
 // Role choices offered when provisioning/converting an account. A Manager

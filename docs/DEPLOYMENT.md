@@ -22,6 +22,14 @@ that path is intentionally a single, non-scaled container (see
 docker-compose-based (or equivalent container-orchestrator) deployment:
 your own VM/server, a cloud provider's container service, Kubernetes, etc.
 
+**Legacy frontend note:** `FRONTEND_BUILD_TARGET`/`frontend-legacy-only`
+below refer to the old vanilla-JS site under `frontend/`, which is frozen
+and going out of phase (see `docs/README.md`'s notice and
+`frontend/README.md`). `react` is the default and the one to deploy unless
+an existing environment specifically still runs the legacy build; the
+legacy deployment path is documented here for operators of those existing
+environments, not as ongoing work to invest in.
+
 **Deploying to Azure Container Apps?** Everything below still applies
 conceptually (safety checklist, migration ordering, scaling shape, backup
 strategy) — jump straight to

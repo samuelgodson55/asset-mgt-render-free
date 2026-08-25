@@ -6,7 +6,7 @@
 // exercise the panel's mismatch-detection/"Attention" warning path, not
 // just its happy-path rendering.
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { DatabaseHealthPanel } from "../../../src/pages/admin/DatabaseHealthPanel";
 import type { DbPoolDiagnostics } from "../../../src/lib/types";
 
@@ -101,5 +101,53 @@ describe("<DatabaseHealthPanel />", () => {
     await screen.findByText("Application route");
     expect(screen.getAllByText("Attention").length).toBeGreaterThan(0);
     expect(screen.getByText(/isn't actually routed through it right now/i)).toBeInTheDocument();
+  });
+
+  it("flags attention-level health and hides the breakdown when the DB role can't see other sessions' state", async () => {
+    // Postgres nulls out `state` in pg_stat_activity for every session but
+    // the probe's own unless the role is a superuser or pg_read_all_stats
+    // member -- the default on Render/Azure Database for
+    // PostgreSQL/RDS/Cloud SQL. `limited_visibility: true` must surface
+    // as an explicit caveat, not a silent "0 idle in transaction".
+    const limitedSnapshot: DbPoolDiagnostics = {
+      ...SNAPSHOT,
+      database_route: { ...SNAPSHOT.database_route, in_use: true },
+      pgbouncer_pool: { ...SNAPSHOT.pgbouncer_pool, reachable: true },
+      postgres_activity: { max_connections: 100, total_connections: 12, active: 1, idle: 2, idle_in_transaction: 0, limited_visibility: true },
+    };
+    dbPoolMock.mockResolvedValue(limitedSnapshot);
+    render(<DatabaseHealthPanel />);
+
+    await screen.findByText("Application route");
+    expect(screen.getAllByText("Attention").length).toBeGreaterThan(0);
+    expect(screen.getByText(/can't see other sessions' state in pg_stat_activity/i)).toBeInTheDocument();
+    expect(screen.getByText("Limited visibility")).toBeInTheDocument();
+  });
+
+  it("marks the health badge as stale (not silently healthy) when a refresh fails after an earlier successful sample", async () => {
+    // First load succeeds with a clean, healthy snapshot; the next poll
+    // (triggered here via the manual refresh button) fails. The badge
+    // must not keep showing the earlier "Healthy" verdict as if nothing
+    // had changed -- see DatabaseHealthPanel.tsx's `refreshFailed` state.
+    const healthySnapshot: DbPoolDiagnostics = {
+      ...SNAPSHOT,
+      database_route: { ...SNAPSHOT.database_route, in_use: true },
+      pgbouncer_pool: { ...SNAPSHOT.pgbouncer_pool, reachable: true },
+      postgres_activity: { max_connections: 100, total_connections: 12, active: 3, idle: 9, idle_in_transaction: 0, limited_visibility: false },
+    };
+    dbPoolMock.mockResolvedValueOnce(healthySnapshot);
+    render(<DatabaseHealthPanel />);
+
+    await waitFor(() => expect(screen.getAllByText("Healthy").length).toBeGreaterThan(0));
+    expect(screen.getByText("Live snapshot")).toBeInTheDocument();
+
+    dbPoolMock.mockRejectedValueOnce(new Error("network error"));
+    fireEvent.click(screen.getByLabelText("Refresh database diagnostics"));
+
+    await waitFor(() => expect(screen.getAllByText("Stale").length).toBeGreaterThan(0));
+    expect(screen.getByText("Stale snapshot")).toBeInTheDocument();
+    expect(screen.getByText(/latest refresh failed/i)).toBeInTheDocument();
+    // Old, no-longer-trustworthy verdict must be gone, not just supplemented.
+    expect(screen.queryAllByText("Healthy").length).toBe(0);
   });
 });

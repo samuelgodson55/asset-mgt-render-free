@@ -3,3 +3,4 @@
 -r requirements.txt
 pytest
 httpx  # required by fastapi.testclient.TestClient (starlette.testclient)
+pip-audit  # dependency vulnerability scan -- see .github/workflows/ci.yml's errorbeacon job

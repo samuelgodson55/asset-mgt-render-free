@@ -5,10 +5,12 @@ without deploying anywhere. It only tells you **what to run** — none of
 these commands have been executed for you.
 
 Repo layout you're working with: `backend/` (FastAPI), `frontend/`
-(legacy static site), `frontend-app/` (React/Vite), `errorbeacon/`
-(monitoring service), `pgbouncer` + `db` + `redis` (docker-compose
-services). This matches what CI (`.github/workflows/ci.yml`) runs, so
-passing these locally is a strong predictor of a green CI run.
+(legacy static site, **frozen — going out of phase, see
+`frontend/README.md`**), `frontend-app/` (React/Vite, the actively
+maintained frontend), `errorbeacon/` (monitoring service), `pgbouncer` +
+`db` + `redis` (docker-compose services). This matches what CI
+(`.github/workflows/ci.yml`) runs, so passing these locally is a strong
+predictor of a green CI run.
 
 ---
 
@@ -374,7 +376,13 @@ plain local Docker Compose — skip it unless you adapt it.
 
 ## 5. Frontend tests
 
-### Legacy static frontend (`frontend/`)
+### Legacy static frontend (`frontend/`) — frozen, run only if you touch it
+
+This frontend is going out of phase and isn't receiving new feature work
+(see `frontend/README.md`); its existing smoke tests still run in CI purely
+as a safety net for the `frontend-legacy-only` build target, so run them
+locally only if you're touching `frontend/` for a genuine bug fix — don't
+add new coverage here.
 
 ```bash
 cd build-frontend && npm ci && cd ..

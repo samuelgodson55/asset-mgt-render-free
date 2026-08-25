@@ -3,13 +3,9 @@
 import { useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { X, Loader2 } from "lucide-react";
-import { assetsApi, ApiError } from "../lib/api";
-
-function errMsg(err: unknown, fallback: string): string {
-  if (err instanceof ApiError) return err.message;
-  if (err instanceof Error && err.message) return err.message;
-  return fallback;
-}
+import { assetsApi } from "../lib/api";
+import { friendlyError, type FriendlyError } from "../lib/errors";
+import { ErrorState } from "./ui/ErrorBanner";
 
 export function CreatePoolModal({ open, onClose, onCreated }: { open: boolean; onClose: () => void; onCreated: () => void }) {
   const [name, setName] = useState("");
@@ -17,7 +13,7 @@ export function CreatePoolModal({ open, onClose, onCreated }: { open: boolean; o
   const [category, setCategory] = useState("");
   const [department, setDepartment] = useState("");
   const [price, setPrice] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<FriendlyError | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
@@ -33,8 +29,7 @@ export function CreatePoolModal({ open, onClose, onCreated }: { open: boolean; o
 
   if (!open) return null;
 
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const doSubmit = async () => {
     setSubmitting(true);
     setError(null);
     try {
@@ -48,11 +43,12 @@ export function CreatePoolModal({ open, onClose, onCreated }: { open: boolean; o
       onCreated();
       alert(result.message ? `${result.message}: "${name}"` : `Stock pool "${name}" created successfully.`);
     } catch (err) {
-      setError(errMsg(err, "Couldn't create that pool."));
+      setError(friendlyError(err, "We couldn't create that pool."));
     } finally {
       setSubmitting(false);
     }
   };
+  const submit = (e: React.FormEvent) => { e.preventDefault(); doSubmit(); };
 
   const inputClass = "bg-ink-soft border border-border-soft rounded-[3px] px-3 py-2.5 text-[13px] text-text placeholder:text-text-faint focus:border-brass/50 focus:outline-none";
 
@@ -83,7 +79,7 @@ export function CreatePoolModal({ open, onClose, onCreated }: { open: boolean; o
             <option value="Production" />
           </datalist>
           <input type="number" min={0} step="0.01" value={price} onChange={(e) => setPrice(e.target.value)} placeholder="Unit price (optional)" className={inputClass} />
-          {error && <div className="bg-rust/10 border border-rust/30 text-rust-soft text-[12px] rounded-[3px] px-3 py-2.5">{error}</div>}
+          {error && <ErrorState error={error} onRetry={error.retryable ? doSubmit : undefined} />}
           <button data-otel-action="asset.create" type="submit" disabled={submitting} className="flex items-center justify-center gap-1.5 bg-brass hover:bg-brass-soft disabled:opacity-60 text-ink font-medium text-[13px] rounded-[3px] py-2.5 transition-colors">
             {submitting && <Loader2 size={13} className="animate-spin" />}
             {submitting ? "Creating…" : "Create pool"}

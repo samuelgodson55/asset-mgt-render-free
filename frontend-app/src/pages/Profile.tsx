@@ -4,19 +4,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import { UserRound, KeyRound, ShieldCheck, Download, Check } from "lucide-react";
-import { profileApi, ApiError } from "../lib/api";
+import { profileApi } from "../lib/api";
 import { useAuth } from "../lib/useAuth";
 import { useRequestGuard } from "../lib/useRequestGuard";
 import { isTrueSuperAdmin } from "../lib/roles";
 import type { ProfileDetail } from "../lib/types";
+import { friendlyError, formatFriendlyErrorLine } from "../lib/errors";
 
 type ProfileTab = "account" | "security" | "two-factor";
-
-function errMsg(err: unknown, fallback: string): string {
-  if (err instanceof ApiError) return err.message;
-  if (err instanceof Error && err.message) return err.message;
-  return fallback;
-}
 
 function FieldMessage({ text, ok }: { text: string; ok: boolean }) {
   return <p className={`text-[12px] mt-2 font-medium ${ok ? "text-moss-soft" : "text-rust-soft"}`}>{text}</p>;
@@ -44,7 +39,7 @@ function ChangePasswordCard({ userId }: { userId: number }) {
       setNext("");
       setConfirm("");
     } catch (err) {
-      setMsg({ text: errMsg(err, "Couldn't update your password."), ok: false });
+      setMsg({ text: formatFriendlyErrorLine(friendlyError(err, "Couldn't update your password.")), ok: false });
     } finally {
       setSubmitting(false);
     }
@@ -94,7 +89,7 @@ function UpdateIdentityCard({ profile, onUpdated }: { profile: ProfileDetail; on
       setMsg({ text: res.message || "Profile updated successfully.", ok: true });
       setPassword("");
     } catch (err) {
-      setMsg({ text: errMsg(err, "Couldn't update your profile."), ok: false });
+      setMsg({ text: formatFriendlyErrorLine(friendlyError(err, "Couldn't update your profile.")), ok: false });
     } finally {
       setSubmitting(false);
     }
@@ -143,7 +138,7 @@ function RecoveryCodesCard() {
       setCodes(res.recovery_codes);
       setPassword("");
     } catch (err) {
-      setMsg({ text: errMsg(err, "Couldn't regenerate recovery codes."), ok: false });
+      setMsg({ text: formatFriendlyErrorLine(friendlyError(err, "Couldn't regenerate recovery codes.")), ok: false });
     } finally {
       setSubmitting(false);
     }

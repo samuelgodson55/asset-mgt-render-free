@@ -40,14 +40,20 @@ export let backendReachable: boolean | null = null;
 
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  /** X-Request-ID / request_id correlation ID from the failed response, when
+   *  one was present -- lets UI-layer error handling (see lib/errors.ts)
+   *  show the person something they can hand to support, instead of that
+   *  ID only ever reaching ErrorBeacon telemetry (see errorbeacon.ts). */
+  requestId: string | null;
+  constructor(status: number, message: string, requestId: string | null = null) {
     super(message);
     this.status = status;
+    this.requestId = requestId;
   }
 }
 
 export class MaintenanceModeError extends ApiError {
-  constructor(message = "The application is currently undergoing maintenance.") { super(503, message); this.name = "MaintenanceModeError"; }
+  constructor(message = "The application is currently undergoing maintenance.", requestId: string | null = null) { super(503, message, requestId); this.name = "MaintenanceModeError"; }
 }
 
 
@@ -137,7 +143,7 @@ async function rawFetchInternal<T = unknown>(path: string, init?: RequestInit, p
         const body = await res.clone().json();
         if (body?.code === "MAINTENANCE_MODE") {
           if (typeof window !== "undefined") window.dispatchEvent(new Event("asset-app:maintenance"));
-          throw new MaintenanceModeError(extractErrorMessage(body, "The application is currently undergoing maintenance."));
+          throw new MaintenanceModeError(extractErrorMessage(body, "The application is currently undergoing maintenance."), requestId || body?.request_id || null);
         }
       } catch (err) {
         if (err instanceof MaintenanceModeError) throw err;
@@ -154,9 +160,13 @@ async function rawFetchInternal<T = unknown>(path: string, init?: RequestInit, p
     if (!res.ok) {
       const fallback = res.statusText || `Request failed (${res.status})`;
       let message = fallback;
+      let bodyRequestId: string | null = null;
       try {
         const body = await res.json();
         message = extractErrorMessage(body, fallback);
+        if (body && typeof body === "object" && typeof (body as { request_id?: unknown }).request_id === "string") {
+          bodyRequestId = (body as { request_id: string }).request_id;
+        }
       } catch {
         // body wasn't JSON -- keep the status text
       }
@@ -170,7 +180,7 @@ async function rawFetchInternal<T = unknown>(path: string, init?: RequestInit, p
       if (res.status === 401 && !isDemoMode() && !path.startsWith("/auth/login") && !path.startsWith("/auth/mfa") && typeof window !== "undefined") {
         window.dispatchEvent(new Event("asset-app:auth-expired"));
       }
-      throw new ApiError(res.status, message);
+      throw new ApiError(res.status, message, bodyRequestId || requestId || null);
     }
     if (res.status === 204) return null as T;
     return (await res.json()) as T;
@@ -292,16 +302,20 @@ async function rawFetchMultipartInternal<T = unknown>(path: string, formData: Fo
   if (!res.ok) {
     const fallback = res.statusText || `Request failed (${res.status})`;
     let message = fallback;
+    let bodyRequestId: string | null = null;
     try {
       const body = await res.json();
       message = extractErrorMessage(body, fallback);
+      if (body && typeof body === "object" && typeof (body as { request_id?: unknown }).request_id === "string") {
+        bodyRequestId = (body as { request_id: string }).request_id;
+      }
     } catch {
       // body wasn't JSON -- keep the status text
     }
     if (res.status === 401 && !isDemoMode() && !path.startsWith("/auth/login") && !path.startsWith("/auth/mfa") && typeof window !== "undefined") {
       window.dispatchEvent(new Event("asset-app:auth-expired"));
     }
-    throw new ApiError(res.status, message);
+    throw new ApiError(res.status, message, bodyRequestId || requestId || null);
   }
   return (await res.json()) as T;
 }

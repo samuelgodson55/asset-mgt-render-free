@@ -152,6 +152,30 @@ server {
     # one, but worth it over 'unsafe-inline' if it ever comes to that).
     add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'" always;
 
+    # ---- Strict-Transport-Security -----------------------------------------
+    # SECURITY GAP FIX (docs/SECURITY_GAPS.md, P1 "HSTS is missing on the
+    # primary production deploy paths"): the Caddyfile (VM path) already
+    # sent this; this template (the Azure Container Apps + Render path --
+    # the two most-used/documented deploy targets) never did, despite
+    # tuning a full CSP right above it.
+    #
+    # Sent UNCONDITIONALLY, not gated on `$scheme = https` the way the gap
+    # writeup first suggested: this container never terminates TLS itself
+    # (no `ssl_certificate` anywhere in this file -- it just `listen`s on
+    # plain ${PORT}). Both Render and Azure Container Apps terminate TLS at
+    # their own edge and forward plain HTTP to this container, so nginx's
+    # own $scheme is "http" on every request it ever sees, even the ones
+    # that arrived over HTTPS -- a `$scheme = https` gate here would never
+    # fire in production and the header would never actually go out. That's
+    # fine per the HSTS spec itself (RFC 6797 6.1): a compliant browser only
+    # ever HONORS a Strict-Transport-Security header it received over a
+    # secure (HTTPS) connection in the first place, and silently ignores it
+    # over plain HTTP -- so sending it unconditionally can't downgrade a
+    # legitimate local-dev/plain-HTTP request, it just has no effect there.
+    # Same unconditional posture the Caddyfile already uses (see that
+    # file's own comment on this header).
+    add_header Strict-Transport-Security "max-age=15552000; includeSubDomains" always;
+
     # ---- compression for static assets ------------------------------------
     gzip on;
     gzip_vary on;
@@ -410,6 +434,7 @@ server {
         # too would just duplicate them a second time on top of backend's
         # copy.
         add_header Content-Security-Policy "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'; style-src 'self' https://cdn.jsdelivr.net https://fonts.googleapis.com 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: https://cdn.jsdelivr.net https://fastapi.tiangolo.com; connect-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'" always;
+        add_header Strict-Transport-Security "max-age=15552000; includeSubDomains" always;
 
         set $backend_upstream ${BACKEND_HOST}:${BACKEND_PORT};
         proxy_pass http://$backend_upstream$request_uri;
@@ -532,6 +557,7 @@ server {
         add_header X-Frame-Options "DENY" always;
         add_header Referrer-Policy "strict-origin-when-cross-origin" always;
         add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'; object-src 'none'" always;
+        add_header Strict-Transport-Security "max-age=15552000; includeSubDomains" always;
         add_header Cache-Control "no-store" always;
     }
 
@@ -557,6 +583,7 @@ server {
         add_header X-Frame-Options "DENY" always;
         add_header Referrer-Policy "strict-origin-when-cross-origin" always;
         add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'; object-src 'none'" always;
+        add_header Strict-Transport-Security "max-age=15552000; includeSubDomains" always;
 
         # Rollout state changes by the minute during a deploy -- never let
         # a browser or intermediate cache serve a stale status.json. This
@@ -672,6 +699,7 @@ server {
         add_header X-Content-Type-Options "nosniff" always;
         add_header X-Frame-Options "DENY" always;
         add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Strict-Transport-Security "max-age=15552000; includeSubDomains" always;
     }
 
     # Long-lived caching for hashed/static assets. If you later add a build
@@ -694,6 +722,7 @@ server {
         add_header X-Frame-Options "DENY" always;
         add_header Referrer-Policy "strict-origin-when-cross-origin" always;
         add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'" always;
+        add_header Strict-Transport-Security "max-age=15552000; includeSubDomains" always;
     }
 
     # Never serve dotfiles (.env, .git, etc.) even if one somehow ends up in

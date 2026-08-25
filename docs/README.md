@@ -16,6 +16,17 @@ exclusive frontend options: a legacy vanilla HTML/JS site and a **React +
 TypeScript + Vite** Ledger SPA. Both are served through the same
 nginx-based container shape and wired together with Docker Compose.
 
+> **Frontend maintenance notice:** the legacy vanilla HTML/JS site
+> (`frontend/`) is **frozen and going out of phase** — see
+> [frontend/README.md](../frontend/README.md). It stays in the repo and
+> in CI only so existing `frontend-legacy-only` / `FRONTEND_BUILD_TARGET=legacy`
+> deployments keep building; it is not getting new features, and beyond a
+> genuine security fix it should not receive further maintenance effort.
+> `frontend-app/` (the React "Ledger" SPA) is the actively developed
+> frontend and the default everywhere. Every reference to the legacy
+> frontend below is kept for operators still running it, not as an
+> invitation to invest more time there.
+
 > **Start here:** [Quick Start](#quick-start-docker) to get it running →
 > [Feature Tour](#feature-tour) to see what it does →
 > [How A Request Flows](#how-a-request-flows-through-the-app) for the
@@ -622,6 +633,12 @@ frontend is a real Vite application: use `npm install` + `npm run dev` inside
 Dockerfile selects exactly one target at image-build time, so changing the
 frontend flavor is an explicit deployment choice rather than an accidental
 side effect.
+
+**Legacy frontend is frozen.** New feature work, refactors, and UX polish
+should go into `frontend-app/` only. The legacy site stays buildable and
+deployable for anyone still targeting it, but treat it as maintenance-mode:
+fix a genuine security or breaking bug if one appears, don't otherwise spend
+review/design effort on it, and don't add new pages or components there.
 
 ## Project Structure
 
@@ -2890,7 +2907,14 @@ Pure Pydantic request/response models, no logic:
   `BACKUP_GDRIVE_OAUTH_*` values to paste into `.env`. See
   [Backups](#backups) for the full walkthrough.
 
-### Frontend — Core (`frontend/js/`)
+### Frontend — Core (`frontend/js/`) — legacy, frozen
+
+> This section documents the **legacy, frozen** vanilla-JS frontend, kept
+> for reference and for anyone still operating a `frontend-legacy-only`
+> deployment. It's intentionally out of phase for further development —
+> see the notice near the top of this document and `frontend/README.md`.
+> For the actively maintained frontend, see `frontend-app/README.md` and
+> the source under `frontend-app/src/`.
 
 - **`js/api.js`** — `apiRequest(path, options)`, the ONE function that
   calls `fetch()`; attaches the JWT header, parses JSON, throws a
@@ -2936,7 +2960,7 @@ Pure Pydantic request/response models, no logic:
   small `{ page, perPage, search, total }` state object in its own
   component file and re-fetches from the API on every change instead.
 
-### Frontend — Components (`frontend/js/components/`) — one file per feature area
+### Frontend — Components (`frontend/js/components/`) — one file per feature area — legacy, frozen
 
 - **`assets.js`** — `loadAssets` (TRUE server-side search + pagination —
   `assetsState` + `setAssetsSearch`/`setAssetsPerPage`/`changeAssetsPage`,
@@ -3333,9 +3357,12 @@ the moment a checkout with a due date is involved.
 ### Frontend
 
 For the React frontend, `npm run dev` gives Vite hot reload while you work.
+This is where new frontend test coverage and manual QA effort should go.
 For the legacy frontend, changes to `.html`/`.js` are reflected after a
-refresh when you run the corresponding static/nginx development path. The
-React app's API client also falls back to its mock data when a backend fetch
+refresh when you run the corresponding static/nginx development path — this
+path is frozen (see the notice at the top of this document), so treat any
+time spent here as bug-fix-only, not feature or coverage work. The React
+app's API client also falls back to its mock data when a backend fetch
 fails, while the legacy client surfaces request errors in the browser console.
 
 ## Security Model

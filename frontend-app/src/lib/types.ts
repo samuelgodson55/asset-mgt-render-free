@@ -643,6 +643,16 @@ export interface DbPoolDiagnostics {
     active?: number;
     idle?: number;
     idle_in_transaction?: number;
+    // True when the DB role probing pg_stat_activity is neither a
+    // superuser nor a member of pg_read_all_stats -- the default on
+    // Render, Azure Database for PostgreSQL, RDS, Cloud SQL, etc.
+    // total_connections stays accurate (a plain count(*)), but
+    // active/idle/idle_in_transaction cannot be trusted: Postgres nulls
+    // out `state` for every session but the probe's own, so those three
+    // numbers under-report rather than showing a clear "unavailable"
+    // state. See backend/db_pool_metrics.py's
+    // _pg_stat_activity_full_visibility() docstring.
+    limited_visibility?: boolean;
   } | null;
   configured: {
     use_pgbouncer: boolean;

@@ -2,6 +2,7 @@
 
 ## Table of Contents
 
+- [v1.0.10 — 2026-08-24](#v1010---2026-08-24)
 - [v1.0.9 — 2026-08-20](#v109---2026-08-20)
 - [v1.0.8 — 2026-08-19](#v108---2026-08-19)
 - [v1.0.7 — 2026-08-18](#v107---2026-08-18)
@@ -19,6 +20,95 @@ reflects how the system has matured in reliability, deployment discipline,
 observability, and operational trust.
 
 <!-- release-notes-insertion-point -->
+
+## [Unreleased]
+
+### Added
+- Extremely user-friendly, correlation-ID-bearing error handling across
+  `frontend-app/`, replacing raw `alert(err.message)`/status-code-flavored
+  error strings throughout the customer/staff self-service flows (order
+  submission, checkout/dispatch, custody returns & extensions, extension
+  requests, profile/security forms) and the Admin/Manager panels:
+  - `src/lib/api/core.ts`: `ApiError`/`MaintenanceModeError` now carry the
+    failed request's correlation ID (`X-Request-ID` header, falling back to
+    a `request_id` field in the JSON body), not just its message.
+  - `src/lib/errors.ts` (new): `friendlyError(err, fallbackTitle, opts)`
+    classifies any caught failure by status (401/403/404/409/429/503/5xx/
+    network) into a plain-language `{title, message, requestId,
+    reassurance, retryable}`, replacing the ~9 near-identical local
+    `errMsg()` helpers that used to just forward `ApiError.message`
+    untouched. `formatFriendlyErrorLine()` collapses one into a single
+    line for the app's compact inline status messages (Profile.tsx, Admin
+    panels).
+  - `src/components/ui/ErrorBanner.tsx`: new `ErrorState` component --
+    title, plain-language explanation, an honest reassurance line (e.g.
+    "Nothing was changed." / "Your cart is still saved."), a copyable
+    "Reference: ..." chip for support, and Try again/Dismiss/custom action
+    buttons -- replacing the flat rust-colored `{error}` boxes across
+    `Quotations.tsx`, `Checkouts.tsx`, `MyItems.tsx`, `AssetDrawer.tsx`,
+    `CreatePoolModal.tsx`, `DispatchModal.tsx`, `QuoteDetailDrawer.tsx`,
+    and `CustodyDrawer.tsx`. Bulk actions (bulk return, bulk extend) now
+    name exactly which items failed instead of one flattened error string.
+  - `tests/lib/errors.test.ts` (new): status-code classification coverage
+    plus an end-to-end check that a correlation ID returned by a real
+    failed `fetch()` (via header or body) survives into the `FriendlyError`
+    a page renders.
+- `docs/SECURITY_GAPS.md`: a priority-scored register of security/CVE-
+  hygiene gaps found in a manual OWASP-adjacent audit — two P0s
+  (`errorbeacon/` has no CVE scanning of any kind; `frontend-app/`, the
+  active frontend, has no dependency-vulnerability coverage), plus P1s
+  (non-blocking `pip-audit`, missing HSTS on the nginx/ACA/Render deploy
+  path, no SAST) and lower-priority defense-in-depth notes.
+
+### Changed
+- Polished `AGENTS.md`: fixed the backend `pytest` invocation (container
+  path is `tests`, not `backend/tests`), and added guidance to scope test
+  runs to the area actually changed instead of running full suites by
+  default, plus notes on config/env conventions, pre-flight drift/
+  migration-safety checks, and which `scripts/` tools to skip unless
+  asked.
+
+## [v1.0.10] - 2026-08-24
+
+### Highlights
+- Documentation-only maintenance pass: added `AGENTS.md` at the repo root
+  for AI coding agents, and formally marked the legacy vanilla-JS frontend
+  (`frontend/`) as frozen/going-out-of-phase across the docs, so future
+  contributors (human or AI) stop investing maintenance effort there.
+- Closed real gaps in `docs/SRE_STRATEGY.md` found by auditing it against
+  the actual operational surface: PgBouncer, the VM path's Cloudflare
+  Tunnel failure mode, orphaned ACA revisions, and the SLA-escalation
+  background jobs had no runbook coverage, and the chaos/load/security-
+  boundary/session-Redis test scripts weren't part of any recurring
+  cadence.
+
+### Added
+- Added `AGENTS.md`: repo map, dev/test/lint commands per component,
+  conventions, and pointers into `docs/`, written for coding agents working
+  in this repo.
+- Added `frontend/README.md`: an explicit deprecation notice for the legacy
+  frontend, what "frozen" does and doesn't mean, and where new frontend work
+  should go instead.
+
+### Changed
+- `docs/README.md`, `docs/DEPLOYMENT.md`, `docs/DEPLOYMENT_VM.md`,
+  `docs/LOCAL_TESTING_GUIDE.md`, `docs/SRE_STRATEGY.md`, and
+  `docs/ERRORBEACON_COVERAGE.md` (plus `errorbeacon/ERRORBEACON_COVERAGE.md`)
+  now call out that `frontend/` is frozen wherever they previously described
+  it as an equal, ongoing-maintenance option alongside `frontend-app/`.
+- `docs/SRE_STRATEGY.md` now states explicitly that reliability work
+  (SLOs, alerting, runbooks) should not grow to cover the legacy frontend.
+- `docs/SRE_STRATEGY.md`'s §5 runbooks now cover PgBouncer client
+  queueing/break-glass routing, reaping orphaned ACA revisions via
+  `reap-stuck-revisions.yml`, recovering a VM whose Cloudflare Tunnel
+  token went stale (`repair-tunnel-token-vm.yml` /
+  `emergency-tunnel-repair-run-command.sh`), and a silent
+  extension/quotation SLA-escalation failure.
+- `docs/SRE_STRATEGY.md`'s weekly cadence now checks PgBouncer waiting
+  count and that the SLA-escalation/overdue digest jobs actually ran; the
+  quarterly cadence now includes running `chaos-test.sh`,
+  `security-boundary-test.py`, and `session-redis-test.py`, not just
+  `load-test.py`.
 
 ## [v1.0.9] - 2026-08-20
 

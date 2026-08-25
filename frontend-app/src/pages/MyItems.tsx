@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { PackageCheck, CalendarClock, X, Send, QrCode } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
-import { myItemsApi, extensionsApi, ApiError, formatDate } from "../lib/api";
+import { myItemsApi, extensionsApi, formatDate } from "../lib/api";
 import type { MyItem } from "../lib/types";
 import { ExportButtons } from "../components/ExportButtons";
 import { PaginationBar, RowsPerPageSelect } from "../components/PaginationBar";
@@ -10,6 +10,8 @@ import { DEFAULT_PAGE_SIZE } from "../lib/pagination";
 import { useRequestGuard } from "../lib/useRequestGuard";
 import { ReceiptModal } from "../components/ReceiptModal";
 import type { ReceiptTarget } from "../lib/receipt";
+import { ErrorState } from "../components/ui/ErrorBanner";
+import { friendlyError, type FriendlyError } from "../lib/errors";
 
 const filterTabs = ["all", "overdue", "due_soon"] as const;
 const filterLabels: Record<(typeof filterTabs)[number], string> = {
@@ -18,17 +20,11 @@ const filterLabels: Record<(typeof filterTabs)[number], string> = {
   due_soon: "Due soon",
 };
 
-function errMsg(err: unknown, fallback: string): string {
-  if (err instanceof ApiError) return err.message;
-  if (err instanceof Error && err.message) return err.message;
-  return fallback;
-}
-
 function ExtensionRequestModal({ item, onClose, onSent }: { item: MyItem | null; onClose: () => void; onSent: () => void }) {
   const [newDate, setNewDate] = useState("");
   const [reason, setReason] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<FriendlyError | null>(null);
 
   useEffect(() => {
     setNewDate("");
@@ -40,7 +36,7 @@ function ExtensionRequestModal({ item, onClose, onSent }: { item: MyItem | null;
 
   const submit = async () => {
     if (!newDate) {
-      setError("Choose a date.");
+      setError({ title: "Choose a date.", message: "", requestId: null, retryable: false });
       return;
     }
     setSubmitting(true);
@@ -49,7 +45,7 @@ function ExtensionRequestModal({ item, onClose, onSent }: { item: MyItem | null;
       await extensionsApi.request(item.checkout_id, newDate, reason.trim());
       onSent();
     } catch (err) {
-      setError(errMsg(err, "Couldn't submit the request."));
+      setError(friendlyError(err, "We couldn't submit that extension request.", { reassurance: "Your item's due date hasn't changed." }));
     } finally {
       setSubmitting(false);
     }
@@ -93,7 +89,7 @@ function ExtensionRequestModal({ item, onClose, onSent }: { item: MyItem | null;
           />
         </label>
 
-        {error && <div className="bg-rust/10 border border-rust/30 text-rust-soft text-[12px] rounded-[3px] px-3 py-2.5 mb-4">{error}</div>}
+        {error && <div className="mb-4"><ErrorState error={error} onRetry={error.retryable ? submit : undefined} /></div>}
 
         <button
           onClick={submit}

@@ -1,15 +1,15 @@
 import { useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { X, Loader2, QrCode, CheckCircle2 } from "lucide-react";
-import { assetsApi, ApiError, formatDate } from "../lib/api";
+import { assetsApi, formatDate } from "../lib/api";
 import type { RosterUser, OutsiderRow } from "../lib/types";
 import { ReceiptModal } from "./ReceiptModal";
 import type { ReceiptTarget } from "../lib/receipt";
+import { friendlyError, type FriendlyError } from "../lib/errors";
+import { ErrorState } from "./ui/ErrorBanner";
 
-function errMsg(err: unknown, fallback: string): string {
-  if (err instanceof ApiError) return err.message;
-  if (err instanceof Error && err.message) return err.message;
-  return fallback;
+function localError(title: string): FriendlyError {
+  return { title, message: "", requestId: null, retryable: false };
 }
 
 // Same rule as backend/schemas/assets_schema.py's MAX_DUE_DATE_YEARS_AHEAD --
@@ -55,7 +55,7 @@ export function DispatchModal({
   const [adhocEmail, setAdhocEmail] = useState("");
   const [adhocPhone, setAdhocPhone] = useState("");
 
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<FriendlyError | null>(null);
   const [submitting, setSubmitting] = useState(false);
   // Post-dispatch success state -- replaces the old `alert(result.message)`
   // with an inline confirmation that offers a scannable receipt on the
@@ -99,25 +99,24 @@ export function DispatchModal({
 
   if (!asset) return null;
 
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const doSubmit = async () => {
     setError(null);
 
     if (route === "adhoc" && !dueDate) {
-      setError("Due date is mandatory for external unauthenticated allocations.");
+      setError(localError("Due date is mandatory for external unauthenticated allocations."));
       return;
     }
 
     let payload: Parameters<typeof assetsApi.checkoutAdvanced>[1];
     if (route === "staff") {
       if (!staffId) {
-        setError("Choose a staff member to dispatch to.");
+        setError(localError("Choose a staff member to dispatch to."));
         return;
       }
       payload = { assignee_type: "user", quantity, due_date: dueDate || null, user_id: Number(staffId) };
     } else if (route === "customer") {
       if (!customerId) {
-        setError("No linked customer accounts are on file yet. Create one from the User Directory first.");
+        setError(localError("No linked customer accounts are on file yet. Create one from the User Directory first."));
         return;
       }
       payload = { assignee_type: "user", quantity, due_date: dueDate || null, user_id: Number(customerId) };
@@ -127,7 +126,7 @@ export function DispatchModal({
         payload.outsider_id = Number(adhocExistingId);
       } else {
         if (!adhocName || (!adhocEmail && !adhocPhone)) {
-          setError("Name and at least one of email/phone are required for outsiders.");
+          setError(localError("Name and at least one of email/phone are required for outsiders."));
           return;
         }
         payload.outsider_name = adhocName;
@@ -151,11 +150,18 @@ export function DispatchModal({
       const result = await assetsApi.checkoutAdvanced(asset.id, payload);
       setDispatched({ assigneeName, quantity, dueDate, message: result.message });
     } catch (err) {
-      setError(errMsg(err, "Dispatch failed."));
+      // This IS the "someone else grabbed the last unit while you were
+      // filling out this form" moment -- a 409 here already carries a
+      // specific detail from backend/services/asset_service/checkout.py
+      // (e.g. only N units left), so friendlyError() surfaces it as-is
+      // under a plain-language title, with an honest reassurance line
+      // (nothing was actually dispatched) and a one-click retry.
+      setError(friendlyError(err, "We couldn't complete that dispatch.", { reassurance: "Nothing was dispatched." }));
     } finally {
       setSubmitting(false);
     }
   };
+  const submit = (e: React.FormEvent) => { e.preventDefault(); doSubmit(); };
 
   const inputClass = "bg-ink-soft border border-border-soft rounded-[3px] px-3 py-2.5 text-[13px] text-text placeholder:text-text-faint focus:border-brass/50 focus:outline-none";
 
@@ -264,7 +270,7 @@ export function DispatchModal({
               </div>
             </div>
 
-            {error && <div className="bg-rust/10 border border-rust/30 text-rust-soft text-[12px] rounded-[3px] px-3 py-2.5">{error}</div>}
+            {error && <ErrorState error={error} onRetry={error.retryable ? doSubmit : undefined} />}
 
             <button data-otel-action="checkout" type="submit" disabled={submitting} className="mt-1 flex items-center justify-center gap-1.5 bg-brass hover:bg-brass-soft disabled:opacity-60 text-ink font-medium text-[13px] rounded-[3px] py-2.5 transition-colors">
               {submitting && <Loader2 size={13} className="animate-spin" />}

@@ -11,6 +11,8 @@ import { useRequestGuard } from "../lib/useRequestGuard";
 import { useCustody } from "../lib/useCustody";
 import { ReceiptModal } from "../components/ReceiptModal";
 import type { ReceiptTarget } from "../lib/receipt";
+import { ErrorState } from "../components/ui/ErrorBanner";
+import { friendlyError, type FriendlyError } from "../lib/errors";
 
 const tabs = ["All", "Overdue", "Due Soon", "Active"] as const;
 
@@ -28,14 +30,18 @@ const FILTER_FOR_TAB: Record<(typeof tabs)[number], "overdue" | "due_soon" | "ac
 function DenyReasonModal({ request, onClose, onDenied }: { request: ExtensionRequest | null; onClose: () => void; onDenied: () => void }) {
   const [note, setNote] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  useEffect(() => setNote(""), [request]);
+  const [error, setError] = useState<FriendlyError | null>(null);
+  useEffect(() => { setNote(""); setError(null); }, [request]);
   if (!request) return null;
 
   const submit = async () => {
     setSubmitting(true);
+    setError(null);
     try {
       await extensionsApi.decide(request.id, false, note.trim() || null);
       onDenied();
+    } catch (err) {
+      setError(friendlyError(err, "We couldn't deny that request.", { reassurance: "The request is still pending -- nothing changed." }));
     } finally {
       setSubmitting(false);
     }
@@ -65,6 +71,7 @@ function DenyReasonModal({ request, onClose, onDenied }: { request: ExtensionReq
             className="w-full mt-1.5 bg-ink-soft border border-border-soft rounded-[3px] px-3 py-2.5 text-[13px] text-text placeholder:text-text-faint focus:border-rust/50 focus:outline-none transition-colors resize-none"
           />
         </label>
+        {error && <div className="mb-4"><ErrorState error={error} onRetry={error.retryable ? submit : undefined} /></div>}
         <button
           onClick={submit}
           disabled={submitting}
@@ -125,6 +132,7 @@ export function Checkouts() {
   // response, so this has to be re-read once that request lands rather
   // than assumed up front.
   const [dueSoonDays, setDueSoonDays] = useState(getDueSoonReminderDays());
+  const [error, setError] = useState<FriendlyError | null>(null);
   const beginCheckoutsRequest = useRequestGuard();
   const beginExtensionsRequest = useRequestGuard();
 
@@ -138,7 +146,7 @@ export function Checkouts() {
         setDueSoonDays(getDueSoonReminderDays());
       })
       .catch((err) => {
-        if (isCurrent()) console.error("Failed to load checkouts:", err);
+        if (isCurrent()) setError(friendlyError(err, "Couldn't load checkouts."));
       });
   }, [beginCheckoutsRequest, perPage, offset, tab]);
   const refreshExtensions = useCallback(() => {
@@ -150,7 +158,7 @@ export function Checkouts() {
         setExtensionsTotal(total);
       })
       .catch((err) => {
-        if (isCurrent()) console.error("Failed to load extension requests:", err);
+        if (isCurrent()) setError(friendlyError(err, "Couldn't load extension requests."));
       });
   }, [beginExtensionsRequest, extPerPage, extOffset]);
 
@@ -161,8 +169,12 @@ export function Checkouts() {
   useEffect(refreshExtensions, [refreshExtensions]);
 
   const approve = async (id: number) => {
-    await extensionsApi.decide(id, true, null);
-    refreshExtensions();
+    try {
+      await extensionsApi.decide(id, true, null);
+      refreshExtensions();
+    } catch (err) {
+      setError(friendlyError(err, "We couldn't approve that request.", { reassurance: "The request is still pending -- nothing changed." }));
+    }
   };
 
   // Switching tabs changes the underlying (server-side) result set, so
@@ -210,6 +222,12 @@ export function Checkouts() {
         <h1 className="font-display text-2xl font-semibold text-text">Checkouts</h1>
         <p className="text-text-muted text-sm mt-1">Track who has what, and who needs a nudge.</p>
       </motion.div>
+
+      {error && (
+        <div className="mb-4">
+          <ErrorState error={error} onDismiss={() => setError(null)} />
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div className="lg:col-span-2">

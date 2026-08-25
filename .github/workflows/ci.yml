@@ -221,6 +221,39 @@ jobs:
       - name: Install dependencies
         run: cd frontend-app && npm ci --no-audit --no-fund
 
+      # SECURITY GAP FIX: frontend-app is the active, shipping React/Vite
+      # SPA -- the only frontend receiving new features -- but previously
+      # had no dependency-vulnerability coverage anywhere in the pipeline:
+      # `npm ci --no-audit` above deliberately skips npm's own audit, and
+      # Trivy only ever scans the *built* runtime image, which discards
+      # node_modules after `vite build` (build-stage only).
+      #
+      # Unlike pip-audit (see scripts/security/pip_audit_gate.py's own
+      # docstring), npm's own advisory database DOES carry a real severity
+      # rating per finding (critical/high/moderate/low) and `--audit-level`
+      # is npm's native way to gate on it -- no custom wrapper needed here.
+      # This mirrors the Trivy image scan's two-step pattern below
+      # (blocking step + separate always-green report step) and this
+      # repo's documented Critical/High-block, Medium/Low-report policy --
+      # see docs/SECURITY_CI_POLICY.md.
+      #
+      # EXPLICIT EXCEPTIONS: npm has no per-advisory ignore list the way
+      # pip-audit's --ignore-vuln does. If a high/critical finding needs to
+      # stay open past this gate (no fix released yet, upstream breaking
+      # change, etc.), pin it explicitly via an `overrides` entry in
+      # frontend-app/package.json with a comment linking the advisory and a
+      # follow-up date -- that's the documented, explicit, reviewable
+      # exception mechanism for this tool, same spirit as the pip-audit
+      # exceptions file just enforced with npm's own primitives instead.
+      - name: npm audit (dependency vulnerability scan -- critical/high, blocking)
+        run: cd frontend-app && npm audit --omit=dev --audit-level=high
+
+      - name: npm audit (dependency vulnerability scan -- full report, non-blocking)
+        # Separate non-blocking step so moderate/low findings still show up
+        # in logs (this repo's documented "Medium/Low -> report" tier)
+        # without failing CI on them -- see the comment above.
+        run: cd frontend-app && npm audit --omit=dev || true
+
       - name: Lint
         run: cd frontend-app && npm run lint
 
@@ -351,8 +384,101 @@ jobs:
       - name: Migration zero-downtime safety gate
         run: python scripts/check-migration-safety.py
 
-      - name: pip-audit (dependency vulnerability scan)
-        run: pip-audit -r backend/requirements.txt --desc || true
+      # SECURITY GAP FIX (docs/SECURITY_GAPS.md, P1 "`pip-audit` never fails
+      # CI"): this used to be `pip-audit -r backend/requirements.txt --desc
+      # || true` -- a CRITICAL CVE in a pinned dependency printed to a log
+      # nobody was required to read, and could never fail a PR. Now runs
+      # through scripts/security/pip_audit_gate.py, which BLOCKS on any
+      # finding that has a fix available (unless explicitly, time-boxedly
+      # exempted in .security/pip-audit-exceptions.json) and reports
+      # (non-blocking) anything with no fix yet to bump to. See that
+      # script's own docstring for why this is gated on fixability rather
+      # than a CVSS severity tier -- neither of pip-audit's vulnerability
+      # backends expose one -- and docs/SECURITY_CI_POLICY.md for how this
+      # fits the repo-wide Critical/High-block, Medium/Low-report policy.
+      - name: pip-audit (dependency vulnerability scan, blocking)
+        run: |
+          python scripts/security/pip_audit_gate.py \
+            -r backend/requirements.txt \
+            --group backend \
+            --ignore-file .security/pip-audit-exceptions.json
+
+  # ---------------------------------------------------------------------
+  # SECURITY GAP FIX (docs/SECURITY_GAPS.md, P1 "No static application
+  # security testing (SAST)"). Gitleaks (secrets, below) and pip-audit/npm
+  # audit/Trivy (known-CVE SCA, above/below) were all present, but nothing
+  # statically analyzed this repo's OWN logic -- no auth-bypass, injection
+  # pattern, or unsafe-deserialization class of bug would ever be caught
+  # by any of those. CodeQL fills that gap for the two languages actually
+  # shipped here (Python: backend/, errorbeacon/, scripts/; JS/TS:
+  # frontend-app/, frontend/js/).
+  #
+  # PINNED TO A COMMIT SHA, not a mutable tag -- same supply-chain
+  # rationale as the Trivy step below (see that step's own comment on
+  # CVE-2026-33634): github/codeql-action is a first-party GitHub action,
+  # but this repo's own stated policy is "every third-party Action pinned
+  # to an exact commit SHA", full stop, not "except the ones we trust
+  # more".
+  #
+  # REPORT-ONLY FOR NOW, on purpose, not another silent `|| true`: this is
+  # a brand-new scanner with no historical baseline for this codebase --
+  # turning it on as a hard `exit-code: 1`-style gate on day one would
+  # block the very next PR on whatever backlog of pre-existing findings it
+  # surfaces, before anyone has triaged a single one. CodeQL's own
+  # standard integration model reflects this same split: `analyze` itself
+  # never fails the job -- results upload to GitHub's Security > Code
+  # scanning tab as alerts, and BLOCKING on them (this repo's documented
+  # Critical/High tier) is enforced separately, via branch protection's
+  # "Require status checks to pass" pointed at the code-scanning check
+  # once findings are triaged -- not via this workflow's own exit code.
+  # See docs/SECURITY_CI_POLICY.md for the repo-wide policy this fits and
+  # the concrete follow-up (re-run, triage the initial backlog, then flip
+  # branch protection to require it) needed to move this from
+  # report-to-report to actually enforced.
+  sast-codeql:
+    name: CodeQL static analysis (SAST, ${{ matrix.language }})
+    needs: [changes]
+    if: >-
+      needs.changes.outputs.backend == 'true' ||
+      needs.changes.outputs.errorbeacon == 'true' ||
+      needs.changes.outputs.frontend == 'true' ||
+      needs.changes.outputs.frontend_app == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: python
+            # Covers backend/, errorbeacon/, and scripts/ in one pass --
+            # only worth running when one of those actually changed.
+            relevant: ${{ needs.changes.outputs.backend == 'true' || needs.changes.outputs.errorbeacon == 'true' }}
+          - language: javascript-typescript
+            # Covers frontend-app/ (React/TS) and the legacy frontend/js/
+            # -- `frontend` here already includes both (see the `changes`
+            # job's own filter comment).
+            relevant: ${{ needs.changes.outputs.frontend == 'true' || needs.changes.outputs.frontend_app == 'true' }}
+    steps:
+      - uses: actions/checkout@v7
+        if: matrix.relevant == 'true'
+
+      - name: Initialize CodeQL
+        if: matrix.relevant == 'true'
+        uses: github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-extended
+
+      # No manual build step needed: Python and JS/TS are both analyzed by
+      # CodeQL's build-free ("autobuild"-less) extraction mode -- neither
+      # language requires a compile step for CodeQL to see its source.
+      - name: Perform CodeQL analysis
+        if: matrix.relevant == 'true'
+        uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          category: /language:${{ matrix.language }}
 
   errorbeacon:
     name: ErrorBeacon tests
@@ -376,6 +502,21 @@ jobs:
           python -m pip install -r requirements-dev.txt
       - name: Run ErrorBeacon tests
         run: python -m pytest tests -v
+      # SECURITY GAP FIX: errorbeacon previously had no CVE/vulnerability
+      # coverage of any kind (no pip-audit, not in the Trivy build matrix,
+      # not in dependabot.yml). This now runs through the same blocking
+      # scripts/security/pip_audit_gate.py wrapper backend/ uses, instead
+      # of the `|| true` report-only posture this step originally shipped
+      # with -- see docs/SECURITY_GAPS.md's now-closed "`pip-audit` never
+      # fails CI" P1 entry and that script's own docstring for the
+      # fixable-vs-not policy it enforces.
+      - name: pip-audit (dependency vulnerability scan, blocking)
+        working-directory: .
+        run: |
+          python3 scripts/security/pip_audit_gate.py \
+            -r errorbeacon/requirements.txt \
+            --group errorbeacon \
+            --ignore-file .security/pip-audit-exceptions.json
 
   secret-scan:
     name: Gitleaks secret scan
@@ -514,21 +655,30 @@ jobs:
   build-and-scan-images:
     name: Build images + Trivy scan
     runs-on: ubuntu-latest
-    needs: [changes, backend, frontend, frontend-app, nginx-config]
-    # `always()` because `backend`/`frontend`/`frontend-app`/`nginx-config`
-    # can now be legitimately SKIPPED (not just succeeded) depending on
-    # what changed -- GitHub's default `needs` propagation would otherwise
-    # skip this job too the moment any one of them is skipped, even when
-    # the other one actually changed and needs its image rebuilt. Runs
-    # only when at least one of backend/frontend/frontend-app changed, AND
-    # none of the jobs that DID run actually failed -- frontend-app is
-    # included in that failure check even though frontend/Dockerfile is
-    # what actually builds it (not this job's own steps), because a
-    # broken React build would silently break the frontend image too.
+    needs: [changes, backend, frontend, frontend-app, nginx-config, errorbeacon]
+    # `always()` because `backend`/`frontend`/`frontend-app`/`nginx-config`/
+    # `errorbeacon` can now be legitimately SKIPPED (not just succeeded)
+    # depending on what changed -- GitHub's default `needs` propagation
+    # would otherwise skip this job too the moment any one of them is
+    # skipped, even when another one actually changed and needs its image
+    # rebuilt. Runs only when at least one of
+    # backend/frontend/frontend-app/errorbeacon changed, AND none of the
+    # jobs that DID run actually failed -- frontend-app is included in
+    # that failure check even though frontend/Dockerfile is what actually
+    # builds it (not this job's own steps), because a broken React build
+    # would silently break the frontend image too.
+    #
+    # SECURITY GAP FIX: errorbeacon was previously never built or
+    # Trivy-scanned here -- it only got an image built (and scanned) at
+    # release/deploy time via build-push-images.yml, so a PR that
+    # introduced a CVE-vulnerable dependency into errorbeacon/ wouldn't be
+    # caught until release. Now it gets the same PR-time build+scan gate
+    # backend/frontend already have. See docs/SECURITY_GAPS.md's
+    # "errorbeacon/ has zero CVE/vulnerability coverage" entry.
     if: >-
       always() &&
-      (needs.changes.outputs.backend == 'true' || needs.changes.outputs.frontend == 'true' || needs.changes.outputs.frontend_app == 'true') &&
-      needs.backend.result != 'failure' && needs.frontend.result != 'failure' && needs.frontend-app.result != 'failure' && needs.nginx-config.result != 'failure'
+      (needs.changes.outputs.backend == 'true' || needs.changes.outputs.frontend == 'true' || needs.changes.outputs.frontend_app == 'true' || needs.changes.outputs.errorbeacon == 'true') &&
+      needs.backend.result != 'failure' && needs.frontend.result != 'failure' && needs.frontend-app.result != 'failure' && needs.nginx-config.result != 'failure' && needs.errorbeacon.result != 'failure'
     steps:
       - uses: actions/checkout@v7
 
@@ -689,6 +839,37 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: snipeit-frontend-react:ci
+          severity: 'HIGH'
+          exit-code: '0'
+          format: 'table'
+
+      # SECURITY GAP FIX: errorbeacon has its own Dockerfile + render.yaml
+      # and ships as an independently deployable service that ingests
+      # exception payloads/stack traces from the main app (realistically
+      # contains sensitive data). It's built here using the same Dockerfile
+      # release.yml's build_matrix uses, so a vulnerable base image or
+      # dependency is caught at PR time instead of only at release/deploy
+      # time. Only built when errorbeacon/ actually changed -- see the
+      # `changes` job and this job's own `if:` above.
+      - name: Build errorbeacon image
+        if: needs.changes.outputs.errorbeacon == 'true'
+        run: docker build -f errorbeacon/Dockerfile -t errorbeacon:ci .
+
+      - name: Trivy scan -- errorbeacon
+        if: needs.changes.outputs.errorbeacon == 'true'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: errorbeacon:ci
+          severity: 'CRITICAL'
+          exit-code: '1'
+          ignore-unfixed: true
+          format: 'table'
+
+      - name: Trivy scan -- errorbeacon (HIGH, report-only)
+        if: needs.changes.outputs.errorbeacon == 'true'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: errorbeacon:ci
           severity: 'HIGH'
           exit-code: '0'
           format: 'table'

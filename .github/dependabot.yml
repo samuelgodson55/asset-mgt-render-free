@@ -52,6 +52,20 @@ updates:
     open-pull-requests-limit: 5
     labels: ["dependencies", "frontend", "tests"]
 
+  # --- Frontend (React/Vite "Ledger" SPA) -- the active, shipping frontend.
+  # Previously missing here: build-frontend/build-tailwind/frontend/tests
+  # (all legacy/frozen-frontend tooling) each had an entry, but the actual
+  # frontend receiving new features didn't, so it had strictly LESS
+  # automated CVE/version-drift coverage than the frontend it's replacing.
+  # See docs/SECURITY_GAPS.md's "frontend-app/ has no dependency-vulnerability
+  # coverage" entry.
+  - package-ecosystem: "npm"
+    directory: "/frontend-app"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "frontend"]
+
   # --- Backend container image base ---
   - package-ecosystem: "docker"
     directory: "/backend"
@@ -67,6 +81,26 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 3
     labels: ["dependencies", "docker"]
+
+  # --- ErrorBeacon (Python) dependencies -- ingests exception payloads/
+  # stack traces from the main app (realistically contains sensitive data)
+  # and ships its own independently deployable image, but previously had
+  # no Dependabot coverage at all. See docs/SECURITY_GAPS.md's
+  # "errorbeacon/ has zero CVE/vulnerability coverage" entry.
+  - package-ecosystem: "pip"
+    directory: "/errorbeacon"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "errorbeacon"]
+
+  # --- ErrorBeacon container image base ---
+  - package-ecosystem: "docker"
+    directory: "/errorbeacon"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    labels: ["dependencies", "docker", "errorbeacon"]
 
   # --- GitHub Actions themselves (actions/checkout, trivy-action, etc.) ---
   - package-ecosystem: "github-actions"

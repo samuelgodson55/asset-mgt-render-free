@@ -1,17 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { X, PackageCheck, Loader2, CalendarClock, Check, Ban, Send, QrCode, ScanLine } from "lucide-react";
-import { usersApi, outsidersApi, checkoutsApi, extensionsApi, ApiError, formatDate } from "../lib/api";
+import { usersApi, outsidersApi, checkoutsApi, extensionsApi, formatDate } from "../lib/api";
 import type { CustodyItem } from "../lib/types";
 import { ExportButtons } from "./ExportButtons";
 import { ReceiptModal } from "./ReceiptModal";
 import type { ReceiptTarget } from "../lib/receipt";
 import { useRequestGuard } from "../lib/useRequestGuard";
+import { ErrorState } from "./ui/ErrorBanner";
+import { friendlyError, type FriendlyError } from "../lib/errors";
+import { getLastRequestId } from "../lib/errorbeacon";
 
-function errMsg(err: unknown, fallback: string): string {
-  if (err instanceof ApiError) return err.message;
-  if (err instanceof Error && err.message) return err.message;
-  return fallback;
+function localError(title: string): FriendlyError {
+  return { title, message: "", requestId: null, retryable: false };
 }
 
 // Shared by the single-item "Extend" button and the "Bulk extend selected"
@@ -183,7 +184,7 @@ export function CustodyDrawer({
   const [loading, setLoading] = useState(true);
   const beginRequest = useRequestGuard();
   const [returningId, setReturningId] = useState<number | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<FriendlyError | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
   // Bulk-selection + per-row return-quantity state, mirroring legacy
@@ -230,7 +231,7 @@ export function CustodyDrawer({
       rowRefs.current[item.checkout_id]?.scrollIntoView({ behavior: "smooth", block: "center" });
       setTimeout(() => setHighlightId((cur) => (cur === item.checkout_id ? null : cur)), 2200);
     } else {
-      setError(`No item on this ledger matches "${raw}".`);
+      setError(localError(`No item on this ledger matches "${raw}".`));
     }
     setScanQuery("");
   };
@@ -256,7 +257,7 @@ export function CustodyDrawer({
           return new Set(Array.from(prev).filter((id) => ids.has(id)));
         });
       })
-      .catch((err) => { if (isCurrent()) setError(errMsg(err, "Couldn't load custody items.")); })
+      .catch((err) => { if (isCurrent()) setError(friendlyError(err, "Couldn't load custody items.")); })
       .finally(() => { if (isCurrent()) setLoading(false); });
   };
 
@@ -306,7 +307,7 @@ export function CustodyDrawer({
 
   const returnItem = async (item: CustodyItem, quantity: number) => {
     if (!quantity || quantity < 1 || quantity > item.outstanding) {
-      setError(`Enter a quantity between 1 and ${item.outstanding} for ${item.asset_name}.`);
+      setError(localError(`Enter a quantity between 1 and ${item.outstanding} for ${item.asset_name}.`));
       return;
     }
     setError(null);
@@ -315,7 +316,7 @@ export function CustodyDrawer({
       await checkoutsApi.returnItem(item.checkout_id, quantity);
       refresh();
     } catch (err) {
-      setError(errMsg(err, "Return failed."));
+      setError(friendlyError(err, `We couldn't check in ${item.asset_name}.`, { reassurance: "It's still on this ledger -- nothing was lost." }));
     } finally {
       setReturningId(null);
     }
@@ -337,12 +338,24 @@ export function CustodyDrawer({
       try {
         await checkoutsApi.returnItem(id, item.outstanding);
       } catch (err) {
-        failures.push(`${item.asset_name}: ${errMsg(err, "return failed")}`);
+        failures.push(`${item.asset_name}: ${friendlyError(err, "return failed").message}`);
       }
     }
     setBulkBusy(false);
-    if (failures.length) setError(`Some returns didn't go through — ${failures.join("; ")}`);
-    else setNotice(`Processed ${checkoutIds.length} return(s).`);
+    if (failures.length) {
+      // A partial-failure bulk action can't honestly say "nothing was
+      // changed" -- some lines above this list DID go through. Naming
+      // exactly which ones didn't (instead of one flat error) is what
+      // lets the person know precisely what still needs doing.
+      setError({
+        title: failures.length === checkoutIds.length ? "None of the selected items could be checked in." : "Some of the selected items couldn't be checked in.",
+        message: failures.join("\n"),
+        requestId: getLastRequestId(),
+        retryable: true,
+      });
+    } else {
+      setNotice(`Processed ${checkoutIds.length} return(s).`);
+    }
     setSelected(new Set());
     refresh();
   };
@@ -358,7 +371,7 @@ export function CustodyDrawer({
       setNotice(`Extended ${extendTarget.asset_name} to ${formatDate(newDueDate)}.`);
       refresh();
     } catch (err) {
-      setError(errMsg(err, "Extend failed."));
+      setError(friendlyError(err, "We couldn't extend that due date.", { reassurance: "The due date hasn't changed." }));
     }
   };
 
@@ -371,14 +384,19 @@ export function CustodyDrawer({
       setBulkExtendOpen(false);
       if (result.failed > 0) {
         const lines = result.results.filter((r) => !r.success).map((r) => `#${r.checkout_id}: ${r.error}`);
-        setError(`${result.message ?? "Some extensions failed."} ${lines.join("; ")}`);
+        setError({
+          title: result.message ?? "Some extensions didn't go through.",
+          message: lines.join("\n"),
+          requestId: getLastRequestId(),
+          retryable: true,
+        });
       } else {
         setNotice(result.message ?? `Extended ${result.succeeded} item(s).`);
       }
       setSelected(new Set());
       refresh();
     } catch (err) {
-      setError(errMsg(err, "Bulk extend failed."));
+      setError(friendlyError(err, "We couldn't extend those due dates.", { reassurance: "Nothing was changed." }));
     }
   };
 
@@ -391,7 +409,7 @@ export function CustodyDrawer({
       setNotice(`Approved extension on ${item.asset_name}.`);
       refresh();
     } catch (err) {
-      setError(errMsg(err, "Couldn't approve that request."));
+      setError(friendlyError(err, "We couldn't approve that request.", { reassurance: "The request is still pending -- nothing changed." }));
     } finally {
       setDecidingId(null);
     }
@@ -407,7 +425,7 @@ export function CustodyDrawer({
       setNotice(`Denied extension on ${denyTarget.assetName}.`);
       refresh();
     } catch (err) {
-      setError(errMsg(err, "Couldn't deny that request."));
+      setError(friendlyError(err, "We couldn't deny that request.", { reassurance: "The request is still pending -- nothing changed." }));
     } finally {
       setDecidingId(null);
     }
@@ -451,7 +469,7 @@ export function CustodyDrawer({
           </div>
         </div>
 
-        {error && <div className="bg-rust/10 border border-rust/30 text-rust-soft text-[12px] rounded-[3px] px-3 py-2.5 mb-3">{error}</div>}
+        {error && <div className="mb-3"><ErrorState error={error} onDismiss={() => setError(null)} /></div>}
         {notice && !error && <div className="bg-moss/10 border border-moss/30 text-moss-soft text-[12px] rounded-[3px] px-3 py-2.5 mb-3">{notice}</div>}
 
         {items.length > 0 && (

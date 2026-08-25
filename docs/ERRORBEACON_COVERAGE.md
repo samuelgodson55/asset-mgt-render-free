@@ -153,8 +153,11 @@ category=client_error
 
 There are two frontend implementations in the repository:
 
-- the existing legacy JavaScript frontend
-- the React `frontend-app`
+- the existing legacy JavaScript frontend (`frontend/` — frozen and going
+  out of phase, see `frontend/README.md`; kept on the same bridge so it
+  doesn't silently go dark, not as a target for new coverage)
+- the React `frontend-app` (the actively maintained frontend — this is
+  where new browser-side error coverage should be added)
 
 Both have the same ErrorBeacon browser bridge.
 

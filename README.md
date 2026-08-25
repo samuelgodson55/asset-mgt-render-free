@@ -221,6 +221,7 @@ Demo accounts (seeded automatically on a fresh database — local/demo use only)
 ```
 ├── backend/          FastAPI app, SQLAlchemy models, Alembic migrations
 ├── frontend-app/      React + TypeScript frontend (dashboard, assets, quotes, reports)
+├── frontend/          Legacy vanilla-JS frontend — frozen, see frontend/README.md
 ├── nginx/            Reverse proxy config (templated per environment)
 ├── infra/            Bicep — Azure Container Apps
 ├── infra-vm/          Terraform — single-VM deployment
@@ -271,6 +272,7 @@ changes safely" guide — see **[`docs/README.md`](docs/README.md)**.
 
 | Doc | Covers |
 |---|---|
+| [`AGENTS.md`](AGENTS.md) | Condensed, task-oriented guide for AI coding agents — repo map, commands, conventions |
 | [`docs/README.md`](docs/README.md) | Full technical manual — features, architecture, API reference, dev guide |
 | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | Azure Container Apps deploy guide |
 | [`docs/DEPLOYMENT_VM.md`](docs/DEPLOYMENT_VM.md) | Single-VM deploy guide |

@@ -2,10 +2,12 @@ import { useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { motion } from "framer-motion";
 import { ShoppingCart, Trash2, Loader2, Search, Send, History, UserPlus } from "lucide-react";
-import { quotationsApi, usersApi, formatPrice, formatDate, setCurrencyCode, ApiError } from "../lib/api";
+import { quotationsApi, usersApi, formatPrice, formatDate, setCurrencyCode } from "../lib/api";
 import type { CatalogAsset, QuotationCartOrDetail, QuotationListRow, UserRow } from "../lib/types";
 import { QuoteDetailDrawer } from "../components/QuoteDetailDrawer";
 import { StatusPill } from "../components/StatusPill";
+import { ErrorState } from "../components/ui/ErrorBanner";
+import { friendlyError, type FriendlyError } from "../lib/errors";
 import { ExportButtons } from "../components/ExportButtons";
 import { PaginationBar, RowsPerPageSelect } from "../components/PaginationBar";
 import { DEFAULT_PAGE_SIZE, MOBILE_DEFAULT_PAGE_SIZE, MOBILE_PAGE_SIZE_OPTIONS, PAGE_SIZE_OPTIONS } from "../lib/pagination";
@@ -14,11 +16,12 @@ import { isPrivileged } from "../lib/roles";
 import { useIsMobile } from "../lib/useIsMobile";
 import { useRequestGuard } from "../lib/useRequestGuard";
 
-function errMsg(err: unknown, fallback: string): string {
-  if (err instanceof ApiError) return err.message;
-  if (err instanceof Error && err.message) return err.message;
-  return fallback;
-}
+/** The page's `error` banner is a single shared slot -- this pairs the
+ * friendly {title, message, requestId} with an optional `retry` closure so
+ * <ErrorState>'s "Try again" button can re-run whichever action actually
+ * failed (addToOrder(asset), submitOrder(), etc.) without every call site
+ * needing its own separate error state. */
+interface PageError { info: FriendlyError; retry?: () => void }
 
 const today = () => new Date().toISOString().slice(0, 10);
 
@@ -64,7 +67,7 @@ export function Quotations() {
   const [cart, setCart] = useState<QuotationCartOrDetail | null>(null);
   const [history, setHistory] = useState<QuotationListRow[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<PageError | null>(null);
   const [search, setSearch] = useState("");
   const [drafts, setDrafts] = useState<Record<number, RowDraft>>({});
   const [addingId, setAddingId] = useState<number | null>(null);
@@ -115,25 +118,28 @@ export function Quotations() {
 
   const refreshCart = () => {
     const isCurrent = beginCartRequest();
-    quotationsApi.myCart().then((data) => { if (isCurrent()) setCart(data); }).catch((err) => { if (isCurrent()) setError(errMsg(err, "Couldn't refresh your cart.")); });
+    quotationsApi.myCart().then((data) => { if (isCurrent()) setCart(data); }).catch((err) => { if (isCurrent()) setError({ info: friendlyError(err, "Couldn't refresh your cart."), retry: refreshCart }); });
   };
   const refreshHistory = () => {
     const isCurrent = beginHistoryRequest();
-    quotationsApi.myHistory().then((data) => { if (isCurrent()) setHistory(data); }).catch((err) => { if (isCurrent()) setError(errMsg(err, "Couldn't refresh your order history.")); });
+    quotationsApi.myHistory().then((data) => { if (isCurrent()) setHistory(data); }).catch((err) => { if (isCurrent()) setError({ info: friendlyError(err, "Couldn't refresh your order history."), retry: refreshHistory }); });
   };
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([quotationsApi.publicConfig(), quotationsApi.catalog(), quotationsApi.myCart(), quotationsApi.myHistory()])
-      .then(([config, fullCat, myCart, myHistory]) => {
-        if (cancelled) return;
-        setCurrencyCode(config.currency_code);
-        setFullCatalog(fullCat);
-        setCart(myCart);
-        setHistory(myHistory);
-      })
-      .catch((err) => !cancelled && setError(errMsg(err, "Couldn't load the Quotation Catalog.")))
-      .finally(() => !cancelled && setLoading(false));
+    const loadAll = () => {
+      Promise.all([quotationsApi.publicConfig(), quotationsApi.catalog(), quotationsApi.myCart(), quotationsApi.myHistory()])
+        .then(([config, fullCat, myCart, myHistory]) => {
+          if (cancelled) return;
+          setCurrencyCode(config.currency_code);
+          setFullCatalog(fullCat);
+          setCart(myCart);
+          setHistory(myHistory);
+        })
+        .catch((err) => !cancelled && setError({ info: friendlyError(err, "Couldn't load the Quotation Catalog."), retry: loadAll }))
+        .finally(() => !cancelled && setLoading(false));
+    };
+    loadAll();
     return () => { cancelled = true; };
   }, []);
 
@@ -147,7 +153,7 @@ export function Quotations() {
       setCatalogLoading(false);
     }).catch((err) => {
       if (!isCurrent()) return;
-      setError(errMsg(err, "Couldn't load the Asset Catalog."));
+      setError({ info: friendlyError(err, "Couldn't load the Asset Catalog."), retry: refreshCatalog });
       setCatalogLoading(false);
     });
   }, [beginCatalogRequest, catalogPerPage, catalogOffset, search]);
@@ -191,7 +197,7 @@ export function Quotations() {
       setAssignMatches([]);
       setAssignMessage(`Assigned to ${target.name}.`);
     } catch (err) {
-      setError(errMsg(err, "Couldn't assign this quote."));
+      setError({ info: friendlyError(err, "Couldn't assign this quote."), retry: () => assignCartToUser(target) });
     } finally {
       setAssigning(false);
     }
@@ -204,16 +210,16 @@ export function Quotations() {
   const addToOrder = async (asset: CatalogAsset) => {
     const draft = draftFor(asset.id);
     const quantity = parseInt(draft.quantity, 10);
-    if (!quantity || quantity < 1) { setError("Enter a quantity of at least 1."); return; }
-    if (!draft.start || !draft.due) { setError("Pick both a start and a due date."); return; }
-    if (draft.due < draft.start) { setError("Due date cannot be before the start date."); return; }
+    if (!quantity || quantity < 1) { setError({ info: { title: "Enter a quantity of at least 1.", message: "", requestId: null, retryable: false } }); return; }
+    if (!draft.start || !draft.due) { setError({ info: { title: "Pick both a start and a due date.", message: "", requestId: null, retryable: false } }); return; }
+    if (draft.due < draft.start) { setError({ info: { title: "Due date cannot be before the start date.", message: "", requestId: null, retryable: false } }); return; }
     setError(null);
     setAddingId(asset.id);
     try {
       const updated = await quotationsApi.addToCart(asset.id, quantity, draft.start, draft.due);
       setCart(updated);
     } catch (err) {
-      setError(errMsg(err, "Couldn't add that to your order."));
+      setError({ info: friendlyError(err, "Couldn't add that to your order."), retry: () => addToOrder(asset) });
     } finally {
       setAddingId(null);
     }
@@ -225,7 +231,7 @@ export function Quotations() {
     try {
       setCart(await quotationsApi.updateCartItem(itemId, quantity));
     } catch (err) {
-      setError(errMsg(err, "Couldn't update that line."));
+      setError({ info: friendlyError(err, "Couldn't update that line.", { reassurance: "Your order line is unchanged." }), retry: () => updateQty(itemId, quantity) });
       refreshCart();
     } finally {
       setCartBusyId(null);
@@ -237,7 +243,7 @@ export function Quotations() {
     try {
       setCart(await quotationsApi.removeCartItem(itemId));
     } catch (err) {
-      setError(errMsg(err, "Couldn't remove that line."));
+      setError({ info: friendlyError(err, "Couldn't remove that line."), retry: () => removeItem(itemId) });
     } finally {
       setCartBusyId(null);
     }
@@ -251,7 +257,13 @@ export function Quotations() {
       await Promise.all([refreshCart(), refreshHistory()]);
       setTab("history");
     } catch (err) {
-      setError(errMsg(err, "Couldn't submit your order."));
+      // This is the real "checkout" moment for a self-service order -- the
+      // exact case where a person most needs to know nothing was lost and
+      // exactly how to recover, not just a bare "Couldn't submit". A 409
+      // here (someone else's concurrent submit dropped the last unit of
+      // stock between page-load and Submit) already carries backend detail
+      // specific enough to explain that; friendlyError() surfaces it as-is.
+      setError({ info: friendlyError(err, "We couldn't complete that order.", { reassurance: "Your cart is still saved -- nothing was lost." }), retry: submitOrder });
     } finally {
       setSubmitting(false);
     }
@@ -265,9 +277,8 @@ export function Quotations() {
       </motion.div>
 
       {error && (
-        <div className="bg-rust/10 border border-rust/30 text-rust-soft text-[12px] rounded-[3px] px-3 py-2.5 mb-4 flex items-center justify-between">
-          <span>{error}</span>
-          <button onClick={() => setError(null)} className="text-rust-soft/70 hover:text-rust-soft">×</button>
+        <div className="mb-4">
+          <ErrorState error={error.info} onRetry={error.info.retryable ? error.retry : undefined} onDismiss={() => setError(null)} />
         </div>
       )}
 

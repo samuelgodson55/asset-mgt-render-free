@@ -219,12 +219,50 @@ def pgbouncer_pool_snapshot() -> dict | None:
     return totals
 
 
+def _pg_stat_activity_full_visibility(conn) -> bool:
+    """Whether the connecting role can see the real `state` (and other
+    per-session columns) for OTHER sessions in pg_stat_activity, not just
+    its own.
+
+    Per PostgreSQL's own docs (monitoring-stats.html), ordinary roles only
+    ever see full detail for their own sessions; every OTHER session's row
+    has `state` (among other columns) forced to NULL unless the connecting
+    role is a superuser or a member of the built-in `pg_read_all_stats`
+    role. Managed Postgres providers (Render, Azure Database for
+    PostgreSQL, RDS, Cloud SQL, ...) essentially never hand the
+    application's own role either of those by default -- that's the
+    common case for this app's real deployment targets, not an edge case
+    -- so without this check, the state breakdown below silently
+    collapses almost everything into an `unknown` bucket that
+    active/idle/idle_in_transaction below then read as zero, which looks
+    exactly like "no idle-in-transaction sessions" (healthy) even when a
+    real one is sitting there unreported.
+    """
+    return bool(
+        conn.execute(
+            text(
+                "SELECT (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) "
+                "OR pg_has_role(current_user, 'pg_read_all_stats', 'MEMBER')"
+            )
+        ).scalar()
+    )
+
+
 def postgres_activity_snapshot() -> dict | None:
     """Best-effort ground-truth connection count straight from
     pg_stat_activity, bypassing PgBouncer's own accounting entirely.
     Returns None (never raises) if this isn't Postgres or the probe
     fails for any reason -- same contract as
     database.py's _probe_postgres_connection_budget().
+
+    `total_connections` (a plain count(*)) is always accurate regardless
+    of privilege -- session existence is visible to everyone. The
+    active/idle/idle_in_transaction BREAKDOWN is only accurate when
+    `limited_visibility` comes back False; see
+    _pg_stat_activity_full_visibility()'s docstring for why or when it
+    won't be, and DatabaseHealthPanel.tsx/ADMIN_DATABASE_GUIDE.md for how
+    the UI is expected to treat a True value (a telemetry gap, not
+    evidence of a healthy idle-in-transaction count).
     """
     try:
         url = make_url(DIRECT_DATABASE_URL)
@@ -239,6 +277,7 @@ def postgres_activity_snapshot() -> dict | None:
                 max_connections = conn.execute(
                     text("SELECT current_setting('max_connections')::int")
                 ).scalar()
+                full_visibility = _pg_stat_activity_full_visibility(conn)
                 rows = conn.execute(
                     text(
                         "SELECT state, count(*) AS n FROM pg_stat_activity "
@@ -261,6 +300,7 @@ def postgres_activity_snapshot() -> dict | None:
         "active": by_state.get("active", 0),
         "idle": by_state.get("idle", 0),
         "idle_in_transaction": idle_in_txn,
+        "limited_visibility": not full_visibility,
     }
 
 

@@ -1,0 +1,25 @@
+{
+  "_readme": [
+    "Time-boxed exceptions for scripts/security/pip_audit_gate.py's block-on-fixable",
+    "policy (see that script's own docstring for the full policy this file is part",
+    "of, and docs/SECURITY_CI_POLICY.md for the repo-wide severity policy).",
+    "",
+    "One array per --group used in .github/workflows/ci.yml (currently 'backend'",
+    "and 'errorbeacon'). Every entry MUST have: id (the pip-audit finding ID --",
+    "PYSEC-.../GHSA-... etc, whichever pip-audit reports), reason (why this stays",
+    "open instead of being fixed right now), added, review_by (an ISO date in the",
+    "future), and approved_by. An entry whose review_by date has passed is treated",
+    "as if it doesn't exist -- the finding blocks the build again and the gate",
+    "script fails loudly naming which entry needs a fresh look. This is",
+    "deliberate: an exception here is a scheduled re-check, never a permanent",
+    "opt-out.",
+    "",
+    "This file is intentionally empty of real entries right now -- there are no",
+    "known, accepted-but-unfixed CVEs in this repo's pinned dependencies as of",
+    "the 2026-08-24 audit. Add an entry here (not a blanket '|| true') the next",
+    "time pip-audit finds something with a fix available that the team",
+    "deliberately decides not to take immediately."
+  ],
+  "backend": [],
+  "errorbeacon": []
+}

@@ -38,6 +38,14 @@ note), and §6.6 below adds a request-ID-first fast path
 error in seconds using nothing but `docker compose logs`, whether or not
 tracing itself is even turned on yet.
 
+**Scope note — legacy frontend:** the vanilla-JS site under `frontend/` is
+frozen and going out of phase (see `docs/README.md`'s notice and
+`frontend/README.md`). None of the reliability work below — SLOs, alerting,
+runbooks — needs to grow to cover it beyond what already exists (its Docker
+`HEALTHCHECK` and the shared nginx/Container Apps health probes). Don't add
+new legacy-frontend-specific monitoring, dashboards, or runbook sections;
+route that effort at `frontend-app/` (the React SPA) instead.
+
 ---
 
 ## Table of contents
@@ -168,6 +176,15 @@ put it in a recurring calendar block or a lightweight ticket template.
 - [ ] Check Redis memory (per DEPLOYMENT.md's note: it should track "a
   handful of job-result keys and rate-limit counters," not file sizes —
   a jump means something reverted to storing export files in Redis).
+- [ ] Check `docs/ADMIN_DATABASE_GUIDE.md`'s database command center:
+  PgBouncer waiting should be `0`; sustained non-zero is your earliest
+  signal of pool pressure, well before it becomes a user-visible
+  timeout — see §5's PgBouncer runbook if it isn't.
+- [ ] Confirm the SLA-escalation and overdue/due-soon digest emails
+  (`tasks/sla_tasks.py`, `tasks/notification_tasks.py`) actually went out
+  this week if there was anything pending/overdue to escalate — cheapest
+  check is grepping `beat`'s logs for the job names; don't assume silence
+  means nothing was pending.
 - [ ] Review the GitHub Actions run history for `ci.yml` — any flaky
   test worth fixing before it becomes "everyone just re-runs it"?
 - [ ] *(if `OTEL_ENABLED=true` — see §6.5)* Sort the last week's traces
@@ -211,7 +228,19 @@ put it in a recurring calendar block or a lightweight ticket template.
 - [ ] Re-run a load test against a staging-like environment ahead of any
   known traffic spike (e.g. start-of-semester checkout rush) and sanity
   check `backendMaxReplicas` (currently 3) and `frontendMinReplicas`
-  against what you saw.
+  against what you saw — `scripts/load-test.py` (see its own `--help`
+  for flags; `--no-keep-alive` is diagnostics-only).
+- [ ] **Resilience script sweep**, against a staging-like environment, not
+  production: `scripts/chaos-test.sh` (kills `db`/`redis` mid-run locally
+  to confirm the app degrades and recovers the way §1's SLOs assume it
+  does), `scripts/security-boundary-test.py` (confirms unauth'd `/api/*`
+  still 401s, `/docs` is still gated in prod, and no secrets/tracebacks
+  leak into responses — cheap regression coverage for exactly the kind of
+  thing a rushed feature PR can silently break), and
+  `scripts/session-redis-test.py` (login/logout/session lifecycle against
+  live Redis). These exist precisely so reliability claims are exercised,
+  not just described — a quarter without running them is a quarter where
+  that claim is unverified.
 - [ ] Postmortem review: re-read any incident write-ups from the quarter
   (see §5) — are the same root causes repeating?
 - [ ] Confirm the Azure Container Apps runtime/base images
@@ -312,6 +341,57 @@ at 2am without reasoning from scratch:
   revision at 0% traffic and silently routes nothing to it; use
   `aca-blue-green.sh rollout` instead (see DEPLOYMENT.md's Rollback
   section for the exact commands).
+- **Orphaned/stuck ACA revisions accumulating at 0% traffic without a new
+  deploy running** → normally `deploy-azure-aca.yml` reaps these itself
+  before and after every rollout; if one is stuck outside of a deploy
+  (e.g. a cancelled workflow run left a candidate revision behind), use
+  the dedicated manual escape hatch instead of waiting for the next
+  deploy: `workflow_dispatch` on
+  [`reap-stuck-revisions.yml`](../.github/workflows/reap-stuck-revisions.yml)
+  with the target environment and a grace period (default 20 minutes) —
+  it calls the same `aca-blue-green.sh reap` implementation and is safe
+  to run on demand.
+- **PgBouncer clients queueing (`docs/ADMIN_DATABASE_GUIDE.md`'s "PgBouncer
+  waiting" panel sustained above 0), or migrations/`pg_dump` behaving
+  oddly** → don't just raise application pool sizes — confirm the
+  PostgreSQL server itself is actually saturated first (see
+  `docs/DB_POOLING.md`'s routing rule). Remember `DIRECT_DATABASE_URL`
+  (not the pooled `DATABASE_URL`) is what migrations and `pg_dump`/backup
+  jobs use deliberately, since transaction pooling isn't safe for either —
+  if backups or `alembic upgrade head` fail with a connection error but
+  the app itself is fine, check that direct path and Postgres's own
+  `max_connections`, not PgBouncer. `USE_PGBOUNCER=false` is a documented
+  break-glass override (`docs/DB_POOLING.md`) for isolating "is this a
+  pooler problem or a Postgres problem" — don't leave it off longer than
+  the investigation.
+- **VM path only — Cloudflare Tunnel shows "Inactive"/zero connectors, or
+  every SSH/`scp` step in `deploy-azure-vm.yml`/`sync-secrets-vm.yml` fails
+  identically with a TLS handshake error** → this is almost always a stale
+  `CLOUDFLARE_TUNNEL_TOKEN` on the VM (cloud-init only writes it once, at
+  first boot — a later `terraform apply` that recreates the Tunnel
+  resource does not refresh it, and editing `cloud-init.yaml` afterwards
+  is a no-op against an already-running VM). Because SSH itself rides over
+  the same Tunnel, you cannot SSH in to fix this. Two ways out, both
+  documented at the top of their respective files: run
+  [`repair-tunnel-token-vm.yml`](../.github/workflows/repair-tunnel-token-vm.yml)
+  (`workflow_dispatch`, pushes the current token from Terraform state via
+  `az vm run-command invoke`, which uses Azure's control-plane channel
+  rather than SSH), or, with no CI available,
+  [`scripts/emergency-tunnel-repair-run-command.sh`](../scripts/emergency-tunnel-repair-run-command.sh)
+  by hand through the Azure Portal's Run Command feature. Don't try to fix
+  this by re-running `terraform apply` alone — it won't touch the running
+  VM's `/opt/snipeit/.env`.
+- **A Manager/Admin never actioned an extension request or a submitted
+  quotation, and no one got reminded** → `tasks/sla_tasks.py`'s
+  `escalate_pending_extension_requests`/`escalate_pending_quotations`
+  Celery Beat jobs are what's supposed to catch this (same digest
+  mechanism as the overdue/due-soon notifications, on
+  `EXTENSION_REQUEST_SLA_HOURS`/`QUOTATION_SLA_HOURS`). If the digest
+  didn't arrive, treat it exactly like §6.1's notification postmortem
+  below: it's the same delivery path (SMTP config, `beat` actually
+  running, RedBeat not double-scheduling/silently dropping the job), not
+  a separate system — check `beat`'s logs for the job name before
+  assuming the SLA thresholds themselves are wrong.
 
 For each real incident going forward, write a short postmortem: what
 broke, what the user-facing impact was, what the fix was, and one
@@ -750,5 +830,9 @@ failure mode for an app this size:
 - Don't scale `db`/`redis` containers horizontally — `main.bicep`
   already calls this out; if you need real HA there, that's a managed
   Postgres/Redis migration, not a scaling knob.
+- Don't invest further SRE effort in the legacy `frontend/` site — it's
+  frozen and going out of phase (see the scope note near the top of this
+  document). Keep it passing its existing health check and CI smoke tests;
+  don't build it new monitoring, alerting, or runbooks.
 
 ---
