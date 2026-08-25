@@ -461,11 +461,19 @@ jobs:
             # job's own filter comment).
             relevant: ${{ needs.changes.outputs.frontend == 'true' || needs.changes.outputs.frontend_app == 'true' }}
     steps:
+      # BUGFIX: `relevant` above is a bare `${{ ... }}` expression, so
+      # GitHub Actions preserves it as a real boolean, not a string.
+      # Comparing that boolean against the string 'true' (as this used to)
+      # forces a type coercion to numbers -- true -> 1, 'true' -> NaN --
+      # so `1 == NaN` is always false and every step below unconditionally
+      # skipped, on every run, for every language, regardless of what
+      # actually changed. Comparing to the bare boolean `true` (no quotes)
+      # fixes it.
       - uses: actions/checkout@v7
-        if: matrix.relevant == 'true'
+        if: matrix.relevant == true
 
       - name: Initialize CodeQL
-        if: matrix.relevant == 'true'
+        if: matrix.relevant == true
         uses: github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
         with:
           languages: ${{ matrix.language }}
@@ -475,7 +483,7 @@ jobs:
       # CodeQL's build-free ("autobuild"-less) extraction mode -- neither
       # language requires a compile step for CodeQL to see its source.
       - name: Perform CodeQL analysis
-        if: matrix.relevant == 'true'
+        if: matrix.relevant == true
         uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
         with:
           category: /language:${{ matrix.language }}

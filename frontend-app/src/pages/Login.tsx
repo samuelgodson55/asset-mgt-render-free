@@ -58,8 +58,18 @@ function ErrorBanner({ message }: { message: string }) {
   );
 }
 
+// Login-specific: a 401 here means "wrong password" or "wrong MFA code",
+// not "your session expired" (there's no session yet) -- so this
+// deliberately does NOT route through friendlyError()'s generic status
+// classification, which would mislabel it. It keeps backend's own
+// specific wording (already accurate: "Incorrect password.", "Invalid
+// code.") and only adds the one thing worth adding: a reference ID, for
+// the rarer case of a genuine server error during login.
 function errorMessage(err: unknown, fallback: string): string {
-  if (err instanceof ApiError) return err.message;
+  if (err instanceof ApiError) {
+    const msg = err.message || fallback;
+    return err.requestId ? `${msg} (Reference: ${err.requestId})` : msg;
+  }
   if (err instanceof Error && err.message) return err.message;
   return fallback;
 }

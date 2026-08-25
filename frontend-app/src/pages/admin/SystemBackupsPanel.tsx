@@ -10,9 +10,10 @@ import { useNavigate } from "react-router-dom";
 import { backupApi } from "../../lib/api";
 import type { BackupEntry, BackupStatus, RestoreResult } from "../../lib/types";
 import { Modal, ModalEyebrow } from "../../components/ui/Modal";
-import { ErrorBanner } from "../../components/ui/ErrorBanner";
+import { ErrorState } from "../../components/ui/ErrorBanner";
 import { TableShell, TableHead, TablePlaceholderRow } from "../../components/ui/TableShell";
-import { errMsg, formatWhen, formatBytes } from "./sharedHelpers";
+import { formatWhen, formatBytes } from "./sharedHelpers";
+import { friendlyError, type FriendlyError } from "../../lib/errors";
 import { useRequestGuard } from "../../lib/useRequestGuard";
 
 const TRIGGER_LABELS: Record<BackupEntry["triggered_by"], string> = {
@@ -35,7 +36,7 @@ function RestoreModal({
   const [confirmText, setConfirmText] = useState("");
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<FriendlyError | null>(null);
 
   useEffect(() => {
     setConfirmText("");
@@ -56,7 +57,11 @@ function RestoreModal({
       const result = pending.mode === "local" ? await backupApi.restoreLocal(pending.filename) : await backupApi.restoreUpload(uploadFile!);
       onDone(result);
     } catch (err) {
-      setError(errMsg(err, "Restore failed."));
+      // A restore that fails before the destructive step begins (e.g. the
+      // mandatory pre-restore safety backup itself failed) hasn't touched
+      // the live database at all -- worth saying so explicitly given how
+      // high-stakes this action is.
+      setError(friendlyError(err, "The restore didn't complete.", { reassurance: "Your live database was not touched." }));
     } finally {
       setSubmitting(false);
     }
@@ -96,7 +101,7 @@ function RestoreModal({
           />
         </label>
 
-        {error && <div className="mt-3"><ErrorBanner>{error}</ErrorBanner></div>}
+        {error && <div className="mt-3"><ErrorState error={error} onRetry={error.retryable ? submit : undefined} /></div>}
 
         <div className="flex gap-2 mt-5">
           <button onClick={onClose} className="flex-1 border border-border-soft hover:border-border text-text text-[13px] rounded-[3px] py-2.5 transition-colors">
@@ -160,6 +165,7 @@ export function SystemBackupsPanel() {
   const [backingUp, setBackingUp] = useState(false);
   const [pendingRestore, setPendingRestore] = useState<PendingRestore | null>(null);
   const [restoreResult, setRestoreResult] = useState<RestoreResult | null>(null);
+  const [pageError, setPageError] = useState<FriendlyError | null>(null);
   const { logout } = useAuth();
   const navigate = useNavigate();
   const beginRequest = useRequestGuard();
@@ -173,7 +179,7 @@ export function SystemBackupsPanel() {
       setStatus(s);
       setBackups(list);
     } catch (err) {
-      if (isCurrent()) console.error("Failed to load backup status/list:", err);
+      if (isCurrent()) setPageError(friendlyError(err, "Couldn't load backup status."));
     } finally {
       if (isCurrent()) setLoadingList(false);
     }
@@ -185,11 +191,12 @@ export function SystemBackupsPanel() {
 
   const createNow = async () => {
     setBackingUp(true);
+    setPageError(null);
     try {
       await backupApi.create();
       await refresh();
     } catch (err) {
-      alert(errMsg(err, "Backup failed."));
+      setPageError(friendlyError(err, "We couldn't create that backup.", { reassurance: "Your existing backups are untouched." }));
     } finally {
       setBackingUp(false);
     }
@@ -204,11 +211,12 @@ export function SystemBackupsPanel() {
 
   const remove = async (filename: string) => {
     if (!confirm(`Delete local backup "${filename}"? This does not affect any copy already uploaded to Google Drive.`)) return;
+    setPageError(null);
     try {
       await backupApi.remove(filename);
       await refresh();
     } catch (err) {
-      alert(errMsg(err, "Delete failed."));
+      setPageError(friendlyError(err, `We couldn't delete "${filename}".`));
     }
   };
 
@@ -249,6 +257,8 @@ export function SystemBackupsPanel() {
             </button>
           </div>
         </div>
+
+        {pageError && <div className="mt-3"><ErrorState error={pageError} onRetry={pageError.retryable ? refresh : undefined} onDismiss={() => setPageError(null)} /></div>}
 
         {status ? (
           <>

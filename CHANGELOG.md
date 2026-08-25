@@ -53,6 +53,15 @@ observability, and operational trust.
     plus an end-to-end check that a correlation ID returned by a real
     failed `fetch()` (via header or body) survives into the `FriendlyError`
     a page renders.
+  - Full parity pass: `SystemBackupsPanel.tsx`'s restore/backup/delete
+    actions (previously two bare `alert(err.message)` calls and one
+    string-only restore-modal error) now use the same `ErrorState`/
+    `friendlyError` treatment as the rest of the app; `Login.tsx`'s
+    pre-authentication error line now appends a reference ID to genuine
+    server errors during login/MFA while deliberately keeping backend's
+    own wording for wrong-password/wrong-code 401s (routing those through
+    the generic "your session expired" classification used elsewhere would
+    have been actively wrong before a session exists).
 - `docs/SECURITY_GAPS.md`: a priority-scored register of security/CVE-
   hygiene gaps found in a manual OWASP-adjacent audit — two P0s
   (`errorbeacon/` has no CVE scanning of any kind; `frontend-app/`, the
