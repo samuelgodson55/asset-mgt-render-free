@@ -70,10 +70,17 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# The three processes that ever handle a request/task: the API itself,
-# whichever worker replica picked up a Celery job it enqueued, and the
-# scheduler that fired a periodic digest -- see docker-compose.yml.
-SERVICES=(backend worker beat)
+# The four processes that ever touch a request/task's correlation ID: the
+# API itself, whichever worker replica picked up a Celery job it enqueued,
+# the scheduler that fired a periodic digest, and -- since ErrorBeacon logs
+# JSON with the same request_id-stamped format (see
+# errorbeacon/app/main/logging_setup.py) -- the ErrorBeacon service any
+# uncaught JS crash or 5xx alert was forwarded to. Including it here is what
+# turns "grep app logs, then separately go dig through Telegram/ErrorBeacon"
+# into one command: an uncaught frontend crash's ingest + Telegram delivery
+# outcome now show up in the same output as the backend/worker lines for
+# that request_id, in order. See docker-compose.yml for all four services.
+SERVICES=(backend worker beat errorbeacon)
 
 LOGS_CMD=(docker compose logs --no-color --timestamps --since "$SINCE")
 if [[ "$FOLLOW" == true ]]; then

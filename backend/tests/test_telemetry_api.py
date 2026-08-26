@@ -49,8 +49,25 @@ def _install_fake_limiter(monkeypatch, **kwargs):
 def _capture_report_client_event(monkeypatch):
     captured = {}
 
-    def _fake(message, *, stack=None, path=None, request_id=None, context=None):
-        captured.update(message=message, stack=stack, path=path, request_id=request_id, context=context)
+    def _fake(
+        message,
+        *,
+        stack=None,
+        path=None,
+        request_id=None,
+        request_id_correlated=True,
+        breadcrumb_request_id=None,
+        context=None,
+    ):
+        captured.update(
+            message=message,
+            stack=stack,
+            path=path,
+            request_id=request_id,
+            request_id_correlated=request_id_correlated,
+            breadcrumb_request_id=breadcrumb_request_id,
+            context=context,
+        )
 
     monkeypatch.setattr(telemetry_api, "report_client_event", _fake)
     return captured
@@ -197,20 +214,159 @@ def test_client_error_accepts_context_within_limits(client, monkeypatch):
 
 # ---------------------------------------------------------------------------
 # request_id correlation
+#
+# The frontend labels payload.request_id with `request_id_confidence`
+# (see frontend-app/src/lib/errorbeacon.ts). Only "correlated" -- a caller
+# that explicitly identified the request that actually failed -- lets that
+# ID become the trace ID. Anything else (missing label, "breadcrumb",
+# "none", or an unrecognized value) is untrusted, and the endpoint falls
+# back to this telemetry POST's OWN freshly-minted request_id instead --
+# see api/telemetry_api.py's client_error() for the full rationale.
+# ---------------------------------------------------------------------------
+# request_id sanitization
+#
+# payload.request_id is untrusted browser input regardless of what
+# request_id_confidence claims about it -- a malicious or buggy client can
+# send "correlated" alongside a value engineered to abuse a log sink that
+# doesn't handle it as safely as the JSON formatter does (embedded
+# newlines/ANSI escapes when logs are tailed as raw text, e.g. `docker
+# compose logs`). sanitize_request_id() (utils/request_id.py) must reject
+# these BEFORE the confidence claim is even considered.
 # ---------------------------------------------------------------------------
 
-def test_client_error_uses_body_request_id_over_header(client, monkeypatch):
+def test_client_error_rejects_unsafe_request_id_even_when_claimed_correlated(client, monkeypatch):
     _install_fake_limiter(monkeypatch, blocked=False)
     captured = _capture_report_client_event(monkeypatch)
 
+    response = client.post(
+        "/api/telemetry/client-error",
+        json={
+            "message": "boom",
+            "request_id": "legit-looking\nX-Injected-Log-Line: fake",
+            "request_id_confidence": "correlated",
+        },
+        headers={"X-Request-ID": "header-rid-3"},
+    )
+
+    # The malicious string must never become the trace id...
+    assert response.json()["request_id"] == "header-rid-3"
+    assert response.json()["request_id_correlated"] is False
+    assert captured["request_id"] == "header-rid-3"
+    # ...and must not even be surfaced as a labeled breadcrumb -- a string
+    # that fails the safety check can't be trusted to *be* an id at all,
+    # so there's nothing legitimate left to show.
+    assert captured["breadcrumb_request_id"] is None
+
+
+def test_client_error_rejects_oversized_request_id(client, monkeypatch):
+    _install_fake_limiter(monkeypatch, blocked=False)
+    captured = _capture_report_client_event(monkeypatch)
+
+    # Field(max_length=200) on ClientErrorPayload bounds the JSON body
+    # field itself, but sanitize_request_id()'s own tighter 128-char limit
+    # must still be enforced independently of that outer Pydantic bound.
+    oversized = "a" * 150
+
+    response = client.post(
+        "/api/telemetry/client-error",
+        json={
+            "message": "boom",
+            "request_id": oversized,
+            "request_id_confidence": "correlated",
+        },
+        headers={"X-Request-ID": "header-rid-4"},
+    )
+
+    assert response.json()["request_id"] == "header-rid-4"
+    assert response.json()["request_id_correlated"] is False
+    assert captured["breadcrumb_request_id"] is None
+
+
+def test_client_error_accepts_safe_request_id_when_correlated(client, monkeypatch):
+    _install_fake_limiter(monkeypatch, blocked=False)
+    captured = _capture_report_client_event(monkeypatch)
+
+    response = client.post(
+        "/api/telemetry/client-error",
+        json={
+            "message": "boom",
+            "request_id": "req-8F4A21_valid.id-1",
+            "request_id_confidence": "correlated",
+        },
+        headers={"X-Request-ID": "header-rid-5"},
+    )
+
+    # A well-formed id is unaffected by the new sanitization -- confirms
+    # this is an additional check, not a regression in the normal path.
+    assert response.json()["request_id"] == "req-8F4A21_valid.id-1"
+    assert response.json()["request_id_correlated"] is True
+    assert captured["breadcrumb_request_id"] is None
+
+
+def test_client_error_unsafe_breadcrumb_is_dropped_not_just_unlabeled(client, monkeypatch):
+    _install_fake_limiter(monkeypatch, blocked=False)
+    captured = _capture_report_client_event(monkeypatch)
+
+    # No request_id_confidence at all (the normal "breadcrumb" case), but
+    # the value itself is unsafe -- must be dropped entirely, not merely
+    # demoted to an unlabeled breadcrumb.
+    response = client.post(
+        "/api/telemetry/client-error",
+        json={"message": "boom", "request_id": "bad\tid\nwith control chars"},
+        headers={"X-Request-ID": "header-rid-6"},
+    )
+
+    assert response.json()["request_id"] == "header-rid-6"
+    assert captured["breadcrumb_request_id"] is None
+
+
+def test_client_error_trusts_body_request_id_when_explicitly_correlated(client, monkeypatch):
+    _install_fake_limiter(monkeypatch, blocked=False)
+    captured = _capture_report_client_event(monkeypatch)
+
+    response = client.post(
+        "/api/telemetry/client-error",
+        json={
+            "message": "boom",
+            "request_id": "body-rid-1",
+            "request_id_confidence": "correlated",
+        },
+        headers={"X-Request-ID": "header-rid-1"},
+    )
+
+    # An explicitly-correlated body ID wins even over a (differently
+    # sanitized) incoming header, because it names the SPECIFIC request
+    # that failed -- not just whatever this POST's own id happens to be.
+    assert response.json()["request_id"] == "body-rid-1"
+    assert response.json()["request_id_correlated"] is True
+    assert captured["request_id"] == "body-rid-1"
+    assert captured["request_id_correlated"] is True
+    assert captured["breadcrumb_request_id"] is None
+
+
+def test_client_error_ignores_uncorrelated_body_request_id_uses_own_id(client, monkeypatch):
+    _install_fake_limiter(monkeypatch, blocked=False)
+    captured = _capture_report_client_event(monkeypatch)
+
+    # No request_id_confidence at all -- e.g. a bare window.error report,
+    # or an older client -- so payload.request_id ("body-rid-1", really
+    # just the last successful call's id) must NOT become the trace id.
     response = client.post(
         "/api/telemetry/client-error",
         json={"message": "boom", "request_id": "body-rid-1"},
         headers={"X-Request-ID": "header-rid-1"},
     )
 
-    assert response.json()["request_id"] == "body-rid-1"
-    assert captured["request_id"] == "body-rid-1"
+    # middleware/request_context.py trusts and reuses a well-formed
+    # incoming X-Request-ID as THIS POST's own id -- which is what gets
+    # used here, not the untrusted breadcrumb from the body.
+    assert response.json()["request_id"] == "header-rid-1"
+    assert response.json()["request_id_correlated"] is False
+    assert captured["request_id"] == "header-rid-1"
+    assert captured["request_id_correlated"] is False
+    # The discarded body ID is still surfaced, just labeled as a breadcrumb,
+    # never silently presented as the trace id.
+    assert captured["breadcrumb_request_id"] == "body-rid-1"
 
 
 def test_client_error_falls_back_to_header_request_id(client, monkeypatch):
@@ -224,10 +380,12 @@ def test_client_error_falls_back_to_header_request_id(client, monkeypatch):
     )
 
     assert response.json()["request_id"] == "header-rid-2"
+    assert response.json()["request_id_correlated"] is False
     assert captured["request_id"] == "header-rid-2"
+    assert captured["breadcrumb_request_id"] is None
 
 
-def test_client_error_missing_request_id_is_none(client, monkeypatch):
+def test_client_error_missing_request_id_uses_freshly_minted_own_id(client, monkeypatch):
     _install_fake_limiter(monkeypatch, blocked=False)
     captured = _capture_report_client_event(monkeypatch)
 
@@ -236,8 +394,15 @@ def test_client_error_missing_request_id_is_none(client, monkeypatch):
         json={"message": "boom"},
     )
 
-    assert response.json()["request_id"] is None
-    assert captured["request_id"] is None
+    # No body id, no header id -- middleware/request_context.py always
+    # mints a fresh UUID4 for this POST regardless, so the response is
+    # never null: a unique-per-report id beats no id at all.
+    rid = response.json()["request_id"]
+    assert rid
+    assert response.json()["request_id_correlated"] is False
+    assert captured["request_id"] == rid
+    assert captured["request_id_correlated"] is False
+    assert captured["breadcrumb_request_id"] is None
 
 
 def test_client_error_requires_message(client, monkeypatch):

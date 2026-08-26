@@ -42,6 +42,23 @@ export function getLastRequestId(): string | null {
 // Reports a single client-side error to the backend. Throttled to at most
 // one report per second so a tight error loop (e.g. a render error that
 // re-throws every frame) can't flood the endpoint.
+//
+// REQUEST ID ATTACHED: two different cases, two different confidence levels.
+//   1. Callers that know EXACTLY which request this error came from (e.g.
+//      lib/api/core.ts, reporting a network failure or 5xx for a specific
+//      call) pass `context.requestId` explicitly -- that value is used
+//      as-is, since it's a precise, attempt-specific ID, not a guess.
+//   2. Uncaught errors with no request in flight (window.addEventListener
+//      "error"/"unhandledrejection", wired up in installGlobalErrorBeacon()
+//      below) don't -- and can't -- know that. For THOSE, falling back to
+//      `lastRequestId` (the most recent response's X-Request-ID) is still
+//      genuinely useful: this is internal telemetry, never shown to a user,
+//      and a developer looking at ErrorBeacon sees "this JS crash happened
+//      right after request X" as one clue among several (stack trace,
+//      timestamp, page path) -- not a claim that X caused it. Imprecise-but-
+//      close is fine for a diagnostic breadcrumb in a way it would NOT be
+//      for a user-facing "Reference: ..." (see lib/errors.ts for why that
+//      path never uses this fallback).
 export function reportClientError(error: unknown, context: Record<string, unknown> = {}): void {
   if (typeof window === "undefined") return;
 
@@ -50,6 +67,26 @@ export function reportClientError(error: unknown, context: Record<string, unknow
   lastReportAt = now;
 
   const err = error instanceof Error ? error : new Error(String(error));
+  const explicitRequestId = typeof context.requestId === "string" ? context.requestId : null;
+  const effectiveRequestId = explicitRequestId ?? lastRequestId;
+
+  // CONFIDENCE LABEL: tells the backend/ErrorBeacon whether `request_id`
+  // below actually names the request that caused this error, or is just
+  // the last request we happened to see before an unrelated crash.
+  //   "correlated" -- a caller (lib/api/core.ts) explicitly identified the
+  //     specific failed call. Precise; safe to treat as the trace ID.
+  //   "breadcrumb" -- no request was in flight (bare window.error /
+  //     unhandledrejection). `lastRequestId` is included only as a
+  //     "this happened shortly after X" clue, NOT a claim that X caused it.
+  //   "none" -- no prior request has completed yet at all.
+  // See backend/api/telemetry_api.py's client_error() for how this
+  // determines which ID actually becomes the log-correlation request_id.
+  const requestIdConfidence: "correlated" | "breadcrumb" | "none" = explicitRequestId
+    ? "correlated"
+    : lastRequestId
+      ? "breadcrumb"
+      : "none";
+
   // Error reporting is deliberately best-effort and must NOT reuse the
   // application's fetch wrapper. Reusing fetch here creates a subtle failure
   // loop: an API request can fail, telemetry tries to use the same mocked or
@@ -59,12 +96,13 @@ export function reportClientError(error: unknown, context: Record<string, unknow
     message: String(err.message || err).slice(0, 5000),
     stack: String(err.stack || "").slice(0, 12000),
     path: window.location.pathname,
-    request_id: lastRequestId,
+    request_id: effectiveRequestId,
+    request_id_confidence: requestIdConfidence,
     context: {
       ...context,
       url: sanitizeUrl(window.location.href),
       userAgent: navigator.userAgent.slice(0, 500),
-      requestId: lastRequestId,
+      requestId: effectiveRequestId,
     },
   });
 

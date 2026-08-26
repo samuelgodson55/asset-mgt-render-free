@@ -6,6 +6,8 @@ import { X, Loader2 } from "lucide-react";
 import { assetsApi } from "../lib/api";
 import { friendlyError, type FriendlyError } from "../lib/errors";
 import { ErrorState } from "./ui/ErrorBanner";
+import { useActionGuard } from "../lib/useActionGuard";
+import { newIdempotencyKey } from "../lib/idempotency";
 
 export function CreatePoolModal({ open, onClose, onCreated }: { open: boolean; onClose: () => void; onCreated: () => void }) {
   const [name, setName] = useState("");
@@ -15,6 +17,7 @@ export function CreatePoolModal({ open, onClose, onCreated }: { open: boolean; o
   const [price, setPrice] = useState("");
   const [error, setError] = useState<FriendlyError | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const createGuard = useActionGuard();
 
   useEffect(() => {
     if (open) {
@@ -29,9 +32,10 @@ export function CreatePoolModal({ open, onClose, onCreated }: { open: boolean; o
 
   if (!open) return null;
 
-  const doSubmit = async () => {
+  const doSubmit = () => createGuard(async () => {
     setSubmitting(true);
     setError(null);
+    const idempotencyKey = newIdempotencyKey();
     try {
       const result = await assetsApi.create({
         name,
@@ -39,7 +43,7 @@ export function CreatePoolModal({ open, onClose, onCreated }: { open: boolean; o
         category: category.trim() || null,
         department: department.trim() || null,
         price: price.trim() ? Number(price.trim()) : null,
-      });
+      }, idempotencyKey);
       onCreated();
       alert(result.message ? `${result.message}: "${name}"` : `Stock pool "${name}" created successfully.`);
     } catch (err) {
@@ -47,7 +51,7 @@ export function CreatePoolModal({ open, onClose, onCreated }: { open: boolean; o
     } finally {
       setSubmitting(false);
     }
-  };
+  });
   const submit = (e: React.FormEvent) => { e.preventDefault(); doSubmit(); };
 
   const inputClass = "bg-ink-soft border border-border-soft rounded-[3px] px-3 py-2.5 text-[13px] text-text placeholder:text-text-faint focus:border-brass/50 focus:outline-none";

@@ -8,7 +8,7 @@ reconciliation check-in, the advanced checkout flow, and CSV batch import.
 from telemetry import trace_operation
 
 from typing import Optional, Literal
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, UploadFile, File, Query, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -16,6 +16,7 @@ from database import get_db
 from deps import get_current_user, require_super_admin, require_privileged_role
 from schemas.assets_schema import AssetTypeCreate, ExceptionCreate, AdvancedCheckoutRequest, QuantityUpdateRequest, NameUpdateRequest, CategoryUpdateRequest, DepartmentUpdateRequest, PriceUpdateRequest
 import services.asset_service as asset_service
+from services.idempotency import run_idempotent
 
 router = APIRouter(prefix="/assets", tags=["assets"])
 
@@ -33,8 +34,18 @@ def _validate_export_format(format: str) -> str:
 
 @router.post("", response_model=dict)
 @trace_operation("asset.create")
-def create_asset_type(asset: AssetTypeCreate, db: Session = Depends(get_db), user: dict = Depends(require_super_admin)):
-    return asset_service.create_asset_type(db, asset, user)
+def create_asset_type(
+    asset: AssetTypeCreate,
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_super_admin),
+):
+    return run_idempotent(
+        action="asset.create",
+        user_id=int(user["sub"]),
+        key=idempotency_key,
+        fn=lambda: asset_service.create_asset_type(db, asset, user),
+    )
 
 
 @router.get("")
@@ -182,8 +193,24 @@ def checkin_asset(asset_id: int, quantity: int = Query(1, ge=1), db: Session = D
 
 @router.post("/{asset_id}/checkout_advanced")
 @trace_operation("checkout.complete")
-def checkout_advanced(asset_id: int, req: AdvancedCheckoutRequest, db: Session = Depends(get_db), user: dict = Depends(require_privileged_role)):
-    return asset_service.checkout_advanced(db, asset_id, req, user)
+def checkout_advanced(
+    asset_id: int,
+    req: AdvancedCheckoutRequest,
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_privileged_role),
+):
+    """Dispatches/issues equipment to Staff, a Linked Customer, or an Ad-Hoc
+    outsider. Accepts an optional `Idempotency-Key` (see
+    services/idempotency.py) so a double-clicked Dispatch button replays the
+    same result -- instead of a second, wasted attempt racing the first for
+    the same row lock and then failing with a "someone already has it" 400."""
+    return run_idempotent(
+        action="asset.checkout_advanced",
+        user_id=int(user["sub"]),
+        key=idempotency_key,
+        fn=lambda: asset_service.checkout_advanced(db, asset_id, req, user),
+    )
 
 
 @router.post("/import")

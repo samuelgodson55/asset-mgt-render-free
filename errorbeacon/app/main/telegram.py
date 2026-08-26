@@ -188,7 +188,29 @@ def telegram_message(e,i,occ,analysis=None,spike=False,regression=False,provider
     if e.status_code is not None:
         parts.append(f'<b>HTTP:</b> {e.status_code} {html.escape(e.method or "")} {html.escape(sanitize_url(e.path)[:500])}')
     if e.request_id:
-        parts.append(f'<b>Request ID:</b> <code>{html.escape(e.request_id[:200])}</code>')
+        # `request_id_correlated` (folded into `context` by
+        # backend/integrations/fastapi_errorbeacon.py's report_client_event())
+        # is False only for a browser crash with no request in flight --
+        # bare window.error/unhandledrejection, nothing to causally blame.
+        # Defaults to True (a normal caught-exception request_id genuinely
+        # belongs to the failure) so older events without this key render
+        # exactly as before.
+        ctx = e.context if isinstance(e.context, dict) else {}
+        correlated = ctx.get('request_id_correlated', True)
+        rid_code = f'<code>{html.escape(e.request_id[:200])}</code>'
+        if correlated:
+            parts.append(f'<b>Request ID:</b> {rid_code}')
+        else:
+            parts.append(
+                f'<b>Request ID:</b> {rid_code} '
+                '⚠️ <i>not causally linked — no request was in flight when this crashed</i>'
+            )
+            breadcrumb = ctx.get('breadcrumb_request_id')
+            if breadcrumb:
+                parts.append(
+                    '<i>Last known request before crash (unconfirmed clue only):</i> '
+                    f'<code>{html.escape(str(breadcrumb)[:200])}</code>'
+                )
     if e.release:
         parts.append(f'<b>Release:</b> <code>{html.escape(e.release[:200])}</code>')
     parts += [f'<b>Occurrences:</b> {occ}', f'<b>Incident:</b> <code>{html.escape(i)}</code>']

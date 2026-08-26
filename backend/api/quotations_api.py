@@ -12,7 +12,7 @@ setting, and PDF export.
 from telemetry import trace_operation
 
 from typing import Optional
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, Header, Query, Response
 from sqlalchemy.orm import Session
 
 from database import get_db
@@ -24,6 +24,7 @@ from schemas.quotations_schema import (
     QuotationDiscountUpdateRequest, QuotationNotificationsReadRequest, QuotationPaidRequest,
 )
 import services.quotation_service as quotation_service
+from services.idempotency import run_idempotent
 
 router = APIRouter(tags=["quotations"])
 
@@ -151,10 +152,23 @@ def remove_quotation_item(item_id: int, db: Session = Depends(get_db), user: dic
 
 @router.post("/quotations/submit")
 @trace_operation("quote.submit")
-def submit_quotation(db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
+def submit_quotation(
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
     """Finalizes the caller's current draft: stamps it with a Quotation ID (e.g. "QT-000001") an
-    Admin/Manager can pull up in the Quotes tab, adjust, and assign to a user."""
-    return quotation_service.submit_my_quotation(db, user)
+    Admin/Manager can pull up in the Quotes tab, adjust, and assign to a user.
+
+    Accepts an optional `Idempotency-Key` (see services/idempotency.py) so a
+    double-clicked Submit button replays the same result instead of running
+    the submit logic twice."""
+    return run_idempotent(
+        action="quotation.submit",
+        user_id=int(user["sub"]),
+        key=idempotency_key,
+        fn=lambda: quotation_service.submit_my_quotation(db, user),
+    )
 
 
 @router.get("/quotations/export")

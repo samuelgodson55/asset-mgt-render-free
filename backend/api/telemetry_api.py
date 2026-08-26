@@ -43,8 +43,10 @@ from pydantic import BaseModel, Field, field_validator
 
 from config import settings
 from integrations.fastapi_errorbeacon import report_client_event
+from logging_config import request_id_var
 from utils.client_ip import resolve_client_ip
 from utils.rate_limiter import RedisFixedWindowLimiter
+from utils.request_id import sanitize_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -184,11 +186,24 @@ def _validate_context(value):
         raise ValueError(f'context exceeds {MAX_CONTEXT_BYTES} bytes')
     return result
 
+
+# Values the frontend may send for `request_id_confidence` (see
+# frontend-app/src/lib/errorbeacon.ts's reportClientError()). Only
+# "correlated" means `request_id` actually names the request that caused
+# this error; anything else (including a value we don't recognize, from an
+# older client or a future one) is treated as untrusted below.
+_CORRELATED_REQUEST_ID = "correlated"
+
+
 class ClientErrorPayload(BaseModel):
     message: str = Field(max_length=5000)
     stack: str | None = Field(default=None, max_length=12000)
     path: str | None = Field(default=None, max_length=2000)
     request_id: str | None = Field(default=None, max_length=200)
+    # Optional so older/other clients that don't send it degrade safely --
+    # see client_error() below, where a missing/unrecognized value is
+    # treated the same as "breadcrumb" (untrusted), never as "correlated".
+    request_id_confidence: str | None = Field(default=None, max_length=20)
     context: dict = Field(default_factory=dict)
 
     @field_validator('context')
@@ -540,12 +555,95 @@ def client_error(payload: ClientErrorPayload, request: Request):
     if blocked:
         return {"accepted": False, "reason": "rate_limited"}
 
-    rid = payload.request_id or request.headers.get("x-request-id")
+    # This telemetry POST's own request_id, already minted by
+    # middleware/request_context.py before this handler ever ran. It is
+    # ALWAYS fresh and unique to this exact report -- unlike
+    # payload.request_id, which for a request-less crash (bare
+    # window.error/unhandledrejection, nothing in flight -- see
+    # errorbeacon.ts) is just the last successful call's ID, reused as a
+    # best-effort breadcrumb. Capture it now, before any override below.
+    own_request_id = request_id_var.get()
+
+    # payload.request_id is untrusted browser input in TWO independent
+    # ways: its ORIGIN (the client could be lying about "correlated"; see
+    # request_id_confidence handling below) and its VALUE (the string
+    # itself, regardless of what's claimed about it, could contain
+    # anything up to 200 chars -- control characters, newlines, whatever).
+    # sanitize_request_id() (utils/request_id.py -- the same check
+    # middleware/request_context.py applies to the X-Request-ID *header*)
+    # guards the second: a value that fails it is treated as absent
+    # entirely, not merely "unconfirmed" -- it can't be trusted enough to
+    # even show as a breadcrumb, since a string that fails this check
+    # can't be trusted to be a real ID at all, let alone the one that
+    # caused this crash.
+    safe_payload_request_id = sanitize_request_id(payload.request_id)
+
+    is_correlated = (
+        safe_payload_request_id is not None
+        and payload.request_id_confidence == _CORRELATED_REQUEST_ID
+    )
+    # The discarded ID, kept only so it can be surfaced as a labeled
+    # breadcrumb -- never silently presented as the trace ID.
+    breadcrumb_request_id = safe_payload_request_id if (safe_payload_request_id and not is_correlated) else None
+
+    if is_correlated:
+        # payload.request_id names the SPECIFIC request that actually
+        # failed (a caller in lib/api/core.ts passed it explicitly because
+        # it knows exactly which call broke). Trustworthy enough to become
+        # this log line's correlation ID -- and everything downstream's --
+        # in place of this POST's own id, so `trace-request.sh <rid>` finds
+        # it in the exact same grep it already uses for caught 5xxs.
+        rid = safe_payload_request_id
+        token = request_id_var.set(rid)
+    else:
+        # No trustworthy causal request_id. Keep this POST's own
+        # freshly-minted id instead of borrowing an unrelated earlier
+        # request's -- that would silently point a dev at whatever page/API
+        # call happened to succeed last (a "happy path" trace) rather than
+        # at the crash itself. own_request_id is already active in the
+        # logging context (set by the middleware), so there's nothing to
+        # swap here.
+        rid = own_request_id
+        token = None
+
+    # The stack trace is passed as `extra={"exception": ...}` rather than
+    # summarized/truncated on purpose: JsonFormatter (logging_config.py)
+    # writes a caught backend exception's traceback under that exact same
+    # "exception" JSON key via `exc_info`, and trace-request.sh's
+    # pretty-printer specifically looks for that key and renders it
+    # line-by-line. Reusing the key means an uncaught JS crash renders
+    # IDENTICALLY to a caught backend 500 in `trace-request.sh` output --
+    # the actual stack, inline, every time, with no dependency on
+    # ErrorBeacon being configured or reachable (see report_client_event()
+    # below, which the same data is also forwarded to -- for Telegram/AI
+    # enrichment, not as the only copy).
+    try:
+        logger.error(
+            "Uncaught client-side JS error: %s",
+            payload.message,
+            extra={
+                "path": payload.path,
+                "source": payload.context.get("source") if isinstance(payload.context, dict) else None,
+                "exception": payload.stack or "(browser did not provide a stack trace)",
+                # Explicit, separate fields -- never merged into request_id
+                # -- so a dev grepping this line can immediately tell "this
+                # ID traces the crash itself" from "this ID is just the
+                # last thing that happened to work".
+                "request_id_correlated": is_correlated,
+                "breadcrumb_request_id": breadcrumb_request_id,
+            },
+        )
+    finally:
+        if token is not None:
+            request_id_var.reset(token)
+
     report_client_event(
         payload.message,
         stack=payload.stack,
         path=payload.path,
         request_id=rid,
+        request_id_correlated=is_correlated,
+        breadcrumb_request_id=breadcrumb_request_id,
         context=payload.context,
     )
-    return {"accepted": True, "request_id": rid}
+    return {"accepted": True, "request_id": rid, "request_id_correlated": is_correlated}

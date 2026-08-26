@@ -3844,6 +3844,7 @@ The application now has an isolated ErrorBeacon service for fast exception detec
 
 See:
 
+- [`ERROR_TRACING.md`](ERROR_TRACING.md) for the "something broke, here's the request_id, tell me what happened" runbook — the exact commands for every deployment path, with or without ErrorBeacon running.
 - [`ERRORBEACON_COVERAGE.md`](ERRORBEACON_COVERAGE.md) for the system-wide error-handling scan and capture points.
 - [`errorbeacon/README.md`](../errorbeacon/README.md) for the monitor itself.
 - [`errorbeacon/DEPLOYMENT.md`](../errorbeacon/DEPLOYMENT.md) for local Docker, Render Free, ACA, VM and other deployment paths.

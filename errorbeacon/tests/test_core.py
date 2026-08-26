@@ -88,6 +88,39 @@ def test_telegram_contains_request_id_and_closes_pre():
     assert '</pre>' in msg
 
 
+def test_telegram_request_id_with_no_correlation_context_renders_unwarned():
+    # Backward compatibility: an event with no `context` at all (or one
+    # that never set `request_id_correlated`) must render exactly as
+    # before -- no warning, since the default is "this id genuinely
+    # belongs to this failure" (true for every caught-exception path).
+    e = ErrorEvent(message='boom', error_type='ValueError', request_id='req-123')
+    msg = telegram_message(e, 'abc123', 1)
+    assert '<b>Request ID:</b> <code>req-123</code>' in msg
+    assert '⚠️' not in msg
+
+
+def test_telegram_warns_when_request_id_is_not_correlated():
+    e = ErrorEvent(
+        message='boom',
+        error_type='ClientError',
+        request_id='27511c2a52ffd7db29d6e9b9c992fc46',
+        context={
+            'request_id_correlated': False,
+            'breadcrumb_request_id': 'f2cfc58337ff8895e4d080f318cbc9a1',
+        },
+    )
+    msg = telegram_message(e, 'abc123', 1)
+    # The freshly-minted (correct, unique-per-report) id is still shown...
+    assert '27511c2a52ffd7db29d6e9b9c992fc46' in msg
+    # ...clearly flagged as not causally linked...
+    assert '⚠️' in msg
+    assert 'not causally linked' in msg
+    # ...and the discarded breadcrumb is surfaced separately, also labeled,
+    # never presented as if it were the trace id.
+    assert 'f2cfc58337ff8895e4d080f318cbc9a1' in msg
+    assert 'unconfirmed clue only' in msg
+
+
 def test_request_context_generates_and_returns_request_id():
     import asyncio
 

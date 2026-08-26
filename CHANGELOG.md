@@ -62,6 +62,51 @@ observability, and operational trust.
     own wording for wrong-password/wrong-code 401s (routing those through
     the generic "your session expired" classification used elsewhere would
     have been actively wrong before a session exists).
+- Double-click/duplicate-request protection for the app's three highest-
+  stakes mutating actions -- submitting a quotation cart, dispatching/
+  checking out an asset, and creating a stock pool -- layered on top of
+  the existing DB-pool defenses (`middleware/db_concurrency.py`'s
+  admission semaphore, `with_for_update()` row locking):
+  - `backend/services/idempotency.py` (new): `run_idempotent()`, a
+    Redis-backed dedupe helper scoped to `(action, user_id,
+    Idempotency-Key)` so a retried/duplicated request replays the
+    original result instead of re-running the underlying DB write a
+    second time. Deliberately implemented as an in-handler helper (called
+    only after `Depends(get_current_user)` has resolved) rather than ASGI
+    middleware, specifically to rule out one person's guessed/reused key
+    ever replaying another person's cached response. Fails open if Redis
+    is unreachable, mirroring `db_admission.py`'s existing philosophy --
+    the row-level lock inside each action remains the correctness
+    backstop either way. Wired into `POST /quotations/submit`,
+    `POST /assets/{id}/checkout_advanced`, and `POST /assets`, all via an
+    optional `Idempotency-Key` header with zero behavior change for any
+    caller that doesn't send one.
+  - `frontend-app/src/lib/idempotency.ts` (new): `newIdempotencyKey()`,
+    minted once per guarded click and threaded through to the three
+    calls above.
+  - `frontend-app/src/lib/useActionGuard.ts` (new): a synchronous
+    ref-based guard that makes a second, near-simultaneous invocation of
+    a wrapped async action (a double-click/double-tap that outraces
+    React's next render of the button's `disabled` state) a silent
+    no-op -- the cheaper, first line of defense that stops a duplicate
+    request from ever being sent, complementing rather than duplicating
+    the server-side Idempotency-Key handling above. Wired into
+    `Quotations.tsx`'s `submitOrder`, `DispatchModal.tsx`'s dispatch
+    submit, and `CreatePoolModal.tsx`'s create submit.
+  - Found and fixed a latent bug while wiring this up:
+    `rawFetchInternal`'s request-header merge spread `...init` AFTER a
+    pre-computed `headers` object, so any caller supplying its own
+    `headers` (as the Idempotency-Key work now does) silently overwrote
+    -- rather than merged with -- the default `Content-Type:
+    application/json`, which would have broken every JSON POST that also
+    sent a custom header. Fixed the spread order; regression-tested in
+    `tests/lib/api-retry.test.ts`.
+  - `backend/tests/test_idempotency.py` (new, 7 tests) and
+    `frontend-app/tests/lib/useActionGuard.test.tsx` (new, 4 tests):
+    cover the dedupe-replay, cross-user isolation, failed-attempt
+    cleanup, Redis-down fail-open, and real-concurrent-duplicate-waits-
+    and-replays cases server-side, and the guard's race-prevention
+    behavior client-side.
 - `docs/SECURITY_GAPS.md`: a priority-scored register of security/CVE-
   hygiene gaps found in a manual OWASP-adjacent audit — two P0s
   (`errorbeacon/` has no CVE scanning of any kind; `frontend-app/`, the

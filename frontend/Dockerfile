@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # =============================================================================
 # frontend/Dockerfile
 # -----------------------------------------------------------------------------
@@ -112,7 +113,14 @@ WORKDIR /build
 # this layer stays cached and is only re-run when build-frontend/package.json
 # actually changes -- not every time an application JS/HTML file changes.
 COPY build-frontend/package.json build-frontend/package-lock.json* /build/build-frontend/
-RUN cd build-frontend && npm ci --no-audit --no-fund && npm cache clean --force
+# --mount=type=cache persists npm's own download cache in a BuildKit cache
+# volume OUTSIDE this layer (same idea as backend/Dockerfile's pip cache
+# mount) -- a rerun (lockfile change, --no-cache build, pruned cache)
+# reuses previously-downloaded tarballs instead of refetching them all
+# from the registry. `npm cache clean --force` is dropped since the cache
+# no longer lives inside the image layer, so there's nothing left to trim.
+RUN --mount=type=cache,target=/root/.npm \
+    cd build-frontend && npm ci --no-audit --no-fund
 
 COPY build-frontend/build.js /build/build-frontend/build.js
 
@@ -156,7 +164,8 @@ WORKDIR /build
 # Same "install deps in their own cached layer first" shape as
 # frontend-build above.
 COPY frontend-app/package.json frontend-app/package-lock.json* /build/
-RUN npm ci --no-audit --no-fund && npm cache clean --force
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --no-audit --no-fund
 
 COPY frontend-app/ /build/
 

@@ -213,12 +213,30 @@ def report_client_event(
     stack: str | None = None,
     path: str | None = None,
     request_id: str | None = None,
+    # True by default: every OTHER caller of this function path (caught
+    # backend exceptions via report_exception/report_background_exception)
+    # always has a request_id that genuinely belongs to the failure being
+    # reported. Only telemetry_api.py's client_error() ever passes False --
+    # for a browser crash with no request in flight, where `request_id`
+    # above is this telemetry POST's own id, not a claim about what caused
+    # the crash (see that module for the full explanation).
+    request_id_correlated: bool = True,
+    breadcrumb_request_id: str | None = None,
     context: dict[str, Any] | None = None,
 ) -> None:
     """Forward a sanitized browser-side error through the backend reporter."""
 
     if not KEY:
         return
+
+    # Folded into `context` (rather than added as new top-level ErrorEvent
+    # fields) so this needs no schema/DB change on the ErrorBeacon side --
+    # telegram.py and the ingest log line both already have access to
+    # `context` and read these two keys out of it directly.
+    merged_context = dict(context or {})
+    merged_context["request_id_correlated"] = request_id_correlated
+    if breadcrumb_request_id:
+        merged_context["breadcrumb_request_id"] = breadcrumb_request_id
 
     payload = {
         "app": APP,
@@ -239,6 +257,6 @@ def report_client_event(
             if isinstance(context, dict) and context.get('test')
             else "client_error"
         ),
-        "context": clean(context or {}),
+        "context": clean(merged_context),
     }
     enqueue(payload)

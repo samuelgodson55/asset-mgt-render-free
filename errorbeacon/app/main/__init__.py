@@ -109,6 +109,18 @@ def ingest(event:ErrorEvent):
     if not limited(): raise HTTPException(429,'Alert rate limit exceeded')
     try:
         i,o,q,s=process(event)
+        # Only the exception path logged before -- a normal, successfully
+        # ingested event left no line in errorbeacon's own stdout at all, so
+        # `trace-request.sh` (which now also greps this container) had
+        # nothing to show even once it started looking. This is the ingest
+        # breadcrumb; alerting.py's worker() logs the Telegram outcome for
+        # the same request_id once delivery is attempted.
+        # See telegram.py's telegram_message() for the corresponding
+        # Telegram-card warning -- both read the same context key so a dev
+        # grepping this line and a dev reading the alert see the same story.
+        _ctx = event.context if isinstance(event.context, dict) else {}
+        _correlated = _ctx.get('request_id_correlated', True)
+        log.info('Event ingested: incident=%s occurrence=%s queued=%s silenced=%s app=%s component=%s request_id_correlated=%s',i,o,q,s,event.app,event.component,_correlated)
         return {'accepted':True,'queued':q,'incident_id':i,'occurrence':o,'request_id':request_id_var.get(),'silenced':s}
     except Exception:
         log.exception('Event ingestion failed')

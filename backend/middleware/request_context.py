@@ -28,9 +28,10 @@ HOW IT WORKS HERE
 This is plain ASGI middleware (not `BaseHTTPMiddleware`, which has known
 streaming/performance caveats) so it stays lightweight and beginner-legible:
   1. On each incoming HTTP request, look for an `X-Request-ID` header. If
-     the caller (or an upstream load balancer/proxy) already supplied one,
-     reuse it -- that lets a request ID stay consistent across multiple
-     hops in a bigger system. Otherwise, generate a fresh UUID4.
+     the caller (or an upstream load balancer/proxy) already supplied one
+     AND it passes the sanity check below, reuse it -- that lets a request
+     ID stay consistent across multiple hops in a bigger system. Otherwise,
+     generate a fresh UUID4.
   2. Store it in `logging_config.request_id_var` (a `contextvars.ContextVar`)
      for the lifetime of this request -- see logging_config.py's module
      docstring for exactly how every log line then picks it up
@@ -40,6 +41,22 @@ streaming/performance caveats) so it stays lightweight and beginner-legible:
      `X-Request-ID` response header, so the caller can see/log it too.
   5. Reset the ContextVar afterwards so it can never "leak" into a
      different, unrelated request handled later on the same worker.
+
+TRUSTING THE INCOMING VALUE
+----------------------------
+Historically the only thing that could set an incoming X-Request-ID was an
+internal load balancer/proxy -- a trusted hop. The frontend now mints and
+sends its own value on every request too (see frontend-app/src/lib/api/core.ts),
+which means this header is effectively untrusted user input: any browser can
+put anything in it. It still isn't used for anything security-sensitive
+(auth, rate limiting, idempotency all live elsewhere), but it IS written
+verbatim into every structured JSON log line for the request and, when OTEL
+is on, set as a span attribute -- so `sanitize_request_id()`
+(utils/request_id.py -- shared with api/telemetry_api.py, which applies the
+exact same check to the browser-supplied `request_id` in a client-error
+report body) caps its length and restricts it to a safe character set
+before it's ever trusted, falling back to a fresh UUID4 (exactly as if no
+header were sent) for anything that doesn't qualify.
 """
 
 import uuid
@@ -48,6 +65,7 @@ from opentelemetry import trace
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from logging_config import request_id_var
+from utils.request_id import sanitize_request_id
 
 REQUEST_ID_HEADER = "x-request-id"
 
@@ -73,7 +91,7 @@ class RequestContextMiddleware:
                 incoming_id = raw_value.decode("latin-1")
                 break
 
-        request_id = incoming_id or str(uuid.uuid4())
+        request_id = sanitize_request_id(incoming_id) or str(uuid.uuid4())
         token = request_id_var.set(request_id)
 
         # Tie this request's log-correlation ID to its trace, in BOTH

@@ -107,7 +107,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # image tag above the `db:` service is ever bumped to a different major
 # version, this "16" must be bumped to match -- a mismatch here is
 # exactly the bug this fix exists to prevent.
-RUN apt-get update && \
+# --mount=type=cache for apt's own package/list cache, same reasoning as
+# the pip cache mount above -- a rerun of this layer (base image bump,
+# --no-cache build) reuses previously-downloaded .deb files instead of
+# refetching them from the Debian/PGDG mirrors every time. `rm -rf
+# /var/lib/apt/lists/*` is dropped since that path is now the cache mount
+# itself, not part of the image layer, so there's nothing left in the
+# image to clean up.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates wget gnupg lsb-release && \
     install -d /usr/share/postgresql-common/pgdg && \
     wget -qO /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
@@ -116,8 +125,7 @@ RUN apt-get update && \
         > /etc/apt/sources.list.d/pgdg.list && \
     apt-get update && \
     apt-get install -y --no-install-recommends postgresql-client-16 && \
-    apt-get purge -y --auto-remove wget gnupg lsb-release && \
-    rm -rf /var/lib/apt/lists/*
+    apt-get purge -y --auto-remove wget gnupg lsb-release
 
 # The installed dependencies -- and ONLY the installed dependencies, none
 # of pip's own cache/build metadata -- copied over from the builder stage.

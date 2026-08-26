@@ -7,6 +7,8 @@ import { ReceiptModal } from "./ReceiptModal";
 import type { ReceiptTarget } from "../lib/receipt";
 import { friendlyError, type FriendlyError } from "../lib/errors";
 import { ErrorState } from "./ui/ErrorBanner";
+import { useActionGuard } from "../lib/useActionGuard";
+import { newIdempotencyKey } from "../lib/idempotency";
 
 function localError(title: string): FriendlyError {
   return { title, message: "", requestId: null, retryable: false };
@@ -57,6 +59,7 @@ export function DispatchModal({
 
   const [error, setError] = useState<FriendlyError | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const dispatchGuard = useActionGuard();
   // Post-dispatch success state -- replaces the old `alert(result.message)`
   // with an inline confirmation that offers a scannable receipt on the
   // spot, since this dispatch is (almost always) the moment the receipt
@@ -99,7 +102,7 @@ export function DispatchModal({
 
   if (!asset) return null;
 
-  const doSubmit = async () => {
+  const runDispatch = async () => {
     setError(null);
 
     if (route === "adhoc" && !dueDate) {
@@ -146,8 +149,14 @@ export function DispatchModal({
       : adhocName;
 
     setSubmitting(true);
+    // Minted once per guarded invocation (see useActionGuard/doSubmit
+    // below) -- a double-click that outraces this button's `disabled`
+    // state now replays the SAME dispatch result instead of racing a
+    // second attempt for the same row lock and either overselling stock
+    // or failing with a confusing "someone already has it" conflict.
+    const idempotencyKey = newIdempotencyKey();
     try {
-      const result = await assetsApi.checkoutAdvanced(asset.id, payload);
+      const result = await assetsApi.checkoutAdvanced(asset.id, payload, idempotencyKey);
       setDispatched({ assigneeName, quantity, dueDate, message: result.message });
     } catch (err) {
       // This IS the "someone else grabbed the last unit while you were
@@ -161,6 +170,7 @@ export function DispatchModal({
       setSubmitting(false);
     }
   };
+  const doSubmit = () => dispatchGuard(runDispatch);
   const submit = (e: React.FormEvent) => { e.preventDefault(); doSubmit(); };
 
   const inputClass = "bg-ink-soft border border-border-soft rounded-[3px] px-3 py-2.5 text-[13px] text-text placeholder:text-text-faint focus:border-brass/50 focus:outline-none";

@@ -10,6 +10,7 @@
 
 import { reportClientError, setLastRequestId } from "../errorbeacon";
 import { runBusinessOperation, telemetryFetch, type BrowserTelemetrySpan } from "../browserTelemetry";
+import { newClientId } from "../clientId";
 
 // Points at the FastAPI backend. In production this app is built with
 // `base: '/'` and served (as its own standalone image, frontend/Dockerfile's
@@ -40,10 +41,15 @@ export let backendReachable: boolean | null = null;
 
 export class ApiError extends Error {
   status: number;
-  /** X-Request-ID / request_id correlation ID from the failed response, when
-   *  one was present -- lets UI-layer error handling (see lib/errors.ts)
-   *  show the person something they can hand to support, instead of that
-   *  ID only ever reaching ErrorBeacon telemetry (see errorbeacon.ts). */
+  /** Correlation ID for the failed request -- lets UI-layer error handling
+   *  (see lib/errors.ts) show the person something they can hand to
+   *  support, instead of that ID only ever reaching ErrorBeacon telemetry
+   *  (see errorbeacon.ts). Preference order, set in rawFetchInternal:
+   *  a `request_id` in the JSON error body, else the `X-Request-ID`
+   *  response header, else the client-minted ID this exact request
+   *  attempted to send (see CLIENT_REQUEST_ID_HEADER below) -- so even a
+   *  bare 502 from a proxy that never reached the app still has a correct,
+   *  attempt-specific reference instead of no reference at all. */
   requestId: string | null;
   constructor(status: number, message: string, requestId: string | null = null) {
     super(message);
@@ -86,6 +92,29 @@ const SAFE_RETRY_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 const API_RETRY_ATTEMPTS = 3;
 const API_RETRY_BASE_DELAY_MS = 150;
 
+// Client-generated request correlation ID (Operations & Observability,
+// frontend half -- see backend/middleware/request_context.py for the
+// backend half, which already accepts and echoes a caller-supplied value).
+//
+// WHY MINT THIS CLIENT-SIDE INSTEAD OF ONLY READING WHAT THE BACKEND HANDS
+// BACK: before this, the UI only ever learned a request's ID from the
+// response's `X-Request-ID` header -- which means a request that never
+// gets a response at all (nginx returning a bare 502 with no backend
+// upstream to proxy to, a dropped connection, ...) had no ID to show as a
+// "Reference" for support. Minting it up front, the same pattern this
+// codebase already uses for `Idempotency-Key` (see lib/idempotency.ts),
+// means every failure mode has a correct, attempt-specific ID available:
+//   - Normal HTTP error: backend echoes this same ID back; logs match.
+//   - Bare 502 from a proxy that never reached the app: we still know the
+//     exact ID we attempted to send -- showing it as "Reference" is honest,
+//     and if support greps for it and finds nothing in app logs, that
+//     itself is a real, correct signal ("this never reached the app," not
+//     "here's an unrelated request").
+//   - Background JS crash telemetry (reportClientError): can be tagged
+//     with the specific in-flight request instead of whatever the last
+//     successful, unrelated response happened to set (see errorbeacon.ts).
+const CLIENT_REQUEST_ID_HEADER = "X-Request-ID";
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -100,13 +129,40 @@ async function rawFetchInternal<T = unknown>(path: string, init?: RequestInit, p
   const retrySafe = SAFE_RETRY_METHODS.has(method);
   let lastNetworkError: unknown = null;
 
+  // Minted ONCE per logical request attempt (i.e. once per call to this
+  // function), not once per HTTP attempt -- deliberately reused across the
+  // internal safe-retry loop below, since a GET retried after a transient
+  // 502/503/504 is still the same logical call from the caller's point of
+  // view. That also means retried attempts collapse to one request_id in
+  // the backend's logs instead of three, which is what you want when
+  // grepping for "what happened with this call": one ID, one story, even
+  // if it took a couple of tries to land. A caller-supplied `X-Request-ID`
+  // in `init.headers` (there are none today) would still win, since it's
+  // spread in after this default below -- same merge convention as every
+  // other default header here.
+  const clientRequestId = newClientId("req");
+
   for (let attempt = 0; attempt < (retrySafe ? API_RETRY_ATTEMPTS : 1); attempt += 1) {
     let res: Response;
     try {
       res = await telemetryFetch(`${API_BASE}${path}`, {
         credentials: "include",
-        headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
         ...init,
+        // Merged LAST and deliberately spread in this order (defaults,
+        // then init, then init.headers folded back on top) so a caller
+        // passing its own `headers` (e.g. an Idempotency-Key -- see
+        // lib/idempotency.ts) ADDS to the default Content-Type instead of
+        // replacing the whole headers object and silently dropping it.
+        // BUG FIX: this used to spread `...init` AFTER a pre-computed
+        // `headers` object, which meant any caller-supplied `headers` key
+        // completely overwrote (not merged with) that computed object --
+        // a call site passing so much as one custom header would have
+        // shipped a JSON POST body with no `Content-Type` at all.
+        headers: {
+          "Content-Type": "application/json",
+          [CLIENT_REQUEST_ID_HEADER]: clientRequestId,
+          ...(init?.headers ?? {}),
+        },
       }, parentSpan);
     } catch (err) {
       // A transport/network failure is already ambiguous from the browser's
@@ -118,7 +174,12 @@ async function rawFetchInternal<T = unknown>(path: string, init?: RequestInit, p
       // network error for callers instead of allowing a later retry/test stub
       // failure to replace it.
       lastNetworkError = err;
-      reportClientError(err, { source: "api.network", endpoint: path, attempts: attempt + 1 });
+      // Pass the ID we attempted to send explicitly, rather than letting
+      // reportClientError() fall back to whatever the last unrelated
+      // successful response happened to set -- see errorbeacon.ts's
+      // reportClientError() for why an explicit requestId here takes
+      // precedence over that fallback.
+      reportClientError(err, { source: "api.network", endpoint: path, attempts: attempt + 1, requestId: clientRequestId });
       throw err;
     }
 
@@ -143,7 +204,13 @@ async function rawFetchInternal<T = unknown>(path: string, init?: RequestInit, p
         const body = await res.clone().json();
         if (body?.code === "MAINTENANCE_MODE") {
           if (typeof window !== "undefined") window.dispatchEvent(new Event("asset-app:maintenance"));
-          throw new MaintenanceModeError(extractErrorMessage(body, "The application is currently undergoing maintenance."), requestId || body?.request_id || null);
+          // clientRequestId as the last resort here is now safe/honest --
+          // unlike a getLastRequestId()-style fallback (deliberately never
+          // used in this file; see lib/errors.ts's comment on why), this
+          // is the ID THIS exact request attempted to send, not some
+          // earlier unrelated one. Covers e.g. nginx's static 503 page
+          // during a deploy, before the app is even up to echo one back.
+          throw new MaintenanceModeError(extractErrorMessage(body, "The application is currently undergoing maintenance."), requestId || body?.request_id || clientRequestId);
         }
       } catch (err) {
         if (err instanceof MaintenanceModeError) throw err;
@@ -170,7 +237,13 @@ async function rawFetchInternal<T = unknown>(path: string, init?: RequestInit, p
       } catch {
         // body wasn't JSON -- keep the status text
       }
-      if (res.status >= 500) reportClientError(new Error(message), { source: "api.http", endpoint: path, status: res.status });
+      if (res.status >= 500) {
+        // Same reasoning as the network-error catch block above: pass the
+        // ID this request attempted to send explicitly, so ErrorBeacon
+        // correlates this report with the exact request that failed
+        // rather than falling back to lastRequestId (see errorbeacon.ts).
+        reportClientError(new Error(message), { source: "api.http", endpoint: path, status: res.status, requestId: bodyRequestId || requestId || clientRequestId });
+      }
       // A 401 in demo mode is expected on every request -- there's no backend
       // session at all, and tryLoad's fallback to bundled mock data is the
       // intended handling for it. Dispatching auth-expired here anyway is
@@ -180,7 +253,13 @@ async function rawFetchInternal<T = unknown>(path: string, init?: RequestInit, p
       if (res.status === 401 && !isDemoMode() && !path.startsWith("/auth/login") && !path.startsWith("/auth/mfa") && typeof window !== "undefined") {
         window.dispatchEvent(new Event("asset-app:auth-expired"));
       }
-      throw new ApiError(res.status, message, bodyRequestId || requestId || null);
+      // Preference order: a request_id in the JSON error body, else the
+      // X-Request-ID response header, else -- new -- the ID this exact
+      // attempt sent as X-Request-ID. That last fallback is what makes a
+      // bare 502 (no response body, no response header -- nginx with no
+      // upstream to proxy to) show a correct "Reference" instead of none
+      // at all: see the CLIENT_REQUEST_ID_HEADER comment above.
+      throw new ApiError(res.status, message, bodyRequestId || requestId || clientRequestId);
     }
     if (res.status === 204) return null as T;
     return (await res.json()) as T;
@@ -291,11 +370,20 @@ export async function rawFetch<T = unknown>(path: string, init?: RequestInit): P
  * clobber and break.
  */
 async function rawFetchMultipartInternal<T = unknown>(path: string, formData: FormData, init?: RequestInit, parentSpan?: BrowserTelemetrySpan | null): Promise<T> {
+  // Same "mint once per logical attempt" ID as rawFetchInternal -- see
+  // CLIENT_REQUEST_ID_HEADER's comment above. Multipart calls aren't
+  // retried, so there's no reuse-across-attempts nuance here.
+  const clientRequestId = newClientId("req");
   const res = await telemetryFetch(`${API_BASE}${path}`, {
     method: "POST",
     credentials: "include",
     body: formData,
     ...init,
+    // Same merge convention as rawFetchInternal: a caller-supplied
+    // X-Request-ID in init.headers (none today) wins, since it's spread
+    // in last. Deliberately does NOT set Content-Type here -- see this
+    // function's docstring for why.
+    headers: { [CLIENT_REQUEST_ID_HEADER]: clientRequestId, ...(init?.headers ?? {}) },
   }, parentSpan);
   const requestId = res.headers.get("x-request-id");
   if (requestId) setLastRequestId(requestId);
@@ -315,7 +403,7 @@ async function rawFetchMultipartInternal<T = unknown>(path: string, formData: Fo
     if (res.status === 401 && !isDemoMode() && !path.startsWith("/auth/login") && !path.startsWith("/auth/mfa") && typeof window !== "undefined") {
       window.dispatchEvent(new Event("asset-app:auth-expired"));
     }
-    throw new ApiError(res.status, message, bodyRequestId || requestId || null);
+    throw new ApiError(res.status, message, bodyRequestId || requestId || clientRequestId);
   }
   return (await res.json()) as T;
 }

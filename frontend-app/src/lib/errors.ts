@@ -28,7 +28,6 @@
  *   {error && <ErrorState error={error} onRetry={submitOrder} />}
  */
 import { ApiError, MaintenanceModeError } from "./api/core";
-import { getLastRequestId } from "./errorbeacon";
 
 export interface FriendlyError {
   /** Short, human summary of what failed. Never a status code or raw exception text. */
@@ -56,13 +55,48 @@ export function friendlyError(err: unknown, fallbackTitle: string, opts: { reass
     return {
       title: "The app is undergoing maintenance.",
       message: err.message || "We're performing scheduled maintenance. Please check back shortly.",
-      requestId: err.requestId ?? getLastRequestId(),
+      // err.requestId is never a stale/unrelated ID -- see the ApiError
+      // branch's comment below for the full explanation of why. In short:
+      // core.ts sets it to (in order) a request_id in the JSON body, the
+      // X-Request-ID response header, or -- as of the client-minted
+      // request ID change -- the ID this exact request attempted to send.
+      // That last case covers e.g. nginx's static 503 page during a
+      // deploy, before the app is even up to echo one back: the ID is
+      // still correct and worth showing, it just means "here's what we
+      // tried to send" rather than "here's what the app logged".
+      requestId: err.requestId,
       retryable: true,
     };
   }
 
   if (err instanceof ApiError) {
-    const requestId = err.requestId ?? getLastRequestId();
+    // getLastRequestId() (see errorbeacon.ts) is deliberately NEVER used
+    // as a fallback here, and never should be: it's the ID of the most
+    // recent request that got far enough to receive an X-Request-ID
+    // header, which has no guaranteed relationship to THIS failure. The
+    // case that surfaced this originally: stop the backend container,
+    // click an action -- nginx has nothing to proxy to and returns a bare
+    // 502 with no X-Request-ID header and an HTML (non-JSON) body. Back
+    // then that left `err.requestId` genuinely null, and a
+    // getLastRequestId() fallback would have displayed the ID of some
+    // earlier, unrelated, SUCCESSFUL request as this failure's
+    // "Reference" -- so a person handing that ID to support (or running
+    // scripts/trace-request.sh with it) gets sent to the wrong request
+    // entirely, with no indication anything's amiss.
+    //
+    // The bare-502 case is now handled correctly further upstream instead:
+    // core.ts mints a request ID client-side before every request goes
+    // out (the same pattern as Idempotency-Key -- see lib/idempotency.ts)
+    // and falls back to THAT specific, attempt-scoped ID when neither the
+    // response body nor the response header supplied one. So `err.requestId`
+    // being null here now only happens for the small remaining set of
+    // cases in core.ts where it deliberately isn't set at all (e.g. a
+    // fetch()-level failure, handled entirely by the branch at the bottom
+    // of this function) -- not for a bare 502, which used to be null but
+    // no longer is. ErrorState.tsx renders the "Reference:" chip
+    // conditionally (`{error.requestId && (...)}`) either way, so a null
+    // value here still just omits it instead of rendering a blank chip.
+    const requestId = err.requestId;
 
     if (err.status === 401) {
       return {
@@ -142,11 +176,14 @@ export function friendlyError(err: unknown, fallbackTitle: string, opts: { reass
 
   // Not an ApiError at all: fetch() itself threw (offline, DNS failure,
   // CORS, connection dropped mid-request) -- there's no status code and no
-  // response body to read a request_id from.
+  // response body to read a request_id from, and (same reasoning as the
+  // ApiError branch above) getLastRequestId() would only ever surface a
+  // PREVIOUS, unrelated request's ID here, not one for this failure --
+  // never show it as a "Reference" for this error.
   return {
     title: "We couldn't reach the server.",
     message: "Check your internet connection and try again.",
-    requestId: getLastRequestId(),
+    requestId: null,
     reassurance,
     retryable: true,
   };

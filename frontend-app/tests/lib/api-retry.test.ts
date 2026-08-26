@@ -40,3 +40,31 @@ describe("safe API retry policy", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("request header merging", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("keeps the default Content-Type when a caller passes an extra header (e.g. Idempotency-Key), instead of the extra header replacing the whole headers object", async () => {
+    // Regression test: rawFetchInternal used to spread `...init` AFTER a
+    // pre-computed `headers` object, so any caller-supplied `headers` key
+    // (added for e.g. the Idempotency-Key -- see lib/idempotency.ts)
+    // completely OVERWROTE the computed headers instead of merging with
+    // them, silently dropping Content-Type from every JSON POST that also
+    // sent a custom header.
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ ok: true }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { rawFetch } = await import("../../src/lib/api/core");
+    await rawFetch("/assets/1/checkout_advanced", {
+      method: "POST",
+      body: JSON.stringify({ quantity: 1 }),
+      headers: { "Idempotency-Key": "test-key-123" },
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, requestInit] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const headers = requestInit.headers as Record<string, string>;
+    expect(headers["Content-Type"]).toBe("application/json");
+    expect(headers["Idempotency-Key"]).toBe("test-key-123");
+  });
+});

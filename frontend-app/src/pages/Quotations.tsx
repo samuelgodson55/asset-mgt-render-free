@@ -15,6 +15,8 @@ import { useAuth } from "../lib/useAuth";
 import { isPrivileged } from "../lib/roles";
 import { useIsMobile } from "../lib/useIsMobile";
 import { useRequestGuard } from "../lib/useRequestGuard";
+import { useActionGuard } from "../lib/useActionGuard";
+import { newIdempotencyKey } from "../lib/idempotency";
 
 /** The page's `error` banner is a single shared slot -- this pairs the
  * friendly {title, message, requestId} with an optional `retry` closure so
@@ -115,6 +117,7 @@ export function Quotations() {
   const beginCartRequest = useRequestGuard();
   const beginHistoryRequest = useRequestGuard();
   const beginCatalogRequest = useRequestGuard();
+  const submitGuard = useActionGuard();
 
   const refreshCart = () => {
     const isCurrent = beginCartRequest();
@@ -249,11 +252,18 @@ export function Quotations() {
     }
   };
 
-  const submitOrder = async () => {
+  const submitOrder = () => submitGuard(async () => {
     setSubmitting(true);
     setError(null);
+    // Minted once per guarded invocation -- see useActionGuard's docstring
+    // for why a double-click can't reach this line twice concurrently, and
+    // lib/idempotency.ts for why a fresh key per genuine attempt (as
+    // opposed to a stable key reused across attempts) is exactly right: a
+    // deliberate "Try again" after a real failure/conflict SHOULD run as
+    // a brand new attempt, not replay a stale cached result.
+    const idempotencyKey = newIdempotencyKey();
     try {
-      await quotationsApi.submitCart();
+      await quotationsApi.submitCart(idempotencyKey);
       await Promise.all([refreshCart(), refreshHistory()]);
       setTab("history");
     } catch (err) {
@@ -267,7 +277,7 @@ export function Quotations() {
     } finally {
       setSubmitting(false);
     }
-  };
+  });
 
   return (
     <div>

@@ -68,7 +68,8 @@ export const assetsApi = {
   categories: () => rawFetch<{ categories: string[] }>("/assets/categories"),
   activity: (days = 14) => rawFetch<{ date: string; checkouts: number; returns: number }[]>(`/assets/activity${qs({ days })}`),
   details: (assetId: number) => rawFetch<AssetDetails>(`/assets/${assetId}/details`),
-  create: (payload: AssetTypeCreateRequest) => rawFetch<{ message?: string; id: number }>("/assets", { method: "POST", body: JSON.stringify(payload) }),
+  create: (payload: AssetTypeCreateRequest, idempotencyKey?: string) =>
+    rawFetch<{ message?: string; id: number }>("/assets", { method: "POST", body: JSON.stringify(payload), headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined }),
   updateQuantity: (assetId: number, newTotal: number) => rawFetch<{ message?: string }>(`/assets/${assetId}/quantity`, { method: "PUT", body: JSON.stringify({ new_total: newTotal }) }),
   updateName: (assetId: number, name: string) => rawFetch<{ message?: string }>(`/assets/${assetId}/name`, { method: "PUT", body: JSON.stringify({ name }) }),
   updateCategory: (assetId: number, category: string | null) => rawFetch<{ message?: string }>(`/assets/${assetId}/category`, { method: "PUT", body: JSON.stringify({ category }) }),
@@ -81,8 +82,13 @@ export const assetsApi = {
     rawFetch<{ message?: string }>(`/assets/${assetId}/exception`, { method: "POST", body: JSON.stringify(payload) }),
   recallException: (assetId: number, exceptionId: number) =>
     rawFetch<{ message?: string }>(`/assets/${assetId}/exception/${exceptionId}/recall`, { method: "POST" }),
-  checkoutAdvanced: (assetId: number, payload: AdvancedCheckoutPayload) =>
-    rawFetch<{ message?: string }>(`/assets/${assetId}/checkout_advanced`, { method: "POST", body: JSON.stringify(payload) }),
+  // `idempotencyKey`: pass a value freshly minted once per click (see
+  // lib/idempotency.ts's newIdempotencyKey()) so a double-click that
+  // outraces the Dispatch button's `disabled` state replays the SAME
+  // result instead of a second attempt racing the first for the row
+  // lock -- see backend/services/idempotency.py for the full reasoning.
+  checkoutAdvanced: (assetId: number, payload: AdvancedCheckoutPayload, idempotencyKey?: string) =>
+    rawFetch<{ message?: string }>(`/assets/${assetId}/checkout_advanced`, { method: "POST", body: JSON.stringify(payload), headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined }),
   // Roster helpers powering the Dispatch drawer's "Assign To" dropdowns --
   // separate, unfiltered fetches (mirrors users.js/outsiders.js's
   // loadUsers()/loadOutsiders() populating #staffSelect/#customerSelect/

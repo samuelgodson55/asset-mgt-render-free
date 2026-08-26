@@ -51,7 +51,11 @@ export const quotationsApi = {
   updateCartItem: (itemId: number, quantity: number) =>
     rawFetch<QuotationCartOrDetail>(`/quotations/items/${itemId}`, { method: "PUT", body: JSON.stringify({ quantity }) }),
   removeCartItem: (itemId: number) => rawFetch<QuotationCartOrDetail>(`/quotations/items/${itemId}`, { method: "DELETE" }),
-  submitCart: () => rawFetch<QuotationCartOrDetail>("/quotations/submit", { method: "POST" }),
+  // `idempotencyKey`: see assets.ts's checkoutAdvanced() for the full
+  // reasoning -- this is the actual "checkout" moment for a self-service
+  // order, so it gets the same double-click protection.
+  submitCart: (idempotencyKey?: string) =>
+    rawFetch<QuotationCartOrDetail>("/quotations/submit", { method: "POST", headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined }),
 
   // ---- self-service: "My Quotes" (submitted history + own detail) ----
   myHistory: () => tryLoad(async () => (await rawFetch<{ items: QuotationListRow[] }>("/quotations/me/history")).items, []),

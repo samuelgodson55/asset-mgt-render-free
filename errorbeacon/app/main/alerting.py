@@ -13,7 +13,7 @@ import queue
 
 from .ai import enqueue_ai
 from .db import persist, should_notify
-from .logging_setup import log
+from .logging_setup import log, request_id_var
 from .state import _jobs, _stop
 from .telegram import _send_incident_telegram
 
@@ -32,11 +32,22 @@ def worker():
             e,i,o,s,r=_jobs.get(timeout=.5)
         except queue.Empty:
             continue
+        # This runs on a persistent background THREAD, not inside the
+        # request that enqueued it -- request_id_var (a contextvar) does not
+        # cross that boundary on its own, so without this the Telegram
+        # outcome logged below would carry request_id=null no matter how
+        # good the ingest-time log line was. e.request_id is the same
+        # correlation ID the frontend/backend already minted, so re-binding
+        # it here means "was this delivered?" shows up under the exact same
+        # ID `trace-request.sh` is searching for.
+        token=request_id_var.set(e.request_id)
         try:
-            alert(e,i,o,s,r)
+            sent=alert(e,i,o,s,r)
+            log.info('Alert delivered: incident=%s telegram_sent=%s',i,sent)
         except Exception:
             log.exception('Alert worker failed')
         finally:
+            request_id_var.reset(token)
             _jobs.task_done()
 
 def enqueue(e,i,o,s,r):

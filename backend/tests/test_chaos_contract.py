@@ -55,3 +55,37 @@ def test_correlation_client_event_is_marked_as_chaos_test():
     assert '"chaos_test"' in telemetry
     assert "context.get('test')" in telemetry
     assert '"status_code": None' in telemetry
+
+
+def test_errorbeacon_reference_integration_stays_in_sync():
+    # errorbeacon/integrations/fastapi_errorbeacon.py is a REFERENCE copy
+    # shipped for other teams integrating with ErrorBeacon (see its
+    # README) -- nothing in this repo imports it. That means it can drift
+    # silently: this test is the only thing standing between "we fixed a
+    # bug here" and "we shipped the same bug again in the reference doc"
+    # the next time someone follows it.
+    #
+    # Deliberately NOT a byte-for-byte diff: the reference copy legitimately
+    # uses namespaced env var names (ERRORBEACON_URL vs URL) so a copied
+    # integration doesn't collide with an existing app's globals. This
+    # checks the BEHAVIORAL contract of report_client_event() instead --
+    # its parameters, and that it actually forwards them -- which is what
+    # actually matters for a team copying this file.
+    live = (ROOT / "backend/integrations/fastapi_errorbeacon.py").read_text()
+    reference = (ROOT / "errorbeacon/integrations/fastapi_errorbeacon.py").read_text()
+
+    for source, label in [(live, "live"), (reference, "reference")]:
+        assert "def report_client_event(" in source, f"{label} copy is missing report_client_event()"
+        assert "request_id_correlated: bool = True" in source, (
+            f"{label} copy's report_client_event() is missing the request_id_correlated "
+            "parameter -- see backend/api/telemetry_api.py for why an uncorrelated "
+            "request_id must never be silently presented as if it were causal."
+        )
+        assert "breadcrumb_request_id: str | None = None" in source, (
+            f"{label} copy's report_client_event() is missing the breadcrumb_request_id "
+            "parameter."
+        )
+        # Both parameters must actually be forwarded into the outgoing
+        # payload's context, not just accepted and dropped.
+        assert 'merged_context["request_id_correlated"] = request_id_correlated' in source
+        assert 'merged_context["breadcrumb_request_id"] = breadcrumb_request_id' in source
