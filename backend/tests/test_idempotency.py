@@ -94,7 +94,10 @@ def test_different_keys_both_run_normally(fake_redis):
     import services.idempotency as idem
 
     calls = []
-    fn = lambda: calls.append(1) or {"n": len(calls)}
+
+    def fn():
+        calls.append(1)
+        return {"n": len(calls)}
 
     a = idem.run_idempotent(action="quotation.submit", user_id=1, key="click-1", fn=fn)
     b = idem.run_idempotent(action="quotation.submit", user_id=1, key="click-2", fn=fn)
@@ -112,7 +115,10 @@ def test_same_key_different_users_never_cross_contaminate(fake_redis):
     import services.idempotency as idem
 
     calls = []
-    fn = lambda: calls.append(1) or {"n": len(calls)}
+
+    def fn():
+        calls.append(1)
+        return {"n": len(calls)}
 
     a = idem.run_idempotent(action="quotation.submit", user_id=1, key="same-key", fn=fn)
     b = idem.run_idempotent(action="quotation.submit", user_id=2, key="same-key", fn=fn)
