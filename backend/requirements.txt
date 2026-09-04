@@ -43,7 +43,7 @@ redis==8.0.1
 # relies on.
 # 2.32.3 -> 2.33.0: clears PYSEC-2026-2275 (also picks up the 2.32.4 fix
 # for PYSEC-2026-1872 along the way).
-requests==2.33.0
+requests==2.34.2
 # Keep requests encoding-detection dependencies on versions it supports.
 charset-normalizer==3.3.2
 chardet<6
