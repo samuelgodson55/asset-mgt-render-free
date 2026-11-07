@@ -8,6 +8,6 @@
     "watch": "tailwindcss -i input.css -o ../frontend/css/tailwind.css --watch"
   },
   "devDependencies": {
-    "tailwindcss": "^4.3.3"
+    "tailwindcss": "^4.3.4"
   }
 }
